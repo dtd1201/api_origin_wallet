@@ -1,5 +1,16 @@
 # Frontend API Guide
 
+This document is intended for frontend implementation.
+
+Use it for:
+
+- building API clients / service layer
+- generating TypeScript types
+- mapping screens to backend flows
+- handling auth, onboarding, profile completion, and admin behavior correctly
+
+## Environment
+
 Base URL:
 
 ```text
@@ -25,15 +36,169 @@ Authenticated headers:
 Authorization: Bearer {token}
 ```
 
-## Common Notes
+## Frontend Rules
 
-- All authenticated user endpoints require `auth.token`.
-- All `/user/*` endpoints also require `auth.user`.
-- All `/admin/*` endpoints require `auth.admin`.
-- Endpoints inside the `profile.complete` middleware require the user profile to be completed first.
+- Public endpoints can be called without a token.
+- All authenticated endpoints require `Authorization: Bearer {token}`.
+- All `/user/*` endpoints require a token belonging to a user account.
+- All `/admin/*` endpoints require a token belonging to an admin account.
+- Some `/user/*` endpoints additionally require the user profile to be completed first.
 - Validation errors usually return `422 Unprocessable Entity`.
-- Delete endpoints return `204 No Content`.
-- Some provider-managed fields inside `result`, `raw_data`, provider accounts, quotes, and transfers can vary by integration. The examples below show the expected envelope and common fields.
+- Delete endpoints usually return `204 No Content`.
+- Provider-managed fields inside `result`, `raw_data`, provider accounts, quotes, and transfers can vary by integration.
+
+## Recommended Frontend Flow
+
+### 1. App bootstrap
+
+On app startup:
+
+1. Read token from storage.
+2. If token exists, call `GET /auth/me`.
+3. If `401`, clear token and send user back to login.
+4. Use `onboarding.profile_completed` and `onboarding.next_action` to decide the first screen.
+
+### 2. Register flow
+
+1. Call `POST /auth/register`.
+2. Ask user for the verification code from email.
+3. Call `POST /auth/register/verify`.
+4. Save returned token.
+5. If `onboarding.profile_completed === false`, navigate to profile completion / onboarding.
+
+Alternative:
+
+- Email links can use `GET /auth/register/activate?...`.
+
+### 3. Login flow
+
+1. Call `POST /auth/login` with email and password.
+2. Ask user for the login verification code from email.
+3. Call `POST /auth/login/verify`.
+4. Save returned token.
+5. Use `onboarding` in the response to decide whether to send the user to:
+   - complete profile
+   - wait for provider / KYC review
+   - dashboard
+
+### 4. Google login flow
+
+1. Obtain Google `id_token` from the frontend Google auth SDK.
+2. Call `POST /auth/google`.
+3. Save returned token.
+4. Use `onboarding.profile_completed` exactly like email registration/login.
+
+### 5. Password reset flow
+
+1. Call `POST /auth/forgot-password`.
+2. Ask user for the verification code from email.
+3. Call `POST /auth/reset-password`.
+4. Redirect user back to the login screen.
+
+### 6. Profile completion flow
+
+After login or registration, the frontend should inspect:
+
+- `onboarding.profile_completed`
+- `onboarding.selected_provider_code`
+- `onboarding.selected_provider_account_status`
+- `onboarding.next_action`
+- `onboarding.message`
+
+Practical rule:
+
+- if `profile_completed` is `false`, send user to complete profile
+- if `profile_completed` is `true` but provider account / KYC is still pending, show pending / review state
+- only enable profile-complete-only endpoints when profile is complete
+
+## How Frontend Should Use `userId`
+
+Many user endpoints are shaped like:
+
+```text
+/user/users/{userId}/...
+```
+
+Frontend should normally use:
+
+```text
+userId = authMe.user.id
+```
+
+or:
+
+```text
+userId = login/register response.user.id
+```
+
+The frontend should not let users manually choose another `userId`.
+
+## Common HTTP Statuses
+
+- `200 OK`: successful read/update/login verify flow
+- `201 Created`: created new resource
+- `202 Accepted`: action started, usually waiting for email verification
+- `204 No Content`: delete succeeded
+- `401 Unauthorized`: token missing / invalid / expired
+- `403 Forbidden`: token exists but role or signature is invalid
+- `404 Not Found`: resource not found
+- `422 Unprocessable Entity`: validation error or flow state error
+
+## Common Error Shapes
+
+Validation error example:
+
+```json
+{
+  "message": "The email field is required. (and 1 more error)",
+  "errors": {
+    "email": [
+      "The email field is required."
+    ]
+  }
+}
+```
+
+Simple error example:
+
+```json
+{
+  "message": "Invalid credentials."
+}
+```
+
+Frontend rule:
+
+- prefer field-level mapping when `errors` exists
+- otherwise show `message`
+
+## Important Enums And Common Values
+
+These values appear repeatedly in responses and are useful for frontend UI logic.
+
+### User-related
+
+- `status`: commonly `pending`, `active`, `suspended`
+- `kyc_status`: commonly `pending`
+- `profile.user_type`: commonly `individual`, `business`
+
+### Provider account / onboarding-related
+
+- `selected_provider_account_status`: commonly `not_started`, `pending`
+- `provider_account.status`: commonly `pending`, `active`
+
+### Transfer-related
+
+- `transfer_type`: commonly `bank_transfer`
+- `status`: commonly `draft`, `pending`, `completed`, `cancelled`
+
+The backend may add more values over time, so frontend should avoid hard-crashing on unknown enum values.
+
+## Date And Number Handling
+
+- Datetimes are returned as ISO-8601 strings, for example `2026-03-17T10:00:00.000000Z`.
+- Monetary values are often returned as decimal strings, not JS numbers.
+- Frontend should treat monetary fields as strings until formatted for display or converted with a safe decimal library.
 
 ## Common Response Shapes
 
@@ -146,6 +311,63 @@ Response:
 ```
 
 ## Auth APIs
+
+### `POST /auth/chatbot/message`
+
+Authenticated chatbot MVP endpoint for frontend chat UI.
+
+Headers:
+
+```http
+Authorization: Bearer {token}
+```
+
+Request:
+
+```json
+{
+  "message": "How do I add a beneficiary?",
+  "conversation_id": null
+}
+```
+
+Response `200`:
+
+```json
+{
+  "conversation_id": "conv_001",
+  "reply": "To add a beneficiary, open the beneficiaries screen and provide recipient banking details such as full name, country, currency, bank name, and account number.",
+  "suggestions": [
+    "How do I create a transfer?",
+    "What beneficiary fields are required?"
+  ],
+  "actions": [
+    {
+      "type": "navigate",
+      "label": "Open Beneficiaries",
+      "target": "/beneficiaries"
+    },
+    {
+      "type": "navigate",
+      "label": "Add Beneficiary",
+      "target": "/beneficiaries/new"
+    }
+  ],
+  "meta": {
+    "profile_completed": true,
+    "has_provider_account": true,
+    "has_beneficiaries": false,
+    "has_balances": true
+  }
+}
+```
+
+Frontend notes:
+
+- This MVP is rule-based, not AI-model-based yet.
+- `conversation_id` can be reused by frontend UI, but the current MVP does not persist conversation history.
+- `actions` are intended for UI shortcuts like navigation buttons.
+- `suggestions` are intended for quick-reply chips.
 
 ### `POST /auth/register`
 
