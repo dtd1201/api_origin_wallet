@@ -1,0 +1,36 @@
+<?php
+
+namespace App\Services\YourProvider;
+
+use App\Services\Integrations\Contracts\ProviderPayloadMapper;
+use App\Services\Integrations\Support\AbstractApiOnboardingProvider;
+
+class YourProviderOnboardingService extends AbstractApiOnboardingProvider
+{
+    protected function serviceConfigKey(): string
+    {
+        return 'your_provider';
+    }
+
+    protected function requestHeaders(): array
+    {
+        return [
+            'Authorization' => 'Bearer '.config('services.your_provider.api_key'),
+        ];
+    }
+
+    protected function customerEndpoint(): string
+    {
+        return (string) config('services.your_provider.customer_endpoint');
+    }
+
+    protected function accountEndpoint(): string
+    {
+        return (string) config('services.your_provider.account_endpoint');
+    }
+
+    protected function payloadMapper(): ProviderPayloadMapper
+    {
+        return app(YourProviderPayloadMapper::class);
+    }
+}

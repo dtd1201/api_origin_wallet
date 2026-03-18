@@ -1,0 +1,38 @@
+<?php
+
+namespace App\Services\YourProvider;
+
+use App\Models\User;
+use App\Services\Integrations\Contracts\ProviderPayloadMapper;
+
+class YourProviderPayloadMapper implements ProviderPayloadMapper
+{
+    public function buildCustomerPayload(User $user): array
+    {
+        return [
+            'email' => $user->email,
+        ];
+    }
+
+    public function buildAccountPayload(User $user, array $customerResponse): array
+    {
+        return [
+            'customer_id' => $this->extractCustomerId($customerResponse),
+        ];
+    }
+
+    public function extractCustomerId(array $customerResponse): ?string
+    {
+        return $customerResponse['id'] ?? null;
+    }
+
+    public function extractAccountId(array $accountResponse): ?string
+    {
+        return $accountResponse['id'] ?? null;
+    }
+
+    public function extractAccountName(User $user, array $accountResponse): ?string
+    {
+        return $accountResponse['name'] ?? $user->full_name;
+    }
+}

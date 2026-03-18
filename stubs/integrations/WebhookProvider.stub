@@ -1,0 +1,21 @@
+<?php
+
+namespace App\Services\YourProvider;
+
+use App\Models\IntegrationProvider;
+use App\Services\Integrations\Contracts\WebhookProvider;
+use Illuminate\Http\Request;
+
+class YourProviderWebhookService implements WebhookProvider
+{
+    public function handleWebhook(IntegrationProvider $provider, Request $request): array
+    {
+        $payload = $request->json()->all();
+
+        return [
+            'message' => 'Webhook received.',
+            'provider' => $provider->code,
+            'payload' => $payload,
+        ];
+    }
+}
