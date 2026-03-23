@@ -21,6 +21,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
+use Throwable;
 
 class AuthController extends Controller
 {
@@ -503,8 +504,11 @@ class AuthController extends Controller
             try {
                 $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider']), true);
                 $providerSyncMessage = "Profile submitted and {$selectedProvider->name} onboarding request sent successfully.";
-            } catch (\RuntimeException $exception) {
-                $providerSyncMessage = $exception->getMessage();
+            } catch (Throwable $exception) {
+                report($exception);
+                $providerSyncMessage = $exception instanceof \RuntimeException
+                    ? $exception->getMessage()
+                    : "Profile submitted successfully, but {$selectedProvider->name} onboarding could not be started yet.";
             }
         }
 

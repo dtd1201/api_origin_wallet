@@ -10,6 +10,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
+use Throwable;
 
 class ProfileController extends Controller
 {
@@ -78,8 +79,11 @@ class ProfileController extends Controller
             try {
                 $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider']), true);
                 $message = "Profile updated and {$selectedProvider->name} onboarding request sent successfully.";
-            } catch (RuntimeException $exception) {
-                $message = $exception->getMessage();
+            } catch (Throwable $exception) {
+                report($exception);
+                $message = $exception instanceof RuntimeException
+                    ? $exception->getMessage()
+                    : "Profile updated successfully, but {$selectedProvider->name} onboarding could not be started yet.";
             }
         }
 
