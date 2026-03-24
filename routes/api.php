@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AdminAuthController;
 use App\Http\Controllers\Api\ChatbotController;
 use App\Http\Controllers\Api\ProviderController;
 use App\Http\Controllers\Api\ProviderWebhookController;
@@ -30,6 +31,16 @@ Route::prefix('auth')->group(function (): void {
         Route::get('me', [AuthController::class, 'me']);
         Route::put('profile', [AuthController::class, 'updateProfile']);
         Route::post('chatbot/message', [ChatbotController::class, 'message']);
+    });
+});
+
+Route::prefix('admin/auth')->group(function (): void {
+    Route::post('login', [AdminAuthController::class, 'login']);
+    Route::post('login/verify', [AdminAuthController::class, 'verifyLogin']);
+
+    Route::middleware(['auth.token', 'auth.admin'])->group(function (): void {
+        Route::post('logout', [AdminAuthController::class, 'logout']);
+        Route::get('me', [AdminAuthController::class, 'me']);
     });
 });
 

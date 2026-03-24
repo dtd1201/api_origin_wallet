@@ -4,6 +4,7 @@ namespace App\Models;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Database\Factories\UserFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
@@ -71,6 +72,16 @@ class User extends Authenticatable
         return $this->hasMany(UserProviderAccount::class);
     }
 
+    public function integrationLinks(): HasMany
+    {
+        return $this->hasMany(UserIntegrationLink::class);
+    }
+
+    public function integrationRequests(): HasMany
+    {
+        return $this->hasMany(UserIntegrationRequest::class);
+    }
+
     public function bankAccounts(): HasMany
     {
         return $this->hasMany(BankAccount::class);
@@ -128,5 +139,37 @@ class User extends Authenticatable
             ->all();
 
         return $this->roles()->whereIn('role_code', $normalizedRoleCodes)->exists();
+    }
+
+    public function isAdmin(): bool
+    {
+        $adminRoleCodes = collect(config('auth.admin_role_codes', ['admin', 'super_admin']))
+            ->filter(fn ($roleCode) => is_string($roleCode) && $roleCode !== '')
+            ->map(fn (string $roleCode) => Str::lower($roleCode))
+            ->values()
+            ->all();
+
+        if ($this->relationLoaded('roles')) {
+            return $this->roles->contains(
+                fn (UserRole $role) => in_array(Str::lower((string) $role->role_code), $adminRoleCodes, true)
+            );
+        }
+
+        return $this->roles()
+            ->whereIn('role_code', $adminRoleCodes)
+            ->exists();
+    }
+
+    public function scopeNonAdmin(Builder $query): Builder
+    {
+        $adminRoleCodes = collect(config('auth.admin_role_codes', ['admin', 'super_admin']))
+            ->filter(fn ($roleCode) => is_string($roleCode) && $roleCode !== '')
+            ->map(fn (string $roleCode) => Str::lower($roleCode))
+            ->values()
+            ->all();
+
+        return $query->whereDoesntHave('roles', function (Builder $roleQuery) use ($adminRoleCodes): void {
+            $roleQuery->whereIn('role_code', $adminRoleCodes);
+        });
     }
 }

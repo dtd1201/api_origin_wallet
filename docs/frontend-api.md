@@ -88,14 +88,26 @@ Alternative:
 3. Save returned token.
 4. Use `onboarding.profile_completed` exactly like email registration/login.
 
-### 5. Password reset flow
+### 5. Admin login flow
+
+1. Call `POST /admin/auth/login` with email and password.
+2. Ask admin user for the login verification code from email.
+3. Call `POST /admin/auth/login/verify`.
+4. Save returned token.
+5. On admin app startup, call `GET /admin/auth/me`.
+
+Important rule:
+
+- admin login only works for accounts whose `user.roles` includes an admin role such as `admin` or `super_admin`
+
+### 6. Password reset flow
 
 1. Call `POST /auth/forgot-password`.
 2. Ask user for the verification code from email.
 3. Call `POST /auth/reset-password`.
 4. Redirect user back to the login screen.
 
-### 6. Profile completion flow
+### 7. Profile completion flow
 
 After login or registration, the frontend should inspect:
 
@@ -215,7 +227,8 @@ Auth payload:
     "full_name": "Jane Doe",
     "status": "pending",
     "kyc_status": "pending",
-    "profile": null
+    "profile": null,
+    "roles": []
   },
   "onboarding": {
     "profile_completed": false,
@@ -485,7 +498,8 @@ Response `200`:
     "profile": {
       "user_id": 1,
       "user_type": "individual"
-    }
+    },
+    "roles": []
   },
   "onboarding": {
     "profile_completed": true,
@@ -503,6 +517,105 @@ Response `200`:
     "message": "Profile received. Account and KYC status remain pending until provider onboarding is completed."
   },
   "providers": []
+}
+```
+
+### `POST /admin/auth/login`
+
+Same 2-step login behavior as `/auth/login`, but only for admin accounts.
+
+Request:
+
+```json
+{
+  "email": "admin@example.com",
+  "password": "secret123"
+}
+```
+
+Response `202`:
+
+```json
+{
+  "message": "Verification code sent to email. Please verify to complete login.",
+  "email": "admin@example.com",
+  "expires_in_minutes": 15
+}
+```
+
+Response `403`:
+
+```json
+{
+  "message": "This account is not allowed to access admin."
+}
+```
+
+### `POST /admin/auth/login/verify`
+
+Request:
+
+```json
+{
+  "email": "admin@example.com",
+  "verification_code": "123456"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "message": "Login successful.",
+  "token": "plain-api-token",
+  "token_type": "Bearer",
+  "user": {
+    "id": 99,
+    "email": "admin@example.com",
+    "phone": null,
+    "full_name": "Backoffice Admin",
+    "status": "active",
+    "kyc_status": "approved",
+    "profile": null,
+    "roles": [
+      "admin"
+    ]
+  },
+  "onboarding": {
+    "profile_completed": false,
+    "selected_provider_code": null,
+    "selected_provider_account_status": "not_started",
+    "provider_account_statuses": {},
+    "next_action": "complete_user_profile",
+    "message": "Login successful. User must complete profile before using wallet features."
+  },
+  "providers": []
+}
+```
+
+### `GET /admin/auth/me`
+
+Headers:
+
+```http
+Authorization: Bearer {adminToken}
+```
+
+Response: same auth payload shape as `POST /admin/auth/login/verify`.
+
+### `POST /admin/auth/logout`
+
+Headers:
+
+```http
+Authorization: Bearer {adminToken}
+```
+
+Response:
+
+```json
+{
+  "message": "Logged out successfully."
 }
 ```
 
@@ -795,27 +908,60 @@ Response:
 Response:
 
 ```json
-[
-  {
-    "id": 1,
-    "user_id": 1,
-    "provider_id": 1,
-    "external_customer_id": null,
-    "external_account_id": null,
-    "account_name": null,
-    "status": "pending",
-    "metadata": {
-      "integration_status": "awaiting_provider_details"
+{
+  "data": [
+    {
+      "provider": {
+        "id": 2,
+        "code": "AIRWALLEX",
+        "name": "Airwallex",
+        "status": "active"
+      },
+      "provider_account": null,
+      "integration_link": null,
+      "integration_request": null,
+      "link_available": false,
+      "can_connect": false,
+      "can_request_connect": true,
+      "request_pending": false
     },
-    "provider": {
-      "id": 1,
-      "code": "AIRWALLEX",
-      "name": "Airwallex",
-      "status": "active"
+    {
+      "provider": {
+        "id": 1,
+        "code": "CURRENXIE",
+        "name": "Currenxie",
+        "status": "active"
+      },
+      "provider_account": null,
+      "integration_link": {
+        "id": 10,
+        "user_id": 1,
+        "provider_id": 1,
+        "link_url": "https://provider.example.com/connect/user-123",
+        "link_label": "Connect provider",
+        "is_active": true,
+        "created_at": "2026-03-24T03:00:00.000000Z",
+        "updated_at": "2026-03-24T03:00:00.000000Z"
+      },
+      "integration_request": null,
+      "link_available": true,
+      "can_connect": true,
+      "can_request_connect": false,
+      "request_pending": false
     }
-  }
-]
+  ]
+}
 ```
+
+Frontend notes:
+
+- this endpoint returns all active providers, even when the user does not yet have a link
+- use `integration_link.link_url` for the connect CTA URL
+- use `integration_link.link_label` for button text when present
+- show `Connect provider` when `can_connect === true`
+- show `Request connect` when `can_request_connect === true`
+- disable the request button and show pending state when `request_pending === true`
+- `provider_account` can be `null` before the user completes the external provider connection
 
 ### `GET /user/users/{userId}/provider-accounts/{providerId}`
 
@@ -823,20 +969,43 @@ Response when linked:
 
 ```json
 {
-  "id": 1,
-  "user_id": 1,
-  "provider_id": 1,
-  "external_customer_id": null,
-  "external_account_id": null,
-  "account_name": null,
-  "status": "pending",
-  "metadata": {},
   "provider": {
     "id": 1,
-    "code": "AIRWALLEX",
-    "name": "Airwallex",
+    "code": "CURRENXIE",
+    "name": "Currenxie",
     "status": "active"
-  }
+  },
+  "provider_account": {
+    "id": 1,
+    "user_id": 1,
+    "provider_id": 1,
+    "external_customer_id": null,
+    "external_account_id": null,
+    "account_name": null,
+    "status": "pending",
+    "metadata": {},
+    "provider": {
+      "id": 1,
+      "code": "CURRENXIE",
+      "name": "Currenxie",
+      "status": "active"
+    }
+  },
+  "integration_link": {
+    "id": 10,
+    "user_id": 1,
+    "provider_id": 1,
+    "link_url": "https://provider.example.com/connect/user-123",
+    "link_label": "Connect provider",
+    "is_active": true,
+    "created_at": "2026-03-24T03:00:00.000000Z",
+    "updated_at": "2026-03-24T03:00:00.000000Z"
+  },
+  "integration_request": null,
+  "link_available": true,
+  "can_connect": true,
+  "can_request_connect": false,
+  "request_pending": false
 }
 ```
 
@@ -845,13 +1014,28 @@ Response when not linked:
 ```json
 {
   "provider": {
-    "id": 1,
+    "id": 2,
     "code": "AIRWALLEX",
     "name": "Airwallex",
     "status": "active"
   },
   "provider_account": null,
-  "link_available": true
+  "integration_link": null,
+  "integration_request": {
+    "id": 7,
+    "user_id": 1,
+    "provider_id": 2,
+    "status": "pending",
+    "note": "Please enable this provider for my account.",
+    "requested_at": "2026-03-24T04:00:00.000000Z",
+    "resolved_at": null,
+    "created_at": "2026-03-24T04:00:00.000000Z",
+    "updated_at": "2026-03-24T04:00:00.000000Z"
+  },
+  "link_available": false,
+  "can_connect": false,
+  "can_request_connect": true,
+  "request_pending": true
 }
 ```
 
@@ -862,6 +1046,52 @@ Request:
 ```json
 {
   "force": false
+}
+```
+
+### `POST /user/users/{userId}/provider-accounts/{providerId}/request-connect`
+
+Use this when the user sees a provider card but no connect link is available yet.
+
+Request:
+
+```json
+{
+  "note": "Please enable this provider for my account."
+}
+```
+
+Response `202`:
+
+```json
+{
+  "message": "Provider connection request submitted successfully.",
+  "provider": {
+    "id": 2,
+    "code": "AIRWALLEX",
+    "name": "Airwallex",
+    "status": "active"
+  },
+  "integration_request": {
+    "id": 7,
+    "user_id": 1,
+    "provider_id": 2,
+    "status": "pending",
+    "note": "Please enable this provider for my account.",
+    "requested_at": "2026-03-24T04:00:00.000000Z",
+    "resolved_at": null,
+    "created_at": "2026-03-24T04:00:00.000000Z",
+    "updated_at": "2026-03-24T04:00:00.000000Z"
+  },
+  "request_pending": true
+}
+```
+
+Response `422`:
+
+```json
+{
+  "message": "This provider is already available for connection."
 }
 ```
 
@@ -1286,6 +1516,10 @@ Prefix:
 
 Response: paginated users with `profile` and `roles`.
 
+Important rule:
+
+- this list excludes admin accounts such as `admin` and `super_admin`
+
 #### `POST /admin/users`
 
 Request:
@@ -1295,11 +1529,33 @@ Request:
   "email": "admin-created@example.com",
   "phone": "+84901234567",
   "full_name": "Created User",
-  "password_hash": "secret123",
+  "password": "secret123",
   "status": "active",
-  "kyc_status": "pending"
+  "kyc_status": "pending",
+  "integration_links": [
+    {
+      "provider_code": "CURRENXIE",
+      "link_url": "https://provider.example.com/connect/currenxie",
+      "link_label": "Connect Currenxie",
+      "is_active": true
+    },
+    {
+      "provider_code": "AIRWALLEX",
+      "link_url": "https://provider.example.com/connect/airwallex",
+      "link_label": "Connect Airwallex",
+      "is_active": false
+    }
+  ]
 }
 ```
+
+Notes:
+
+- `password` is the recommended field for frontend use
+- `password_hash` is still accepted for backward compatibility
+- this endpoint creates regular users only, not admin users
+- `integration_links` is optional
+- when provided, it defines which providers will appear on the user's integrations screen
 
 Response `201`:
 
@@ -1310,13 +1566,48 @@ Response `201`:
   "phone": "+84901234567",
   "full_name": "Created User",
   "status": "active",
-  "kyc_status": "pending"
+  "kyc_status": "pending",
+  "roles": [],
+  "integration_links": [
+    {
+      "id": 10,
+      "user_id": 1,
+      "provider_id": 1,
+      "link_url": "https://provider.example.com/connect/currenxie",
+      "link_label": "Connect Currenxie",
+      "is_active": true,
+      "provider": {
+        "id": 1,
+        "code": "CURRENXIE",
+        "name": "Currenxie",
+        "status": "active"
+      }
+    }
+  ],
+  "available_providers": [
+    {
+      "id": 2,
+      "code": "AIRWALLEX",
+      "name": "Airwallex",
+      "status": "active"
+    },
+    {
+      "id": 1,
+      "code": "CURRENXIE",
+      "name": "Currenxie",
+      "status": "active"
+    }
+  ]
 }
 ```
 
 #### `GET /admin/users/{id}`
 
-Response: user object with `profile` and `roles`.
+Response: user object with `profile`, `roles`, current `integration_links`, and `available_providers`.
+
+Important rule:
+
+- returns `404` if `{id}` belongs to an admin account
 
 #### `PUT /admin/users/{id}`
 
@@ -1325,15 +1616,154 @@ Request:
 ```json
 {
   "full_name": "Updated User",
-  "status": "suspended"
+  "status": "suspended",
+  "password": "new-secret123",
+  "integration_links": [
+    {
+      "provider_code": "AIRWALLEX",
+      "link_url": "https://provider.example.com/connect/airwallex",
+      "link_label": "Connect Airwallex",
+      "is_active": true
+    }
+  ]
 }
 ```
 
-Response: updated user object.
+Response: updated user object with `integration_links` and `available_providers`.
+
+Important rule:
+
+- returns `404` if `{id}` belongs to an admin account
+- if `integration_links` is provided, the backend syncs the whole provider assignment list for that user
+- providers omitted from `integration_links` will be removed from the user's assigned provider list
 
 #### `DELETE /admin/users/{id}`
 
 Response: `204 No Content`
+
+Important rule:
+
+- returns `404` if `{id}` belongs to an admin account
+
+#### `GET /admin/users/{id}/integration-links`
+
+Response:
+
+```json
+{
+  "user_id": 12,
+  "data": [
+    {
+      "provider": {
+        "id": 1,
+        "code": "CURRENXIE",
+        "name": "Currenxie",
+        "status": "active"
+      },
+      "integration_link": {
+        "id": 10,
+        "user_id": 12,
+        "provider_id": 1,
+        "link_url": "https://provider.example.com/connect/user-123",
+        "link_label": "Connect provider",
+        "is_active": true,
+        "created_at": "2026-03-24T03:00:00.000000Z",
+        "updated_at": "2026-03-24T03:00:00.000000Z"
+      },
+      "integration_request": null
+    },
+    {
+      "provider": {
+        "id": 2,
+        "code": "AIRWALLEX",
+        "name": "Airwallex",
+        "status": "active"
+      },
+      "integration_link": null,
+      "integration_request": {
+        "id": 7,
+        "user_id": 12,
+        "provider_id": 2,
+        "status": "pending",
+        "note": "Please enable this provider for my account.",
+        "requested_at": "2026-03-24T04:00:00.000000Z",
+        "resolved_at": null,
+        "created_at": "2026-03-24T04:00:00.000000Z",
+        "updated_at": "2026-03-24T04:00:00.000000Z"
+      }
+    }
+  ]
+}
+```
+
+Important rule:
+
+- returns one slot per active provider
+- each user can have at most one link per provider
+- pending user requests appear in `integration_request`
+- returns `404` if `{id}` belongs to an admin account
+
+#### `PUT /admin/users/{id}/integration-links/{providerCode}`
+
+Request:
+
+```json
+{
+  "link_url": "https://provider.example.com/connect/user-123",
+  "link_label": "Connect provider",
+  "is_active": true
+}
+```
+
+Response:
+
+```json
+{
+  "message": "Currenxie integration link saved successfully.",
+  "user_id": 12,
+  "provider": {
+    "id": 1,
+    "code": "CURRENXIE",
+    "name": "Currenxie",
+    "status": "active"
+  },
+  "integration_link": {
+    "id": 10,
+    "user_id": 12,
+    "provider_id": 1,
+    "link_url": "https://provider.example.com/connect/user-123",
+    "link_label": "Connect provider",
+    "is_active": true,
+    "created_at": "2026-03-24T03:00:00.000000Z",
+    "updated_at": "2026-03-24T03:00:00.000000Z"
+  },
+  "integration_request": {
+    "id": 7,
+    "user_id": 12,
+    "provider_id": 1,
+    "status": "resolved",
+    "note": "Please enable this provider for my account.",
+    "requested_at": "2026-03-24T04:00:00.000000Z",
+    "resolved_at": "2026-03-24T04:30:00.000000Z",
+    "created_at": "2026-03-24T04:00:00.000000Z",
+    "updated_at": "2026-03-24T04:30:00.000000Z"
+  }
+}
+```
+
+Important rule:
+
+- if a link already exists for the same `{user, provider}`, this endpoint updates it instead of creating a second one
+- if there was a pending user request for this provider, it is marked as `resolved`
+- returns `404` if `{id}` belongs to an admin account
+
+#### `DELETE /admin/users/{id}/integration-links/{providerCode}`
+
+Response: `204 No Content`
+
+Important rule:
+
+- returns `404` if `{id}` belongs to an admin account
 
 ### Integration Providers
 

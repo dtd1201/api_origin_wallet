@@ -20,6 +20,7 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::get('users/{user}/provider-accounts', [ProviderAccountController::class, 'index']);
     Route::get('users/{user}/provider-accounts/{provider}', [ProviderAccountController::class, 'show']);
     Route::post('users/{user}/provider-accounts/{provider}/link', [ProviderAccountController::class, 'link']);
+    Route::post('users/{user}/provider-accounts/{provider}/request-connect', [ProviderAccountController::class, 'requestConnect']);
     Route::post('users/{user}/providers/{provider}/sync/accounts', [ProviderDataSyncController::class, 'syncAccounts']);
     Route::post('users/{user}/providers/{provider}/sync/balances', [ProviderDataSyncController::class, 'syncBalances']);
     Route::post('users/{user}/providers/{provider}/sync/transactions', [ProviderDataSyncController::class, 'syncTransactions']);

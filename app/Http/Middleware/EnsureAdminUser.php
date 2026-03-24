@@ -20,15 +20,7 @@ class EnsureAdminUser
 
         $user->loadMissing('roles');
 
-        $allowedRoleCodes = collect(config('auth.admin_role_codes', ['admin', 'super_admin']))
-            ->filter(fn ($roleCode) => is_string($roleCode) && $roleCode !== '')
-            ->map(fn (string $roleCode) => strtolower($roleCode))
-            ->values();
-
-        $isAdmin = $user->roles
-            ->contains(fn ($role) => $allowedRoleCodes->contains(strtolower((string) $role->role_code)));
-
-        if (! $isAdmin) {
+        if (! $user->isAdmin()) {
             return $this->forbiddenResponse('You are not allowed to access admin resources.', 403);
         }
 

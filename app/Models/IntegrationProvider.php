@@ -28,6 +28,16 @@ class IntegrationProvider extends Model
         return $this->hasMany(UserProviderAccount::class, 'provider_id');
     }
 
+    public function userIntegrationLinks(): HasMany
+    {
+        return $this->hasMany(UserIntegrationLink::class, 'provider_id');
+    }
+
+    public function userIntegrationRequests(): HasMany
+    {
+        return $this->hasMany(UserIntegrationRequest::class, 'provider_id');
+    }
+
     public function bankAccounts(): HasMany
     {
         return $this->hasMany(BankAccount::class, 'provider_id');
