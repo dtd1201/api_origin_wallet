@@ -179,6 +179,62 @@ class AdminUserManagementTest extends TestCase
         $this->assertDatabaseCount('user_integration_links', 1);
     }
 
+    public function test_available_providers_only_include_active_providers(): void
+    {
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create();
+
+        IntegrationProvider::query()->create([
+            'code' => 'CURRENXIE',
+            'name' => 'Currenxie',
+            'status' => 'active',
+        ]);
+        IntegrationProvider::query()->create([
+            'code' => 'LEGACY_BANK',
+            'name' => 'Legacy Bank',
+            'status' => 'inactive',
+        ]);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->getJson("/api/admin/users/{$user->id}")
+            ->assertOk()
+            ->assertJsonFragment(['code' => 'CURRENXIE'])
+            ->assertJsonMissing(['code' => 'LEGACY_BANK']);
+    }
+
+    public function test_admin_cannot_assign_inactive_provider_to_user(): void
+    {
+        $admin = $this->createAdminUser();
+
+        IntegrationProvider::query()->create([
+            'code' => 'LEGACY_BANK',
+            'name' => 'Legacy Bank',
+            'status' => 'inactive',
+        ]);
+
+        $response = $this->withToken($this->issueTokenFor($admin))
+            ->postJson('/api/admin/users', [
+                'email' => 'inactive-provider@example.com',
+                'full_name' => 'Inactive Provider User',
+                'password' => 'secret123',
+                'integration_links' => [
+                    [
+                        'provider_code' => 'LEGACY_BANK',
+                        'link_url' => 'https://provider.example.com/connect/legacy-bank',
+                    ],
+                ],
+            ]);
+
+        $response
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['integration_links.0.provider_code']);
+
+        $this->assertDatabaseMissing('users', [
+            'email' => 'inactive-provider@example.com',
+        ]);
+        $this->assertDatabaseCount('user_integration_links', 0);
+    }
+
     private function createAdminUser(): User
     {
         $user = User::factory()->create();

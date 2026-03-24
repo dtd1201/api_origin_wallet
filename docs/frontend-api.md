@@ -47,6 +47,65 @@ Authorization: Bearer {token}
 - Delete endpoints usually return `204 No Content`.
 - Provider-managed fields inside `result`, `raw_data`, provider accounts, quotes, and transfers can vary by integration.
 
+## Admin Frontend Notes
+
+The admin frontend should be treated as a separate project from the user frontend.
+
+Recommended setup:
+
+- user app on one subdomain, for example `wallet.example.com`
+- admin app on a different subdomain, for example `admin-wallet.example.com`
+- both apps can call the same backend API base URL
+
+Important implementation notes:
+
+- do not share login flow between user app and admin app
+- user app uses `/auth/*`
+- admin app uses `/admin/auth/*`
+- admin app does not support register or Google login
+- store admin token and user token under different storage keys
+- do not reuse user auth guards/hooks blindly inside the admin app
+- the admin app should call `GET /admin/auth/me` on bootstrap
+- if admin token returns `401` or `403`, clear admin session and redirect to admin login
+
+Suggested token storage keys:
+
+- `origin_wallet_user_token`
+- `origin_wallet_admin_token`
+
+CORS / deploy notes:
+
+- add both user frontend origin and admin frontend origin to `CORS_ALLOWED_ORIGINS`
+- deploy user frontend and admin frontend separately
+- keep environment variables separate for each app
+- admin subdomain should generally be marked `noindex`
+
+Current backend CORS behavior:
+
+- backend reads allowed origins from `CORS_ALLOWED_ORIGINS`
+- CORS applies to `api/*`
+- Bearer-token auth does not require `supports_credentials=true`
+- adding the admin frontend origin will not affect user auth flow as long as each frontend uses its own token storage and auth routes
+
+Production example:
+
+```env
+CORS_ALLOWED_ORIGINS=https://khoinguyenoriginwallet.com,https://www.khoinguyenoriginwallet.com,https://admin.khoinguyenoriginwallet.com
+```
+
+Local development example:
+
+```env
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost:3001
+```
+
+Recommended deployment checklist for admin frontend:
+
+- point admin frontend to the same backend API base URL
+- add admin frontend origin to `CORS_ALLOWED_ORIGINS`
+- run `php artisan optimize:clear` after changing env values on the API server
+- verify preflight and API calls from browser devtools on the admin subdomain
+
 ## Recommended Frontend Flow
 
 ### 1. App bootstrap
@@ -958,12 +1017,13 @@ Frontend notes:
 - this endpoint returns all active providers, even when the user does not yet have a link
 - use `integration_link.link_url` for the connect CTA URL
 - use `integration_link.link_label` for button text when present
+- the `{providerCode}` route parameter uses provider `code`, for example `CURRENXIE` or `AIRWALLEX`
 - show `Connect provider` when `can_connect === true`
 - show `Request connect` when `can_request_connect === true`
 - disable the request button and show pending state when `request_pending === true`
 - `provider_account` can be `null` before the user completes the external provider connection
 
-### `GET /user/users/{userId}/provider-accounts/{providerId}`
+### `GET /user/users/{userId}/provider-accounts/{providerCode}`
 
 Response when linked:
 
@@ -1039,7 +1099,7 @@ Response when not linked:
 }
 ```
 
-### `POST /user/users/{userId}/provider-accounts/{providerId}/link`
+### `POST /user/users/{userId}/provider-accounts/{providerCode}/link`
 
 Request:
 
@@ -1049,7 +1109,27 @@ Request:
 }
 ```
 
-### `POST /user/users/{userId}/provider-accounts/{providerId}/request-connect`
+Response:
+
+```json
+{
+  "message": "Currenxie account link request processed successfully.",
+  "provider": {
+    "id": 1,
+    "code": "CURRENXIE",
+    "name": "Currenxie",
+    "status": "active"
+  },
+  "provider_account": {
+    "id": 1,
+    "user_id": 1,
+    "provider_id": 1,
+    "status": "pending"
+  }
+}
+```
+
+### `POST /user/users/{userId}/provider-accounts/{providerCode}/request-connect`
 
 Use this when the user sees a provider card but no connect link is available yet.
 
@@ -1095,31 +1175,11 @@ Response `422`:
 }
 ```
 
-Response:
+### `POST /user/users/{userId}/providers/{providerCode}/sync/accounts`
 
-```json
-{
-  "message": "Airwallex account link request processed successfully.",
-  "provider": {
-    "id": 1,
-    "code": "AIRWALLEX",
-    "name": "Airwallex",
-    "status": "active"
-  },
-  "provider_account": {
-    "id": 1,
-    "user_id": 1,
-    "provider_id": 1,
-    "status": "pending"
-  }
-}
-```
+### `POST /user/users/{userId}/providers/{providerCode}/sync/balances`
 
-### `POST /user/users/{userId}/providers/{providerId}/sync/accounts`
-
-### `POST /user/users/{userId}/providers/{providerId}/sync/balances`
-
-### `POST /user/users/{userId}/providers/{providerId}/sync/transactions`
+### `POST /user/users/{userId}/providers/{providerCode}/sync/transactions`
 
 Response shape for all 3:
 
@@ -1601,6 +1661,10 @@ Response `201`:
 }
 ```
 
+Important rule:
+
+- `available_providers` only includes providers with `status = active`
+
 #### `GET /admin/users/{id}`
 
 Response: user object with `profile`, `roles`, current `integration_links`, and `available_providers`.
@@ -1608,6 +1672,7 @@ Response: user object with `profile`, `roles`, current `integration_links`, and 
 Important rule:
 
 - returns `404` if `{id}` belongs to an admin account
+- `available_providers` only includes providers with `status = active`
 
 #### `PUT /admin/users/{id}`
 
@@ -1636,6 +1701,7 @@ Important rule:
 - returns `404` if `{id}` belongs to an admin account
 - if `integration_links` is provided, the backend syncs the whole provider assignment list for that user
 - providers omitted from `integration_links` will be removed from the user's assigned provider list
+- `integration_links[*].provider_code` must reference an active provider; inactive providers are rejected with validation error `422`
 
 #### `DELETE /admin/users/{id}`
 
@@ -1785,11 +1851,11 @@ Request:
 
 Response `201`: provider object.
 
-#### `GET /admin/integration-providers/{id}`
+#### `GET /admin/integration-providers/{providerCode}`
 
 Response: provider object.
 
-#### `PUT /admin/integration-providers/{id}`
+#### `PUT /admin/integration-providers/{providerCode}`
 
 Request:
 
@@ -1802,7 +1868,7 @@ Request:
 
 Response: updated provider object.
 
-#### `DELETE /admin/integration-providers/{id}`
+#### `DELETE /admin/integration-providers/{providerCode}`
 
 Response: `204 No Content`
 
@@ -2025,7 +2091,7 @@ Response: updated transaction object.
 
 Response: `204 No Content`
 
-### `POST /admin/providers/{providerId}/users/{userId}/sync`
+### `POST /admin/providers/{providerCode}/users/{userId}/sync`
 
 Response:
 

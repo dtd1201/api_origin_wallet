@@ -10,6 +10,8 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\Exists;
 
 class UserController extends Controller
 {
@@ -32,7 +34,7 @@ class UserController extends Controller
             'status' => ['nullable', 'string', 'max:30'],
             'kyc_status' => ['nullable', 'string', 'max:30'],
             'integration_links' => ['sometimes', 'array'],
-            'integration_links.*.provider_code' => ['required', 'string', 'distinct', 'exists:integration_providers,code'],
+            'integration_links.*.provider_code' => ['required', 'string', 'distinct', $this->activeProviderCodeRule()],
             'integration_links.*.link_url' => ['required', 'url', 'max:2048'],
             'integration_links.*.link_label' => ['nullable', 'string', 'max:100'],
             'integration_links.*.is_active' => ['sometimes', 'boolean'],
@@ -74,7 +76,7 @@ class UserController extends Controller
             'status' => ['sometimes', 'string', 'max:30'],
             'kyc_status' => ['sometimes', 'string', 'max:30'],
             'integration_links' => ['sometimes', 'array'],
-            'integration_links.*.provider_code' => ['required', 'string', 'distinct', 'exists:integration_providers,code'],
+            'integration_links.*.provider_code' => ['required', 'string', 'distinct', $this->activeProviderCodeRule()],
             'integration_links.*.link_url' => ['required', 'url', 'max:2048'],
             'integration_links.*.link_label' => ['nullable', 'string', 'max:100'],
             'integration_links.*.is_active' => ['sometimes', 'boolean'],
@@ -132,10 +134,17 @@ class UserController extends Controller
         return [
             ...$user->toArray(),
             'available_providers' => IntegrationProvider::query()
+                ->where('status', 'active')
                 ->orderBy('name')
                 ->get(['id', 'code', 'name', 'status'])
                 ->toArray(),
         ];
+    }
+
+    private function activeProviderCodeRule(): Exists
+    {
+        return Rule::exists('integration_providers', 'code')
+            ->where(fn ($query) => $query->where('status', 'active'));
     }
 
     /**
