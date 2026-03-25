@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Integrations\Contracts\OnboardingProvider;
 use App\Services\Integrations\Contracts\ProviderPayloadMapper;
+use App\Services\Integrations\DataObjects\ProviderOnboardingResult;
 use App\Services\Integrations\ProviderAccountStatusManager;
 use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Support\Facades\DB;
@@ -14,6 +15,34 @@ use RuntimeException;
 
 abstract class AbstractApiOnboardingProvider implements OnboardingProvider
 {
+    public function beginOnboarding(
+        IntegrationProvider $provider,
+        User $user,
+        ?UserProviderAccount $existingProviderAccount = null,
+    ): ProviderOnboardingResult {
+        $providerAccount = $this->syncUser($provider, $user);
+
+        return new ProviderOnboardingResult(
+            providerAccount: $providerAccount->fresh('provider'),
+            status: (string) $providerAccount->status,
+            nextAction: $this->nextActionForStatus((string) $providerAccount->status),
+            message: $this->messageForStatus($provider, (string) $providerAccount->status),
+            metadata: [
+                'provider_code' => $provider->code,
+                'provider_account_status' => $providerAccount->status,
+            ],
+        );
+    }
+
+    public function completeOnboarding(
+        IntegrationProvider $provider,
+        User $user,
+        UserProviderAccount $providerAccount,
+        array $payload,
+    ): ProviderOnboardingResult {
+        throw new RuntimeException("{$provider->name} does not support callback-based onboarding completion.");
+    }
+
     final public function syncUser(IntegrationProvider $provider, User $user): UserProviderAccount
     {
         if ($user->profile === null) {
@@ -117,4 +146,23 @@ abstract class AbstractApiOnboardingProvider implements OnboardingProvider
     abstract protected function accountEndpoint(): string;
 
     abstract protected function payloadMapper(): ProviderPayloadMapper;
+
+    protected function nextActionForStatus(string $status): string
+    {
+        return match (strtolower($status)) {
+            'active' => 'provider_onboarding_completed',
+            'rejected', 'failed' => 'contact_support',
+            default => 'wait_for_provider_review',
+        };
+    }
+
+    protected function messageForStatus(IntegrationProvider $provider, string $status): string
+    {
+        return match (strtolower($status)) {
+            'active' => "{$provider->name} onboarding completed successfully.",
+            'rejected' => "{$provider->name} onboarding was rejected.",
+            'failed' => "{$provider->name} onboarding failed.",
+            default => "{$provider->name} onboarding request sent successfully.",
+        };
+    }
 }

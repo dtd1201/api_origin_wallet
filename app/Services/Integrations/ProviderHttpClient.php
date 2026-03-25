@@ -7,10 +7,12 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
 use App\Support\SensitiveDataSanitizer;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
+use RuntimeException;
 
 class ProviderHttpClient implements ProviderClient
 {
@@ -20,6 +22,11 @@ class ProviderHttpClient implements ProviderClient
         private readonly array $headers = [],
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer = new SensitiveDataSanitizer(),
     ) {
+    }
+
+    public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
+    {
+        return $this->send('GET', $path, $query, $user, $relatedTransferId);
     }
 
     public function post(string $path, array $payload, ?User $user = null, ?int $relatedTransferId = null): Response
@@ -41,12 +48,15 @@ class ProviderHttpClient implements ProviderClient
     {
         return Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
             ->acceptJson()
-            ->asJson()
-            ->withHeaders($this->headers);
+            ->withHeaders($this->resolveHeaders());
     }
 
     private function buildUrl(string $path): string
     {
+        if (preg_match('/^https?:\/\//i', $path) === 1) {
+            return $path;
+        }
+
         $baseUrl = rtrim((string) config("services.{$this->serviceConfigKey}.base_url"), '/');
 
         return $baseUrl.'/'.ltrim($path, '/');
@@ -64,9 +74,10 @@ class ProviderHttpClient implements ProviderClient
         $startedAt = microtime(true);
 
         $response = match ($method) {
-            'POST' => $request->post($url, $payload),
-            'PUT' => $request->put($url, $payload),
-            'DELETE' => empty($payload) ? $request->delete($url) : $request->delete($url, $payload),
+            'GET' => $request->get($url, $payload),
+            'POST' => $request->asJson()->post($url, $payload),
+            'PUT' => $request->asJson()->put($url, $payload),
+            'DELETE' => empty($payload) ? $request->delete($url) : $request->asJson()->delete($url, $payload),
             default => throw new \InvalidArgumentException("Unsupported HTTP method [{$method}]."),
         };
 
@@ -75,6 +86,96 @@ class ProviderHttpClient implements ProviderClient
         $this->logRequest($user, $relatedTransferId, $method, $url, $payload, $response, $durationMs);
 
         return $response;
+    }
+
+    private function resolveHeaders(): array
+    {
+        return array_filter([
+            ...$this->resolveAuthHeaders(),
+            ...$this->headers,
+        ], static fn ($value) => $value !== null && $value !== '');
+    }
+
+    private function resolveAuthHeaders(): array
+    {
+        $authConfig = (array) config("services.{$this->serviceConfigKey}.auth", []);
+        $mode = strtolower((string) ($authConfig['mode'] ?? 'none'));
+
+        return match ($mode) {
+            '', 'none', 'static_headers' => [],
+            'bearer_token' => filled($authConfig['token'] ?? null)
+                ? ['Authorization' => 'Bearer '.$authConfig['token']]
+                : [],
+            'header' => filled($authConfig['header_name'] ?? null) && array_key_exists('header_value', $authConfig)
+                ? [(string) $authConfig['header_name'] => $authConfig['header_value']]
+                : [],
+            'client_credentials' => ['Authorization' => 'Bearer '.$this->getClientCredentialsAccessToken($authConfig)],
+            default => throw new RuntimeException("Unsupported auth mode [{$mode}] for provider [{$this->serviceConfigKey}]."),
+        };
+    }
+
+    private function getClientCredentialsAccessToken(array $authConfig): string
+    {
+        $cacheKey = (string) ($authConfig['cache_key'] ?? "provider_http_client:{$this->serviceConfigKey}:access_token");
+        $cachedToken = Cache::get($cacheKey);
+
+        if (is_string($cachedToken) && $cachedToken !== '') {
+            return $cachedToken;
+        }
+
+        $clientId = (string) ($authConfig['client_id'] ?? '');
+        $clientSecret = (string) ($authConfig['client_secret'] ?? '');
+
+        if ($clientId === '' || $clientSecret === '') {
+            throw new RuntimeException("Client credentials are not configured for provider [{$this->serviceConfigKey}].");
+        }
+
+        $tokenEndpoint = (string) ($authConfig['token_endpoint'] ?? '');
+        $tokenUrl = (string) ($authConfig['token_url'] ?? '');
+        $credentialsIn = strtolower((string) ($authConfig['credentials_in'] ?? 'body'));
+
+        if ($tokenUrl === '' && $tokenEndpoint === '') {
+            throw new RuntimeException("Token endpoint is not configured for provider [{$this->serviceConfigKey}].");
+        }
+
+        $request = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
+            ->acceptJson()
+            ->asForm();
+
+        foreach ((array) ($authConfig['headers'] ?? []) as $headerName => $headerValue) {
+            $request = $request->withHeader((string) $headerName, $headerValue);
+        }
+
+        $payload = array_filter([
+            'grant_type' => (string) ($authConfig['grant_type'] ?? 'client_credentials'),
+            'scope' => $authConfig['scope'] ?? null,
+            'audience' => $authConfig['audience'] ?? null,
+        ], static fn ($value) => $value !== null && $value !== '');
+
+        if ($credentialsIn === 'basic') {
+            $request = $request->withBasicAuth($clientId, $clientSecret);
+        } else {
+            $payload['client_id'] = $clientId;
+            $payload['client_secret'] = $clientSecret;
+        }
+
+        $response = $request->post(
+            $tokenUrl !== '' ? $this->buildUrl($tokenUrl) : $this->buildUrl($tokenEndpoint),
+            $payload,
+        );
+
+        $responseData = $response->json() ?? [];
+
+        if (! $response->successful() || ! filled($responseData['access_token'] ?? null)) {
+            throw new RuntimeException("Failed to obtain access token for provider [{$this->serviceConfigKey}].");
+        }
+
+        $token = (string) $responseData['access_token'];
+        $expiresIn = max(60, (int) ($responseData['expires_in'] ?? 300) - (int) ($authConfig['cache_buffer_seconds'] ?? 30));
+
+        Cache::put($cacheKey, $token, now()->addSeconds($expiresIn));
+
+        return $token;
     }
 
     private function logRequest(

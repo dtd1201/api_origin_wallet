@@ -10,6 +10,7 @@ use App\Models\UserIntegrationRequest;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
 
 class UserIntegrationLinkController extends Controller
 {
@@ -25,7 +26,9 @@ class UserIntegrationLinkController extends Controller
 
         return response()->json([
             'user_id' => $user->id,
-            'data' => $providers->map(function (IntegrationProvider $provider) use ($user): array {
+            'data' => $providers
+                ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding())
+                ->map(function (IntegrationProvider $provider) use ($user): array {
                 $link = $user->integrationLinks->firstWhere('provider_id', $provider->id);
                 $request = $user->integrationRequests->firstWhere('provider_id', $provider->id);
 
@@ -48,29 +51,41 @@ class UserIntegrationLinkController extends Controller
             'is_active' => ['sometimes', 'boolean'],
         ]);
 
-        $integrationLink = DB::transaction(function () use ($user, $provider, $validated): UserIntegrationLink {
-            $integrationLink = UserIntegrationLink::query()->updateOrCreate(
-                [
-                    'user_id' => $user->id,
-                    'provider_id' => $provider->id,
-                ],
-                [
-                    'link_url' => $validated['link_url'],
-                    'link_label' => $validated['link_label'] ?? null,
-                    'is_active' => $validated['is_active'] ?? true,
-                ]
-            );
+        if (! $provider->supportsOnboarding()) {
+            return response()->json([
+                'message' => 'This provider is not available for onboarding yet.',
+            ], 422);
+        }
 
-            UserIntegrationRequest::query()
-                ->where('user_id', $user->id)
-                ->where('provider_id', $provider->id)
-                ->update([
-                    'status' => 'resolved',
-                    'resolved_at' => now(),
-                ]);
+        try {
+            $integrationLink = DB::transaction(function () use ($user, $provider, $validated): UserIntegrationLink {
+                $integrationLink = UserIntegrationLink::query()->updateOrCreate(
+                    [
+                        'user_id' => $user->id,
+                        'provider_id' => $provider->id,
+                    ],
+                    [
+                        'link_url' => $validated['link_url'],
+                        'link_label' => $validated['link_label'] ?? null,
+                        'is_active' => $validated['is_active'] ?? true,
+                    ]
+                );
 
-            return $integrationLink;
-        });
+                UserIntegrationRequest::query()
+                    ->where('user_id', $user->id)
+                    ->where('provider_id', $provider->id)
+                    ->update([
+                        'status' => 'resolved',
+                        'resolved_at' => now(),
+                    ]);
+
+                return $integrationLink;
+            });
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
 
         return response()->json([
             'message' => "{$provider->name} integration link saved successfully.",
@@ -88,12 +103,24 @@ class UserIntegrationLinkController extends Controller
     {
         $user = $this->resolveManageableUser($user);
 
-        DB::transaction(function () use ($user, $provider): void {
-            UserIntegrationLink::query()
-                ->where('user_id', $user->id)
-                ->where('provider_id', $provider->id)
-                ->delete();
-        });
+        if (! $provider->supportsOnboarding()) {
+            return response()->json([
+                'message' => 'This provider is not available for onboarding yet.',
+            ], 422);
+        }
+
+        try {
+            DB::transaction(function () use ($user, $provider): void {
+                UserIntegrationLink::query()
+                    ->where('user_id', $user->id)
+                    ->where('provider_id', $provider->id)
+                    ->delete();
+            });
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
 
         return response()->json(status: 204);
     }

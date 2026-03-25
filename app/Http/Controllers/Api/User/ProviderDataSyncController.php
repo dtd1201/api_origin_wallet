@@ -13,17 +13,29 @@ class ProviderDataSyncController extends Controller
 {
     public function syncAccounts(User $user, IntegrationProvider $provider, ProviderDataSyncManager $manager): JsonResponse
     {
-        return $this->respond(fn () => $manager->syncAccounts($provider, $user), $provider, 'Accounts synced successfully.');
+        return $this->respond(function () use ($provider, $user, $manager): array {
+            $provider->assertSupportsCapability('data_sync');
+
+            return $manager->syncAccounts($provider, $user);
+        }, $provider, 'Accounts synced successfully.');
     }
 
     public function syncBalances(User $user, IntegrationProvider $provider, ProviderDataSyncManager $manager): JsonResponse
     {
-        return $this->respond(fn () => $manager->syncBalances($provider, $user), $provider, 'Balances synced successfully.');
+        return $this->respond(function () use ($provider, $user, $manager): array {
+            $provider->assertSupportsCapability('data_sync');
+
+            return $manager->syncBalances($provider, $user);
+        }, $provider, 'Balances synced successfully.');
     }
 
     public function syncTransactions(User $user, IntegrationProvider $provider, ProviderDataSyncManager $manager): JsonResponse
     {
-        return $this->respond(fn () => $manager->syncTransactions($provider, $user), $provider, 'Transactions synced successfully.');
+        return $this->respond(function () use ($provider, $user, $manager): array {
+            $provider->assertSupportsCapability('data_sync');
+
+            return $manager->syncTransactions($provider, $user);
+        }, $provider, 'Transactions synced successfully.');
     }
 
     private function respond(callable $callback, IntegrationProvider $provider, string $message): JsonResponse

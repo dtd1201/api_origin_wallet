@@ -28,14 +28,16 @@ class ProviderAccountController extends Controller
             ->get(['id', 'code', 'name', 'status']);
 
         return response()->json([
-            'data' => $providers->map(function (IntegrationProvider $provider) use ($user): array {
+            'data' => $providers
+                ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding())
+                ->map(function (IntegrationProvider $provider) use ($user): array {
                 $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
                 $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
                 $providerAccount = $user->providerAccounts
                     ->where('provider_id', $provider->id)
                     ->sortByDesc('id')
                     ->first();
-                $linkAvailable = $provider->status === 'active'
+                $linkAvailable = $provider->isAvailableForOnboarding()
                     && $integrationLink !== null
                     && $integrationLink->is_active
                     && filled($integrationLink->link_url);
@@ -50,12 +52,16 @@ class ProviderAccountController extends Controller
                     'can_request_connect' => ! $linkAvailable,
                     'request_pending' => $integrationRequest?->status === 'pending',
                 ];
-            })->all(),
+            })->values()->all(),
         ]);
     }
 
     public function show(User $user, IntegrationProvider $provider): JsonResponse
     {
+        if (! $provider->supportsOnboarding()) {
+            abort(404);
+        }
+
         $user->loadMissing(['integrationLinks.provider', 'providerAccounts.provider', 'integrationRequests.provider']);
 
         $providerAccount = $user->providerAccounts()
@@ -65,7 +71,7 @@ class ProviderAccountController extends Controller
             ->first();
         $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
         $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
-        $linkAvailable = $provider->status === 'active'
+        $linkAvailable = $provider->isAvailableForOnboarding()
             && $integrationLink !== null
             && $integrationLink->is_active
             && filled($integrationLink->link_url);
@@ -97,6 +103,12 @@ class ProviderAccountController extends Controller
 
     public function requestConnect(Request $request, User $user, IntegrationProvider $provider): JsonResponse
     {
+        if (! $provider->supportsOnboarding()) {
+            return response()->json([
+                'message' => 'This provider is not available for onboarding yet.',
+            ], 422);
+        }
+
         $validated = $request->validate([
             'note' => ['sometimes', 'nullable', 'string', 'max:1000'],
         ]);
@@ -104,7 +116,7 @@ class ProviderAccountController extends Controller
         $user->loadMissing(['integrationLinks', 'integrationRequests']);
 
         $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
-        $linkAvailable = $provider->status === 'active'
+        $linkAvailable = $provider->isAvailableForOnboarding()
             && $integrationLink !== null
             && $integrationLink->is_active
             && filled($integrationLink->link_url);
@@ -145,7 +157,9 @@ class ProviderAccountController extends Controller
         ProviderOnboardingManager $manager,
     ): JsonResponse {
         try {
-            $providerAccount = $manager->linkUser(
+            $provider->assertSupportsCapability('onboarding');
+
+            $onboarding = $manager->linkUser(
                 provider: $provider,
                 user: $user->load('profile', 'providerAccounts.provider'),
                 force: (bool) $request->boolean('force', false),
@@ -157,9 +171,38 @@ class ProviderAccountController extends Controller
         }
 
         return response()->json([
-            'message' => "{$provider->name} account link request processed successfully.",
+            'message' => $onboarding->message,
             'provider' => $provider->only(['id', 'code', 'name', 'status']),
-            'provider_account' => $providerAccount,
+            'provider_account' => $onboarding->providerAccount,
+            'onboarding' => $onboarding->toArray(),
+        ]);
+    }
+
+    public function complete(
+        Request $request,
+        User $user,
+        IntegrationProvider $provider,
+        ProviderOnboardingManager $manager,
+    ): JsonResponse {
+        try {
+            $provider->assertSupportsCapability('onboarding');
+
+            $onboarding = $manager->completeUserOnboarding(
+                provider: $provider,
+                user: $user->load('profile', 'providerAccounts.provider'),
+                payload: $request->all(),
+            );
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => $onboarding->message,
+            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider_account' => $onboarding->providerAccount,
+            'onboarding' => $onboarding->toArray(),
         ]);
     }
 }

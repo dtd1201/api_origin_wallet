@@ -166,26 +166,18 @@ class ApiAuthService
 
     private function transformProvider(IntegrationProvider $provider): array
     {
-        $providerConfig = (array) config('integrations.providers.'.strtolower($provider->code), []);
-
-        $supportsOnboarding = isset($providerConfig['onboarding']);
-        $supportsBeneficiaries = isset($providerConfig['beneficiary']);
-        $supportsDataSync = isset($providerConfig['data_sync']);
-        $supportsQuotes = isset($providerConfig['quote']);
-        $supportsTransfers = isset($providerConfig['transfer']);
-        $supportsWebhooks = isset($providerConfig['webhook']);
-
         return [
             'id' => $provider->id,
             'code' => $provider->code,
             'name' => $provider->name,
             'status' => $provider->status,
-            'is_available_for_onboarding' => $provider->status === 'active' && $supportsOnboarding,
-            'supports_beneficiaries' => $supportsBeneficiaries,
-            'supports_data_sync' => $supportsDataSync,
-            'supports_quotes' => $supportsQuotes,
-            'supports_transfers' => $supportsTransfers,
-            'supports_webhooks' => $supportsWebhooks,
+            'is_available_for_onboarding' => $provider->isAvailableForOnboarding(),
+            'supports_beneficiaries' => $provider->supportsBeneficiaries(),
+            'supports_data_sync' => $provider->supportsDataSync(),
+            'supports_quotes' => $provider->supportsQuotes(),
+            'supports_transfers' => $provider->supportsTransfers(),
+            'supports_webhooks' => $provider->supportsWebhooks(),
+            'is_configured' => $provider->isConfigured(),
         ];
     }
 

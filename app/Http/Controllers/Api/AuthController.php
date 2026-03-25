@@ -291,8 +291,8 @@ class AuthController extends Controller
 
         if ($selectedProvider !== null) {
             try {
-                $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider', 'roles']), true);
-                $providerSyncMessage = "Profile submitted and {$selectedProvider->name} onboarding request sent successfully.";
+                $onboarding = $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider', 'roles']), true);
+                $providerSyncMessage = "Profile submitted. {$onboarding->message}";
             } catch (Throwable $exception) {
                 report($exception);
                 $providerSyncMessage = $exception instanceof \RuntimeException

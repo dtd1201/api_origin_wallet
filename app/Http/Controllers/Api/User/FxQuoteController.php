@@ -45,6 +45,7 @@ class FxQuoteController extends Controller
         $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);
 
         try {
+            $provider->assertSupportsCapability('quote');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
             $quote = $manager->createQuote($provider, $user, $validated);
         } catch (RuntimeException $exception) {

@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Transfers\TransferEligibilityService;
+use InvalidArgumentException;
 use RuntimeException;
 
 class TransferController extends Controller
@@ -55,6 +56,7 @@ class TransferController extends Controller
         $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);
 
         try {
+            $provider->assertSupportsCapability('transfer');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
         } catch (RuntimeException $exception) {
             return response()->json([
@@ -104,11 +106,12 @@ class TransferController extends Controller
         $provider = IntegrationProvider::query()->findOrFail($transfer->provider_id);
 
         try {
+            $provider->assertSupportsCapability('transfer');
             $transfer = $manager->submitTransfer(
                 provider: $provider,
                 transfer: $transfer->load(['user', 'beneficiary', 'sourceBankAccount'])
             );
-        } catch (RuntimeException $exception) {
+        } catch (RuntimeException|InvalidArgumentException $exception) {
             return response()->json([
                 'message' => $exception->getMessage(),
             ], 422);

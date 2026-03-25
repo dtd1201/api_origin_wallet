@@ -304,11 +304,25 @@ Auth payload:
       "name": "Airwallex",
       "status": "active",
       "is_available_for_onboarding": true,
+      "supports_beneficiaries": false,
+      "supports_data_sync": false,
+      "supports_quotes": false,
+      "supports_transfers": false,
+      "supports_webhooks": false,
+      "is_configured": false
+    },
+    {
+      "id": 2,
+      "code": "CURRENXIE",
+      "name": "Currenxie",
+      "status": "active",
+      "is_available_for_onboarding": true,
       "supports_beneficiaries": true,
       "supports_data_sync": true,
       "supports_quotes": true,
       "supports_transfers": true,
-      "supports_webhooks": true
+      "supports_webhooks": true,
+      "is_configured": true
     }
   ]
 }
@@ -372,15 +386,50 @@ Response:
       "name": "Airwallex",
       "status": "active",
       "is_available_for_onboarding": true,
+      "supports_beneficiaries": false,
+      "supports_data_sync": false,
+      "supports_quotes": false,
+      "supports_transfers": false,
+      "supports_webhooks": false,
+      "is_configured": false
+    },
+    {
+      "id": 2,
+      "code": "WISE",
+      "name": "Wise",
+      "status": "active",
+      "is_available_for_onboarding": true,
+      "supports_beneficiaries": false,
+      "supports_data_sync": false,
+      "supports_quotes": false,
+      "supports_transfers": false,
+      "supports_webhooks": false,
+      "is_configured": false
+    },
+    {
+      "id": 3,
+      "code": "CURRENXIE",
+      "name": "Currenxie",
+      "status": "active",
+      "is_available_for_onboarding": true,
       "supports_beneficiaries": true,
       "supports_data_sync": true,
       "supports_quotes": true,
       "supports_transfers": true,
-      "supports_webhooks": true
+      "supports_webhooks": true,
+      "is_configured": true
     }
   ]
 }
 ```
+
+Frontend notes:
+
+- `is_available_for_onboarding` means the provider can participate in the onboarding flow
+- a provider can still have `is_available_for_onboarding === true` while `is_configured === false`
+- `is_configured === false` means live backend-driven API actions such as sync, quotes, transfers, or direct API onboarding may not be ready yet
+- current default seeded setup includes `Currenxie`, `Wise`, and `Airwallex`
+- `Wise` and `Airwallex` currently default to manual-link onboarding unless backend API capabilities are explicitly enabled later
 
 ## Auth APIs
 
@@ -1014,14 +1063,17 @@ Response:
 
 Frontend notes:
 
-- this endpoint returns all active providers, even when the user does not yet have a link
+- this endpoint returns active providers that support onboarding, not every active provider in the database
 - use `integration_link.link_url` for the connect CTA URL
 - use `integration_link.link_label` for button text when present
 - the `{providerCode}` route parameter uses provider `code`, for example `CURRENXIE` or `AIRWALLEX`
+- `link_available` becomes `true` when the provider supports onboarding and the user has an active integration link
+- this allows manual link-based onboarding even before full provider API config exists
 - show `Connect provider` when `can_connect === true`
 - show `Request connect` when `can_request_connect === true`
 - disable the request button and show pending state when `request_pending === true`
 - `provider_account` can be `null` before the user completes the external provider connection
+- `Wise` and `Airwallex` may appear here with manual onboarding availability even when sync/quote/transfer features are still disabled
 
 ### `GET /user/users/{userId}/provider-accounts/{providerCode}`
 
@@ -1113,7 +1165,7 @@ Response:
 
 ```json
 {
-  "message": "Currenxie account link request processed successfully.",
+  "message": "Currenxie onboarding request sent successfully.",
   "provider": {
     "id": 1,
     "code": "CURRENXIE",
@@ -1125,9 +1177,25 @@ Response:
     "user_id": 1,
     "provider_id": 1,
     "status": "pending"
+  },
+  "onboarding": {
+    "status": "pending",
+    "next_action": "wait_for_provider_review",
+    "message": "Currenxie onboarding request sent successfully.",
+    "action_type": "direct_api",
+    "metadata": {
+      "provider_code": "CURRENXIE",
+      "provider_account_status": "pending"
+    }
   }
 }
 ```
+
+Frontend notes:
+
+- use `onboarding.next_action` to decide whether to wait, redirect, or show success state
+- `onboarding.redirect_url` can be present for hosted / redirect-based providers
+- `provider_account` remains the canonical local account record when available
 
 ### `POST /user/users/{userId}/provider-accounts/{providerCode}/request-connect`
 
@@ -1174,6 +1242,60 @@ Response `422`:
   "message": "This provider is already available for connection."
 }
 ```
+
+### `POST /user/users/{userId}/provider-accounts/{providerCode}/complete`
+
+Use this after a hosted or redirect-based provider sends the user back to your frontend and you need to finalize local onboarding state.
+
+Example request:
+
+```json
+{
+  "status": "active",
+  "external_customer_id": "cust_123",
+  "external_account_id": "acct_456",
+  "account_name": "Jane Doe - Hosted"
+}
+```
+
+Example response:
+
+```json
+{
+  "message": "Hosted Provider onboarding completed successfully.",
+  "provider": {
+    "id": 3,
+    "code": "HOSTED_PROVIDER",
+    "name": "Hosted Provider",
+    "status": "active"
+  },
+  "provider_account": {
+    "id": 1,
+    "user_id": 1,
+    "provider_id": 3,
+    "external_customer_id": "cust_123",
+    "external_account_id": "acct_456",
+    "account_name": "Jane Doe - Hosted",
+    "status": "active"
+  },
+  "onboarding": {
+    "status": "active",
+    "next_action": "provider_onboarding_completed",
+    "message": "Hosted Provider onboarding completed successfully.",
+    "action_type": "callback",
+    "metadata": {
+      "provider_code": "HOSTED_PROVIDER",
+      "provider_account_status": "active"
+    }
+  }
+}
+```
+
+Frontend notes:
+
+- call this only for providers whose `link` response indicates a redirect-style flow
+- after success, refresh `GET /auth/me` or `GET /user/users/{userId}/provider-accounts/{providerCode}`
+- for providers with direct API onboarding, this endpoint can return `422`
 
 ### `POST /user/users/{userId}/providers/{providerCode}/sync/accounts`
 

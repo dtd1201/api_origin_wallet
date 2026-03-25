@@ -9,12 +9,18 @@ class IntegrationProviderSeeder extends Seeder
 {
     public function run(): void
     {
-        IntegrationProvider::query()->updateOrCreate(
-            ['code' => 'currenxie'],
-            [
-                'name' => 'Currenxie',
-                'status' => 'active',
-            ]
-        );
+        collect([
+            ['code' => 'currenxie', 'name' => 'Currenxie'],
+            ['code' => 'wise', 'name' => 'Wise'],
+            ['code' => 'airwallex', 'name' => 'Airwallex'],
+        ])->each(function (array $provider): void {
+            IntegrationProvider::query()->updateOrCreate(
+                ['code' => $provider['code']],
+                [
+                    'name' => $provider['name'],
+                    'status' => 'active',
+                ]
+            );
+        });
     }
 }

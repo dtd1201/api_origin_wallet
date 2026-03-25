@@ -73,11 +73,20 @@ class CurrenxieBeneficiaryService implements BeneficiaryProvider
         return new ProviderHttpClient(
             provider: $provider,
             serviceConfigKey: 'currenxie',
-            headers: [
-                'X-API-KEY' => (string) config('services.currenxie.api_key'),
-                'X-API-SECRET' => (string) config('services.currenxie.api_secret'),
-            ],
+            headers: $this->requestHeaders(),
         );
+    }
+
+    private function requestHeaders(): array
+    {
+        if (strtolower((string) config('services.currenxie.auth.mode', 'static_headers')) !== 'static_headers') {
+            return [];
+        }
+
+        return [
+            'X-API-KEY' => (string) config('services.currenxie.api_key'),
+            'X-API-SECRET' => (string) config('services.currenxie.api_secret'),
+        ];
     }
 
     private function buildBeneficiaryPayload(Beneficiary $beneficiary): array

@@ -13,7 +13,7 @@ class UserIntegrationConnectRequestTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_user_sees_all_active_providers_and_can_request_connect_when_link_missing(): void
+    public function test_user_hides_providers_without_onboarding_capability_and_can_request_connect_when_link_missing(): void
     {
         $user = User::factory()->create();
         $user->profile()->create([
@@ -29,6 +29,16 @@ class UserIntegrationConnectRequestTest extends TestCase
             'name' => 'Currenxie',
             'status' => 'active',
         ]);
+        IntegrationProvider::query()->create([
+            'code' => 'WISE',
+            'name' => 'Wise',
+            'status' => 'active',
+        ]);
+        IntegrationProvider::query()->create([
+            'code' => 'PAYONEER',
+            'name' => 'Payoneer',
+            'status' => 'active',
+        ]);
 
         $response = $this->withToken($this->issueTokenFor($user))
             ->getJson("/api/user/users/{$user->id}/provider-accounts");
@@ -37,6 +47,8 @@ class UserIntegrationConnectRequestTest extends TestCase
             ->assertOk()
             ->assertJsonFragment(['code' => 'AIRWALLEX'])
             ->assertJsonFragment(['code' => 'CURRENXIE'])
+            ->assertJsonFragment(['code' => 'WISE'])
+            ->assertJsonMissing(['code' => 'PAYONEER'])
             ->assertJsonPath('data.0.can_request_connect', true);
     }
 

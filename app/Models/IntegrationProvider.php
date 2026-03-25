@@ -18,6 +18,84 @@ class IntegrationProvider extends Model
         'status',
     ];
 
+    public function integrationConfig(): array
+    {
+        return (array) config('integrations.providers.'.strtolower($this->code), []);
+    }
+
+    public function serviceConfig(): array
+    {
+        return (array) config('services.'.strtolower($this->code), []);
+    }
+
+    public function supportsOnboarding(): bool
+    {
+        return isset($this->integrationConfig()['onboarding']);
+    }
+
+    public function supportsBeneficiaries(): bool
+    {
+        return isset($this->integrationConfig()['beneficiary']);
+    }
+
+    public function supportsDataSync(): bool
+    {
+        return isset($this->integrationConfig()['data_sync']);
+    }
+
+    public function supportsQuotes(): bool
+    {
+        return isset($this->integrationConfig()['quote']);
+    }
+
+    public function supportsTransfers(): bool
+    {
+        return isset($this->integrationConfig()['transfer']);
+    }
+
+    public function supportsWebhooks(): bool
+    {
+        return isset($this->integrationConfig()['webhook']);
+    }
+
+    public function isConfigured(): bool
+    {
+        return filled($this->serviceConfig()['base_url'] ?? null);
+    }
+
+    public function isAvailableForOnboarding(): bool
+    {
+        return $this->status === 'active'
+            && $this->supportsOnboarding();
+    }
+
+    public function assertSupportsCapability(string $capability): void
+    {
+        $message = match ($capability) {
+            'onboarding' => 'This provider is not available for onboarding yet.',
+            'beneficiary' => 'This provider does not support beneficiaries yet.',
+            'data_sync' => 'This provider does not support account sync yet.',
+            'quote' => 'This provider does not support FX quotes yet.',
+            'transfer' => 'This provider does not support transfers yet.',
+            'webhook' => 'This provider does not support webhooks yet.',
+            default => 'This provider capability is not available.',
+        };
+
+        $supported = match ($capability) {
+            'onboarding' => $this->supportsOnboarding() && $this->status === 'active',
+            'beneficiary' => $this->supportsBeneficiaries() && $this->isConfigured(),
+            'data_sync' => $this->supportsDataSync() && $this->isConfigured(),
+            'quote' => $this->supportsQuotes() && $this->isConfigured(),
+            'transfer' => $this->supportsTransfers() && $this->isConfigured(),
+            'webhook' => $this->supportsWebhooks() && $this->isConfigured(),
+            default => false,
+        };
+
+        if (! $supported) {
+            throw new \RuntimeException($message);
+        }
+    }
+
     public function getRouteKeyName(): string
     {
         return 'code';

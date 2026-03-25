@@ -15,6 +15,10 @@ class CurrenxieOnboardingService extends AbstractApiOnboardingProvider
 
     protected function requestHeaders(): array
     {
+        if (strtolower((string) config('services.currenxie.auth.mode', 'static_headers')) !== 'static_headers') {
+            return [];
+        }
+
         return [
             'X-API-KEY' => (string) config('services.currenxie.api_key'),
             'X-API-SECRET' => (string) config('services.currenxie.api_secret'),

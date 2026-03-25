@@ -77,8 +77,8 @@ class ProfileController extends Controller
 
         if ($selectedProvider !== null) {
             try {
-                $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider']), true);
-                $message = "Profile updated and {$selectedProvider->name} onboarding request sent successfully.";
+                $onboarding = $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider']), true);
+                $message = "Profile updated. {$onboarding->message}";
             } catch (Throwable $exception) {
                 report($exception);
                 $message = $exception instanceof RuntimeException

@@ -1,0 +1,95 @@
+<?php
+
+namespace App\Services\Integrations\Support;
+
+use App\Models\IntegrationProvider;
+use App\Models\User;
+use App\Models\UserProviderAccount;
+use App\Services\Integrations\Contracts\OnboardingProvider;
+use App\Services\Integrations\DataObjects\ProviderOnboardingResult;
+use App\Services\Integrations\ProviderAccountStatusManager;
+use RuntimeException;
+
+class ManualLinkOnboardingProvider implements OnboardingProvider
+{
+    public function syncUser(IntegrationProvider $provider, User $user): UserProviderAccount
+    {
+        if ($user->profile === null) {
+            throw new RuntimeException('User profile is required before syncing with provider.');
+        }
+
+        return $user->providerAccounts()->updateOrCreate(
+            [
+                'provider_id' => $provider->id,
+                'external_account_id' => null,
+            ],
+            [
+                'status' => 'pending',
+                'metadata' => [
+                    'integration_status' => 'manual_link_required',
+                    'provider_code' => $provider->code,
+                ],
+            ],
+        );
+    }
+
+    public function beginOnboarding(
+        IntegrationProvider $provider,
+        User $user,
+        ?UserProviderAccount $existingProviderAccount = null,
+    ): ProviderOnboardingResult {
+        $providerAccount = $existingProviderAccount ?? $this->syncUser($provider, $user);
+
+        return new ProviderOnboardingResult(
+            providerAccount: $providerAccount->fresh('provider'),
+            status: (string) $providerAccount->status,
+            nextAction: 'open_provider_link',
+            message: "{$provider->name} onboarding is managed through the assigned provider link.",
+            actionType: 'manual_link',
+            metadata: [
+                'provider_code' => $provider->code,
+                'provider_account_status' => $providerAccount->status,
+            ],
+        );
+    }
+
+    public function completeOnboarding(
+        IntegrationProvider $provider,
+        User $user,
+        UserProviderAccount $providerAccount,
+        array $payload,
+    ): ProviderOnboardingResult {
+        $statusManager = app(ProviderAccountStatusManager::class);
+        $status = $statusManager->normalizeProviderAccountSubmissionStatus((string) ($payload['status'] ?? 'active'));
+
+        $providerAccount->update([
+            'external_customer_id' => $payload['external_customer_id'] ?? $providerAccount->external_customer_id,
+            'external_account_id' => $payload['external_account_id'] ?? $providerAccount->external_account_id,
+            'account_name' => $payload['account_name'] ?? $providerAccount->account_name ?? $user->full_name,
+            'status' => $status,
+            'metadata' => array_merge($providerAccount->metadata ?? [], [
+                'integration_status' => 'manual_link_completed',
+                'completion_payload' => $payload,
+            ]),
+        ]);
+
+        $providerAccount = $providerAccount->fresh('user', 'provider');
+        $statusManager->syncUserStatusFromProviderAccount($providerAccount);
+
+        return new ProviderOnboardingResult(
+            providerAccount: $providerAccount->fresh('provider'),
+            status: (string) $providerAccount->status,
+            nextAction: $providerAccount->status === 'active'
+                ? 'provider_onboarding_completed'
+                : 'wait_for_provider_review',
+            message: $providerAccount->status === 'active'
+                ? "{$provider->name} onboarding completed successfully."
+                : "{$provider->name} onboarding completion was recorded successfully.",
+            actionType: 'manual_link',
+            metadata: [
+                'provider_code' => $provider->code,
+                'provider_account_status' => $providerAccount->status,
+            ],
+        );
+    }
+}

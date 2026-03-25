@@ -57,6 +57,7 @@ class BeneficiaryController extends Controller
         try {
             $beneficiary = DB::transaction(function () use ($user, $validated, $manager): Beneficiary {
                 $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);
+                $provider->assertSupportsCapability('beneficiary');
                 $beneficiary = $user->beneficiaries()->create([
                     ...$validated,
                     'status' => 'pending',
@@ -107,6 +108,7 @@ class BeneficiaryController extends Controller
             $beneficiary = DB::transaction(function () use ($beneficiary, $validated, $manager): Beneficiary {
                 $beneficiary->update($validated);
                 $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+                $provider->assertSupportsCapability('beneficiary');
 
                 return $manager->updateBeneficiary($provider, $beneficiary->fresh()->load('user'));
             });
@@ -126,6 +128,7 @@ class BeneficiaryController extends Controller
         try {
             DB::transaction(function () use ($beneficiary, $manager): void {
                 $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+                $provider->assertSupportsCapability('beneficiary');
                 $manager->deleteBeneficiary($provider, $beneficiary->load('user'));
                 $beneficiary->delete();
             });
