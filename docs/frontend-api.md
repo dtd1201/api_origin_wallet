@@ -431,6 +431,49 @@ Frontend notes:
 - current default seeded setup includes `Currenxie`, `Wise`, and `Airwallex`
 - `Wise` and `Airwallex` currently default to manual-link onboarding unless backend API capabilities are explicitly enabled later
 
+### `POST /contact`
+
+Public endpoint for the website contact form.
+
+Request:
+
+```json
+{
+  "name": "Jane Doe",
+  "email": "jane@example.com",
+  "company": "Origin Wallet",
+  "subject": "Need help with onboarding",
+  "message": "Please contact me about account setup."
+}
+```
+
+Validation rules:
+
+- `name`: required, string, max 255
+- `email`: required, valid email, max 255
+- `company`: optional, string, max 255
+- `subject`: required, string, max 255
+- `message`: required, string, max 5000
+
+Response `201`:
+
+```json
+{
+  "message": "Contact message submitted successfully.",
+  "data": {
+    "id": 1,
+    "submitted_at": "2026-03-26T03:00:00.000000Z"
+  }
+}
+```
+
+Frontend notes:
+
+- no authentication is required
+- frontend should show a success state after `201`
+- frontend should map `422` validation errors to form fields
+- backend also stores request metadata such as IP address and user agent for support follow-up
+
 ## Auth APIs
 
 ### `POST /auth/chatbot/message`
@@ -1832,6 +1875,65 @@ Response: `204 No Content`
 Important rule:
 
 - returns `404` if `{id}` belongs to an admin account
+
+### Contact Submissions
+
+#### `GET /admin/contact-submissions`
+
+Admin-only paginated inbox for contact form submissions.
+
+Response:
+
+```json
+{
+  "current_page": 1,
+  "data": [
+    {
+      "id": 2,
+      "name": "Jane Doe",
+      "email": "jane@example.com",
+      "company": "Origin Wallet",
+      "subject": "Need help with onboarding",
+      "message": "Please contact me about account setup.",
+      "ip_address": "127.0.0.1",
+      "user_agent": "Mozilla/5.0",
+      "submitted_at": "2026-03-26T03:00:00.000000Z",
+      "created_at": "2026-03-26T03:00:00.000000Z",
+      "updated_at": "2026-03-26T03:00:00.000000Z"
+    }
+  ],
+  "per_page": 15,
+  "total": 1
+}
+```
+
+Frontend notes:
+
+- requires admin bearer token
+- ordered newest first by `submitted_at`
+- use standard Laravel pagination fields for table pagination
+
+#### `GET /admin/contact-submissions/{id}`
+
+Admin-only endpoint for the full detail of one contact submission.
+
+Response:
+
+```json
+{
+  "id": 2,
+  "name": "Jane Doe",
+  "email": "jane@example.com",
+  "company": "Origin Wallet",
+  "subject": "Need help with onboarding",
+  "message": "Please contact me about account setup.",
+  "ip_address": "127.0.0.1",
+  "user_agent": "Mozilla/5.0",
+  "submitted_at": "2026-03-26T03:00:00.000000Z",
+  "created_at": "2026-03-26T03:00:00.000000Z",
+  "updated_at": "2026-03-26T03:00:00.000000Z"
+}
+```
 
 #### `GET /admin/users/{id}/integration-links`
 
