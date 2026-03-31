@@ -77,6 +77,11 @@ class CurrenxieTransferService implements TransferProvider
         });
     }
 
+    public function syncTransferStatus(IntegrationProvider $provider, Transfer $transfer): Transfer
+    {
+        throw new RuntimeException('Currenxie transfer status sync is not configured yet.');
+    }
+
     private function requestHeaders(): array
     {
         if (strtolower((string) config('services.currenxie.auth.mode', 'static_headers')) !== 'static_headers') {

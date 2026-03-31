@@ -13,4 +13,9 @@ class AirwallexTransferService implements TransferProvider
     {
         throw new RuntimeException('Airwallex transfer API is not configured yet.');
     }
+
+    public function syncTransferStatus(IntegrationProvider $provider, Transfer $transfer): Transfer
+    {
+        throw new RuntimeException('Airwallex transfer status sync is not configured yet.');
+    }
 }

@@ -23,6 +23,8 @@ Route::apiResources([
 
 Route::post('providers/{provider}/users/{user}/sync', [ProviderSyncController::class, 'syncUser'])
     ->name('providers.users.sync');
+Route::post('transfers/{transfer}/sync-status', [TransferController::class, 'syncStatus'])
+    ->name('transfers.sync-status');
 
 Route::get('users/{user}/integration-links', [UserIntegrationLinkController::class, 'index'])
     ->name('users.integration-links.index');

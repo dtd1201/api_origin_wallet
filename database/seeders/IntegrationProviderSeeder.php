@@ -13,6 +13,7 @@ class IntegrationProviderSeeder extends Seeder
             ['code' => 'currenxie', 'name' => 'Currenxie'],
             ['code' => 'wise', 'name' => 'Wise'],
             ['code' => 'airwallex', 'name' => 'Airwallex'],
+            ['code' => 'pingpong', 'name' => 'PingPong'],
         ])->each(function (array $provider): void {
             IntegrationProvider::query()->updateOrCreate(
                 ['code' => $provider['code']],

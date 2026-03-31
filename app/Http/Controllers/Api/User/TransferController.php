@@ -51,6 +51,19 @@ class TransferController extends Controller
             'purpose_code' => ['nullable', 'string', 'max:100'],
             'reference_text' => ['nullable', 'string', 'max:255'],
             'client_reference' => ['nullable', 'string', 'max:255'],
+            'raw_data' => ['nullable', 'array'],
+            'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.pingpong' => ['sometimes', 'array'],
+            'raw_data.pingpong.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.pingpong.payout_type' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.pingpong.use_pobo' => ['sometimes', 'nullable', 'in:Y,N'],
+            'raw_data.pingpong.pobo_id' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.pingpong.payment_method' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.pingpong.clearing_network' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.pingpong.fee_bear' => ['sometimes', 'nullable', 'string', 'max:20'],
+            'raw_data.pingpong.middle_bank_code' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
+            'raw_data.pingpong.order_note' => ['sometimes', 'nullable', 'string', 'max:100'],
         ]);
 
         $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);
@@ -119,6 +132,33 @@ class TransferController extends Controller
 
         return response()->json([
             'message' => 'Transfer submitted successfully.',
+            'transfer' => $transfer,
+        ]);
+    }
+
+    public function syncStatus(
+        User $user,
+        Transfer $transfer,
+        ProviderTransferManager $manager,
+    ): JsonResponse {
+        abort_unless($transfer->user_id === $user->id, 404);
+
+        $provider = IntegrationProvider::query()->findOrFail($transfer->provider_id);
+
+        try {
+            $provider->assertSupportsCapability('transfer');
+            $transfer = $manager->syncTransferStatus(
+                provider: $provider,
+                transfer: $transfer->load(['user', 'beneficiary', 'sourceBankAccount'])
+            );
+        } catch (RuntimeException|InvalidArgumentException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => 'Transfer status synced successfully.',
             'transfer' => $transfer,
         ]);
     }

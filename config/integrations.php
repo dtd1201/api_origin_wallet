@@ -31,5 +31,9 @@ return [
             // 'transfer' => \App\Services\Airwallex\AirwallexTransferService::class,
             // 'beneficiary' => \App\Services\Airwallex\AirwallexBeneficiaryService::class,
         ],
+        'pingpong' => [
+            'beneficiary' => \App\Services\PingPong\PingPongBeneficiaryService::class,
+            'transfer' => \App\Services\PingPong\PingPongTransferService::class,
+        ],
     ],
 ];

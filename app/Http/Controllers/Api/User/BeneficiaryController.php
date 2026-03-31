@@ -52,6 +52,20 @@ class BeneficiaryController extends Controller
             'city' => ['nullable', 'string', 'max:100'],
             'state' => ['nullable', 'string', 'max:100'],
             'postal_code' => ['nullable', 'string', 'max:30'],
+            'raw_data' => ['nullable', 'array'],
+            'raw_data.pingpong' => ['sometimes', 'array'],
+            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
+            'raw_data.pingpong.bank_detail' => ['sometimes', 'array'],
+            'raw_data.pingpong.bank_detail.account_type' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'raw_data.pingpong.bank_detail.branch_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.pingpong.bank_detail.ifsc_code' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.pingpong.bank_detail.sort_code' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.pingpong.bank_detail.routing_no' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'raw_data.pingpong.bank_detail.cert_type' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'raw_data.pingpong.bank_detail.cert_no' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
+            'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
         ]);
 
         try {
@@ -102,6 +116,20 @@ class BeneficiaryController extends Controller
             'city' => ['sometimes', 'nullable', 'string', 'max:100'],
             'state' => ['sometimes', 'nullable', 'string', 'max:100'],
             'postal_code' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'raw_data' => ['sometimes', 'nullable', 'array'],
+            'raw_data.pingpong' => ['sometimes', 'array'],
+            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
+            'raw_data.pingpong.bank_detail' => ['sometimes', 'array'],
+            'raw_data.pingpong.bank_detail.account_type' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'raw_data.pingpong.bank_detail.branch_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.pingpong.bank_detail.ifsc_code' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.pingpong.bank_detail.sort_code' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.pingpong.bank_detail.routing_no' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'raw_data.pingpong.bank_detail.cert_type' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'raw_data.pingpong.bank_detail.cert_no' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
+            'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
         ]);
 
         try {

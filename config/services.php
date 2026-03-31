@@ -88,4 +88,22 @@ return [
         'beneficiary_endpoint' => env('AIRWALLEX_BENEFICIARY_ENDPOINT', '/api/v1/beneficiaries/create'),
         'webhook_secret' => env('AIRWALLEX_WEBHOOK_SECRET'),
     ],
+
+    'pingpong' => [
+        'base_url' => env('PINGPONG_BASE_URL', 'https://test-gateway.pingpongx.com'),
+        'timeout' => env('PINGPONG_TIMEOUT', 30),
+        'auth' => [
+            'mode' => env('PINGPONG_AUTH_MODE', 'pingpong_access_token'),
+            'token_endpoint' => env('PINGPONG_TOKEN_ENDPOINT', '/v2/token/get'),
+            'app_id' => env('PINGPONG_APP_ID'),
+            'app_secret' => env('PINGPONG_APP_SECRET'),
+            'cache_key' => env('PINGPONG_TOKEN_CACHE_KEY', 'provider_http_client:pingpong:access_token'),
+            'cache_buffer_seconds' => env('PINGPONG_TOKEN_CACHE_BUFFER_SECONDS', 300),
+        ],
+        'recipient_create_endpoint' => env('PINGPONG_RECIPIENT_CREATE_ENDPOINT', '/api/recipient/v2/create'),
+        'recipient_update_endpoint' => env('PINGPONG_RECIPIENT_UPDATE_ENDPOINT', '/api/recipient/v2/update'),
+        'recipient_delete_endpoint' => env('PINGPONG_RECIPIENT_DELETE_ENDPOINT', '/api/recipient/v2/delete'),
+        'payment_create_endpoint' => env('PINGPONG_PAYMENT_CREATE_ENDPOINT', '/api/payout/v2/create'),
+        'payment_query_endpoint' => env('PINGPONG_PAYMENT_QUERY_ENDPOINT', '/api/payout/v2/query'),
+    ],
 ];

@@ -18,4 +18,11 @@ class ProviderTransferManager
             ->resolveTransferProvider($provider)
             ->submitTransfer($provider, $transfer);
     }
+
+    public function syncTransferStatus(IntegrationProvider $provider, Transfer $transfer): Transfer
+    {
+        return $this->registry
+            ->resolveTransferProvider($provider)
+            ->syncTransferStatus($provider, $transfer);
+    }
 }

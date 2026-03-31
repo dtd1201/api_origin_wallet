@@ -43,6 +43,7 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::post('users/{user}/transfers', [TransferController::class, 'store']);
     Route::get('users/{user}/transfers', [TransferController::class, 'index']);
     Route::post('users/{user}/transfers/{transfer}/submit', [TransferController::class, 'submit']);
+    Route::post('users/{user}/transfers/{transfer}/sync-status', [TransferController::class, 'syncStatus']);
     Route::post('users/{user}/transfers/{transfer}/cancel', [TransferController::class, 'cancel']);
     Route::get('users/{user}/transfers/{transfer}', [TransferController::class, 'show']);
 

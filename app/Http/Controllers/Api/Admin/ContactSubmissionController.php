@@ -22,4 +22,11 @@ class ContactSubmissionController extends Controller
     {
         return response()->json($contactSubmission);
     }
+
+    public function destroy(ContactSubmission $contactSubmission): JsonResponse
+    {
+        $contactSubmission->delete();
+
+        return response()->json(status: 204);
+    }
 }

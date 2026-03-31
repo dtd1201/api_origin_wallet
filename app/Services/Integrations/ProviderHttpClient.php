@@ -110,6 +110,7 @@ class ProviderHttpClient implements ProviderClient
                 ? [(string) $authConfig['header_name'] => $authConfig['header_value']]
                 : [],
             'client_credentials' => ['Authorization' => 'Bearer '.$this->getClientCredentialsAccessToken($authConfig)],
+            'pingpong_access_token' => ['Authorization' => $this->getPingPongAccessToken($authConfig)],
             default => throw new RuntimeException("Unsupported auth mode [{$mode}] for provider [{$this->serviceConfigKey}]."),
         };
     }
@@ -178,6 +179,45 @@ class ProviderHttpClient implements ProviderClient
         return $token;
     }
 
+    private function getPingPongAccessToken(array $authConfig): string
+    {
+        $cacheKey = (string) ($authConfig['cache_key'] ?? "provider_http_client:{$this->serviceConfigKey}:access_token");
+        $cachedToken = Cache::get($cacheKey);
+
+        if (is_string($cachedToken) && $cachedToken !== '') {
+            return $cachedToken;
+        }
+
+        $appId = (string) ($authConfig['app_id'] ?? '');
+        $appSecret = (string) ($authConfig['app_secret'] ?? '');
+
+        if ($appId === '' || $appSecret === '') {
+            throw new RuntimeException("PingPong credentials are not configured for provider [{$this->serviceConfigKey}].");
+        }
+
+        $tokenEndpoint = (string) ($authConfig['token_endpoint'] ?? '/v2/token/get');
+
+        $response = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
+            ->acceptJson()
+            ->get($this->buildUrl($tokenEndpoint), [
+                'app_id' => $appId,
+                'app_secret' => $appSecret,
+            ]);
+
+        $responseData = $response->json() ?? [];
+
+        if (! $response->successful() || ! filled($responseData['access_token'] ?? null)) {
+            throw new RuntimeException("Failed to obtain PingPong access token for provider [{$this->serviceConfigKey}].");
+        }
+
+        $token = (string) $responseData['access_token'];
+        $expiresIn = max(60, (int) ($responseData['expires_in'] ?? 7200) - (int) ($authConfig['cache_buffer_seconds'] ?? 300));
+
+        Cache::put($cacheKey, $token, now()->addSeconds($expiresIn));
+
+        return $token;
+    }
+
     private function logRequest(
         ?User $user,
         ?int $relatedTransferId,
@@ -193,7 +233,7 @@ class ProviderHttpClient implements ProviderClient
             'related_transfer_id' => $relatedTransferId,
             'request_method' => $method,
             'request_url' => $url,
-            'request_headers' => $this->sensitiveDataSanitizer->sanitize($this->headers),
+            'request_headers' => $this->sensitiveDataSanitizer->sanitize($this->resolveHeaders()),
             'request_body' => $this->sensitiveDataSanitizer->sanitize($payload),
             'response_status' => $response->status(),
             'response_headers' => $this->sensitiveDataSanitizer->sanitize(
