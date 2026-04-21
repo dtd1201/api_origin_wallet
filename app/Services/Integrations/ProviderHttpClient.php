@@ -7,6 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
 use App\Support\SensitiveDataSanitizer;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
@@ -103,9 +104,11 @@ class ProviderHttpClient implements ProviderClient
 
         return match ($mode) {
             '', 'none', 'static_headers' => [],
+            'basic_auth' => $this->getBasicAuthHeaders($authConfig),
             'bearer_token' => filled($authConfig['token'] ?? null)
                 ? ['Authorization' => 'Bearer '.$authConfig['token']]
                 : [],
+            'airwallex_access_token' => ['Authorization' => 'Bearer '.$this->getAirwallexAccessToken($authConfig)],
             'header' => filled($authConfig['header_name'] ?? null) && array_key_exists('header_value', $authConfig)
                 ? [(string) $authConfig['header_name'] => $authConfig['header_value']]
                 : [],
@@ -113,6 +116,82 @@ class ProviderHttpClient implements ProviderClient
             'pingpong_access_token' => ['Authorization' => $this->getPingPongAccessToken($authConfig)],
             default => throw new RuntimeException("Unsupported auth mode [{$mode}] for provider [{$this->serviceConfigKey}]."),
         };
+    }
+
+    private function getBasicAuthHeaders(array $authConfig): array
+    {
+        $username = (string) ($authConfig['username'] ?? '');
+        $password = (string) ($authConfig['password'] ?? '');
+
+        if ($username === '' || $password === '') {
+            throw new RuntimeException("Basic auth credentials are not configured for provider [{$this->serviceConfigKey}].");
+        }
+
+        return [
+            'Authorization' => 'Basic '.base64_encode($username.':'.$password),
+        ];
+    }
+
+    private function getAirwallexAccessToken(array $authConfig): string
+    {
+        $cacheKey = (string) ($authConfig['cache_key'] ?? "provider_http_client:{$this->serviceConfigKey}:access_token");
+        $cachedToken = Cache::get($cacheKey);
+
+        if (is_string($cachedToken) && $cachedToken !== '') {
+            return $cachedToken;
+        }
+
+        $clientId = (string) ($authConfig['client_id'] ?? '');
+        $apiKey = (string) config("services.{$this->serviceConfigKey}.x_api_key", '');
+
+        if ($clientId === '' || $apiKey === '') {
+            throw new RuntimeException("Airwallex credentials are not configured for provider [{$this->serviceConfigKey}].");
+        }
+
+        $tokenEndpoint = (string) ($authConfig['token_endpoint'] ?? '/api/v1/authentication/login');
+        $tokenUrl = (string) ($authConfig['token_url'] ?? '');
+        $request = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
+            ->acceptJson()
+            ->asJson()
+            ->withHeaders([
+                'x-api-key' => $apiKey,
+                'x-client-id' => $clientId,
+            ]);
+
+        foreach ((array) ($authConfig['headers'] ?? []) as $headerName => $headerValue) {
+            $request = $request->withHeader((string) $headerName, $headerValue);
+        }
+
+        $payload = array_filter([
+            'client_secret' => $authConfig['client_secret'] ?? null,
+        ], static fn ($value) => $value !== null && $value !== '');
+
+        $response = $request->post(
+            $tokenUrl !== '' ? $this->buildUrl($tokenUrl) : $this->buildUrl($tokenEndpoint),
+            $payload,
+        );
+        $responseData = $response->json() ?? [];
+        $token = $responseData['token'] ?? $responseData['access_token'] ?? null;
+
+        if (! $response->successful() || ! filled($token)) {
+            throw new RuntimeException("Failed to obtain access token for provider [{$this->serviceConfigKey}].");
+        }
+
+        $expiresAt = $responseData['expires_at'] ?? null;
+        $bufferSeconds = (int) ($authConfig['cache_buffer_seconds'] ?? 30);
+        $ttl = 300;
+
+        if (is_string($expiresAt) && $expiresAt !== '') {
+            try {
+                $ttl = max(60, now()->diffInSeconds(Carbon::parse($expiresAt), false) - $bufferSeconds);
+            } catch (\Throwable) {
+                $ttl = 300;
+            }
+        }
+
+        Cache::put($cacheKey, (string) $token, now()->addSeconds($ttl));
+
+        return (string) $token;
     }
 
     private function getClientCredentialsAccessToken(array $authConfig): string

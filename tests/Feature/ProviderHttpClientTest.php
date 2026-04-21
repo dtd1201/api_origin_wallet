@@ -183,4 +183,106 @@ class ProviderHttpClientTest extends TestCase
                 && $request->hasHeader('on-behalf-of', 'managed-account-123');
         });
     }
+
+    public function test_airwallex_auth_fetches_and_caches_access_token(): void
+    {
+        Cache::flush();
+
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'AIRWALLEX_PROVIDER',
+            'name' => 'Airwallex Provider',
+            'status' => 'active',
+        ]);
+
+        config()->set('services.airwallex_provider.base_url', 'https://api-demo.airwallex.com');
+        config()->set('services.airwallex_provider.timeout', 30);
+        config()->set('services.airwallex_provider.x_api_key', 'airwallex-api-key');
+        config()->set('services.airwallex_provider.auth', [
+            'mode' => 'airwallex_access_token',
+            'token_endpoint' => '/api/v1/authentication/login',
+            'client_id' => 'airwallex-client-id',
+            'cache_key' => 'tests:airwallex_provider:token',
+            'cache_buffer_seconds' => 30,
+        ]);
+
+        $tokenRequests = 0;
+        $apiRequests = 0;
+
+        Http::fake(function ($request) use (&$tokenRequests, &$apiRequests) {
+            if ($request->url() === 'https://api-demo.airwallex.com/api/v1/authentication/login') {
+                $tokenRequests++;
+
+                return Http::response([
+                    'token' => 'airwallex-access-token',
+                    'expires_at' => now()->addMinutes(20)->toISOString(),
+                ], 200);
+            }
+
+            if ($request->url() === 'https://api-demo.airwallex.com/api/v1/global_accounts') {
+                $apiRequests++;
+
+                return Http::response(['items' => []], 200);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $client = new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'airwallex_provider',
+        );
+
+        $client->get('/api/v1/global_accounts');
+        $client->get('/api/v1/global_accounts');
+
+        $this->assertSame(1, $tokenRequests);
+        $this->assertSame(2, $apiRequests);
+
+        Http::assertSent(function ($request): bool {
+            if ($request->url() !== 'https://api-demo.airwallex.com/api/v1/global_accounts') {
+                return false;
+            }
+
+            return $request->hasHeader('Authorization', 'Bearer airwallex-access-token');
+        });
+    }
+
+    public function test_basic_auth_mode_sends_encoded_authorization_header(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'TAZAPAY_PROVIDER',
+            'name' => 'Tazapay Provider',
+            'status' => 'active',
+        ]);
+
+        config()->set('services.tazapay_provider.base_url', 'https://service-sandbox.tazapay.com');
+        config()->set('services.tazapay_provider.timeout', 30);
+        config()->set('services.tazapay_provider.auth', [
+            'mode' => 'basic_auth',
+            'username' => 'tzp_live_key',
+            'password' => 'tzp_live_secret',
+        ]);
+
+        Http::fake([
+            'https://service-sandbox.tazapay.com/v3/balance' => Http::response(['data' => []], 200),
+        ]);
+
+        $client = new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'tazapay_provider',
+            headers: [
+                'tz-account-id' => 'acc_123',
+            ],
+        );
+
+        $response = $client->get('/v3/balance');
+
+        $this->assertTrue($response->successful());
+
+        Http::assertSent(function ($request): bool {
+            return $request->url() === 'https://service-sandbox.tazapay.com/v3/balance'
+                && $request->hasHeader('Authorization', 'Basic '.base64_encode('tzp_live_key:tzp_live_secret'))
+                && $request->hasHeader('tz-account-id', 'acc_123');
+        });
+    }
 }

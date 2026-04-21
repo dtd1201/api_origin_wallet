@@ -23,17 +23,22 @@ return [
         ],
         'airwallex' => [
             'onboarding' => \App\Services\Airwallex\AirwallexOnboardingService::class,
-            // Keep API-driven capabilities disabled until Airwallex credentials are provided.
-            // Available skeleton services:
-            // 'webhook' => \App\Services\Airwallex\AirwallexWebhookService::class,
-            // 'data_sync' => \App\Services\Airwallex\AirwallexDataSyncService::class,
-            // 'quote' => \App\Services\Airwallex\AirwallexQuoteService::class,
-            // 'transfer' => \App\Services\Airwallex\AirwallexTransferService::class,
-            // 'beneficiary' => \App\Services\Airwallex\AirwallexBeneficiaryService::class,
+            'webhook' => \App\Services\Airwallex\AirwallexWebhookService::class,
+            'data_sync' => \App\Services\Airwallex\AirwallexDataSyncService::class,
+            'quote' => \App\Services\Airwallex\AirwallexQuoteService::class,
+            'transfer' => \App\Services\Airwallex\AirwallexTransferService::class,
+            'beneficiary' => \App\Services\Airwallex\AirwallexBeneficiaryService::class,
         ],
         'pingpong' => [
             'beneficiary' => \App\Services\PingPong\PingPongBeneficiaryService::class,
             'transfer' => \App\Services\PingPong\PingPongTransferService::class,
+        ],
+        'tazapay' => [
+            'beneficiary' => \App\Services\Tazapay\TazapayBeneficiaryService::class,
+            'quote' => \App\Services\Tazapay\TazapayQuoteService::class,
+            'transfer' => \App\Services\Tazapay\TazapayTransferService::class,
+            'data_sync' => \App\Services\Tazapay\TazapayDataSyncService::class,
+            'webhook' => \App\Services\Tazapay\TazapayWebhookService::class,
         ],
     ],
 ];

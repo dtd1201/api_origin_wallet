@@ -40,6 +40,23 @@ class FxQuoteController extends Controller
             'target_currency' => ['required', 'string', 'size:3'],
             'source_amount' => ['required', 'numeric'],
             'target_amount' => ['nullable', 'numeric'],
+            'raw_data' => ['sometimes', 'array'],
+            'raw_data.tazapay' => ['sometimes', 'array'],
+            'raw_data.tazapay.payout_type' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.tazapay.local' => ['sometimes', 'array'],
+            'raw_data.tazapay.local.fund_transfer_network' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.tazapay.local_payment_network' => ['sometimes', 'array'],
+            'raw_data.tazapay.local_payment_network.type' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.tazapay.wallet' => ['sometimes', 'array'],
+            'raw_data.tazapay.wallet.type' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.tazapay.swift' => ['sometimes', 'array'],
+            'raw_data.tazapay.swift.charge_type' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.tazapay.holding_info' => ['sometimes', 'array'],
+            'raw_data.tazapay.holding_info.currency' => ['sometimes', 'nullable', 'string', 'size:3'],
+            'raw_data.tazapay.holding_info.amount' => ['sometimes', 'nullable', 'numeric'],
+            'raw_data.tazapay.destination_info' => ['sometimes', 'array'],
+            'raw_data.tazapay.destination_info.currency' => ['sometimes', 'nullable', 'string', 'size:3'],
+            'raw_data.tazapay.destination_info.amount' => ['sometimes', 'nullable', 'numeric'],
         ]);
 
         $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);

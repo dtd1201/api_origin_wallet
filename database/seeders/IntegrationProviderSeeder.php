@@ -14,6 +14,7 @@ class IntegrationProviderSeeder extends Seeder
             ['code' => 'wise', 'name' => 'Wise'],
             ['code' => 'airwallex', 'name' => 'Airwallex'],
             ['code' => 'pingpong', 'name' => 'PingPong'],
+            ['code' => 'tazapay', 'name' => 'Tazapay'],
         ])->each(function (array $provider): void {
             IntegrationProvider::query()->updateOrCreate(
                 ['code' => $provider['code']],

@@ -66,8 +66,9 @@ return [
     'airwallex' => [
         'base_url' => env('AIRWALLEX_BASE_URL'),
         'timeout' => env('AIRWALLEX_TIMEOUT', 30),
+        'api_version' => env('AIRWALLEX_API_VERSION'),
         'auth' => [
-            'mode' => env('AIRWALLEX_AUTH_MODE', 'none'),
+            'mode' => env('AIRWALLEX_AUTH_MODE', 'airwallex_access_token'),
             'token' => env('AIRWALLEX_BEARER_TOKEN'),
             'token_url' => env('AIRWALLEX_TOKEN_URL'),
             'token_endpoint' => env('AIRWALLEX_TOKEN_ENDPOINT', '/api/v1/authentication/login'),
@@ -84,9 +85,16 @@ return [
         'balances_endpoint' => env('AIRWALLEX_BALANCES_ENDPOINT', '/api/v1/balances/current'),
         'transactions_endpoint' => env('AIRWALLEX_TRANSACTIONS_ENDPOINT', '/api/v1/pa/payment_events/search'),
         'quote_endpoint' => env('AIRWALLEX_QUOTE_ENDPOINT', '/api/v1/quotes/create'),
+        'quote_validity' => env('AIRWALLEX_QUOTE_VALIDITY', 'MIN_15'),
         'transfer_endpoint' => env('AIRWALLEX_TRANSFER_ENDPOINT', '/api/v1/transfers/create'),
+        'transfer_retrieve_endpoint' => env('AIRWALLEX_TRANSFER_RETRIEVE_ENDPOINT', '/api/v1/transfers/{transfer}'),
         'beneficiary_endpoint' => env('AIRWALLEX_BENEFICIARY_ENDPOINT', '/api/v1/beneficiaries/create'),
+        'beneficiary_update_endpoint' => env('AIRWALLEX_BENEFICIARY_UPDATE_ENDPOINT', '/api/v1/beneficiaries/{beneficiary}'),
+        'beneficiary_delete_endpoint' => env('AIRWALLEX_BENEFICIARY_DELETE_ENDPOINT', '/api/v1/beneficiaries/{beneficiary}'),
         'webhook_secret' => env('AIRWALLEX_WEBHOOK_SECRET'),
+        'webhook_signature_header' => env('AIRWALLEX_WEBHOOK_SIGNATURE_HEADER', 'x-signature'),
+        'webhook_timestamp_header' => env('AIRWALLEX_WEBHOOK_TIMESTAMP_HEADER', 'x-timestamp'),
+        'webhook_signature_algorithm' => env('AIRWALLEX_WEBHOOK_SIGNATURE_ALGORITHM', 'sha256'),
     ],
 
     'pingpong' => [
@@ -105,5 +113,26 @@ return [
         'recipient_delete_endpoint' => env('PINGPONG_RECIPIENT_DELETE_ENDPOINT', '/api/recipient/v2/delete'),
         'payment_create_endpoint' => env('PINGPONG_PAYMENT_CREATE_ENDPOINT', '/api/payout/v2/create'),
         'payment_query_endpoint' => env('PINGPONG_PAYMENT_QUERY_ENDPOINT', '/api/payout/v2/query'),
+    ],
+
+    'tazapay' => [
+        'base_url' => env('TAZAPAY_BASE_URL'),
+        'timeout' => env('TAZAPAY_TIMEOUT', 30),
+        'public_key' => env('TAZAPAY_PUBLIC_KEY'),
+        'account_id' => env('TAZAPAY_ACCOUNT_ID'),
+        'tz_account_id' => env('TAZAPAY_TZ_ACCOUNT_ID'),
+        'auth' => [
+            'mode' => env('TAZAPAY_AUTH_MODE', 'basic_auth'),
+            'username' => env('TAZAPAY_API_KEY'),
+            'password' => env('TAZAPAY_API_SECRET'),
+        ],
+        'beneficiary_endpoint' => env('TAZAPAY_BENEFICIARY_ENDPOINT', '/v3/beneficiary'),
+        'beneficiary_update_endpoint' => env('TAZAPAY_BENEFICIARY_UPDATE_ENDPOINT', '/v3/beneficiary/{beneficiary}'),
+        'quote_endpoint' => env('TAZAPAY_QUOTE_ENDPOINT', '/v3/payout/quote'),
+        'payout_endpoint' => env('TAZAPAY_PAYOUT_ENDPOINT', '/v3/payout'),
+        'payout_retrieve_endpoint' => env('TAZAPAY_PAYOUT_RETRIEVE_ENDPOINT', '/v3/payout/{transfer}'),
+        'balance_endpoint' => env('TAZAPAY_BALANCE_ENDPOINT', '/v3/balance'),
+        'webhook_secret' => env('TAZAPAY_WEBHOOK_SECRET'),
+        'webhook_signature_header' => env('TAZAPAY_WEBHOOK_SIGNATURE_HEADER'),
     ],
 ];

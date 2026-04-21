@@ -31,5 +31,11 @@ class IntegrationProviderSeederTest extends TestCase
             'name' => 'Airwallex',
             'status' => 'active',
         ]);
+
+        $this->assertDatabaseHas('integration_providers', [
+            'code' => 'tazapay',
+            'name' => 'Tazapay',
+            'status' => 'active',
+        ]);
     }
 }
