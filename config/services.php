@@ -135,4 +135,22 @@ return [
         'webhook_secret' => env('TAZAPAY_WEBHOOK_SECRET'),
         'webhook_signature_header' => env('TAZAPAY_WEBHOOK_SIGNATURE_HEADER'),
     ],
+
+    'nium' => [
+        'base_url' => env('NIUM_BASE_URL'),
+        'timeout' => env('NIUM_TIMEOUT', 30),
+        'client_id' => env('NIUM_CLIENT_ID'),
+        'auth' => [
+            'mode' => env('NIUM_AUTH_MODE', 'header'),
+            'header_name' => env('NIUM_AUTH_HEADER_NAME', 'x-api-key'),
+            'header_value' => env('NIUM_API_KEY'),
+        ],
+        'quote_endpoint' => env('NIUM_QUOTE_ENDPOINT', '/api/v1/client/{client}/quotes'),
+        'beneficiary_endpoint' => env('NIUM_BENEFICIARY_ENDPOINT', '/api/v2/client/{client}/customer/{customer}/beneficiaries'),
+        'beneficiary_update_endpoint' => env('NIUM_BENEFICIARY_UPDATE_ENDPOINT'),
+        'beneficiary_delete_endpoint' => env('NIUM_BENEFICIARY_DELETE_ENDPOINT'),
+        'account_verification_endpoint' => env('NIUM_ACCOUNT_VERIFICATION_ENDPOINT', '/api/v1/client/{client}/customer/{customer}/accountVerification'),
+        'transfer_endpoint' => env('NIUM_TRANSFER_ENDPOINT', '/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/remittance'),
+        'transfer_status_endpoint' => env('NIUM_TRANSFER_STATUS_ENDPOINT', '/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/remittance/{transfer}/audit'),
+    ],
 ];

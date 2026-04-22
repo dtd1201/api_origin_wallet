@@ -37,5 +37,11 @@ class IntegrationProviderSeederTest extends TestCase
             'name' => 'Tazapay',
             'status' => 'active',
         ]);
+
+        $this->assertDatabaseHas('integration_providers', [
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
     }
 }

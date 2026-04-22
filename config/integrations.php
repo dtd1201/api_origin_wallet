@@ -40,5 +40,10 @@ return [
             'data_sync' => \App\Services\Tazapay\TazapayDataSyncService::class,
             'webhook' => \App\Services\Tazapay\TazapayWebhookService::class,
         ],
+        'nium' => [
+            'beneficiary' => \App\Services\Nium\NiumBeneficiaryService::class,
+            'quote' => \App\Services\Nium\NiumQuoteService::class,
+            'transfer' => \App\Services\Nium\NiumTransferService::class,
+        ],
     ],
 ];

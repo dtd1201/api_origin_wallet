@@ -66,6 +66,16 @@ class BeneficiaryController extends Controller
             'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
             'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
             'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
+            'raw_data.nium' => ['sometimes', 'array'],
+            'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
+            'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification' => ['sometimes', 'array'],
+            'raw_data.nium.account_verification.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification.proxyType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification.proxyValue' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.nium.account_verification.routingInfo' => ['sometimes', 'array'],
         ]);
 
         try {
@@ -130,6 +140,16 @@ class BeneficiaryController extends Controller
             'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
             'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
             'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
+            'raw_data.nium' => ['sometimes', 'array'],
+            'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
+            'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification' => ['sometimes', 'array'],
+            'raw_data.nium.account_verification.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification.proxyType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.account_verification.proxyValue' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.nium.account_verification.routingInfo' => ['sometimes', 'array'],
         ]);
 
         try {
