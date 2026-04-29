@@ -4,6 +4,7 @@ namespace App\Services\Currenxie;
 
 use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderPayloadMapper;
+use App\Services\Kyc\KycProfileSnapshot;
 
 class CurrenxiePayloadMapper implements ProviderPayloadMapper
 {
@@ -28,6 +29,7 @@ class CurrenxiePayloadMapper implements ProviderPayloadMapper
                 'state' => $user->profile?->state,
                 'postal_code' => $user->profile?->postal_code,
             ],
+            'internal_kyc' => app(KycProfileSnapshot::class)->forUser($user),
         ];
     }
 
@@ -38,6 +40,7 @@ class CurrenxiePayloadMapper implements ProviderPayloadMapper
             'email' => $user->email,
             'full_name' => $user->full_name,
             'country_code' => $user->profile?->country_code,
+            'internal_kyc' => app(KycProfileSnapshot::class)->forUser($user),
         ];
     }
 

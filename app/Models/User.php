@@ -9,8 +9,8 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
-use Illuminate\Support\Str;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Str;
 
 class User extends Authenticatable
 {
@@ -70,6 +70,26 @@ class User extends Authenticatable
     public function providerAccounts(): HasMany
     {
         return $this->hasMany(UserProviderAccount::class);
+    }
+
+    public function kycProfile(): HasOne
+    {
+        return $this->hasOne(KycProfile::class);
+    }
+
+    public function kycSubmission(): HasOne
+    {
+        return $this->kycProfile();
+    }
+
+    public function kycProviderSubmissions(): HasMany
+    {
+        return $this->hasMany(KycProviderSubmission::class);
+    }
+
+    public function amlScreenings(): HasMany
+    {
+        return $this->hasMany(AmlScreening::class);
     }
 
     public function integrationLinks(): HasMany

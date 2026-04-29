@@ -15,6 +15,7 @@ class IntegrationProviderSeeder extends Seeder
             ['code' => 'airwallex', 'name' => 'Airwallex'],
             ['code' => 'pingpong', 'name' => 'PingPong'],
             ['code' => 'tazapay', 'name' => 'Tazapay'],
+            ['code' => 'unlimit', 'name' => 'Unlimit'],
             ['code' => 'nium', 'name' => 'Nium'],
         ])->each(function (array $provider): void {
             IntegrationProvider::query()->updateOrCreate(

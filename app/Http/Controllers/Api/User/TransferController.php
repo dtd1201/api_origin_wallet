@@ -64,6 +64,15 @@ class TransferController extends Controller
             'raw_data.pingpong.middle_bank_code' => ['sometimes', 'nullable', 'string', 'max:100'],
             'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
             'raw_data.pingpong.order_note' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'raw_data.unlimit' => ['sometimes', 'array'],
+            'raw_data.unlimit.payment_method' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.unlimit.request' => ['sometimes', 'array'],
+            'raw_data.unlimit.merchant_order' => ['sometimes', 'array'],
+            'raw_data.unlimit.payout_data' => ['sometimes', 'array'],
+            'raw_data.unlimit.customer' => ['sometimes', 'array'],
+            'raw_data.unlimit.ewallet_account' => ['sometimes', 'array'],
+            'raw_data.unlimit.card_account' => ['sometimes', 'array'],
+            'raw_data.unlimit.payment_data' => ['sometimes', 'array'],
         ]);
 
         $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);

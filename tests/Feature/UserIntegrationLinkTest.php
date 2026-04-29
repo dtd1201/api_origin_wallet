@@ -7,8 +7,8 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
-use Tests\TestCase;
 use Tests\Fixtures\RedirectOnboardingProvider;
+use Tests\TestCase;
 
 class UserIntegrationLinkTest extends TestCase
 {
@@ -143,6 +143,7 @@ class UserIntegrationLinkTest extends TestCase
             'name' => 'Currenxie',
             'status' => 'active',
         ]);
+        $this->markInternalKycVerified($user, $provider);
         $user->integrationLinks()->create([
             'provider_id' => $provider->id,
             'link_url' => 'https://provider.example.com/connect/manual',
@@ -196,6 +197,7 @@ class UserIntegrationLinkTest extends TestCase
             'name' => 'Hosted Provider',
             'status' => 'active',
         ]);
+        $this->markInternalKycVerified($user, $provider);
 
         $response = $this->withToken($this->issueTokenFor($user))
             ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/link", [
@@ -228,6 +230,7 @@ class UserIntegrationLinkTest extends TestCase
             'name' => 'Hosted Provider',
             'status' => 'active',
         ]);
+        $this->markInternalKycVerified($user, $provider);
 
         $user->providerAccounts()->create([
             'provider_id' => $provider->id,
@@ -276,5 +279,18 @@ class UserIntegrationLinkTest extends TestCase
         ]);
 
         return $plainToken;
+    }
+
+    private function markInternalKycVerified(User $user, IntegrationProvider $provider): void
+    {
+        $user->update([
+            'kyc_status' => 'verified',
+        ]);
+
+        $user->kycProviderSubmissions()->create([
+            'provider_id' => $provider->id,
+            'status' => 'approved',
+            'approved_at' => now(),
+        ]);
     }
 }

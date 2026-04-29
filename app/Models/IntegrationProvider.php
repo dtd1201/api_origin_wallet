@@ -116,6 +116,11 @@ class IntegrationProvider extends Model
         return $this->hasMany(UserIntegrationRequest::class, 'provider_id');
     }
 
+    public function kycProviderSubmissions(): HasMany
+    {
+        return $this->hasMany(KycProviderSubmission::class, 'provider_id');
+    }
+
     public function bankAccounts(): HasMany
     {
         return $this->hasMany(BankAccount::class, 'provider_id');

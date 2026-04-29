@@ -20,6 +20,7 @@ class ProviderAccountController extends Controller
             'providerAccounts.provider',
             'integrationLinks.provider',
             'integrationRequests.provider',
+            'kycProviderSubmissions.provider',
         ]);
 
         $providers = IntegrationProvider::query()
@@ -31,28 +32,34 @@ class ProviderAccountController extends Controller
             'data' => $providers
                 ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding())
                 ->map(function (IntegrationProvider $provider) use ($user): array {
-                $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
-                $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
-                $providerAccount = $user->providerAccounts
-                    ->where('provider_id', $provider->id)
-                    ->sortByDesc('id')
-                    ->first();
-                $linkAvailable = $provider->isAvailableForOnboarding()
-                    && $integrationLink !== null
-                    && $integrationLink->is_active
-                    && filled($integrationLink->link_url);
+                    $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
+                    $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
+                    $kycProviderSubmission = $user->kycProviderSubmissions->firstWhere('provider_id', $provider->id);
+                    $providerAccount = $user->providerAccounts
+                        ->where('provider_id', $provider->id)
+                        ->sortByDesc('id')
+                        ->first();
+                    $linkAvailable = $provider->isAvailableForOnboarding()
+                        && $integrationLink !== null
+                        && $integrationLink->is_active
+                        && filled($integrationLink->link_url);
+                    $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
+                    $providerSubmissionApproved = in_array($kycProviderSubmission?->status, ['approved', 'submitted'], true);
 
-                return [
-                    'provider' => $provider->only(['id', 'code', 'name', 'status']),
-                    'provider_account' => $providerAccount,
-                    'integration_link' => $integrationLink,
-                    'integration_request' => $integrationRequest,
-                    'link_available' => $linkAvailable,
-                    'can_connect' => $linkAvailable,
-                    'can_request_connect' => ! $linkAvailable,
-                    'request_pending' => $integrationRequest?->status === 'pending',
-                ];
-            })->values()->all(),
+                    return [
+                        'provider' => $provider->only(['id', 'code', 'name', 'status']),
+                        'provider_account' => $providerAccount,
+                        'integration_link' => $integrationLink,
+                        'integration_request' => $integrationRequest,
+                        'kyc_provider_submission' => $kycProviderSubmission,
+                        'internal_kyc_verified' => $internalKycVerified,
+                        'provider_submission_approved' => $providerSubmissionApproved,
+                        'link_available' => $linkAvailable,
+                        'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionApproved,
+                        'can_request_connect' => ! $linkAvailable,
+                        'request_pending' => $integrationRequest?->status === 'pending',
+                    ];
+                })->values()->all(),
         ]);
     }
 
@@ -62,7 +69,12 @@ class ProviderAccountController extends Controller
             abort(404);
         }
 
-        $user->loadMissing(['integrationLinks.provider', 'providerAccounts.provider', 'integrationRequests.provider']);
+        $user->loadMissing([
+            'integrationLinks.provider',
+            'providerAccounts.provider',
+            'integrationRequests.provider',
+            'kycProviderSubmissions.provider',
+        ]);
 
         $providerAccount = $user->providerAccounts()
             ->with('provider')
@@ -71,10 +83,13 @@ class ProviderAccountController extends Controller
             ->first();
         $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
         $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
+        $kycProviderSubmission = $user->kycProviderSubmissions->firstWhere('provider_id', $provider->id);
         $linkAvailable = $provider->isAvailableForOnboarding()
             && $integrationLink !== null
             && $integrationLink->is_active
             && filled($integrationLink->link_url);
+        $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
+        $providerSubmissionApproved = in_array($kycProviderSubmission?->status, ['approved', 'submitted'], true);
 
         if ($providerAccount === null) {
             return response()->json([
@@ -82,8 +97,11 @@ class ProviderAccountController extends Controller
                 'provider_account' => null,
                 'integration_link' => $integrationLink,
                 'integration_request' => $integrationRequest,
+                'kyc_provider_submission' => $kycProviderSubmission,
+                'internal_kyc_verified' => $internalKycVerified,
+                'provider_submission_approved' => $providerSubmissionApproved,
                 'link_available' => $linkAvailable,
-                'can_connect' => $linkAvailable,
+                'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionApproved,
                 'can_request_connect' => ! $linkAvailable,
                 'request_pending' => $integrationRequest?->status === 'pending',
             ]);
@@ -94,8 +112,11 @@ class ProviderAccountController extends Controller
             'provider_account' => $providerAccount,
             'integration_link' => $integrationLink,
             'integration_request' => $integrationRequest,
+            'kyc_provider_submission' => $kycProviderSubmission,
+            'internal_kyc_verified' => $internalKycVerified,
+            'provider_submission_approved' => $providerSubmissionApproved,
             'link_available' => $linkAvailable,
-            'can_connect' => $linkAvailable,
+            'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionApproved,
             'can_request_connect' => ! $linkAvailable,
             'request_pending' => $integrationRequest?->status === 'pending',
         ]);

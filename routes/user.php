@@ -1,13 +1,14 @@
 <?php
 
-use App\Http\Controllers\Api\User\BankAccountController;
 use App\Http\Controllers\Api\User\BalanceController;
+use App\Http\Controllers\Api\User\BankAccountController;
 use App\Http\Controllers\Api\User\BeneficiaryController;
 use App\Http\Controllers\Api\User\FxQuoteController;
+use App\Http\Controllers\Api\User\KycSubmissionController;
 use App\Http\Controllers\Api\User\OverviewController;
 use App\Http\Controllers\Api\User\ProfileController;
-use App\Http\Controllers\Api\User\ProviderDataSyncController;
 use App\Http\Controllers\Api\User\ProviderAccountController;
+use App\Http\Controllers\Api\User\ProviderDataSyncController;
 use App\Http\Controllers\Api\User\TransactionController;
 use App\Http\Controllers\Api\User\TransferController;
 use Illuminate\Support\Facades\Route;
@@ -15,6 +16,10 @@ use Illuminate\Support\Facades\Route;
 Route::get('users/{user}/overview', [OverviewController::class, 'show']);
 Route::get('users/{user}/profile', [ProfileController::class, 'show']);
 Route::put('users/{user}/profile', [ProfileController::class, 'update']);
+Route::get('users/{user}/kyc-profile', [KycSubmissionController::class, 'show']);
+Route::put('users/{user}/kyc-profile', [KycSubmissionController::class, 'submit']);
+Route::get('users/{user}/kyc-submission', [KycSubmissionController::class, 'show']);
+Route::put('users/{user}/kyc-submission', [KycSubmissionController::class, 'submit']);
 
 Route::middleware('profile.complete')->group(function (): void {
     Route::get('users/{user}/provider-accounts', [ProviderAccountController::class, 'index']);

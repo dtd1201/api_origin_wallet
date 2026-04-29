@@ -40,6 +40,11 @@ class ProviderHttpClient implements ProviderClient
         return $this->send('PUT', $path, $payload, $user, $relatedTransferId);
     }
 
+    public function patch(string $path, array $payload, ?User $user = null, ?int $relatedTransferId = null): Response
+    {
+        return $this->send('PATCH', $path, $payload, $user, $relatedTransferId);
+    }
+
     public function delete(string $path, array $payload = [], ?User $user = null, ?int $relatedTransferId = null): Response
     {
         return $this->send('DELETE', $path, $payload, $user, $relatedTransferId);
@@ -78,6 +83,7 @@ class ProviderHttpClient implements ProviderClient
             'GET' => $request->get($url, $payload),
             'POST' => $request->asJson()->post($url, $payload),
             'PUT' => $request->asJson()->put($url, $payload),
+            'PATCH' => $request->asJson()->patch($url, $payload),
             'DELETE' => empty($payload) ? $request->delete($url) : $request->asJson()->delete($url, $payload),
             default => throw new \InvalidArgumentException("Unsupported HTTP method [{$method}]."),
         };
@@ -91,8 +97,12 @@ class ProviderHttpClient implements ProviderClient
 
     private function resolveHeaders(): array
     {
+        $customAuthorizationHeader = collect($this->headers)
+            ->keys()
+            ->contains(static fn ($header) => strtolower((string) $header) === 'authorization');
+
         return array_filter([
-            ...$this->resolveAuthHeaders(),
+            ...($customAuthorizationHeader ? [] : $this->resolveAuthHeaders()),
             ...$this->headers,
         ], static fn ($value) => $value !== null && $value !== '');
     }
@@ -113,6 +123,7 @@ class ProviderHttpClient implements ProviderClient
                 ? [(string) $authConfig['header_name'] => $authConfig['header_value']]
                 : [],
             'client_credentials' => ['Authorization' => 'Bearer '.$this->getClientCredentialsAccessToken($authConfig)],
+            'unlimit_access_token' => ['Authorization' => 'Bearer '.$this->getUnlimitAccessToken($authConfig)],
             'pingpong_access_token' => ['Authorization' => $this->getPingPongAccessToken($authConfig)],
             default => throw new RuntimeException("Unsupported auth mode [{$mode}] for provider [{$this->serviceConfigKey}]."),
         };
@@ -248,6 +259,51 @@ class ProviderHttpClient implements ProviderClient
 
         if (! $response->successful() || ! filled($responseData['access_token'] ?? null)) {
             throw new RuntimeException("Failed to obtain access token for provider [{$this->serviceConfigKey}].");
+        }
+
+        $token = (string) $responseData['access_token'];
+        $expiresIn = max(60, (int) ($responseData['expires_in'] ?? 300) - (int) ($authConfig['cache_buffer_seconds'] ?? 30));
+
+        Cache::put($cacheKey, $token, now()->addSeconds($expiresIn));
+
+        return $token;
+    }
+
+    private function getUnlimitAccessToken(array $authConfig): string
+    {
+        $cacheKey = (string) ($authConfig['cache_key'] ?? "provider_http_client:{$this->serviceConfigKey}:access_token");
+        $cachedToken = Cache::get($cacheKey);
+
+        if (is_string($cachedToken) && $cachedToken !== '') {
+            return $cachedToken;
+        }
+
+        $terminalCode = (string) ($authConfig['terminal_code'] ?? '');
+        $password = (string) ($authConfig['password'] ?? '');
+
+        if ($terminalCode === '' || $password === '') {
+            throw new RuntimeException("Unlimit terminal credentials are not configured for provider [{$this->serviceConfigKey}].");
+        }
+
+        $tokenEndpoint = (string) ($authConfig['token_endpoint'] ?? '/auth/token');
+        $tokenUrl = (string) ($authConfig['token_url'] ?? '');
+
+        $response = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
+            ->acceptJson()
+            ->asForm()
+            ->post(
+                $tokenUrl !== '' ? $this->buildUrl($tokenUrl) : $this->buildUrl($tokenEndpoint),
+                [
+                    'grant_type' => (string) ($authConfig['grant_type'] ?? 'password'),
+                    'terminal_code' => $terminalCode,
+                    'password' => $password,
+                ],
+            );
+
+        $responseData = $response->json() ?? [];
+
+        if (! $response->successful() || ! filled($responseData['access_token'] ?? null)) {
+            throw new RuntimeException("Failed to obtain Unlimit access token for provider [{$this->serviceConfigKey}].");
         }
 
         $token = (string) $responseData['access_token'];

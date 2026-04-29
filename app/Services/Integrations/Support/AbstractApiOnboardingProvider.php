@@ -45,6 +45,14 @@ abstract class AbstractApiOnboardingProvider implements OnboardingProvider
 
     final public function syncUser(IntegrationProvider $provider, User $user): UserProviderAccount
     {
+        $user->loadMissing([
+            'profile',
+            'kycProfile.documents',
+            'kycProfile.relatedPersons.documents',
+            'kycProfile.providerSubmissions.provider',
+            'kycProfile.requirements',
+        ]);
+
         if ($user->profile === null) {
             throw new RuntimeException('User profile is required before syncing with provider.');
         }

@@ -76,6 +76,11 @@ class BeneficiaryController extends Controller
             'raw_data.nium.account_verification.proxyType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.account_verification.proxyValue' => ['sometimes', 'nullable', 'string', 'max:255'],
             'raw_data.nium.account_verification.routingInfo' => ['sometimes', 'array'],
+            'raw_data.unlimit' => ['sometimes', 'array'],
+            'raw_data.unlimit.customer' => ['sometimes', 'array'],
+            'raw_data.unlimit.ewallet_account' => ['sometimes', 'array'],
+            'raw_data.unlimit.card_account' => ['sometimes', 'array'],
+            'raw_data.unlimit.payment_data' => ['sometimes', 'array'],
         ]);
 
         try {
@@ -150,6 +155,11 @@ class BeneficiaryController extends Controller
             'raw_data.nium.account_verification.proxyType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.account_verification.proxyValue' => ['sometimes', 'nullable', 'string', 'max:255'],
             'raw_data.nium.account_verification.routingInfo' => ['sometimes', 'array'],
+            'raw_data.unlimit' => ['sometimes', 'array'],
+            'raw_data.unlimit.customer' => ['sometimes', 'array'],
+            'raw_data.unlimit.ewallet_account' => ['sometimes', 'array'],
+            'raw_data.unlimit.card_account' => ['sometimes', 'array'],
+            'raw_data.unlimit.payment_data' => ['sometimes', 'array'],
         ]);
 
         try {

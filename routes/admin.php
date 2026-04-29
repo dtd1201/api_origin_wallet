@@ -1,14 +1,17 @@
 <?php
 
+use App\Http\Controllers\Api\Admin\AmlScreeningController;
 use App\Http\Controllers\Api\Admin\BankAccountController;
 use App\Http\Controllers\Api\Admin\BeneficiaryController;
 use App\Http\Controllers\Api\Admin\ContactSubmissionController;
 use App\Http\Controllers\Api\Admin\IntegrationProviderController;
+use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
 use App\Http\Controllers\Api\Admin\ProviderSyncController;
 use App\Http\Controllers\Api\Admin\TransactionController;
 use App\Http\Controllers\Api\Admin\TransferController;
-use App\Http\Controllers\Api\Admin\UserIntegrationLinkController;
 use App\Http\Controllers\Api\Admin\UserController;
+use App\Http\Controllers\Api\Admin\UserIntegrationLinkController;
+use App\Http\Controllers\Api\Admin\UserKycSubmissionController;
 use Illuminate\Support\Facades\Route;
 
 Route::apiResources([
@@ -25,6 +28,43 @@ Route::post('providers/{provider}/users/{user}/sync', [ProviderSyncController::c
     ->name('providers.users.sync');
 Route::post('transfers/{transfer}/sync-status', [TransferController::class, 'syncStatus'])
     ->name('transfers.sync-status');
+
+Route::get('kyc-submissions', [UserKycSubmissionController::class, 'index'])
+    ->name('kyc-submissions.index');
+Route::get('kyc-profiles', [UserKycSubmissionController::class, 'index'])
+    ->name('kyc-profiles.index');
+Route::get('users/{user}/kyc-profile', [UserKycSubmissionController::class, 'show'])
+    ->name('users.kyc-profile.show');
+Route::post('users/{user}/kyc-profile/approve', [UserKycSubmissionController::class, 'approve'])
+    ->name('users.kyc-profile.approve');
+Route::post('users/{user}/kyc-profile/reject', [UserKycSubmissionController::class, 'reject'])
+    ->name('users.kyc-profile.reject');
+Route::get('users/{user}/kyc-submission', [UserKycSubmissionController::class, 'show'])
+    ->name('users.kyc-submission.show');
+Route::post('users/{user}/kyc-submission/approve', [UserKycSubmissionController::class, 'approve'])
+    ->name('users.kyc-submission.approve');
+Route::post('users/{user}/kyc-submission/reject', [UserKycSubmissionController::class, 'reject'])
+    ->name('users.kyc-submission.reject');
+
+Route::get('kyc-provider-submissions', [KycProviderSubmissionController::class, 'index'])
+    ->name('kyc-provider-submissions.index');
+Route::get('users/{user}/kyc-profile/provider-submissions', [KycProviderSubmissionController::class, 'userIndex'])
+    ->name('users.kyc-profile.provider-submissions.index');
+Route::post('users/{user}/kyc-profile/providers/{provider}/approve', [KycProviderSubmissionController::class, 'approve'])
+    ->name('users.kyc-profile.providers.approve');
+Route::post('users/{user}/kyc-profile/providers/{provider}/reject', [KycProviderSubmissionController::class, 'reject'])
+    ->name('users.kyc-profile.providers.reject');
+
+Route::get('aml-screenings', [AmlScreeningController::class, 'index'])
+    ->name('aml-screenings.index');
+Route::get('aml-screenings/{amlScreening}', [AmlScreeningController::class, 'show'])
+    ->name('aml-screenings.show');
+Route::post('users/{user}/kyc-profile/aml-screenings/run', [AmlScreeningController::class, 'runForUser'])
+    ->name('users.kyc-profile.aml-screenings.run');
+Route::post('aml-screenings/{amlScreening}/clear', [AmlScreeningController::class, 'clear'])
+    ->name('aml-screenings.clear');
+Route::post('aml-screenings/{amlScreening}/confirm-match', [AmlScreeningController::class, 'confirmMatch'])
+    ->name('aml-screenings.confirm-match');
 
 Route::get('users/{user}/integration-links', [UserIntegrationLinkController::class, 'index'])
     ->name('users.integration-links.index');

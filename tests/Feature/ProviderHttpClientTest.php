@@ -184,6 +184,82 @@ class ProviderHttpClientTest extends TestCase
         });
     }
 
+    public function test_unlimit_auth_fetches_password_grant_token_and_caches_access_token(): void
+    {
+        Cache::flush();
+
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'UNLIMIT_PROVIDER',
+            'name' => 'Unlimit Provider',
+            'status' => 'active',
+        ]);
+
+        config()->set('services.unlimit_provider.base_url', 'https://sandbox.cardpay.com/api');
+        config()->set('services.unlimit_provider.timeout', 30);
+        config()->set('services.unlimit_provider.auth', [
+            'mode' => 'unlimit_access_token',
+            'token_endpoint' => '/auth/token',
+            'terminal_code' => 'terminal-123',
+            'password' => 'terminal-secret',
+            'cache_key' => 'tests:unlimit_provider:token',
+            'cache_buffer_seconds' => 30,
+        ]);
+
+        $tokenRequests = 0;
+        $apiRequests = 0;
+
+        Http::fake(function ($request) use (&$tokenRequests, &$apiRequests) {
+            if ($request->url() === 'https://sandbox.cardpay.com/api/auth/token') {
+                $tokenRequests++;
+
+                return Http::response([
+                    'access_token' => 'unlimit-access-token',
+                    'expires_in' => 300,
+                    'refresh_token' => 'unlimit-refresh-token',
+                    'token_type' => 'bearer',
+                ], 200);
+            }
+
+            if ($request->url() === 'https://sandbox.cardpay.com/api/payouts') {
+                $apiRequests++;
+
+                return Http::response([
+                    'payout_data' => [
+                        'id' => '4237264',
+                        'status' => 'NEW',
+                    ],
+                ], 201);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $client = new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'unlimit_provider',
+        );
+
+        $client->post('/payouts', ['payment_method' => 'BANKTRANSFERSIDR']);
+        $client->post('/payouts', ['payment_method' => 'BANKTRANSFERSIDR']);
+
+        $this->assertSame(1, $tokenRequests);
+        $this->assertSame(2, $apiRequests);
+
+        Http::assertSent(function ($request): bool {
+            $data = $request->data();
+
+            return $request->url() === 'https://sandbox.cardpay.com/api/auth/token'
+                && $data['grant_type'] === 'password'
+                && $data['terminal_code'] === 'terminal-123'
+                && $data['password'] === 'terminal-secret';
+        });
+
+        Http::assertSent(function ($request): bool {
+            return $request->url() === 'https://sandbox.cardpay.com/api/payouts'
+                && $request->hasHeader('Authorization', 'Bearer unlimit-access-token');
+        });
+    }
+
     public function test_airwallex_auth_fetches_and_caches_access_token(): void
     {
         Cache::flush();
@@ -283,6 +359,47 @@ class ProviderHttpClientTest extends TestCase
             return $request->url() === 'https://service-sandbox.tazapay.com/v3/balance'
                 && $request->hasHeader('Authorization', 'Basic '.base64_encode('tzp_live_key:tzp_live_secret'))
                 && $request->hasHeader('tz-account-id', 'acc_123');
+        });
+    }
+
+    public function test_custom_authorization_header_skips_provider_auth_resolution(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'WISE_PROVIDER',
+            'name' => 'Wise Provider',
+            'status' => 'active',
+        ]);
+
+        config()->set('services.wise_provider.base_url', 'https://api.wise-sandbox.com');
+        config()->set('services.wise_provider.timeout', 30);
+        config()->set('services.wise_provider.auth', [
+            'mode' => 'client_credentials',
+            'token_endpoint' => '/oauth/token',
+            'client_id' => 'wise-client-id',
+            'client_secret' => 'wise-client-secret',
+            'credentials_in' => 'basic',
+        ]);
+
+        Http::fake([
+            'https://api.wise-sandbox.com/v2/profiles' => Http::response([], 200),
+        ]);
+
+        $client = new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'wise_provider',
+            headers: [
+                'Authorization' => 'Bearer wise-user-token',
+            ],
+        );
+
+        $response = $client->get('/v2/profiles');
+
+        $this->assertTrue($response->successful());
+
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request): bool {
+            return $request->url() === 'https://api.wise-sandbox.com/v2/profiles'
+                && $request->hasHeader('Authorization', 'Bearer wise-user-token');
         });
     }
 }

@@ -13,13 +13,11 @@ return [
         ],
         'wise' => [
             'onboarding' => \App\Services\Wise\WiseOnboardingService::class,
-            // Keep API-driven capabilities disabled until Wise credentials are provided.
-            // Available skeleton services:
-            // 'webhook' => \App\Services\Wise\WiseWebhookService::class,
-            // 'data_sync' => \App\Services\Wise\WiseDataSyncService::class,
-            // 'quote' => \App\Services\Wise\WiseQuoteService::class,
-            // 'transfer' => \App\Services\Wise\WiseTransferService::class,
-            // 'beneficiary' => \App\Services\Wise\WiseBeneficiaryService::class,
+            'webhook' => \App\Services\Wise\WiseWebhookService::class,
+            'data_sync' => \App\Services\Wise\WiseDataSyncService::class,
+            'quote' => \App\Services\Wise\WiseQuoteService::class,
+            'transfer' => \App\Services\Wise\WiseTransferService::class,
+            'beneficiary' => \App\Services\Wise\WiseBeneficiaryService::class,
         ],
         'airwallex' => [
             'onboarding' => \App\Services\Airwallex\AirwallexOnboardingService::class,
@@ -39,6 +37,12 @@ return [
             'transfer' => \App\Services\Tazapay\TazapayTransferService::class,
             'data_sync' => \App\Services\Tazapay\TazapayDataSyncService::class,
             'webhook' => \App\Services\Tazapay\TazapayWebhookService::class,
+        ],
+        'unlimit' => [
+            'onboarding' => \App\Services\Unlimit\UnlimitOnboardingService::class,
+            'beneficiary' => \App\Services\Unlimit\UnlimitBeneficiaryService::class,
+            'transfer' => \App\Services\Unlimit\UnlimitTransferService::class,
+            'webhook' => \App\Services\Unlimit\UnlimitWebhookService::class,
         ],
         'nium' => [
             'beneficiary' => \App\Services\Nium\NiumBeneficiaryService::class,
