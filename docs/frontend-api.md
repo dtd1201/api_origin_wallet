@@ -96,7 +96,7 @@ CORS_ALLOWED_ORIGINS=https://khoinguyenoriginwallet.com,https://www.khoinguyenor
 Local development example:
 
 ```env
-CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost:3001
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost:8082,http://127.0.0.1:8082,http://localhost:3001
 ```
 
 Recommended deployment checklist for admin frontend:
@@ -430,6 +430,64 @@ Frontend notes:
 - `is_configured === false` means live backend-driven API actions such as sync, quotes, transfers, or direct API onboarding may not be ready yet
 - current default seeded setup includes `Currenxie`, `Wise`, and `Airwallex`
 - `Wise` and `Airwallex` currently default to manual-link onboarding unless backend API capabilities are explicitly enabled later
+
+### `GET /provider-rates`
+
+Public endpoint for displaying all providers and best-effort live FX quote previews without login.
+
+Query:
+
+```text
+source_currency=USD
+target_currency=VND
+source_amount=1000
+```
+
+Response:
+
+```json
+{
+  "data": [
+    {
+      "provider": {
+        "id": 1,
+        "code": "AIRWALLEX",
+        "name": "Airwallex",
+        "status": "active",
+        "supports_quotes": true,
+        "is_configured": true
+      },
+      "quote_status": "ready",
+      "quote": {
+        "source_currency": "USD",
+        "target_currency": "VND",
+        "source_amount": 1000,
+        "target_amount": 25450000,
+        "mid_rate": 25500,
+        "net_rate": 25450,
+        "fee_amount": 5,
+        "expires_at": "2026-05-18T10:30:00Z",
+        "quoted_at": "2026-05-18T10:15:00Z"
+      },
+      "message": null
+    }
+  ],
+  "meta": {
+    "source_currency": "USD",
+    "target_currency": "VND",
+    "source_amount": 1000,
+    "refreshed_at": "2026-05-18T10:15:00Z",
+    "refresh_interval_seconds": 15
+  }
+}
+```
+
+Frontend notes:
+
+- this endpoint returns all providers, including providers that do not support quotes
+- `quote_status` can be `ready`, `unavailable`, or `error`
+- backend caches public quote previews for `PUBLIC_PROVIDER_RATES_CACHE_TTL_SECONDS` seconds
+- Wise public previews require `WISE_PUBLIC_PROFILE_ID`; otherwise Wise appears with `quote_status: "error"`
 
 ### `POST /contact`
 

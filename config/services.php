@@ -5,6 +5,10 @@ return [
         'client_id' => env('GOOGLE_CLIENT_ID'),
     ],
 
+    'public_provider_rates' => [
+        'cache_ttl_seconds' => env('PUBLIC_PROVIDER_RATES_CACHE_TTL_SECONDS', 15),
+    ],
+
     'currenxie' => [
         'base_url' => env('CURRENXIE_BASE_URL'),
         'api_key' => env('CURRENXIE_API_KEY'),
@@ -55,6 +59,7 @@ return [
             'cache_buffer_seconds' => env('WISE_TOKEN_CACHE_BUFFER_SECONDS', 30),
         ],
         'profiles_endpoint' => env('WISE_PROFILES_ENDPOINT', '/v2/profiles'),
+        'public_profile_id' => env('WISE_PUBLIC_PROFILE_ID'),
         'balances_endpoint' => env('WISE_BALANCES_ENDPOINT', '/v4/profiles/{profile}/balances'),
         'account_details_endpoint' => env('WISE_ACCOUNT_DETAILS_ENDPOINT', '/v1/profiles/{profile}/account-details'),
         'transactions_endpoint' => env('WISE_TRANSACTIONS_ENDPOINT', '/v1/profiles/{profile}/balance-statements/{balance}/statement.json'),

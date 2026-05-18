@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AdminAuthController;
 use App\Http\Controllers\Api\ChatbotController;
 use App\Http\Controllers\Api\ContactSubmissionController;
 use App\Http\Controllers\Api\ProviderController;
+use App\Http\Controllers\Api\PublicProviderRateController;
 use App\Http\Controllers\Api\ProviderWebhookController;
 use Illuminate\Support\Facades\Route;
 
@@ -15,6 +16,7 @@ Route::get('/test', function () {
 });
 
 Route::get('/providers', [ProviderController::class, 'index']);
+Route::get('/provider-rates', [PublicProviderRateController::class, 'index']);
 Route::post('/contact', [ContactSubmissionController::class, 'store']);
 
 Route::prefix('auth')->group(function (): void {
