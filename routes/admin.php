@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Admin\BeneficiaryController;
 use App\Http\Controllers\Api\Admin\ContactSubmissionController;
 use App\Http\Controllers\Api\Admin\IntegrationProviderController;
 use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
+use App\Http\Controllers\Api\Admin\ManagedExchangeRateController;
 use App\Http\Controllers\Api\Admin\ProviderSyncController;
 use App\Http\Controllers\Api\Admin\TransactionController;
 use App\Http\Controllers\Api\Admin\TransferController;
@@ -18,6 +19,7 @@ Route::apiResources([
     'users' => UserController::class,
     'contact-submissions' => ContactSubmissionController::class,
     'integration-providers' => IntegrationProviderController::class,
+    'exchange-rates' => ManagedExchangeRateController::class,
     'bank-accounts' => BankAccountController::class,
     'beneficiaries' => BeneficiaryController::class,
     'transfers' => TransferController::class,

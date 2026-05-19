@@ -10,6 +10,7 @@ use App\Services\Tazapay\TazapayService;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
 class PublicProviderRateService
@@ -18,20 +19,28 @@ class PublicProviderRateService
         private readonly AirwallexService $airwallexService,
         private readonly NiumService $niumService,
         private readonly TazapayService $tazapayService,
+        private readonly ManagedExchangeRateService $managedExchangeRateService,
     ) {
     }
 
-    public function rates(string $sourceCurrency, string $targetCurrency, float $sourceAmount): array
+    public function rates(
+        string $sourceCurrency,
+        string $targetCurrency,
+        float $sourceAmount,
+        string $audience = 'public',
+    ): array
     {
         $sourceCurrency = strtoupper($sourceCurrency);
         $targetCurrency = strtoupper($targetCurrency);
         $sourceAmount = round($sourceAmount, 8);
+        $audience = $audience === 'authenticated' ? 'authenticated' : 'public';
         $cacheTtl = $this->cacheTtlSeconds();
         $cacheKey = implode(':', [
             'public_provider_rates',
             $sourceCurrency,
             $targetCurrency,
             number_format($sourceAmount, 8, '.', ''),
+            $audience,
         ]);
 
         return Cache::remember($cacheKey, now()->addSeconds($cacheTtl), function () use (
@@ -39,6 +48,7 @@ class PublicProviderRateService
             $targetCurrency,
             $sourceAmount,
             $cacheTtl,
+            $audience,
         ): array {
             $providers = IntegrationProvider::query()
                 ->orderBy('id')
@@ -51,6 +61,7 @@ class PublicProviderRateService
                         $sourceCurrency,
                         $targetCurrency,
                         $sourceAmount,
+                        $audience,
                     ))
                     ->values()
                     ->all(),
@@ -58,6 +69,7 @@ class PublicProviderRateService
                     'source_currency' => $sourceCurrency,
                     'target_currency' => $targetCurrency,
                     'source_amount' => $sourceAmount,
+                    'audience' => $audience,
                     'refreshed_at' => now()->toISOString(),
                     'refresh_interval_seconds' => $cacheTtl,
                 ],
@@ -70,6 +82,7 @@ class PublicProviderRateService
         string $sourceCurrency,
         string $targetCurrency,
         float $sourceAmount,
+        string $audience,
     ): array {
         $base = [
             'provider' => [
@@ -97,18 +110,43 @@ class PublicProviderRateService
             ];
         }
 
-        if (! $provider->supportsQuotes()) {
+        $managedQuote = $this->managedExchangeRateService->providerQuote(
+            providerCode: $provider->code,
+            audience: $audience,
+            sourceCurrency: $sourceCurrency,
+            targetCurrency: $targetCurrency,
+            sourceAmount: $sourceAmount,
+        );
+
+        if ($managedQuote !== null) {
             return [
                 ...$base,
-                'message' => 'Provider does not support public FX quotes.',
+                'quote_status' => 'managed',
+                'quote' => $managedQuote,
+                'message' => $audience === 'authenticated'
+                    ? 'Showing authenticated admin configured rate.'
+                    : 'Showing public admin configured rate.',
             ];
         }
 
+        if (! $provider->supportsQuotes()) {
+            return $this->marketReferenceRate(
+                base: $base,
+                sourceCurrency: $sourceCurrency,
+                targetCurrency: $targetCurrency,
+                sourceAmount: $sourceAmount,
+                message: 'Provider does not support public FX quotes. Showing market reference rate.',
+            );
+        }
+
         if (! $provider->isConfigured()) {
-            return [
-                ...$base,
-                'message' => 'Provider is not configured.',
-            ];
+            return $this->marketReferenceRate(
+                base: $base,
+                sourceCurrency: $sourceCurrency,
+                targetCurrency: $targetCurrency,
+                sourceAmount: $sourceAmount,
+                message: 'Provider is not configured. Showing market reference rate.',
+            );
         }
 
         try {
@@ -144,6 +182,82 @@ class PublicProviderRateService
             'wise' => $this->wiseQuote($provider, $sourceCurrency, $targetCurrency, $sourceAmount),
             default => throw new RuntimeException('Public quote preview is not implemented for this provider.'),
         };
+    }
+
+    private function marketReferenceRate(
+        array $base,
+        string $sourceCurrency,
+        string $targetCurrency,
+        float $sourceAmount,
+        string $message,
+    ): array {
+        try {
+            return [
+                ...$base,
+                'quote_status' => 'reference',
+                'quote' => $this->marketReferenceQuote($sourceCurrency, $targetCurrency, $sourceAmount),
+                'message' => $message,
+            ];
+        } catch (\Throwable $exception) {
+            return [
+                ...$base,
+                'quote_status' => 'unavailable',
+                'message' => $exception->getMessage(),
+            ];
+        }
+    }
+
+    private function marketReferenceQuote(
+        string $sourceCurrency,
+        string $targetCurrency,
+        float $sourceAmount,
+    ): array {
+        $sourceCurrency = strtoupper($sourceCurrency);
+        $targetCurrency = strtoupper($targetCurrency);
+        $cacheKey = 'public_provider_rates:market_reference:'.$sourceCurrency;
+        $ttl = max(60, (int) config('services.public_provider_rates.market_cache_ttl_seconds', 3600));
+
+        $rateData = Cache::remember($cacheKey, now()->addSeconds($ttl), function () use ($sourceCurrency): array {
+            $baseUrl = rtrim((string) config('services.public_provider_rates.market_base_url'), '/');
+            $response = Http::timeout(10)
+                ->acceptJson()
+                ->get($baseUrl.'/'.urlencode($sourceCurrency));
+            $responseData = $response->json() ?? [];
+
+            if (! $response->successful() || ($responseData['result'] ?? null) !== 'success') {
+                throw new RuntimeException($responseData['error-type'] ?? 'Market reference rate lookup failed.');
+            }
+
+            return $responseData;
+        });
+
+        $rate = $this->nullableFloat(Arr::get($rateData, 'rates.'.$targetCurrency));
+
+        if ($rate === null) {
+            throw new RuntimeException("Market reference rate is not available for {$sourceCurrency}/{$targetCurrency}.");
+        }
+
+        return [
+            ...$this->quotePayload(
+                sourceCurrency: $sourceCurrency,
+                targetCurrency: $targetCurrency,
+                sourceAmount: $sourceAmount,
+                targetAmount: $sourceAmount * $rate,
+                midRate: $rate,
+                netRate: $rate,
+                feeAmount: 0,
+                expiresAt: $rateData['time_next_update_utc'] ?? now()->addHour()->toISOString(),
+            ),
+            'source' => [
+                'type' => 'market_reference',
+                'name' => 'ExchangeRate-API Open Access',
+                'url' => 'https://www.exchangerate-api.com/docs/free',
+                'provider_url' => $rateData['provider'] ?? 'https://www.exchangerate-api.com',
+                'time_last_update_utc' => $rateData['time_last_update_utc'] ?? null,
+                'time_next_update_utc' => $rateData['time_next_update_utc'] ?? null,
+                'attribution_required' => true,
+            ],
+        ];
     }
 
     private function airwallexQuote(string $sourceCurrency, string $targetCurrency, float $sourceAmount): array

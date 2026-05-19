@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AdminAuthController;
+use App\Http\Controllers\Api\BankRateController;
 use App\Http\Controllers\Api\ChatbotController;
 use App\Http\Controllers\Api\ContactSubmissionController;
 use App\Http\Controllers\Api\ProviderController;
@@ -17,7 +18,13 @@ Route::get('/test', function () {
 
 Route::get('/providers', [ProviderController::class, 'index']);
 Route::get('/provider-rates', [PublicProviderRateController::class, 'index']);
+Route::get('/bank-rates', [BankRateController::class, 'index']);
 Route::post('/contact', [ContactSubmissionController::class, 'store']);
+
+Route::middleware('auth.token')->prefix('member')->group(function (): void {
+    Route::get('provider-rates', [PublicProviderRateController::class, 'authenticated']);
+    Route::get('bank-rates', [BankRateController::class, 'authenticated']);
+});
 
 Route::prefix('auth')->group(function (): void {
     Route::post('register', [AuthController::class, 'register']);

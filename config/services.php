@@ -7,6 +7,8 @@ return [
 
     'public_provider_rates' => [
         'cache_ttl_seconds' => env('PUBLIC_PROVIDER_RATES_CACHE_TTL_SECONDS', 15),
+        'market_cache_ttl_seconds' => env('PUBLIC_PROVIDER_MARKET_RATE_CACHE_TTL_SECONDS', 3600),
+        'market_base_url' => env('PUBLIC_PROVIDER_MARKET_RATE_BASE_URL', 'https://open.er-api.com/v6/latest'),
     ],
 
     'currenxie' => [
@@ -187,5 +189,9 @@ return [
         'account_verification_endpoint' => env('NIUM_ACCOUNT_VERIFICATION_ENDPOINT', '/api/v1/client/{client}/customer/{customer}/accountVerification'),
         'transfer_endpoint' => env('NIUM_TRANSFER_ENDPOINT', '/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/remittance'),
         'transfer_status_endpoint' => env('NIUM_TRANSFER_STATUS_ENDPOINT', '/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/remittance/{transfer}/audit'),
+    ],
+
+    'managed_exchange_rates' => [
+        'refresh_interval_seconds' => env('MANAGED_EXCHANGE_RATE_REFRESH_INTERVAL_SECONDS', 300),
     ],
 ];

@@ -467,7 +467,11 @@ Response:
         "net_rate": 25450,
         "fee_amount": 5,
         "expires_at": "2026-05-18T10:30:00Z",
-        "quoted_at": "2026-05-18T10:15:00Z"
+        "quoted_at": "2026-05-18T10:15:00Z",
+        "source": {
+          "type": "provider_quote",
+          "name": "Airwallex"
+        }
       },
       "message": null
     }
@@ -485,8 +489,12 @@ Response:
 Frontend notes:
 
 - this endpoint returns all providers, including providers that do not support quotes
-- `quote_status` can be `ready`, `unavailable`, or `error`
+- `quote_status` can be `ready`, `reference`, `unavailable`, or `error`
+- `ready` means the rate came from the configured provider API
+- `reference` means provider credentials are not available and backend returned a market reference rate instead
+- reference rates currently use ExchangeRate-API Open Access and require attribution in the UI
 - backend caches public quote previews for `PUBLIC_PROVIDER_RATES_CACHE_TTL_SECONDS` seconds
+- backend caches market reference rates for `PUBLIC_PROVIDER_MARKET_RATE_CACHE_TTL_SECONDS` seconds
 - Wise public previews require `WISE_PUBLIC_PROFILE_ID`; otherwise Wise appears with `quote_status: "error"`
 
 ### `POST /contact`
