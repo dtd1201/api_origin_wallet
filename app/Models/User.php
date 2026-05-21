@@ -87,6 +87,11 @@ class User extends Authenticatable
         return $this->hasMany(KycProviderSubmission::class);
     }
 
+    public function identityVerificationSessions(): HasMany
+    {
+        return $this->hasMany(IdentityVerificationSession::class);
+    }
+
     public function amlScreenings(): HasMany
     {
         return $this->hasMany(AmlScreening::class);

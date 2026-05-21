@@ -122,6 +122,11 @@ class KycSubmissionController extends Controller
             'documents' => ['sometimes', 'array'],
             'documents.*.type' => ['required_with:documents', 'string', 'max:50'],
             'documents.*.file_url' => ['required_with:documents', 'url', 'max:2048'],
+            'documents.*.storage_disk' => ['nullable', 'string', 'max:50'],
+            'documents.*.file_path' => ['nullable', 'string', 'max:2048'],
+            'documents.*.original_name' => ['nullable', 'string', 'max:255'],
+            'documents.*.mime_type' => ['nullable', 'string', 'max:100'],
+            'documents.*.file_size' => ['nullable', 'integer', 'min:0'],
             'documents.*.file_hash' => ['nullable', 'string', 'max:255'],
             'documents.*.side' => ['nullable', 'string', 'max:20'],
             'documents.*.document_number' => ['nullable', 'string', 'max:100'],
@@ -146,6 +151,11 @@ class KycSubmissionController extends Controller
             'related_persons.*.documents' => ['sometimes', 'array'],
             'related_persons.*.documents.*.type' => ['required_with:related_persons.*.documents', 'string', 'max:50'],
             'related_persons.*.documents.*.file_url' => ['required_with:related_persons.*.documents', 'url', 'max:2048'],
+            'related_persons.*.documents.*.storage_disk' => ['nullable', 'string', 'max:50'],
+            'related_persons.*.documents.*.file_path' => ['nullable', 'string', 'max:2048'],
+            'related_persons.*.documents.*.original_name' => ['nullable', 'string', 'max:255'],
+            'related_persons.*.documents.*.mime_type' => ['nullable', 'string', 'max:100'],
+            'related_persons.*.documents.*.file_size' => ['nullable', 'integer', 'min:0'],
             'related_persons.*.documents.*.file_hash' => ['nullable', 'string', 'max:255'],
             'related_persons.*.documents.*.side' => ['nullable', 'string', 'max:20'],
             'related_persons.*.documents.*.document_number' => ['nullable', 'string', 'max:100'],
@@ -190,6 +200,11 @@ class KycSubmissionController extends Controller
         return [
             'type',
             'file_url',
+            'storage_disk',
+            'file_path',
+            'original_name',
+            'mime_type',
+            'file_size',
             'file_hash',
             'side',
             'document_number',
@@ -228,9 +243,13 @@ class KycSubmissionController extends Controller
      */
     private function buildRequirements(array $validated): array
     {
-        $documentTypes = collect($validated['documents'] ?? [])
+        $profileDocumentTypes = collect($validated['documents'] ?? [])
             ->pluck('type')
             ->map(fn (string $type) => strtolower($type));
+        $relatedDocumentTypes = collect($validated['related_persons'] ?? [])
+            ->flatMap(fn (array $person) => collect($person['documents'] ?? [])->pluck('type'))
+            ->map(fn (string $type) => strtolower($type));
+        $documentTypes = $profileDocumentTypes->merge($relatedDocumentTypes);
         $relationshipTypes = collect($validated['related_persons'] ?? [])
             ->pluck('relationship_type')
             ->map(fn (string $type) => strtolower($type));
@@ -245,18 +264,32 @@ class KycSubmissionController extends Controller
                 satisfied: true,
             ),
             $this->requirement(
-                key: 'identity_document',
-                label: 'Identity document',
+                key: 'identity_document_front',
+                label: 'Identity document front',
                 category: 'document',
                 type: 'document',
-                satisfied: $documentTypes->intersect(['passport', 'national_id', 'driver_license', 'identity_document'])->isNotEmpty(),
+                satisfied: $documentTypes->intersect(['identity_document_front', 'passport_front', 'national_id_front', 'driver_license_front'])->isNotEmpty(),
+            ),
+            $this->requirement(
+                key: 'identity_document_back',
+                label: 'Identity document back',
+                category: 'document',
+                type: 'document',
+                satisfied: $documentTypes->intersect(['identity_document_back', 'passport_back', 'national_id_back', 'driver_license_back'])->isNotEmpty(),
             ),
             $this->requirement(
                 key: 'proof_of_address',
                 label: 'Proof of address',
                 category: 'document',
                 type: 'document',
-                satisfied: $documentTypes->contains('proof_of_address'),
+                satisfied: $documentTypes->intersect(['proof_of_address', 'proof_of_business_address'])->isNotEmpty(),
+            ),
+            $this->requirement(
+                key: 'selfie_liveness',
+                label: 'Selfie and liveness check',
+                category: 'biometric',
+                type: 'document',
+                satisfied: $documentTypes->contains('selfie_liveness'),
             ),
         ];
 
@@ -266,7 +299,21 @@ class KycSubmissionController extends Controller
                 label: 'Business registration document',
                 category: 'business',
                 type: 'document',
-                satisfied: $documentTypes->contains('business_registration'),
+                satisfied: $profileDocumentTypes->contains('business_registration'),
+            );
+            $requirements[] = $this->requirement(
+                key: 'proof_of_business_address',
+                label: 'Proof of business address',
+                category: 'business',
+                type: 'document',
+                satisfied: $profileDocumentTypes->contains('proof_of_business_address'),
+            );
+            $requirements[] = $this->requirement(
+                key: 'ownership_structure',
+                label: 'Ownership structure or shareholder register',
+                category: 'business',
+                type: 'document',
+                satisfied: $profileDocumentTypes->contains('ownership_structure'),
             );
             $requirements[] = $this->requirement(
                 key: 'authorized_representative',

@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AdminAuthController;
 use App\Http\Controllers\Api\BankRateController;
 use App\Http\Controllers\Api\ChatbotController;
 use App\Http\Controllers\Api\ContactSubmissionController;
+use App\Http\Controllers\Api\User\IdentityVerificationController;
 use App\Http\Controllers\Api\ProviderController;
 use App\Http\Controllers\Api\PublicProviderRateController;
 use App\Http\Controllers\Api\ProviderWebhookController;
@@ -44,6 +45,10 @@ Route::prefix('auth')->group(function (): void {
         Route::post('chatbot/message', [ChatbotController::class, 'message']);
     });
 });
+
+Route::middleware('auth.token')
+    ->get('identity-verification-sessions/{identityVerificationSession}/evidence/{artifactHash}', [IdentityVerificationController::class, 'showEvidence'])
+    ->name('identity-verification.evidence.show');
 
 Route::prefix('admin/auth')->group(function (): void {
     Route::post('login', [AdminAuthController::class, 'login']);

@@ -11,6 +11,12 @@ return [
         'market_base_url' => env('PUBLIC_PROVIDER_MARKET_RATE_BASE_URL', 'https://open.er-api.com/v6/latest'),
     ],
 
+    'identity_verification' => [
+        'provider' => env('IDENTITY_VERIFICATION_PROVIDER', 'origin_capture'),
+        'session_ttl_minutes' => env('IDENTITY_VERIFICATION_SESSION_TTL_MINUTES', 60),
+        'evidence_disk' => env('IDENTITY_VERIFICATION_EVIDENCE_DISK', 'kyc_private'),
+    ],
+
     'currenxie' => [
         'base_url' => env('CURRENXIE_BASE_URL'),
         'api_key' => env('CURRENXIE_API_KEY'),

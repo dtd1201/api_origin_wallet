@@ -16,6 +16,11 @@ class KycDocument extends Model
         'type',
         'status',
         'file_url',
+        'storage_disk',
+        'file_path',
+        'original_name',
+        'mime_type',
+        'file_size',
         'file_hash',
         'side',
         'document_number',
@@ -30,6 +35,7 @@ class KycDocument extends Model
         return [
             'issued_at' => 'date',
             'expires_at' => 'date',
+            'file_size' => 'integer',
             'metadata' => 'array',
         ];
     }

@@ -31,7 +31,7 @@ class InternalKycTest extends TestCase
             ->assertJsonPath('kyc_status', 'pending')
             ->assertJsonPath('kyc_profile.status', 'submitted')
             ->assertJsonPath('kyc_profile.applicant_type', 'business')
-            ->assertJsonFragment(['type' => 'passport'])
+            ->assertJsonFragment(['type' => 'passport_front'])
             ->assertJsonPath('kyc_profile.related_persons.0.relationship_type', 'authorized_representative')
             ->assertJsonFragment(['key' => 'business_registration']);
 
@@ -101,7 +101,7 @@ class InternalKycTest extends TestCase
             'entity_type' => 'kyc_profile',
         ]);
         $this->assertDatabaseHas('kyc_requirements', [
-            'key' => 'identity_document',
+            'key' => 'identity_document_front',
             'status' => 'approved',
         ]);
     }
@@ -216,7 +216,7 @@ class InternalKycTest extends TestCase
                 'rejection_reason' => 'Document is unreadable.',
                 'requirements' => [
                     [
-                        'key' => 'identity_document',
+                        'key' => 'identity_document_front',
                         'status' => 'needs_more_info',
                         'rejection_reason' => 'Passport image is blurry.',
                     ],
@@ -231,7 +231,7 @@ class InternalKycTest extends TestCase
             ->assertJsonPath('kyc_profile.rejection_reason', 'Document is unreadable.');
 
         $this->assertDatabaseHas('kyc_requirements', [
-            'key' => 'identity_document',
+            'key' => 'identity_document_front',
             'status' => 'needs_more_info',
             'rejection_reason' => 'Passport image is blurry.',
         ]);
@@ -365,13 +365,13 @@ class InternalKycTest extends TestCase
         $this->assertSame('verified', $payload['internal_kyc']['status']);
         $this->assertSame('verified', $payload['internal_kyc']['profile']['status']);
         $identityDocument = collect($payload['internal_kyc']['documents'])
-            ->firstWhere('type', 'passport');
+            ->firstWhere('type', 'passport_front');
 
         $this->assertSame('P1234567', $identityDocument['document_number']);
         $this->assertSame('authorized_representative', $payload['internal_kyc']['related_persons'][0]['relationship_type']);
         $this->assertNotEmpty($payload['internal_kyc']['aml_screenings']);
         $this->assertNotNull(
-            collect($payload['internal_kyc']['requirements'])->firstWhere('key', 'identity_document')
+            collect($payload['internal_kyc']['requirements'])->firstWhere('key', 'identity_document_front')
         );
     }
 
@@ -442,7 +442,7 @@ class InternalKycTest extends TestCase
             'country_code' => 'US',
             'documents' => [
                 [
-                    'type' => 'passport',
+                    'type' => 'passport_front',
                     'file_url' => 'https://files.example.com/passport-front.jpg',
                     'side' => 'front',
                     'document_number' => 'P1234567',
@@ -451,8 +451,24 @@ class InternalKycTest extends TestCase
                     'expires_at' => '2031-01-01',
                 ],
                 [
+                    'type' => 'passport_back',
+                    'file_url' => 'https://files.example.com/passport-back.jpg',
+                    'side' => 'back',
+                    'document_number' => 'P1234567',
+                    'issuing_country_code' => 'US',
+                    'issued_at' => '2021-01-01',
+                    'expires_at' => '2031-01-01',
+                ],
+                [
                     'type' => 'proof_of_address',
                     'file_url' => 'https://files.example.com/utility-bill.pdf',
+                ],
+                [
+                    'type' => 'selfie_liveness',
+                    'file_url' => 'https://files.example.com/selfie-liveness.jpg',
+                    'metadata' => [
+                        'liveness_session_id' => 'live_applicant_001',
+                    ],
                 ],
             ],
         ];
@@ -478,6 +494,16 @@ class InternalKycTest extends TestCase
                     'document_number' => 'ACME-001',
                     'issuing_country_code' => 'US',
                 ],
+                [
+                    'type' => 'proof_of_business_address',
+                    'file_url' => 'https://files.example.com/business-address.pdf',
+                    'issuing_country_code' => 'US',
+                ],
+                [
+                    'type' => 'ownership_structure',
+                    'file_url' => 'https://files.example.com/ownership-structure.pdf',
+                    'issuing_country_code' => 'US',
+                ],
             ],
             'related_persons' => [
                 [
@@ -488,10 +514,26 @@ class InternalKycTest extends TestCase
                     'residence_country_code' => 'US',
                     'documents' => [
                         [
-                            'type' => 'passport',
-                            'file_url' => 'https://files.example.com/representative-passport.jpg',
+                            'type' => 'passport_front',
+                            'file_url' => 'https://files.example.com/representative-passport-front.jpg',
+                            'side' => 'front',
                             'document_number' => 'P1234567',
                             'issuing_country_code' => 'US',
+                        ],
+                        [
+                            'type' => 'passport_back',
+                            'file_url' => 'https://files.example.com/representative-passport-back.jpg',
+                            'side' => 'back',
+                            'document_number' => 'P1234567',
+                            'issuing_country_code' => 'US',
+                        ],
+                        [
+                            'type' => 'proof_of_address',
+                            'file_url' => 'https://files.example.com/representative-address.pdf',
+                        ],
+                        [
+                            'type' => 'selfie_liveness',
+                            'file_url' => 'https://files.example.com/representative-liveness.jpg',
                         ],
                     ],
                 ],

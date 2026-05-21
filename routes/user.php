@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\User\BalanceController;
 use App\Http\Controllers\Api\User\BankAccountController;
 use App\Http\Controllers\Api\User\BeneficiaryController;
 use App\Http\Controllers\Api\User\FxQuoteController;
+use App\Http\Controllers\Api\User\IdentityVerificationController;
 use App\Http\Controllers\Api\User\KycSubmissionController;
 use App\Http\Controllers\Api\User\OverviewController;
 use App\Http\Controllers\Api\User\ProfileController;
@@ -20,6 +21,9 @@ Route::get('users/{user}/kyc-profile', [KycSubmissionController::class, 'show'])
 Route::put('users/{user}/kyc-profile', [KycSubmissionController::class, 'submit']);
 Route::get('users/{user}/kyc-submission', [KycSubmissionController::class, 'show']);
 Route::put('users/{user}/kyc-submission', [KycSubmissionController::class, 'submit']);
+Route::post('users/{user}/identity-verification-sessions', [IdentityVerificationController::class, 'start']);
+Route::post('users/{user}/identity-verification-sessions/{identityVerificationSession}/uploads', [IdentityVerificationController::class, 'upload']);
+Route::post('users/{user}/identity-verification-sessions/{identityVerificationSession}/complete', [IdentityVerificationController::class, 'complete']);
 
 Route::middleware('profile.complete')->group(function (): void {
     Route::get('users/{user}/provider-accounts', [ProviderAccountController::class, 'index']);
