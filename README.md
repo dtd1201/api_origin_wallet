@@ -7,6 +7,57 @@
 <a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
 </p>
 
+## Origin Wallet API
+
+### Bank Rate Sync
+
+The backend can fetch official Vietnam bank exchange rates and upsert them into
+`managed_exchange_rates` for the existing `/api/bank-rates` and `/api/member/bank-rates`
+endpoints.
+
+Supported sources:
+
+- Vietcombank XML: `https://portal.vietcombank.com.vn/Usercontrols/TVPortal.TyGia/pXML.aspx`
+- Techcombank JSON: `https://techcombank.com/content/techcombank/web/vn/en/cong-cu-tien-ich/ty-gia/_jcr_content.exchange-rates.integration.json`
+
+Run manually:
+
+```bash
+php artisan bank-rates:sync
+php artisan bank-rates:sync --source=vcb
+php artisan bank-rates:sync --source=techcombank
+```
+
+Deploy checklist:
+
+```bash
+composer install --no-dev --optimize-autoloader
+php artisan migrate --force
+php artisan optimize:clear
+php artisan config:cache
+php artisan route:cache
+php artisan bank-rates:sync
+```
+
+Make sure the server cron runs Laravel's scheduler every minute:
+
+```cron
+* * * * * cd /var/www/origin_wallet && php artisan schedule:run >> /dev/null 2>&1
+```
+
+The scheduled sync runs every 5 minutes. This respects Vietcombank's published note that the XML
+source should be requested at most once every 5 minutes.
+
+Environment flags:
+
+```env
+BANK_RATE_SYNC_ENABLED=true
+BANK_RATE_SYNC_TIMEOUT=20
+BANK_RATE_SYNC_AUDIENCES=public,authenticated
+BANK_RATE_VCB_ENABLED=true
+BANK_RATE_TECHCOMBANK_ENABLED=true
+```
+
 ## About Laravel
 
 Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:

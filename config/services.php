@@ -200,4 +200,33 @@ return [
     'managed_exchange_rates' => [
         'refresh_interval_seconds' => env('MANAGED_EXCHANGE_RATE_REFRESH_INTERVAL_SECONDS', 300),
     ],
+
+    'bank_rate_sources' => [
+        'enabled' => env('BANK_RATE_SYNC_ENABLED', true),
+        'timeout' => env('BANK_RATE_SYNC_TIMEOUT', 20),
+        'audiences' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', env('BANK_RATE_SYNC_AUDIENCES', 'public,authenticated'))
+        ))),
+        'sources' => [
+            'vcb' => [
+                'enabled' => env('BANK_RATE_VCB_ENABLED', true),
+                'code' => 'vcb',
+                'name' => 'Vietcombank',
+                'url' => env('BANK_RATE_VCB_URL', 'https://portal.vietcombank.com.vn/Usercontrols/TVPortal.TyGia/pXML.aspx'),
+                'accept' => 'application/xml,text/xml,*/*',
+                'parser' => 'vietcombank_xml',
+                'display_order' => 10,
+            ],
+            'techcombank' => [
+                'enabled' => env('BANK_RATE_TECHCOMBANK_ENABLED', true),
+                'code' => 'techcombank',
+                'name' => 'Techcombank',
+                'url' => env('BANK_RATE_TECHCOMBANK_URL', 'https://techcombank.com/content/techcombank/web/vn/en/cong-cu-tien-ich/ty-gia/_jcr_content.exchange-rates.integration.json'),
+                'accept' => 'application/json,*/*',
+                'parser' => 'techcombank_json',
+                'display_order' => 40,
+            ],
+        ],
+    ],
 ];

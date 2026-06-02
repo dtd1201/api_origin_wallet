@@ -5,8 +5,10 @@ use App\Models\User;
 use App\Services\Airwallex\AirwallexDataSyncService;
 use App\Services\Airwallex\AirwallexQuoteService;
 use App\Services\Airwallex\AirwallexService;
+use App\Services\BankRates\BankRateSyncService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Schedule;
 use Symfony\Component\Console\Command\Command;
 
 Artisan::command('inspire', function () {
@@ -105,7 +107,7 @@ Artisan::command(
                     'expires_at' => $quote->expires_at?->toISOString(),
                 ], JSON_PRETTY_PRINT));
             }
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             $this->error($exception->getMessage());
 
             return Command::FAILURE;
@@ -116,3 +118,44 @@ Artisan::command(
         return Command::SUCCESS;
     }
 )->purpose('Verify Airwallex credentials and optionally run sync or quote checks.');
+
+Artisan::command(
+    'bank-rates:sync
+    {--source=* : Limit sync to source keys such as vcb or techcombank}',
+    function (): int {
+        if (! (bool) config('services.bank_rate_sources.enabled', true)) {
+            $this->warn('Bank rate sync is disabled by BANK_RATE_SYNC_ENABLED.');
+
+            return Command::SUCCESS;
+        }
+
+        try {
+            $sources = $this->option('source');
+            $summary = app(BankRateSyncService::class)->sync(is_array($sources) && $sources !== [] ? $sources : null);
+        } catch (Throwable $exception) {
+            $this->error($exception->getMessage());
+
+            return Command::FAILURE;
+        }
+
+        foreach ($summary['sources'] as $source) {
+            if (isset($source['error'])) {
+                $this->error("{$source['name']} failed: {$source['error']}");
+
+                continue;
+            }
+
+            $this->info("{$source['name']}: {$source['rate_count']} rates, {$source['upserted']} rows upserted.");
+        }
+
+        $this->line("Total upserted: {$summary['upserted']}");
+
+        return $summary['failed'] > 0 ? Command::FAILURE : Command::SUCCESS;
+    }
+)->purpose('Fetch official Vietnam bank rates and upsert managed exchange rates.');
+
+if ((bool) config('services.bank_rate_sources.enabled', true)) {
+    Schedule::command('bank-rates:sync')
+        ->everyFiveMinutes()
+        ->withoutOverlapping();
+}
