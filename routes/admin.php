@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\Admin\AmlScreeningController;
 use App\Http\Controllers\Api\Admin\BankAccountController;
 use App\Http\Controllers\Api\Admin\BeneficiaryController;
 use App\Http\Controllers\Api\Admin\ContactSubmissionController;
+use App\Http\Controllers\Api\Admin\FxOrderController;
 use App\Http\Controllers\Api\Admin\IntegrationProviderController;
 use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
 use App\Http\Controllers\Api\Admin\ManagedExchangeRateController;
@@ -26,10 +27,17 @@ Route::apiResources([
     'transactions' => TransactionController::class,
 ]);
 
+Route::apiResource('fx-orders', FxOrderController::class)
+    ->except(['store'])
+    ->parameters(['fx-orders' => 'fxOrder']);
 Route::post('providers/{provider}/users/{user}/sync', [ProviderSyncController::class, 'syncUser'])
     ->name('providers.users.sync');
 Route::post('transfers/{transfer}/sync-status', [TransferController::class, 'syncStatus'])
     ->name('transfers.sync-status');
+Route::post('fx-orders/{fxOrder}/confirm', [FxOrderController::class, 'confirm'])
+    ->name('fx-orders.confirm');
+Route::post('fx-orders/{fxOrder}/reject', [FxOrderController::class, 'reject'])
+    ->name('fx-orders.reject');
 
 Route::get('kyc-submissions', [UserKycSubmissionController::class, 'index'])
     ->name('kyc-submissions.index');

@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\User\BalanceController;
 use App\Http\Controllers\Api\User\BankAccountController;
 use App\Http\Controllers\Api\User\BeneficiaryController;
+use App\Http\Controllers\Api\User\FxOrderController;
 use App\Http\Controllers\Api\User\FxQuoteController;
 use App\Http\Controllers\Api\User\IdentityVerificationController;
 use App\Http\Controllers\Api\User\KycSubmissionController;
@@ -38,6 +39,9 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::post('users/{user}/fx-quotes', [FxQuoteController::class, 'store']);
     Route::get('users/{user}/fx-quotes', [FxQuoteController::class, 'index']);
     Route::get('users/{user}/fx-quotes/{fxQuote}', [FxQuoteController::class, 'show']);
+    Route::post('users/{user}/fx-orders', [FxOrderController::class, 'store']);
+    Route::get('users/{user}/fx-orders', [FxOrderController::class, 'index']);
+    Route::get('users/{user}/fx-orders/{fxOrder}', [FxOrderController::class, 'show']);
 
     Route::get('users/{user}/balances', [BalanceController::class, 'index']);
     Route::get('users/{user}/bank-accounts', [BankAccountController::class, 'index']);

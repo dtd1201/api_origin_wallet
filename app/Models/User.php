@@ -127,6 +127,11 @@ class User extends Authenticatable
         return $this->hasMany(FxQuote::class);
     }
 
+    public function fxOrders(): HasMany
+    {
+        return $this->hasMany(FxOrder::class);
+    }
+
     public function transfers(): HasMany
     {
         return $this->hasMany(Transfer::class);
