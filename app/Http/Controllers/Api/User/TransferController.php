@@ -6,12 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
+use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Transfers\TransferEligibilityService;
+use App\Services\Wallet\TransferApprovalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
-use App\Services\Integrations\ProviderTransferManager;
-use App\Services\Transfers\TransferEligibilityService;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -33,8 +34,12 @@ class TransferController extends Controller
         );
     }
 
-    public function store(Request $request, User $user, TransferEligibilityService $eligibilityService): JsonResponse
-    {
+    public function store(
+        Request $request,
+        User $user,
+        TransferEligibilityService $eligibilityService,
+        TransferApprovalService $approvalService,
+    ): JsonResponse {
         $validated = $request->validate([
             'provider_id' => ['required', 'exists:integration_providers,id'],
             'source_bank_account_id' => ['nullable', 'exists:bank_accounts,id'],
@@ -94,12 +99,18 @@ class TransferController extends Controller
                 ->findOrFail($validated['fx_quote_id']);
         }
 
-        $transfer = DB::transaction(function () use ($user, $validated): Transfer {
-            return $user->transfers()->create([
+        $transfer = DB::transaction(function () use ($approvalService, $user, $validated): Transfer {
+            $transfer = $user->transfers()->create([
                 ...$validated,
                 'transfer_no' => 'TRF-'.Str::upper(Str::random(12)),
                 'status' => 'draft',
             ]);
+
+            $transfer->update([
+                'status' => $approvalService->initialStatusFor($transfer),
+            ]);
+
+            return $transfer->fresh();
         });
 
         if ($fxQuote !== null) {
@@ -176,9 +187,9 @@ class TransferController extends Controller
     {
         abort_unless($transfer->user_id === $user->id, 404);
 
-        if (! in_array($transfer->status, ['draft', 'pending'], true)) {
+        if (! in_array($transfer->status, ['draft', 'approval_required', 'approved'], true)) {
             return response()->json([
-                'message' => 'Only draft or pending transfers can be cancelled.',
+                'message' => 'Only draft, approval required, or approved transfers can be cancelled before provider submission.',
             ], 422);
         }
 

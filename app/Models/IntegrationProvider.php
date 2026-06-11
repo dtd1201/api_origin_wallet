@@ -15,8 +15,38 @@ class IntegrationProvider extends Model
     protected $fillable = [
         'code',
         'name',
+        'logo_url',
         'status',
     ];
+
+    public function publicPayload(): array
+    {
+        return [
+            'id' => $this->id,
+            'code' => $this->code,
+            'name' => $this->name,
+            'logo_url' => $this->logo_url,
+            'status' => $this->status,
+            'is_available_for_onboarding' => $this->isAvailableForOnboarding(),
+            'supports_beneficiaries' => $this->supportsBeneficiaries(),
+            'supports_data_sync' => $this->supportsDataSync(),
+            'supports_quotes' => $this->supportsQuotes(),
+            'supports_transfers' => $this->supportsTransfers(),
+            'supports_webhooks' => $this->supportsWebhooks(),
+            'is_configured' => $this->isConfigured(),
+        ];
+    }
+
+    public function summaryPayload(): array
+    {
+        return [
+            'id' => $this->id,
+            'code' => $this->code,
+            'name' => $this->name,
+            'logo_url' => $this->logo_url,
+            'status' => $this->status,
+        ];
+    }
 
     public function integrationConfig(): array
     {

@@ -5,34 +5,41 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
-class Balance extends Model
+class LedgerEntry extends Model
 {
     use HasFactory;
 
     protected $fillable = [
+        'balance_id',
         'user_id',
         'provider_id',
-        'bank_account_id',
-        'external_account_id',
+        'reference',
+        'entry_type',
+        'status',
         'currency',
-        'available_balance',
-        'ledger_balance',
-        'reserved_balance',
-        'as_of',
+        'amount',
+        'balance_after',
+        'source_type',
+        'source_id',
+        'description',
+        'posted_at',
         'raw_data',
     ];
 
     protected function casts(): array
     {
         return [
-            'available_balance' => 'decimal:8',
-            'ledger_balance' => 'decimal:8',
-            'reserved_balance' => 'decimal:8',
-            'as_of' => 'datetime',
+            'amount' => 'decimal:8',
+            'balance_after' => 'decimal:8',
+            'posted_at' => 'datetime',
             'raw_data' => 'array',
         ];
+    }
+
+    public function balance(): BelongsTo
+    {
+        return $this->belongsTo(Balance::class);
     }
 
     public function user(): BelongsTo
@@ -43,15 +50,5 @@ class Balance extends Model
     public function provider(): BelongsTo
     {
         return $this->belongsTo(IntegrationProvider::class, 'provider_id');
-    }
-
-    public function bankAccount(): BelongsTo
-    {
-        return $this->belongsTo(BankAccount::class);
-    }
-
-    public function ledgerEntries(): HasMany
-    {
-        return $this->hasMany(LedgerEntry::class);
     }
 }

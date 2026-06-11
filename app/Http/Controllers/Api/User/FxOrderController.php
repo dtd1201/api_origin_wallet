@@ -17,7 +17,7 @@ class FxOrderController extends Controller
     {
         return response()->json(
             $user->fxOrders()
-                ->with('provider:id,code,name,status')
+                ->with('provider:id,code,name,logo_url,status')
                 ->latest('id')
                 ->get()
         );
@@ -27,7 +27,7 @@ class FxOrderController extends Controller
     {
         abort_unless($fxOrder->user_id === $user->id, 404);
 
-        return response()->json($fxOrder->load('provider:id,code,name,status'));
+        return response()->json($fxOrder->load('provider:id,code,name,logo_url,status'));
     }
 
     public function store(Request $request, User $user): JsonResponse
@@ -75,7 +75,7 @@ class FxOrderController extends Controller
 
         return response()->json([
             'message' => 'FX order submitted successfully and is pending confirmation.',
-            'order' => $fxOrder->fresh('provider:id,code,name,status'),
+            'order' => $fxOrder->fresh('provider:id,code,name,logo_url,status'),
         ], 201);
     }
 
@@ -118,6 +118,7 @@ class FxOrderController extends Controller
                 'id' => $provider->id,
                 'code' => $provider->code,
                 'name' => $provider->name,
+                'logo_url' => $provider->logo_url,
             ],
         ];
     }

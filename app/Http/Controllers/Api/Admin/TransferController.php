@@ -2,10 +2,13 @@
 
 namespace App\Http\Controllers\Api\Admin;
 
+use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
-use App\Services\Integrations\ProviderTransferManager;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
+use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Wallet\LedgerService;
+use App\Services\Wallet\TransferApprovalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -14,9 +17,20 @@ use RuntimeException;
 
 class TransferController extends Controller
 {
+    use RecordsAdminAudit;
+
     public function index(): JsonResponse
     {
-        return response()->json(Transfer::latest('id')->paginate(15));
+        return response()->json(
+            Transfer::query()
+                ->with([
+                    'user:id,email,phone,full_name,status,kyc_status',
+                    'provider:id,code,name,logo_url,status',
+                    'approvals.approver:id,email,full_name,status,kyc_status',
+                ])
+                ->latest('id')
+                ->paginate(15)
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -67,7 +81,14 @@ class TransferController extends Controller
 
     public function show(Transfer $transfer): JsonResponse
     {
-        return response()->json($transfer->load(['beneficiary', 'sourceBankAccount', 'approvals', 'transactions']));
+        return response()->json($transfer->load([
+            'user:id,email,phone,full_name,status,kyc_status',
+            'provider:id,code,name,logo_url,status',
+            'beneficiary',
+            'sourceBankAccount',
+            'approvals.approver:id,email,full_name,status,kyc_status',
+            'transactions',
+        ]));
     }
 
     public function syncStatus(Transfer $transfer, ProviderTransferManager $manager): JsonResponse
@@ -88,6 +109,63 @@ class TransferController extends Controller
 
         return response()->json([
             'message' => 'Transfer status synced successfully.',
+            'transfer' => $transfer,
+        ]);
+    }
+
+    public function approve(
+        Request $request,
+        Transfer $transfer,
+        TransferApprovalService $approvalService,
+    ): JsonResponse {
+        $validated = $request->validate([
+            'note' => ['sometimes', 'nullable', 'string', 'max:2000'],
+        ]);
+
+        $before = $transfer->toArray();
+
+        try {
+            $transfer = $approvalService->approve($transfer, $request->user(), $validated['note'] ?? null);
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
+
+        $this->recordAdminAudit($request, 'transfer.approved', 'transfer', $transfer->id, $before, $transfer->toArray());
+
+        return response()->json([
+            'message' => 'Transfer approved successfully.',
+            'transfer' => $transfer,
+        ]);
+    }
+
+    public function reject(
+        Request $request,
+        Transfer $transfer,
+        TransferApprovalService $approvalService,
+        LedgerService $ledgerService,
+    ): JsonResponse {
+        $validated = $request->validate([
+            'note' => ['sometimes', 'nullable', 'string', 'max:2000'],
+        ]);
+
+        $before = $transfer->toArray();
+
+        try {
+            $transfer = $approvalService->reject($transfer, $request->user(), $validated['note'] ?? null);
+            $ledgerService->releaseTransferHold($transfer, 'Transfer hold released after admin rejection.');
+            $transfer = $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
+
+        $this->recordAdminAudit($request, 'transfer.rejected', 'transfer', $transfer->id, $before, $transfer->toArray());
+
+        return response()->json([
+            'message' => 'Transfer rejected successfully.',
             'transfer' => $transfer,
         ]);
     }

@@ -108,7 +108,7 @@ class KycProviderSubmissionController extends Controller
 
         return response()->json([
             'message' => "{$provider->name} KYC submission approved for internal release.",
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'kyc_provider_submission' => $submission,
         ]);
     }
@@ -148,7 +148,7 @@ class KycProviderSubmissionController extends Controller
 
         return response()->json([
             'message' => "{$provider->name} KYC submission rejected for internal release.",
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'kyc_provider_submission' => $submission,
         ]);
     }

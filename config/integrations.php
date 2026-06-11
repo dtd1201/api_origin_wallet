@@ -1,53 +1,91 @@
 <?php
 
+use App\Services\Airwallex\AirwallexBeneficiaryService;
+use App\Services\Airwallex\AirwallexDataSyncService;
+use App\Services\Airwallex\AirwallexOnboardingService;
+use App\Services\Airwallex\AirwallexQuoteService;
+use App\Services\Airwallex\AirwallexTransferService;
+use App\Services\Airwallex\AirwallexWebhookService;
+use App\Services\Currenxie\CurrenxieBeneficiaryService;
+use App\Services\Currenxie\CurrenxieDataSyncService;
+use App\Services\Currenxie\CurrenxieOnboardingService;
+use App\Services\Currenxie\CurrenxiePayloadMapper;
+use App\Services\Currenxie\CurrenxieQuoteService;
+use App\Services\Currenxie\CurrenxieTransferService;
+use App\Services\Currenxie\CurrenxieWebhookService;
+use App\Services\Nium\NiumBeneficiaryService;
+use App\Services\Nium\NiumDataSyncService;
+use App\Services\Nium\NiumQuoteService;
+use App\Services\Nium\NiumTransferService;
+use App\Services\Nium\NiumWebhookService;
+use App\Services\PingPong\PingPongBeneficiaryService;
+use App\Services\PingPong\PingPongTransferService;
+use App\Services\Tazapay\TazapayBeneficiaryService;
+use App\Services\Tazapay\TazapayDataSyncService;
+use App\Services\Tazapay\TazapayQuoteService;
+use App\Services\Tazapay\TazapayTransferService;
+use App\Services\Tazapay\TazapayWebhookService;
+use App\Services\Unlimit\UnlimitBeneficiaryService;
+use App\Services\Unlimit\UnlimitOnboardingService;
+use App\Services\Unlimit\UnlimitTransferService;
+use App\Services\Unlimit\UnlimitWebhookService;
+use App\Services\Wise\WiseBeneficiaryService;
+use App\Services\Wise\WiseDataSyncService;
+use App\Services\Wise\WiseOnboardingService;
+use App\Services\Wise\WiseQuoteService;
+use App\Services\Wise\WiseTransferService;
+use App\Services\Wise\WiseWebhookService;
+
 return [
     'providers' => [
         'currenxie' => [
-            'onboarding' => \App\Services\Currenxie\CurrenxieOnboardingService::class,
-            'webhook' => \App\Services\Currenxie\CurrenxieWebhookService::class,
-            'data_sync' => \App\Services\Currenxie\CurrenxieDataSyncService::class,
-            'quote' => \App\Services\Currenxie\CurrenxieQuoteService::class,
-            'transfer' => \App\Services\Currenxie\CurrenxieTransferService::class,
-            'beneficiary' => \App\Services\Currenxie\CurrenxieBeneficiaryService::class,
-            'payload_mapper' => \App\Services\Currenxie\CurrenxiePayloadMapper::class,
+            'onboarding' => CurrenxieOnboardingService::class,
+            'webhook' => CurrenxieWebhookService::class,
+            'data_sync' => CurrenxieDataSyncService::class,
+            'quote' => CurrenxieQuoteService::class,
+            'transfer' => CurrenxieTransferService::class,
+            'beneficiary' => CurrenxieBeneficiaryService::class,
+            'payload_mapper' => CurrenxiePayloadMapper::class,
         ],
         'wise' => [
-            'onboarding' => \App\Services\Wise\WiseOnboardingService::class,
-            'webhook' => \App\Services\Wise\WiseWebhookService::class,
-            'data_sync' => \App\Services\Wise\WiseDataSyncService::class,
-            'quote' => \App\Services\Wise\WiseQuoteService::class,
-            'transfer' => \App\Services\Wise\WiseTransferService::class,
-            'beneficiary' => \App\Services\Wise\WiseBeneficiaryService::class,
+            'onboarding' => WiseOnboardingService::class,
+            'webhook' => WiseWebhookService::class,
+            'data_sync' => WiseDataSyncService::class,
+            'quote' => WiseQuoteService::class,
+            'transfer' => WiseTransferService::class,
+            'beneficiary' => WiseBeneficiaryService::class,
         ],
         'airwallex' => [
-            'onboarding' => \App\Services\Airwallex\AirwallexOnboardingService::class,
-            'webhook' => \App\Services\Airwallex\AirwallexWebhookService::class,
-            'data_sync' => \App\Services\Airwallex\AirwallexDataSyncService::class,
-            'quote' => \App\Services\Airwallex\AirwallexQuoteService::class,
-            'transfer' => \App\Services\Airwallex\AirwallexTransferService::class,
-            'beneficiary' => \App\Services\Airwallex\AirwallexBeneficiaryService::class,
+            'onboarding' => AirwallexOnboardingService::class,
+            'webhook' => AirwallexWebhookService::class,
+            'data_sync' => AirwallexDataSyncService::class,
+            'quote' => AirwallexQuoteService::class,
+            'transfer' => AirwallexTransferService::class,
+            'beneficiary' => AirwallexBeneficiaryService::class,
         ],
         'pingpong' => [
-            'beneficiary' => \App\Services\PingPong\PingPongBeneficiaryService::class,
-            'transfer' => \App\Services\PingPong\PingPongTransferService::class,
+            'beneficiary' => PingPongBeneficiaryService::class,
+            'transfer' => PingPongTransferService::class,
         ],
         'tazapay' => [
-            'beneficiary' => \App\Services\Tazapay\TazapayBeneficiaryService::class,
-            'quote' => \App\Services\Tazapay\TazapayQuoteService::class,
-            'transfer' => \App\Services\Tazapay\TazapayTransferService::class,
-            'data_sync' => \App\Services\Tazapay\TazapayDataSyncService::class,
-            'webhook' => \App\Services\Tazapay\TazapayWebhookService::class,
+            'beneficiary' => TazapayBeneficiaryService::class,
+            'quote' => TazapayQuoteService::class,
+            'transfer' => TazapayTransferService::class,
+            'data_sync' => TazapayDataSyncService::class,
+            'webhook' => TazapayWebhookService::class,
         ],
         'unlimit' => [
-            'onboarding' => \App\Services\Unlimit\UnlimitOnboardingService::class,
-            'beneficiary' => \App\Services\Unlimit\UnlimitBeneficiaryService::class,
-            'transfer' => \App\Services\Unlimit\UnlimitTransferService::class,
-            'webhook' => \App\Services\Unlimit\UnlimitWebhookService::class,
+            'onboarding' => UnlimitOnboardingService::class,
+            'beneficiary' => UnlimitBeneficiaryService::class,
+            'transfer' => UnlimitTransferService::class,
+            'webhook' => UnlimitWebhookService::class,
         ],
         'nium' => [
-            'beneficiary' => \App\Services\Nium\NiumBeneficiaryService::class,
-            'quote' => \App\Services\Nium\NiumQuoteService::class,
-            'transfer' => \App\Services\Nium\NiumTransferService::class,
+            'beneficiary' => NiumBeneficiaryService::class,
+            'quote' => NiumQuoteService::class,
+            'transfer' => NiumTransferService::class,
+            'data_sync' => NiumDataSyncService::class,
+            'webhook' => NiumWebhookService::class,
         ],
     ],
 ];

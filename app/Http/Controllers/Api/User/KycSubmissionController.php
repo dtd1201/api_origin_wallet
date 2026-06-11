@@ -6,11 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Models\KycProfile;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
+use App\Services\Kyc\BusinessRegistryVerificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class KycSubmissionController extends Controller
 {
@@ -31,9 +33,14 @@ class KycSubmissionController extends Controller
         ]);
     }
 
-    public function submit(Request $request, User $user, AmlScreeningService $amlScreeningService): JsonResponse
-    {
+    public function submit(
+        Request $request,
+        User $user,
+        AmlScreeningService $amlScreeningService,
+        BusinessRegistryVerificationService $businessRegistryVerificationService,
+    ): JsonResponse {
         $validated = $request->validate($this->rules());
+        $validated = $this->attachBusinessRegistryVerification($validated, $businessRegistryVerificationService);
 
         $kycProfile = DB::transaction(function () use ($user, $validated, $amlScreeningService): KycProfile {
             $payload = Arr::only($validated, $this->profileFields());
@@ -96,6 +103,39 @@ class KycSubmissionController extends Controller
             'kyc_profile' => $kycProfile,
             'kyc_submission' => $kycProfile,
         ], 202);
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function attachBusinessRegistryVerification(
+        array $validated,
+        BusinessRegistryVerificationService $businessRegistryVerificationService,
+    ): array {
+        if (($validated['applicant_type'] ?? null) !== 'business') {
+            return $validated;
+        }
+
+        $verification = $businessRegistryVerificationService->verify(
+            countryCode: (string) ($validated['registered_country_code'] ?? $validated['country_code'] ?? ''),
+            businessRegistrationNumber: $validated['business_registration_number'] ?? null,
+            taxId: $validated['tax_id'] ?? null,
+            businessName: $validated['business_name'] ?? null,
+        );
+
+        if (($verification['status'] ?? null) === 'invalid') {
+            throw ValidationException::withMessages([
+                'business_registration_number' => $verification['message'] ?? 'Business registry verification failed.',
+            ]);
+        }
+
+        $validated['metadata'] = [
+            ...($validated['metadata'] ?? []),
+            'business_registry_verification' => $verification,
+        ];
+
+        return $validated;
     }
 
     /**
@@ -250,10 +290,17 @@ class KycSubmissionController extends Controller
             ->flatMap(fn (array $person) => collect($person['documents'] ?? [])->pluck('type'))
             ->map(fn (string $type) => strtolower($type));
         $documentTypes = $profileDocumentTypes->merge($relatedDocumentTypes);
+        $relatedPersons = collect($validated['related_persons'] ?? []);
         $relationshipTypes = collect($validated['related_persons'] ?? [])
             ->pluck('relationship_type')
             ->map(fn (string $type) => strtolower($type));
         $isBusiness = $validated['applicant_type'] === 'business';
+        $hasRelatedPersonDocument = fn (array $relationships): bool => $relatedPersons->contains(function (array $person) use ($relationships): bool {
+            $relationshipType = strtolower((string) ($person['relationship_type'] ?? ''));
+
+            return in_array($relationshipType, $relationships, true)
+                && collect($person['documents'] ?? [])->pluck('type')->filter()->isNotEmpty();
+        });
 
         $requirements = [
             $this->requirement(
@@ -268,14 +315,14 @@ class KycSubmissionController extends Controller
                 label: 'Identity document front',
                 category: 'document',
                 type: 'document',
-                satisfied: $documentTypes->intersect(['identity_document_front', 'passport_front', 'national_id_front', 'driver_license_front'])->isNotEmpty(),
+                satisfied: $documentTypes->intersect(['identity_document', 'identity_document_front', 'passport_front', 'national_id_front', 'driver_license_front'])->isNotEmpty(),
             ),
             $this->requirement(
                 key: 'identity_document_back',
                 label: 'Identity document back',
                 category: 'document',
                 type: 'document',
-                satisfied: $documentTypes->intersect(['identity_document_back', 'passport_back', 'national_id_back', 'driver_license_back'])->isNotEmpty(),
+                satisfied: $documentTypes->intersect(['identity_document', 'identity_document_back', 'passport_back', 'national_id_back', 'driver_license_back'])->isNotEmpty(),
             ),
             $this->requirement(
                 key: 'proof_of_address',
@@ -302,6 +349,13 @@ class KycSubmissionController extends Controller
                 satisfied: $profileDocumentTypes->contains('business_registration'),
             );
             $requirements[] = $this->requirement(
+                key: 'certificate_of_incorporation',
+                label: 'Certificate of incorporation',
+                category: 'business',
+                type: 'document',
+                satisfied: $profileDocumentTypes->contains('certificate_of_incorporation'),
+            );
+            $requirements[] = $this->requirement(
                 key: 'proof_of_business_address',
                 label: 'Proof of business address',
                 category: 'business',
@@ -316,6 +370,13 @@ class KycSubmissionController extends Controller
                 satisfied: $profileDocumentTypes->contains('ownership_structure'),
             );
             $requirements[] = $this->requirement(
+                key: 'account_opening_application_form',
+                label: 'Hand-held account opening application form',
+                category: 'business',
+                type: 'document',
+                satisfied: $profileDocumentTypes->contains('account_opening_application_form'),
+            );
+            $requirements[] = $this->requirement(
                 key: 'authorized_representative',
                 label: 'Authorized representative',
                 category: 'person',
@@ -323,11 +384,27 @@ class KycSubmissionController extends Controller
                 satisfied: $relationshipTypes->intersect(['authorized_representative', 'director'])->isNotEmpty(),
             );
             $requirements[] = $this->requirement(
+                key: 'authorized_representative_identity_document',
+                label: 'Authorized representative ID document',
+                category: 'person',
+                type: 'document',
+                satisfied: $hasRelatedPersonDocument(['authorized_representative', 'director'])
+                    || $relatedDocumentTypes->contains('authorized_representative_identity_document'),
+            );
+            $requirements[] = $this->requirement(
                 key: 'beneficial_owner',
                 label: 'Beneficial owner',
                 category: 'person',
                 type: 'related_person',
                 satisfied: $relationshipTypes->intersect(['beneficial_owner', 'ubo'])->isNotEmpty(),
+            );
+            $requirements[] = $this->requirement(
+                key: 'beneficial_owner_identity_document',
+                label: 'UBO ID document',
+                category: 'person',
+                type: 'document',
+                satisfied: $hasRelatedPersonDocument(['beneficial_owner', 'ubo'])
+                    || $relatedDocumentTypes->intersect(['beneficial_owner_identity_document', 'ubo_identity_document'])->isNotEmpty(),
             );
         }
 

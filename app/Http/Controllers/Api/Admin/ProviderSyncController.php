@@ -21,7 +21,7 @@ class ProviderSyncController extends Controller
 
         return response()->json([
             'message' => "{$provider->name} sync submitted successfully.",
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'user_id' => $user->id,
             'provider_account' => $providerAccount,
         ]);

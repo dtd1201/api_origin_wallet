@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\Admin;
 
+use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\ManagedExchangeRate;
@@ -14,6 +15,8 @@ use Illuminate\Validation\ValidationException;
 
 class ManagedExchangeRateController extends Controller
 {
+    use RecordsAdminAudit;
+
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -25,7 +28,7 @@ class ManagedExchangeRateController extends Controller
         ]);
 
         $rates = ManagedExchangeRate::query()
-            ->with('provider:id,code,name,status')
+            ->with('provider:id,code,name,logo_url,status')
             ->when($validated['rate_type'] ?? null, fn ($query, $value) => $query->where('rate_type', $value))
             ->when($validated['audience'] ?? null, fn ($query, $value) => $query->where('audience', $value))
             ->when(
@@ -52,15 +55,20 @@ class ManagedExchangeRateController extends Controller
         $this->assertHasRateValue($validated);
         $validated = $this->normalizePayload($validated);
 
-        $rate = DB::transaction(fn (): ManagedExchangeRate => ManagedExchangeRate::query()->create($validated));
+        $rate = DB::transaction(function () use ($request, $validated): ManagedExchangeRate {
+            $rate = ManagedExchangeRate::query()->create($validated);
+            $this->recordAdminAudit($request, 'exchange_rate.created', 'managed_exchange_rate', $rate->id, null, $rate->toArray());
+
+            return $rate;
+        });
         $this->clearRateCaches();
 
-        return response()->json($rate->load('provider:id,code,name,status'), 201);
+        return response()->json($rate->load('provider:id,code,name,logo_url,status'), 201);
     }
 
     public function show(ManagedExchangeRate $exchangeRate): JsonResponse
     {
-        return response()->json($exchangeRate->load('provider:id,code,name,status'));
+        return response()->json($exchangeRate->load('provider:id,code,name,logo_url,status'));
     }
 
     public function update(Request $request, ManagedExchangeRate $exchangeRate): JsonResponse
@@ -73,19 +81,29 @@ class ManagedExchangeRateController extends Controller
         $this->assertHasRateValue($candidate);
         $validated = $this->normalizePayload($validated, $exchangeRate);
 
-        $rate = DB::transaction(function () use ($exchangeRate, $validated): ManagedExchangeRate {
+        $before = $exchangeRate->toArray();
+
+        $rate = DB::transaction(function () use ($before, $exchangeRate, $request, $validated): ManagedExchangeRate {
             $exchangeRate->update($validated);
 
-            return $exchangeRate->fresh();
+            $exchangeRate = $exchangeRate->fresh();
+            $this->recordAdminAudit($request, 'exchange_rate.updated', 'managed_exchange_rate', $exchangeRate->id, $before, $exchangeRate->toArray());
+
+            return $exchangeRate;
         });
         $this->clearRateCaches();
 
-        return response()->json($rate->load('provider:id,code,name,status'));
+        return response()->json($rate->load('provider:id,code,name,logo_url,status'));
     }
 
-    public function destroy(ManagedExchangeRate $exchangeRate): JsonResponse
+    public function destroy(Request $request, ManagedExchangeRate $exchangeRate): JsonResponse
     {
-        DB::transaction(fn () => $exchangeRate->delete());
+        $before = $exchangeRate->toArray();
+
+        DB::transaction(function () use ($before, $exchangeRate, $request): void {
+            $this->recordAdminAudit($request, 'exchange_rate.deleted', 'managed_exchange_rate', $exchangeRate->id, $before, null);
+            $exchangeRate->delete();
+        });
         $this->clearRateCaches();
 
         return response()->json(status: 204);

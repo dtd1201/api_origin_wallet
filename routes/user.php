@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\User\BalanceController;
 use App\Http\Controllers\Api\User\BankAccountController;
 use App\Http\Controllers\Api\User\BeneficiaryController;
+use App\Http\Controllers\Api\User\BusinessRegistryVerificationController;
 use App\Http\Controllers\Api\User\FxOrderController;
 use App\Http\Controllers\Api\User\FxQuoteController;
 use App\Http\Controllers\Api\User\IdentityVerificationController;
@@ -20,6 +21,7 @@ Route::get('users/{user}/profile', [ProfileController::class, 'show']);
 Route::put('users/{user}/profile', [ProfileController::class, 'update']);
 Route::get('users/{user}/kyc-profile', [KycSubmissionController::class, 'show']);
 Route::put('users/{user}/kyc-profile', [KycSubmissionController::class, 'submit']);
+Route::post('users/{user}/kyc-profile/business-registry/verify', BusinessRegistryVerificationController::class);
 Route::get('users/{user}/kyc-submission', [KycSubmissionController::class, 'show']);
 Route::put('users/{user}/kyc-submission', [KycSubmissionController::class, 'submit']);
 Route::post('users/{user}/identity-verification-sessions', [IdentityVerificationController::class, 'start']);

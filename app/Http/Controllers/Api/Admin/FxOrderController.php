@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\Admin;
 
+use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
 use App\Models\FxOrder;
 use Illuminate\Http\JsonResponse;
@@ -11,6 +12,8 @@ use Illuminate\Validation\Rule;
 
 class FxOrderController extends Controller
 {
+    use RecordsAdminAudit;
+
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -20,7 +23,7 @@ class FxOrderController extends Controller
         ]);
 
         $orders = FxOrder::query()
-            ->with(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,status'])
+            ->with(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status'])
             ->when(
                 filled($validated['status'] ?? null),
                 fn ($query) => $query->where('status', $validated['status'])
@@ -42,7 +45,7 @@ class FxOrderController extends Controller
     public function show(FxOrder $fxOrder): JsonResponse
     {
         return response()->json(
-            $fxOrder->load(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,status'])
+            $fxOrder->load(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status'])
         );
     }
 
@@ -58,12 +61,17 @@ class FxOrderController extends Controller
             'raw_data' => ['sometimes', 'nullable', 'array'],
         ]);
 
-        $fxOrder = DB::transaction(function () use ($fxOrder, $validated): FxOrder {
+        $before = $fxOrder->toArray();
+
+        $fxOrder = DB::transaction(function () use ($before, $fxOrder, $request, $validated): FxOrder {
             $payload = $this->normalizeUpdatePayload($validated);
 
             $fxOrder->update($payload);
 
-            return $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,status']);
+            $fxOrder = $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status']);
+            $this->recordAdminAudit($request, 'fx_order.updated', 'fx_order', $fxOrder->id, $before, $fxOrder->toArray());
+
+            return $fxOrder;
         });
 
         return response()->json($fxOrder);
@@ -79,7 +87,9 @@ class FxOrderController extends Controller
             'admin_note' => ['sometimes', 'nullable', 'string', 'max:2000'],
         ]);
 
-        $fxOrder = DB::transaction(function () use ($fxOrder, $validated): FxOrder {
+        $before = $fxOrder->toArray();
+
+        $fxOrder = DB::transaction(function () use ($before, $fxOrder, $request, $validated): FxOrder {
             $fxOrder->update([
                 ...$this->normalizeUpdatePayload($validated),
                 'status' => 'confirmed',
@@ -87,7 +97,10 @@ class FxOrderController extends Controller
                 'cancelled_at' => null,
             ]);
 
-            return $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,status']);
+            $fxOrder = $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status']);
+            $this->recordAdminAudit($request, 'fx_order.confirmed', 'fx_order', $fxOrder->id, $before, $fxOrder->toArray());
+
+            return $fxOrder;
         });
 
         return response()->json([
@@ -102,14 +115,19 @@ class FxOrderController extends Controller
             'admin_note' => ['sometimes', 'nullable', 'string', 'max:2000'],
         ]);
 
-        $fxOrder = DB::transaction(function () use ($fxOrder, $validated): FxOrder {
+        $before = $fxOrder->toArray();
+
+        $fxOrder = DB::transaction(function () use ($before, $fxOrder, $request, $validated): FxOrder {
             $fxOrder->update([
                 'status' => 'rejected',
                 'admin_note' => $validated['admin_note'] ?? $fxOrder->admin_note,
                 'cancelled_at' => now(),
             ]);
 
-            return $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,status']);
+            $fxOrder = $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status']);
+            $this->recordAdminAudit($request, 'fx_order.rejected', 'fx_order', $fxOrder->id, $before, $fxOrder->toArray());
+
+            return $fxOrder;
         });
 
         return response()->json([
@@ -118,15 +136,20 @@ class FxOrderController extends Controller
         ]);
     }
 
-    public function destroy(FxOrder $fxOrder): JsonResponse
+    public function destroy(Request $request, FxOrder $fxOrder): JsonResponse
     {
-        DB::transaction(fn () => $fxOrder->delete());
+        $before = $fxOrder->toArray();
+
+        DB::transaction(function () use ($before, $fxOrder, $request): void {
+            $this->recordAdminAudit($request, 'fx_order.deleted', 'fx_order', $fxOrder->id, $before, null);
+            $fxOrder->delete();
+        });
 
         return response()->json(status: 204);
     }
 
     /**
-     * @param array<string, mixed> $validated
+     * @param  array<string, mixed>  $validated
      * @return array<string, mixed>
      */
     private function normalizeUpdatePayload(array $validated): array

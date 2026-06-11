@@ -48,7 +48,7 @@ class ProviderDataSyncController extends Controller
 
         return response()->json([
             'message' => $message,
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'result' => $result,
         ]);
     }

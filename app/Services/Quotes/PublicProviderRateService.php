@@ -20,16 +20,14 @@ class PublicProviderRateService
         private readonly NiumService $niumService,
         private readonly TazapayService $tazapayService,
         private readonly ManagedExchangeRateService $managedExchangeRateService,
-    ) {
-    }
+    ) {}
 
     public function rates(
         string $sourceCurrency,
         string $targetCurrency,
         float $sourceAmount,
         string $audience = 'public',
-    ): array
-    {
+    ): array {
         $sourceCurrency = strtoupper($sourceCurrency);
         $targetCurrency = strtoupper($targetCurrency);
         $sourceAmount = round($sourceAmount, 8);
@@ -89,6 +87,7 @@ class PublicProviderRateService
                 'id' => $provider->id,
                 'code' => $provider->code,
                 'name' => $provider->name,
+                'logo_url' => $provider->logo_url,
                 'status' => $provider->status,
                 'is_available_for_onboarding' => $provider->isAvailableForOnboarding(),
                 'supports_beneficiaries' => $provider->supportsBeneficiaries(),

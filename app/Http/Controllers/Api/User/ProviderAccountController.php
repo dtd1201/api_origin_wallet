@@ -26,7 +26,7 @@ class ProviderAccountController extends Controller
         $providers = IntegrationProvider::query()
             ->where('status', 'active')
             ->orderBy('name')
-            ->get(['id', 'code', 'name', 'status']);
+            ->get(['id', 'code', 'name', 'logo_url', 'status']);
 
         return response()->json([
             'data' => $providers
@@ -47,7 +47,7 @@ class ProviderAccountController extends Controller
                     $providerSubmissionApproved = in_array($kycProviderSubmission?->status, ['approved', 'submitted'], true);
 
                     return [
-                        'provider' => $provider->only(['id', 'code', 'name', 'status']),
+                        'provider' => $provider->summaryPayload(),
                         'provider_account' => $providerAccount,
                         'integration_link' => $integrationLink,
                         'integration_request' => $integrationRequest,
@@ -93,7 +93,7 @@ class ProviderAccountController extends Controller
 
         if ($providerAccount === null) {
             return response()->json([
-                'provider' => $provider->only(['id', 'code', 'name', 'status']),
+                'provider' => $provider->summaryPayload(),
                 'provider_account' => null,
                 'integration_link' => $integrationLink,
                 'integration_request' => $integrationRequest,
@@ -108,7 +108,7 @@ class ProviderAccountController extends Controller
         }
 
         return response()->json([
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'provider_account' => $providerAccount,
             'integration_link' => $integrationLink,
             'integration_request' => $integrationRequest,
@@ -165,7 +165,7 @@ class ProviderAccountController extends Controller
 
         return response()->json([
             'message' => 'Provider connection request submitted successfully.',
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'integration_request' => $integrationRequest,
             'request_pending' => true,
         ], 202);
@@ -193,7 +193,7 @@ class ProviderAccountController extends Controller
 
         return response()->json([
             'message' => $onboarding->message,
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'provider_account' => $onboarding->providerAccount,
             'onboarding' => $onboarding->toArray(),
         ]);
@@ -221,7 +221,7 @@ class ProviderAccountController extends Controller
 
         return response()->json([
             'message' => $onboarding->message,
-            'provider' => $provider->only(['id', 'code', 'name', 'status']),
+            'provider' => $provider->summaryPayload(),
             'provider_account' => $onboarding->providerAccount,
             'onboarding' => $onboarding->toArray(),
         ]);

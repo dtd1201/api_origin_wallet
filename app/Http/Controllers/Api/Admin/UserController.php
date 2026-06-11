@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\Admin;
 
+use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\User;
@@ -15,6 +16,8 @@ use Illuminate\Validation\Rules\Exists;
 
 class UserController extends Controller
 {
+    use RecordsAdminAudit;
+
     public function index(): JsonResponse
     {
         return response()->json(
@@ -45,11 +48,14 @@ class UserController extends Controller
             ->all();
         $payload['password_hash'] = $validated['password'] ?? $validated['password_hash'];
 
-        $user = DB::transaction(function () use ($payload, $validated): User {
+        $user = DB::transaction(function () use ($payload, $request, $validated): User {
             $user = User::create($payload);
             $this->syncIntegrationLinks($user, $validated['integration_links'] ?? null);
 
-            return $user->fresh(['profile', 'roles', 'integrationLinks.provider']);
+            $user = $user->fresh(['profile', 'roles', 'integrationLinks.provider']);
+            $this->recordAdminAudit($request, 'user.created', 'user', $user->id, null, $user->toArray());
+
+            return $user;
         });
 
         return response()->json($this->userDetailPayload($user), 201);
@@ -82,7 +88,9 @@ class UserController extends Controller
             'integration_links.*.is_active' => ['sometimes', 'boolean'],
         ]);
 
-        $user = DB::transaction(function () use ($user, $validated): User {
+        $before = $user->load(['profile', 'roles', 'integrationLinks.provider'])->toArray();
+
+        $user = DB::transaction(function () use ($before, $request, $user, $validated): User {
             $payload = collect($validated)
                 ->except(['password', 'integration_links'])
                 ->all();
@@ -97,17 +105,24 @@ class UserController extends Controller
                 array_key_exists('integration_links', $validated) ? $validated['integration_links'] : null
             );
 
-            return $user->fresh(['profile', 'roles', 'integrationLinks.provider']);
+            $user = $user->fresh(['profile', 'roles', 'integrationLinks.provider']);
+            $this->recordAdminAudit($request, 'user.updated', 'user', $user->id, $before, $user->toArray());
+
+            return $user;
         });
 
         return response()->json($this->userDetailPayload($user));
     }
 
-    public function destroy(User $user): JsonResponse
+    public function destroy(Request $request, User $user): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
+        $before = $user->load(['profile', 'roles', 'integrationLinks.provider'])->toArray();
 
-        DB::transaction(fn () => $user->delete());
+        DB::transaction(function () use ($before, $request, $user): void {
+            $this->recordAdminAudit($request, 'user.deleted', 'user', $user->id, $before, null);
+            $user->delete();
+        });
 
         return response()->json(status: 204);
     }
@@ -136,7 +151,7 @@ class UserController extends Controller
             'available_providers' => IntegrationProvider::query()
                 ->where('status', 'active')
                 ->orderBy('name')
-                ->get(['id', 'code', 'name', 'status'])
+                ->get(['id', 'code', 'name', 'logo_url', 'status'])
                 ->toArray(),
         ];
     }

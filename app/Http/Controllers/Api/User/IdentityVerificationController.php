@@ -69,8 +69,10 @@ class IdentityVerificationController extends Controller
                 'proof_of_address',
                 'selfie_liveness',
                 'business_registration',
+                'certificate_of_incorporation',
                 'proof_of_business_address',
                 'ownership_structure',
+                'account_opening_application_form',
             ])],
             'file' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,pdf,mp4,mov', 'max:20480'],
             'metadata' => ['sometimes', 'array'],
@@ -249,7 +251,13 @@ class IdentityVerificationController extends Controller
     private function requiredCaptures(string $subjectType): array
     {
         if ($subjectType === 'business') {
-            return ['business_registration', 'proof_of_business_address', 'ownership_structure'];
+            return [
+                'business_registration',
+                'certificate_of_incorporation',
+                'proof_of_business_address',
+                'ownership_structure',
+                'account_opening_application_form',
+            ];
         }
 
         return ['identity_front', 'identity_back', 'proof_of_address', 'selfie_liveness'];
