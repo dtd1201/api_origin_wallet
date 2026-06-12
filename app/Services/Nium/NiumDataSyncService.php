@@ -128,6 +128,8 @@ class NiumDataSyncService implements DataSyncProvider
                 $reserved = $this->numericValue($item, [
                     'reservedBalance',
                     'reserved_balance',
+                    'withHoldingBalance',
+                    'with_holding_balance',
                     'holdBalance',
                     'hold_balance',
                     'blockedBalance',
@@ -179,8 +181,11 @@ class NiumDataSyncService implements DataSyncProvider
                 'wallet' => $this->niumService->walletId($user),
             ]),
             query: [
-                'fromDate' => now()->subDays((int) config('services.nium.transaction_sync_days', 30))->toDateString(),
-                'toDate' => now()->toDateString(),
+                'startDate' => now()->subDays((int) config('services.nium.transaction_sync_days', 30))->toDateString(),
+                'endDate' => now()->toDateString(),
+                'page' => 0,
+                'size' => 20,
+                'order' => 'DESC',
             ],
             user: $user,
         );
@@ -190,8 +195,8 @@ class NiumDataSyncService implements DataSyncProvider
             'transactions',
             'data.transactions',
             'wallet.transactions',
-            'data',
             'content',
+            'data',
         ]);
         $count = 0;
 
@@ -293,11 +298,15 @@ class NiumDataSyncService implements DataSyncProvider
             return $items;
         }
 
-        return $this->value($data, ['currency', 'currencyCode']) !== null ? [$data] : [];
+        return $this->value($data, ['currency', 'currencyCode', 'curSymbol']) !== null ? [$data] : [];
     }
 
     private function items(array $data, array $paths): array
     {
+        if (array_is_list($data)) {
+            return array_values(array_filter($data, 'is_array'));
+        }
+
         foreach ($paths as $path) {
             $value = Arr::get($data, $path);
 

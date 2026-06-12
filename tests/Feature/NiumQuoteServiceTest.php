@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\IntegrationProvider;
 use App\Models\User;
+use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumQuoteService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -22,6 +23,13 @@ class NiumQuoteServiceTest extends TestCase
         ]);
 
         $user = User::factory()->create();
+        UserProviderAccount::query()->create([
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'external_customer_id' => 'cust_hash_123',
+            'external_account_id' => 'wallet_hash_123',
+            'status' => 'active',
+        ]);
 
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');
         config()->set('services.nium.client_id', 'client_hash_123');
@@ -60,9 +68,11 @@ class NiumQuoteServiceTest extends TestCase
 
             return $request->url() === 'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/quotes'
                 && $request->hasHeader('x-api-key', 'nium-api-key')
-                && $data['sourceCurrency'] === 'USD'
-                && $data['destinationCurrency'] === 'INR'
-                && $data['sourceAmount'] === '100';
+                && $data['sourceCurrencyCode'] === 'USD'
+                && $data['destinationCurrencyCode'] === 'INR'
+                && $data['sourceAmount'] === 100.0
+                && $data['customerHashId'] === 'cust_hash_123'
+                && $data['quoteType'] === 'payout';
         });
     }
 }

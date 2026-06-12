@@ -1,14 +1,15 @@
 <?php
 
-use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AdminAuthController;
+use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BankRateController;
 use App\Http\Controllers\Api\ChatbotController;
 use App\Http\Controllers\Api\ContactSubmissionController;
-use App\Http\Controllers\Api\User\IdentityVerificationController;
 use App\Http\Controllers\Api\ProviderController;
-use App\Http\Controllers\Api\PublicProviderRateController;
 use App\Http\Controllers\Api\ProviderWebhookController;
+use App\Http\Controllers\Api\PublicProviderRateController;
+use App\Http\Controllers\Api\User\IdentityVerificationController;
+use App\Http\Controllers\Api\User\KycSubmissionController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/test', function () {
@@ -49,6 +50,10 @@ Route::prefix('auth')->group(function (): void {
 Route::middleware('auth.token')
     ->get('identity-verification-sessions/{identityVerificationSession}/evidence/{artifactHash}', [IdentityVerificationController::class, 'showEvidence'])
     ->name('identity-verification.evidence.show');
+
+Route::middleware('auth.token')
+    ->get('kyc-documents/{user}/{artifactHash}', [KycSubmissionController::class, 'showDocument'])
+    ->name('kyc-documents.show');
 
 Route::prefix('admin/auth')->group(function (): void {
     Route::post('login', [AdminAuthController::class, 'login']);

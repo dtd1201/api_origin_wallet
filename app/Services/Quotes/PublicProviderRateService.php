@@ -336,9 +336,13 @@ class PublicProviderRateService
                 ['client' => $this->niumService->clientId()],
             ),
             payload: [
-                'sourceCurrency' => $sourceCurrency,
-                'destinationCurrency' => $targetCurrency,
-                'sourceAmount' => (string) $sourceAmount,
+                'sourceCurrencyCode' => $sourceCurrency,
+                'destinationCurrencyCode' => $targetCurrency,
+                'sourceAmount' => $sourceAmount,
+                'quoteType' => 'payout',
+                'conversionSchedule' => 'immediate',
+                'lockPeriod' => '5_mins',
+                'executionType' => 'at_conversion_time',
             ],
         );
         $responseData = $this->successfulJson($response, 'Nium quote preview failed.');

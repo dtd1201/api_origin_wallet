@@ -15,8 +15,7 @@ class NiumTransferService implements TransferProvider
     public function __construct(
         private readonly NiumService $niumService,
         private readonly TransferEligibilityService $eligibilityService,
-    ) {
-    }
+    ) {}
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
@@ -111,7 +110,7 @@ class NiumTransferService implements TransferProvider
                 ? ($statusPayload['remarks'] ?? $responseData['message'] ?? $transfer->failure_reason)
                 : null,
             'completed_at' => in_array($status, ['completed', 'failed', 'cancelled'], true)
-                ? ($statusPayload['dateTime'] ?? $statusPayload['updatedAt'] ?? now())
+                ? ($statusPayload['dateTime'] ?? $statusPayload['updatedAt'] ?? $statusPayload['lastUpdatedAt'] ?? $statusPayload['completedAt'] ?? now())
                 : $transfer->completed_at,
             'raw_data' => array_merge($transfer->raw_data ?? [], [
                 'payment_status_response' => $responseData,
@@ -135,9 +134,9 @@ class NiumTransferService implements TransferProvider
                 'id' => $transfer->beneficiary->external_beneficiary_id,
             ],
             'payout' => array_filter([
-                'source_amount' => (float) $transfer->source_amount,
-                'source_currency' => $transfer->source_currency,
-                'destination_amount' => $transfer->target_amount !== null ? (float) $transfer->target_amount : null,
+                'sourceAmount' => (float) $transfer->source_amount,
+                'sourceCurrency' => $transfer->source_currency,
+                'destinationAmount' => $transfer->target_amount !== null ? (float) $transfer->target_amount : null,
                 'scheduledPayoutDate' => $nium['payout']['scheduledPayoutDate'] ?? null,
                 'serviceTime' => $nium['payout']['serviceTime'] ?? null,
                 'tradeOrderID' => $rawData['quote_ref'] ?? ($nium['payout']['tradeOrderID'] ?? null),
@@ -162,11 +161,13 @@ class NiumTransferService implements TransferProvider
 
     private function latestStatusPayload(array $responseData): array
     {
-        $items = Arr::get($responseData, 'audit')
+        $items = array_is_list($responseData)
+            ? $responseData
+            : (Arr::get($responseData, 'audit')
             ?? Arr::get($responseData, 'data.audit')
             ?? Arr::get($responseData, 'history')
             ?? Arr::get($responseData, 'data')
-            ?? [];
+            ?? []);
 
         if (is_array($items) && array_is_list($items) && $items !== []) {
             $last = end($items);

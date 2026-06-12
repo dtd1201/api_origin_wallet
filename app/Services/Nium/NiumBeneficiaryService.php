@@ -13,8 +13,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 {
     public function __construct(
         private readonly NiumService $niumService,
-    ) {
-    }
+    ) {}
 
     public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
@@ -159,29 +158,45 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     {
         $rawData = (array) ($beneficiary->raw_data ?? []);
         $nium = (array) ($rawData['nium'] ?? []);
-        $routingInfo = $this->routingInfo($beneficiary, $nium);
-        $payload = [
-            'beneficiary' => array_filter([
-                'name' => $this->beneficiaryName($beneficiary),
-                'accountType' => $this->accountType($beneficiary),
-                'countryCode' => $beneficiary->country_code,
-                'email' => $beneficiary->email,
-                'contactNumber' => $beneficiary->phone,
-                'address' => $beneficiary->address_line1,
-                'city' => $beneficiary->city,
-                'state' => $beneficiary->state,
-                'postcode' => $beneficiary->postal_code,
-                'alias' => $nium['beneficiary']['alias'] ?? null,
-                'remitterBeneficiaryRelationship' => $nium['beneficiary']['remitterBeneficiaryRelationship'] ?? null,
-            ], static fn ($value) => $value !== null && $value !== ''),
+        $payload = array_merge([
+            'beneficiaryContactCountryCode' => $nium['beneficiaryContactCountryCode'] ?? $nium['beneficiary_contact_country_code'] ?? null,
+            'beneficiaryContactNumber' => $beneficiary->phone,
+            'beneficiaryAccountType' => $this->beneficiaryAccountType($beneficiary),
+            'beneficiaryEmail' => $beneficiary->email,
             'destinationCountry' => $beneficiary->country_code,
             'destinationCurrency' => $beneficiary->currency,
             'payoutMethod' => strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'LOCAL')),
-            'accountNumber' => $beneficiary->account_number ?: $beneficiary->iban,
-            'bankAccountType' => $nium['bankAccountType'] ?? $nium['bank_account_type'] ?? 'CHECKING',
-            'bankCode' => $beneficiary->bank_code,
-            'routingInfo' => $routingInfo,
-        ];
+            'beneficiaryName' => $this->beneficiaryName($beneficiary),
+            'beneficiaryAlias' => $nium['beneficiaryAlias'] ?? $nium['beneficiary_alias'] ?? Arr::get($nium, 'beneficiary.alias'),
+            'beneficiaryPostcode' => $beneficiary->postal_code,
+            'beneficiaryAddress' => $beneficiary->address_line1,
+            'beneficiaryCity' => $beneficiary->city,
+            'beneficiaryCountryCode' => $beneficiary->country_code,
+            'beneficiaryState' => $beneficiary->state,
+            'remitterBeneficiaryRelationship' => $nium['remitterBeneficiaryRelationship']
+                ?? $nium['remitter_beneficiary_relationship']
+                ?? Arr::get($nium, 'beneficiary.remitterBeneficiaryRelationship'),
+            'beneficiaryAccountNumber' => $beneficiary->account_number ?: $beneficiary->iban,
+            'beneficiaryBankAccountType' => $nium['beneficiaryBankAccountType'] ?? $nium['beneficiary_bank_account_type'] ?? 'Checking',
+            'beneficiaryBankName' => $beneficiary->bank_name,
+            'beneficiaryBankCode' => $beneficiary->bank_code,
+            'beneficiaryIdentificationType' => $nium['beneficiaryIdentificationType'] ?? $nium['beneficiary_identification_type'] ?? null,
+            'beneficiaryIdentificationValue' => $nium['beneficiaryIdentificationValue'] ?? $nium['beneficiary_identification_value'] ?? null,
+            'proxyType' => $nium['proxyType'] ?? $nium['proxy_type'] ?? null,
+            'proxyValue' => $nium['proxyValue'] ?? $nium['proxy_value'] ?? null,
+            'beneficiaryCardIssuerName' => $nium['beneficiaryCardIssuerName'] ?? $nium['beneficiary_card_issuer_name'] ?? null,
+            'beneficiaryCardExpiryDate' => $nium['beneficiaryCardExpiryDate'] ?? $nium['beneficiary_card_expiry_date'] ?? null,
+            'authenticationCode' => $nium['authenticationCode'] ?? $nium['authentication_code'] ?? null,
+            'encryptedBeneficiaryCardToken' => $nium['encryptedBeneficiaryCardToken'] ?? $nium['encrypted_beneficiary_card_token'] ?? null,
+            'convertDestinationCurrency' => $nium['convertDestinationCurrency'] ?? $nium['convert_destination_currency'] ?? null,
+            'autoSweepPayoutAccount' => $nium['autoSweepPayoutAccount'] ?? $nium['auto_sweep_payout_account'] ?? null,
+            'defaultAutoSweepPayoutAccount' => $nium['defaultAutoSweepPayoutAccount'] ?? $nium['default_auto_sweep_payout_account'] ?? null,
+            'beneficiaryContactName' => $nium['beneficiaryContactName'] ?? $nium['beneficiary_contact_name'] ?? null,
+            'beneficiaryEntityType' => $nium['beneficiaryEntityType'] ?? $nium['beneficiary_entity_type'] ?? null,
+            'beneficiaryDob' => $nium['beneficiaryDob'] ?? $nium['beneficiary_dob'] ?? null,
+            'beneficiaryEstablishmentDate' => $nium['beneficiaryEstablishmentDate'] ?? $nium['beneficiary_establishment_date'] ?? null,
+            'beneficiaryName_local' => $nium['beneficiaryName_local'] ?? $nium['beneficiary_name_local'] ?? null,
+        ], $this->routingCodePayload($beneficiary, $nium));
 
         if (isset($nium['request']) && is_array($nium['request'])) {
             $payload = array_replace_recursive($payload, $nium['request']);
@@ -247,6 +262,25 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         }
 
         return $items;
+    }
+
+    private function routingCodePayload(Beneficiary $beneficiary, array $nium): array
+    {
+        $routingInfo = $this->routingInfo($beneficiary, $nium);
+        $payload = [];
+
+        foreach (array_slice($routingInfo, 0, 2) as $index => $routing) {
+            $number = $index + 1;
+            $payload["routingCodeType{$number}"] = $routing['type'] ?? null;
+            $payload["routingCodeValue{$number}"] = $routing['value'] ?? null;
+        }
+
+        return $payload;
+    }
+
+    private function beneficiaryAccountType(Beneficiary $beneficiary): string
+    {
+        return $this->accountType($beneficiary) === 'BUSINESS' ? 'Corporate' : 'Individual';
     }
 
     private function beneficiaryResponsePayload(array $responseData): array

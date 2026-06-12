@@ -15,12 +15,11 @@ class NiumQuoteService implements QuoteProvider
 {
     public function __construct(
         private readonly NiumService $niumService,
-    ) {
-    }
+    ) {}
 
     public function createQuote(IntegrationProvider $provider, User $user, array $payload): FxQuote
     {
-        $requestPayload = $this->buildQuotePayload($payload);
+        $requestPayload = $this->buildQuotePayload($user, $payload);
         $response = $this->niumService->post(
             path: $this->niumService->path(
                 (string) config('services.nium.quote_endpoint'),
@@ -55,19 +54,35 @@ class NiumQuoteService implements QuoteProvider
         ]));
     }
 
-    private function buildQuotePayload(array $payload): array
+    private function buildQuotePayload(User $user, array $payload): array
     {
         $nium = (array) (($payload['raw_data'] ?? [])['nium'] ?? []);
 
-        return array_filter([
-            'sourceCurrency' => $payload['source_currency'],
-            'destinationCurrency' => $payload['target_currency'],
-            'sourceAmount' => (string) $payload['source_amount'],
-            'destinationAmount' => isset($payload['target_amount']) ? (string) $payload['target_amount'] : null,
-            'lockPeriod' => $nium['lock_period'] ?? null,
-            'conversionSchedule' => $nium['conversion_schedule'] ?? null,
-            'request' => $nium['request'] ?? null,
+        $request = array_filter([
+            'sourceCurrencyCode' => $payload['source_currency'],
+            'destinationCurrencyCode' => $payload['target_currency'],
+            'sourceAmount' => isset($payload['source_amount']) ? (float) $payload['source_amount'] : null,
+            'destinationAmount' => isset($payload['target_amount']) ? (float) $payload['target_amount'] : null,
+            'quoteType' => $nium['quoteType'] ?? $nium['quote_type'] ?? 'payout',
+            'conversionSchedule' => $nium['conversionSchedule'] ?? $nium['conversion_schedule'] ?? 'immediate',
+            'lockPeriod' => $nium['lockPeriod'] ?? $nium['lock_period'] ?? '5_mins',
+            'executionType' => $nium['executionType'] ?? $nium['execution_type'] ?? 'at_conversion_time',
+            'customerHashId' => $nium['customerHashId'] ?? $nium['customer_hash_id'] ?? $this->optionalCustomerId($user),
+            'quoteIntent' => $nium['quoteIntent'] ?? $nium['quote_intent'] ?? null,
         ], static fn ($value) => $value !== null && $value !== '');
+
+        return isset($nium['request']) && is_array($nium['request'])
+            ? array_replace_recursive($request, $nium['request'])
+            : $request;
+    }
+
+    private function optionalCustomerId(User $user): ?string
+    {
+        try {
+            return $this->niumService->customerId($user);
+        } catch (RuntimeException) {
+            return null;
+        }
     }
 
     private function quotePayload(array $responseData): array

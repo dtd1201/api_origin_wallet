@@ -8,7 +8,6 @@ use App\Models\User;
 use App\Services\Nium\NiumBeneficiaryService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
-use RuntimeException;
 use Tests\TestCase;
 
 class NiumBeneficiaryServiceTest extends TestCase
@@ -76,9 +75,10 @@ class NiumBeneficiaryServiceTest extends TestCase
 
             return $request->url() === 'https://gateway.sandbox.nium.com/api/v2/client/client_hash_123/customer/cust_hash_123/beneficiaries'
                 && $request->hasHeader('x-api-key', 'nium-api-key')
-                && $data['beneficiary']['name'] === 'Jane Doe'
+                && $data['beneficiaryName'] === 'Jane Doe'
                 && $data['destinationCurrency'] === 'INR'
-                && $data['routingInfo'][0]['type'] === 'SWIFT';
+                && $data['routingCodeType1'] === 'SWIFT'
+                && $data['routingCodeValue1'] === 'HDFCINBB';
         });
     }
 
@@ -159,7 +159,7 @@ class NiumBeneficiaryServiceTest extends TestCase
         });
     }
 
-    public function test_update_beneficiary_requires_explicit_endpoint_configuration(): void
+    public function test_update_beneficiary_uses_official_v2_endpoint(): void
     {
         $provider = IntegrationProvider::query()->create([
             'code' => 'nium',
@@ -186,15 +186,36 @@ class NiumBeneficiaryServiceTest extends TestCase
             'status' => 'active',
         ]);
 
-        config()->set('services.nium.beneficiary_update_endpoint', null);
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');
+        config()->set('services.nium.client_id', 'client_hash_123');
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => 'nium-api-key',
+        ]);
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Nium beneficiary update is not enabled.');
+        Http::fake([
+            'https://gateway.sandbox.nium.com/api/v2/client/client_hash_123/customer/cust_hash_123/beneficiaries/bnf_hash_123' => Http::response([
+                'beneficiaryHashId' => 'bnf_hash_123',
+                'status' => 'ACTIVE',
+            ], 200),
+        ]);
 
-        app(NiumBeneficiaryService::class)->updateBeneficiary($provider, $beneficiary->fresh('user'));
+        $updated = app(NiumBeneficiaryService::class)->updateBeneficiary($provider, $beneficiary->fresh('user'));
+
+        $this->assertSame('active', $updated->status);
+
+        Http::assertSent(function ($request): bool {
+            $data = $request->data();
+
+            return $request->method() === 'PUT'
+                && $request->url() === 'https://gateway.sandbox.nium.com/api/v2/client/client_hash_123/customer/cust_hash_123/beneficiaries/bnf_hash_123'
+                && $data['beneficiaryName'] === 'Jane Doe'
+                && $data['beneficiaryAccountNumber'] === '1234567890';
+        });
     }
 
-    public function test_delete_beneficiary_requires_explicit_endpoint_configuration(): void
+    public function test_delete_beneficiary_uses_official_v1_endpoint(): void
     {
         $provider = IntegrationProvider::query()->create([
             'code' => 'nium',
@@ -221,11 +242,21 @@ class NiumBeneficiaryServiceTest extends TestCase
             'status' => 'active',
         ]);
 
-        config()->set('services.nium.beneficiary_delete_endpoint', null);
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');
+        config()->set('services.nium.client_id', 'client_hash_123');
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => 'nium-api-key',
+        ]);
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Nium beneficiary delete is not enabled.');
+        Http::fake([
+            'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/beneficiaries/bnf_hash_123' => Http::response('', 200),
+        ]);
 
         app(NiumBeneficiaryService::class)->deleteBeneficiary($provider, $beneficiary->fresh('user'));
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+            && $request->url() === 'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/beneficiaries/bnf_hash_123');
     }
 }

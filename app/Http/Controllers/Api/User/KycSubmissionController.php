@@ -11,8 +11,11 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class KycSubmissionController extends Controller
 {
@@ -31,6 +34,108 @@ class KycSubmissionController extends Controller
             'kyc_profile' => $user->kycProfile,
             'kyc_submission' => $user->kycProfile,
         ]);
+    }
+
+    public function uploadDocument(Request $request, User $user): JsonResponse
+    {
+        $validated = $request->validate([
+            'type' => ['required', 'string', 'max:100'],
+            'file' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,pdf,mp4,mov', 'max:20480'],
+            'subject_type' => ['nullable', 'string', Rule::in([
+                'applicant',
+                'business',
+                'authorized_representative',
+                'beneficial_owner',
+                'agent',
+            ])],
+            'side' => ['nullable', 'string', 'max:20'],
+            'issuing_country_code' => ['nullable', 'string', 'size:2'],
+            'document_number' => ['nullable', 'string', 'max:100'],
+            'issued_at' => ['nullable', 'date'],
+            'expires_at' => ['nullable', 'date', 'after:today'],
+            'metadata' => ['sometimes', 'array'],
+        ]);
+
+        $file = $request->file('file');
+        $disk = (string) config('services.kyc.documents_disk', 'kyc_private');
+        $fileHash = hash_file('sha256', $file->getRealPath());
+        $extension = $file->guessExtension() ?: $file->getClientOriginalExtension() ?: 'bin';
+        $safeType = Str::slug((string) $validated['type']) ?: 'document';
+        $path = sprintf(
+            'kyc/%d/documents/%s-%s.%s',
+            $user->id,
+            $fileHash,
+            $safeType,
+            $extension,
+        );
+
+        Storage::disk($disk)->put($path, file_get_contents($file->getRealPath()));
+
+        $document = array_filter([
+            'type' => $validated['type'],
+            'file_url' => route('kyc-documents.show', [
+                'user' => $user,
+                'artifactHash' => $fileHash,
+            ]),
+            'storage_disk' => $disk,
+            'file_path' => $path,
+            'original_name' => $file->getClientOriginalName(),
+            'mime_type' => $file->getMimeType(),
+            'file_size' => $file->getSize(),
+            'file_hash' => $fileHash,
+            'side' => $validated['side'] ?? null,
+            'document_number' => $validated['document_number'] ?? null,
+            'issuing_country_code' => isset($validated['issuing_country_code'])
+                ? strtoupper((string) $validated['issuing_country_code'])
+                : null,
+            'issued_at' => $validated['issued_at'] ?? null,
+            'expires_at' => $validated['expires_at'] ?? null,
+            'metadata' => array_filter([
+                ...($validated['metadata'] ?? []),
+                'subject_type' => $validated['subject_type'] ?? null,
+                'uploaded_at' => now()->toISOString(),
+            ], static fn ($value) => $value !== null && $value !== ''),
+        ], static fn ($value) => $value !== null && $value !== '');
+
+        return response()->json([
+            'message' => 'KYC document uploaded successfully.',
+            'document' => $document,
+        ], 201);
+    }
+
+    public function showDocument(Request $request, User $user, string $artifactHash): StreamedResponse
+    {
+        $authenticatedUser = $request->user();
+
+        if (! $authenticatedUser instanceof User) {
+            abort(401);
+        }
+
+        $authenticatedUser->loadMissing('roles');
+
+        if ($authenticatedUser->id !== $user->id && ! $authenticatedUser->isAdmin()) {
+            abort(403);
+        }
+
+        $document = $user->kycProfile?->documents()
+            ->where('file_hash', $artifactHash)
+            ->first();
+        $disk = (string) ($document?->storage_disk ?: config('services.kyc.documents_disk', 'kyc_private'));
+        $path = (string) ($document?->file_path ?: $this->uploadedDocumentPath($disk, $user, $artifactHash));
+
+        if ($path === '' || ! Storage::disk($disk)->exists($path)) {
+            abort(404);
+        }
+
+        return Storage::disk($disk)->response(
+            $path,
+            $document?->original_name ?: basename($path),
+            [
+                'Content-Type' => $document?->mime_type ?: (Storage::disk($disk)->mimeType($path) ?: 'application/octet-stream'),
+                'Cache-Control' => 'private, no-store, max-age=0',
+                'X-Content-Type-Options' => 'nosniff',
+            ],
+        );
     }
 
     public function submit(
@@ -136,6 +241,17 @@ class KycSubmissionController extends Controller
         ];
 
         return $validated;
+    }
+
+    private function uploadedDocumentPath(string $disk, User $user, string $artifactHash): ?string
+    {
+        foreach (Storage::disk($disk)->files("kyc/{$user->id}/documents") as $path) {
+            if (str_starts_with(basename($path), $artifactHash.'-')) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 
     /**

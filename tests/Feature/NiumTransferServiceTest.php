@@ -24,7 +24,9 @@ class NiumTransferServiceTest extends TestCase
             'status' => 'active',
         ]);
 
-        $user = User::factory()->create();
+        config()->set('wallet.transfer_controls.require_admin_approval', false);
+
+        $user = User::factory()->create(['kyc_status' => 'verified']);
         $user->providerAccounts()->create([
             'provider_id' => $provider->id,
             'external_customer_id' => 'cust_hash_123',
@@ -102,7 +104,8 @@ class NiumTransferServiceTest extends TestCase
             return $request->url() === 'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/wallet/wallet_hash_123/remittance'
                 && $request->hasHeader('x-api-key', 'nium-api-key')
                 && $data['beneficiary']['id'] === 'bnf_hash_123'
-                && $data['payout']['source_currency'] === 'USD'
+                && $data['payout']['sourceCurrency'] === 'USD'
+                && $data['payout']['sourceAmount'] === 100.0
                 && $data['purposeCode'] === 'IR001';
         });
     }
@@ -157,15 +160,13 @@ class NiumTransferServiceTest extends TestCase
 
         Http::fake([
             'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/wallet/wallet_hash_123/remittance/RT6431795378/audit' => Http::response([
-                'audit' => [
-                    [
-                        'status' => 'PENDING',
-                    ],
-                    [
-                        'status' => 'COMPLETED',
-                        'paymentReferenceNumber' => 'pay_123',
-                        'dateTime' => now()->toISOString(),
-                    ],
+                [
+                    'status' => 'PENDING',
+                ],
+                [
+                    'status' => 'COMPLETED',
+                    'paymentReferenceNumber' => 'pay_123',
+                    'lastUpdatedAt' => now()->toISOString(),
                 ],
             ], 200),
         ]);

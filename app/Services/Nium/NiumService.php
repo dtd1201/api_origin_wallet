@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class NiumService
@@ -82,6 +83,7 @@ class NiumService
 
     public function path(string $template, array $replacements = []): string
     {
+        $replacements = $this->withOfficialPathAliases($replacements);
         $path = $template;
 
         foreach ($replacements as $key => $value) {
@@ -91,11 +93,33 @@ class NiumService
         return $path;
     }
 
+    private function withOfficialPathAliases(array $replacements): array
+    {
+        $aliases = [
+            'client' => 'clientHashId',
+            'customer' => 'customerHashId',
+            'wallet' => 'walletHashId',
+            'beneficiary' => 'beneficiaryHashId',
+            'transfer' => 'systemReferenceNumber',
+        ];
+
+        foreach ($aliases as $legacy => $official) {
+            if (array_key_exists($legacy, $replacements) && ! array_key_exists($official, $replacements)) {
+                $replacements[$official] = $replacements[$legacy];
+            }
+        }
+
+        return $replacements;
+    }
+
     private function client(): ProviderHttpClient
     {
         return new ProviderHttpClient(
             provider: $this->provider(),
             serviceConfigKey: 'nium',
+            headers: [
+                'x-request-id' => (string) Str::uuid(),
+            ],
         );
     }
 
