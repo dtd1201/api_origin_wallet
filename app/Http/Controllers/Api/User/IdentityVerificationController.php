@@ -74,7 +74,7 @@ class IdentityVerificationController extends Controller
                 'ownership_structure',
                 'account_opening_application_form',
             ])],
-            'file' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,pdf,mp4,mov', 'max:20480'],
+            'file' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,pdf,mp4,mov,webm', 'max:20480'],
             'metadata' => ['sometimes', 'array'],
         ]);
 

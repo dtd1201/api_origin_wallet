@@ -40,7 +40,7 @@ class KycSubmissionController extends Controller
     {
         $validated = $request->validate([
             'type' => ['required', 'string', 'max:100'],
-            'file' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,pdf,mp4,mov', 'max:20480'],
+            'file' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,pdf,mp4,mov,webm', 'max:20480'],
             'subject_type' => ['nullable', 'string', Rule::in([
                 'applicant',
                 'business',
