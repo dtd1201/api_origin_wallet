@@ -9,6 +9,7 @@ use App\Services\BankRates\BankRateSyncService;
 use App\Services\Nium\NiumDataSyncService;
 use App\Services\Nium\NiumQuoteService;
 use App\Services\Nium\NiumService;
+use App\Support\SensitiveDataSanitizer;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -69,7 +70,10 @@ Artisan::command(
 
             if (! $response->successful()) {
                 $this->error('Airwallex connectivity check failed.');
-                $this->line(json_encode($response->json() ?? ['raw' => $response->body()], JSON_PRETTY_PRINT));
+                $this->line(json_encode(
+                    app(SensitiveDataSanitizer::class)->sanitize($response->json() ?? ['raw' => $response->body()]),
+                    JSON_PRETTY_PRINT
+                ));
 
                 return Command::FAILURE;
             }
@@ -111,7 +115,7 @@ Artisan::command(
                 ], JSON_PRETTY_PRINT));
             }
         } catch (Throwable $exception) {
-            $this->error($exception->getMessage());
+            $this->error((string) app(SensitiveDataSanitizer::class)->sanitize($exception->getMessage()));
 
             return Command::FAILURE;
         }
@@ -176,7 +180,10 @@ Artisan::command(
 
             if (! $response->successful()) {
                 $this->error('Nium connectivity check failed.');
-                $this->line(json_encode($response->json() ?? ['raw' => $response->body()], JSON_PRETTY_PRINT));
+                $this->line(json_encode(
+                    app(SensitiveDataSanitizer::class)->sanitize($response->json() ?? ['raw' => $response->body()]),
+                    JSON_PRETTY_PRINT
+                ));
 
                 return Command::FAILURE;
             }
@@ -215,7 +222,7 @@ Artisan::command(
                 ], JSON_PRETTY_PRINT));
             }
         } catch (Throwable $exception) {
-            $this->error($exception->getMessage());
+            $this->error((string) app(SensitiveDataSanitizer::class)->sanitize($exception->getMessage()));
 
             return Command::FAILURE;
         }

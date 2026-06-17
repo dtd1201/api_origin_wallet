@@ -7,6 +7,7 @@ use App\Models\AuditLog;
 use App\Models\WebhookEvent;
 use App\Services\Integrations\Contracts\ReprocessesWebhookEvent;
 use App\Services\Integrations\ProviderRegistry;
+use App\Support\SensitiveDataSanitizer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -16,6 +17,11 @@ use Throwable;
 
 class ProviderWebhookEventController extends Controller
 {
+    public function __construct(
+        private readonly SensitiveDataSanitizer $sensitiveDataSanitizer,
+    ) {
+    }
+
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -71,7 +77,7 @@ class ProviderWebhookEventController extends Controller
         }
 
         $event = DB::transaction(function () use ($request, $providerWebhookEvent): WebhookEvent {
-            $oldData = $providerWebhookEvent->toArray();
+            $oldData = $this->sensitiveDataSanitizer->sanitize($providerWebhookEvent->toArray());
             $payload = (array) ($providerWebhookEvent->payload ?? []);
             $currentRetry = (array) Arr::get($payload, '_origin_retry', []);
             $retryCount = (int) ($currentRetry['count'] ?? 0) + 1;
@@ -94,7 +100,7 @@ class ProviderWebhookEventController extends Controller
                 'entity_type' => 'webhook_event',
                 'entity_id' => (string) $providerWebhookEvent->id,
                 'old_data' => $oldData,
-                'new_data' => $providerWebhookEvent->fresh()->toArray(),
+                'new_data' => $this->sensitiveDataSanitizer->sanitize($providerWebhookEvent->fresh()->toArray()),
                 'ip_address' => $request->ip(),
                 'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
             ]);
@@ -142,7 +148,7 @@ class ProviderWebhookEventController extends Controller
             'processed_at' => $event->processed_at,
             'next_retry_at' => null,
             'error_message' => $event->error_message,
-            'payload' => $event->payload,
+            'payload' => $this->sensitiveDataSanitizer->sanitize($event->payload),
         ];
     }
 }

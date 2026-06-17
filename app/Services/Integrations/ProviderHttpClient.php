@@ -362,21 +362,21 @@ class ProviderHttpClient implements ProviderClient
         Response $response,
         int $durationMs,
     ): void {
+        $responseBody = $response->json() ?? ['raw' => $response->body()];
+
         ApiRequestLog::create([
             'provider_id' => $this->provider->id,
             'user_id' => $user?->id,
             'related_transfer_id' => $relatedTransferId,
             'request_method' => $method,
-            'request_url' => $url,
+            'request_url' => $this->sensitiveDataSanitizer->sanitize($url),
             'request_headers' => $this->sensitiveDataSanitizer->sanitize($this->resolveHeaders()),
             'request_body' => $this->sensitiveDataSanitizer->sanitize($payload),
             'response_status' => $response->status(),
             'response_headers' => $this->sensitiveDataSanitizer->sanitize(
                 Arr::map($response->headers(), static fn ($value) => implode(', ', $value))
             ),
-            'response_body' => $this->sensitiveDataSanitizer->sanitize(
-                $response->json() ?? ['raw' => $response->body()]
-            ),
+            'response_body' => $this->sensitiveDataSanitizer->sanitize($responseBody),
             'duration_ms' => $durationMs,
             'is_success' => $response->successful(),
         ]);

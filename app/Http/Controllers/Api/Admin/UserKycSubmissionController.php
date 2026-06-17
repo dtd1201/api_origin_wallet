@@ -108,6 +108,102 @@ class UserKycSubmissionController extends Controller
         ]);
     }
 
+    public function requestUpdate(Request $request, User $user): JsonResponse
+    {
+        $user = $this->resolveManageableUser($user);
+
+        $validated = $request->validate([
+            'key' => ['required', 'string', 'max:100'],
+            'label' => ['required', 'string', 'max:255'],
+            'category' => ['required', 'string', 'max:50'],
+            'requirement_type' => ['required', 'string', 'max:50'],
+            'subject_type' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'subject_id' => ['sometimes', 'nullable', 'integer'],
+            'reason' => ['required', 'string', 'max:2000'],
+            'review_note' => ['sometimes', 'nullable', 'string', 'max:1000'],
+            'metadata' => ['sometimes', 'array'],
+        ]);
+
+        /** @var KycProfile $kycProfile */
+        $kycProfile = $user->kycProfile()
+            ->with(['documents', 'relatedPersons', 'requirements'])
+            ->firstOrFail();
+
+        $kycProfile = DB::transaction(function () use ($request, $user, $kycProfile, $validated): KycProfile {
+            $oldData = $kycProfile->toArray();
+            $reviewedByUserId = $request->user()?->id;
+
+            $kycProfile->update([
+                'status' => 'needs_more_info',
+                'reviewed_by_user_id' => $reviewedByUserId,
+                'reviewed_at' => now(),
+                'review_note' => $validated['review_note'] ?? null,
+                'rejection_reason' => null,
+            ]);
+
+            $requirement = $kycProfile->requirements()->updateOrCreate(
+                ['key' => $validated['key']],
+                [
+                    'label' => $validated['label'],
+                    'category' => $validated['category'],
+                    'status' => 'needs_more_info',
+                    'requirement_type' => $validated['requirement_type'],
+                    'subject_type' => $validated['subject_type'] ?? null,
+                    'subject_id' => $validated['subject_id'] ?? null,
+                    'review_note' => $validated['review_note'] ?? null,
+                    'rejection_reason' => $validated['reason'],
+                    'metadata' => [
+                        ...($validated['metadata'] ?? []),
+                        'requested_by_user_id' => $reviewedByUserId,
+                        'requested_at' => now()->toISOString(),
+                    ],
+                ]
+            );
+
+            if (($validated['subject_type'] ?? null) === 'document' && isset($validated['subject_id'])) {
+                $kycProfile->documents()
+                    ->whereKey($validated['subject_id'])
+                    ->update(['status' => 'needs_more_info']);
+            }
+
+            if (($validated['subject_type'] ?? null) === 'related_person' && isset($validated['subject_id'])) {
+                $kycProfile->relatedPersons()
+                    ->whereKey($validated['subject_id'])
+                    ->update(['status' => 'needs_more_info']);
+            }
+
+            $user->update([
+                'status' => 'pending',
+                'kyc_status' => 'needs_more_info',
+            ]);
+
+            AuditLog::query()->create([
+                'user_id' => $reviewedByUserId,
+                'action' => 'kyc.update_requested',
+                'entity_type' => 'kyc_profile',
+                'entity_id' => (string) $kycProfile->id,
+                'old_data' => $oldData,
+                'new_data' => [
+                    ...$kycProfile->fresh()->toArray(),
+                    'target_user_id' => $user->id,
+                    'target_user_kyc_status' => $user->fresh()->kyc_status,
+                    'requested_requirement' => $requirement->fresh()?->toArray(),
+                ],
+                'ip_address' => $request->ip(),
+                'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
+            ]);
+
+            return $kycProfile->fresh(['user', 'reviewedBy', 'documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches']);
+        });
+
+        return response()->json([
+            'message' => 'KYC update requested.',
+            'user' => $user->fresh(),
+            'kyc_profile' => $kycProfile,
+            'kyc_submission' => $kycProfile,
+        ]);
+    }
+
     private function reviewProfile(
         Request $request,
         User $user,

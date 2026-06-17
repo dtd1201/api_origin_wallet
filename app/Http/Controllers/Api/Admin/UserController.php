@@ -52,7 +52,7 @@ class UserController extends Controller
             $user = User::create($payload);
             $this->syncIntegrationLinks($user, $validated['integration_links'] ?? null);
 
-            $user = $user->fresh(['profile', 'roles', 'integrationLinks.provider']);
+            $user = $user->fresh(['profile', 'kycProfile', 'roles', 'integrationLinks.provider']);
             $this->recordAdminAudit($request, 'user.created', 'user', $user->id, null, $user->toArray());
 
             return $user;
@@ -65,7 +65,7 @@ class UserController extends Controller
     {
         return response()->json(
             $this->userDetailPayload(
-                $this->resolveManageableUser($user)->load(['profile', 'roles', 'integrationLinks.provider'])
+                $this->resolveManageableUser($user)->load(['profile', 'kycProfile', 'roles', 'integrationLinks.provider'])
             )
         );
     }
@@ -88,7 +88,7 @@ class UserController extends Controller
             'integration_links.*.is_active' => ['sometimes', 'boolean'],
         ]);
 
-        $before = $user->load(['profile', 'roles', 'integrationLinks.provider'])->toArray();
+        $before = $user->load(['profile', 'kycProfile', 'roles', 'integrationLinks.provider'])->toArray();
 
         $user = DB::transaction(function () use ($before, $request, $user, $validated): User {
             $payload = collect($validated)
@@ -105,7 +105,7 @@ class UserController extends Controller
                 array_key_exists('integration_links', $validated) ? $validated['integration_links'] : null
             );
 
-            $user = $user->fresh(['profile', 'roles', 'integrationLinks.provider']);
+            $user = $user->fresh(['profile', 'kycProfile', 'roles', 'integrationLinks.provider']);
             $this->recordAdminAudit($request, 'user.updated', 'user', $user->id, $before, $user->toArray());
 
             return $user;
@@ -117,7 +117,7 @@ class UserController extends Controller
     public function destroy(Request $request, User $user): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
-        $before = $user->load(['profile', 'roles', 'integrationLinks.provider'])->toArray();
+        $before = $user->load(['profile', 'kycProfile', 'roles', 'integrationLinks.provider'])->toArray();
 
         DB::transaction(function () use ($before, $request, $user): void {
             $this->recordAdminAudit($request, 'user.deleted', 'user', $user->id, $before, null);
@@ -130,7 +130,7 @@ class UserController extends Controller
     private function manageableUsersQuery(): Builder
     {
         return User::query()
-            ->with(['profile', 'roles', 'integrationLinks.provider'])
+            ->with(['profile', 'kycProfile', 'roles', 'integrationLinks.provider'])
             ->nonAdmin()
             ->latest('id');
     }

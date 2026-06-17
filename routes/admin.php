@@ -72,12 +72,16 @@ Route::post('users/{user}/kyc-profile/approve', [UserKycSubmissionController::cl
     ->name('users.kyc-profile.approve');
 Route::post('users/{user}/kyc-profile/reject', [UserKycSubmissionController::class, 'reject'])
     ->name('users.kyc-profile.reject');
+Route::post('users/{user}/kyc-profile/requirements/request-update', [UserKycSubmissionController::class, 'requestUpdate'])
+    ->name('users.kyc-profile.requirements.request-update');
 Route::get('users/{user}/kyc-submission', [UserKycSubmissionController::class, 'show'])
     ->name('users.kyc-submission.show');
 Route::post('users/{user}/kyc-submission/approve', [UserKycSubmissionController::class, 'approve'])
     ->name('users.kyc-submission.approve');
 Route::post('users/{user}/kyc-submission/reject', [UserKycSubmissionController::class, 'reject'])
     ->name('users.kyc-submission.reject');
+Route::post('users/{user}/kyc-submission/requirements/request-update', [UserKycSubmissionController::class, 'requestUpdate'])
+    ->name('users.kyc-submission.requirements.request-update');
 
 Route::get('kyc-provider-submissions', [KycProviderSubmissionController::class, 'index'])
     ->name('kyc-provider-submissions.index');

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\ProviderWebhookManager;
+use App\Support\SensitiveDataSanitizer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use RuntimeException;
@@ -16,6 +17,7 @@ class ProviderWebhookController extends Controller
         IntegrationProvider $provider,
         Request $request,
         ProviderWebhookManager $manager,
+        SensitiveDataSanitizer $sensitiveDataSanitizer,
     ): JsonResponse {
         try {
             $result = $manager->handle($provider, $request);
@@ -25,7 +27,7 @@ class ProviderWebhookController extends Controller
             ], 403);
         } catch (RuntimeException $exception) {
             return response()->json([
-                'message' => $exception->getMessage(),
+                'message' => $sensitiveDataSanitizer->sanitize($exception->getMessage()),
             ], 422);
         }
 

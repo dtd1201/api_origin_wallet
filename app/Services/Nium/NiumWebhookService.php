@@ -175,7 +175,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     ? ($this->value($resource, ['dateTime', 'updatedAt', 'completedAt']) ?? now())
                     : $transfer->completed_at,
                 'raw_data' => array_merge($transfer->raw_data ?? [], [
-                    'last_webhook_payload' => $payload,
+                    'last_webhook_payload' => $this->sensitiveDataSanitizer->sanitize($payload),
                 ]),
             ]);
 
@@ -219,7 +219,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 'status' => $this->normalizeTransactionStatus($transfer->status),
                 'booked_at' => $this->value($resource, ['dateTime', 'updatedAt', 'completedAt']) ?? now(),
                 'value_date' => $this->value($resource, ['valueDate', 'date']) ?? now(),
-                'raw_data' => $resource,
+                'raw_data' => $this->sensitiveDataSanitizer->sanitize($resource),
             ],
         );
     }
