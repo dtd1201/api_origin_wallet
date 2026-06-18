@@ -22,6 +22,7 @@ Route::put('users/{user}/profile', [ProfileController::class, 'update']);
 Route::get('users/{user}/kyc-profile', [KycSubmissionController::class, 'show']);
 Route::put('users/{user}/kyc-profile', [KycSubmissionController::class, 'submit']);
 Route::post('users/{user}/kyc-profile/documents', [KycSubmissionController::class, 'uploadDocument']);
+Route::post('users/{user}/kyc-profile/requirements/{requirement}/resubmit', [KycSubmissionController::class, 'resubmitRequirement']);
 Route::post('users/{user}/kyc-profile/business-registry/verify', BusinessRegistryVerificationController::class);
 Route::get('users/{user}/kyc-submission', [KycSubmissionController::class, 'show']);
 Route::put('users/{user}/kyc-submission', [KycSubmissionController::class, 'submit']);

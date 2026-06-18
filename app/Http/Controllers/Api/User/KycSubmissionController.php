@@ -3,7 +3,9 @@
 namespace App\Http\Controllers\Api\User;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Models\KycProfile;
+use App\Models\KycRequirement;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
 use App\Services\Kyc\BusinessRegistryVerificationService;
@@ -204,6 +206,181 @@ class KycSubmissionController extends Controller
 
         return response()->json([
             'message' => 'KYC profile submitted and is pending internal review.',
+            'kyc_status' => $user->fresh()->kyc_status,
+            'kyc_profile' => $kycProfile,
+            'kyc_submission' => $kycProfile,
+        ], 202);
+    }
+
+    public function resubmitRequirement(Request $request, User $user, KycRequirement $requirement): JsonResponse
+    {
+        /** @var KycProfile $kycProfile */
+        $kycProfile = $user->kycProfile()
+            ->with(['documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches', 'reviewedBy'])
+            ->firstOrFail();
+
+        abort_if($requirement->kyc_profile_id !== $kycProfile->id, 404);
+
+        $validated = $request->validate([
+            'note' => ['sometimes', 'nullable', 'string', 'max:1000'],
+            'profile' => ['sometimes', 'array'],
+            'profile.applicant_type' => ['sometimes', 'string', Rule::in(['individual', 'business'])],
+            'profile.legal_name' => ['sometimes', 'string', 'max:255'],
+            'profile.date_of_birth' => ['sometimes', 'nullable', 'date', 'before:today'],
+            'profile.nationality_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
+            'profile.residence_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
+            'profile.business_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'profile.business_registration_number' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'profile.tax_id' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'profile.registered_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
+            'profile.address_line1' => ['sometimes', 'string', 'max:255'],
+            'profile.address_line2' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'profile.city' => ['sometimes', 'string', 'max:100'],
+            'profile.state' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'profile.postal_code' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'profile.country_code' => ['sometimes', 'string', 'size:2'],
+            'profile.metadata' => ['sometimes', 'array'],
+            'related_person' => ['sometimes', 'array'],
+            'related_person.relationship_type' => ['sometimes', 'string', 'max:50'],
+            'related_person.legal_name' => ['sometimes', 'string', 'max:255'],
+            'related_person.date_of_birth' => ['sometimes', 'nullable', 'date', 'before:today'],
+            'related_person.nationality_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
+            'related_person.residence_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
+            'related_person.ownership_percentage' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:100'],
+            'related_person.address_line1' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'related_person.address_line2' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'related_person.city' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'related_person.state' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'related_person.postal_code' => ['sometimes', 'nullable', 'string', 'max:30'],
+            'related_person.country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
+            'related_person.metadata' => ['sometimes', 'array'],
+            'document' => ['sometimes', 'array'],
+            'document.type' => ['required_with:document', 'string', 'max:50'],
+            'document.file_url' => ['required_with:document', 'url', 'max:2048'],
+            'document.storage_disk' => ['nullable', 'string', 'max:50'],
+            'document.file_path' => ['nullable', 'string', 'max:2048'],
+            'document.original_name' => ['nullable', 'string', 'max:255'],
+            'document.mime_type' => ['nullable', 'string', 'max:100'],
+            'document.file_size' => ['nullable', 'integer', 'min:0'],
+            'document.file_hash' => ['nullable', 'string', 'max:255'],
+            'document.side' => ['nullable', 'string', 'max:20'],
+            'document.document_number' => ['nullable', 'string', 'max:100'],
+            'document.issuing_country_code' => ['nullable', 'string', 'size:2'],
+            'document.issued_at' => ['nullable', 'date'],
+            'document.expires_at' => ['nullable', 'date', 'after:today'],
+            'document.metadata' => ['sometimes', 'array'],
+            'metadata' => ['sometimes', 'array'],
+        ]);
+
+        if (
+            ! array_key_exists('profile', $validated)
+            && ! array_key_exists('related_person', $validated)
+            && ! array_key_exists('document', $validated)
+        ) {
+            throw ValidationException::withMessages([
+                'requirement' => 'Submit updated information or a replacement document for this requirement.',
+            ]);
+        }
+
+        $kycProfile = DB::transaction(function () use ($request, $user, $kycProfile, $requirement, $validated): KycProfile {
+            $oldData = $kycProfile->toArray();
+            $profilePayload = Arr::only($validated['profile'] ?? [], $this->profileFields());
+            $relatedPersonPayload = Arr::only($validated['related_person'] ?? [], $this->relatedPersonFields());
+            $documentPayload = Arr::only($validated['document'] ?? [], $this->documentFields());
+            $resubmittedDocument = null;
+            $previousDocument = null;
+
+            if ($profilePayload !== []) {
+                $kycProfile->update($profilePayload);
+            }
+
+            if (($requirement->subject_type === 'related_person') && $requirement->subject_id && $relatedPersonPayload !== []) {
+                $kycProfile->relatedPersons()
+                    ->whereKey($requirement->subject_id)
+                    ->update([
+                        ...$relatedPersonPayload,
+                        'status' => 'submitted',
+                    ]);
+            }
+
+            if ($documentPayload !== []) {
+                if ($requirement->subject_type === 'document' && $requirement->subject_id) {
+                    $previousDocument = $kycProfile->documents()->whereKey($requirement->subject_id)->first();
+                }
+
+                $metadata = [
+                    ...($documentPayload['metadata'] ?? []),
+                    'resubmission_requirement_id' => $requirement->id,
+                    'resubmission_requirement_key' => $requirement->key,
+                    'previous_document_id' => $previousDocument?->id,
+                    'resubmitted_at' => now()->toISOString(),
+                ];
+
+                $resubmittedDocument = $kycProfile->documents()->create([
+                    ...$documentPayload,
+                    'kyc_related_person_id' => $previousDocument?->kyc_related_person_id
+                        ?: ($requirement->metadata['related_person_id'] ?? null),
+                    'status' => 'submitted',
+                    'metadata' => array_filter($metadata, static fn ($value) => $value !== null && $value !== ''),
+                ]);
+            }
+
+            $requirementMetadata = $requirement->metadata ?? [];
+            $requirementMetadata = [
+                ...$requirementMetadata,
+                ...($validated['metadata'] ?? []),
+                'resubmitted_at' => now()->toISOString(),
+                'resubmission_note' => $validated['note'] ?? null,
+                'resubmission_count' => ((int) ($requirementMetadata['resubmission_count'] ?? 0)) + 1,
+                'resubmitted_profile_fields' => array_keys($profilePayload),
+                'resubmitted_related_person_fields' => array_keys($relatedPersonPayload),
+                'resubmitted_document_id' => $resubmittedDocument?->id,
+            ];
+
+            $requirement->update([
+                'status' => 'submitted',
+                'metadata' => array_filter($requirementMetadata, static fn ($value) => $value !== null && $value !== ''),
+            ]);
+
+            $hasOpenRequirements = $kycProfile->requirements()
+                ->where('id', '!=', $requirement->id)
+                ->whereIn('status', ['required', 'needs_more_info', 'rejected'])
+                ->exists();
+
+            $kycProfile->update([
+                'status' => $hasOpenRequirements ? 'needs_more_info' : 'submitted',
+                'submitted_at' => $hasOpenRequirements ? $kycProfile->submitted_at : now(),
+                'reviewed_by_user_id' => null,
+                'reviewed_at' => null,
+            ]);
+
+            $user->update([
+                'status' => 'pending',
+                'kyc_status' => $hasOpenRequirements ? 'needs_more_info' : 'pending',
+            ]);
+
+            AuditLog::query()->create([
+                'user_id' => $user->id,
+                'action' => 'kyc.requirement_resubmitted',
+                'entity_type' => 'kyc_requirement',
+                'entity_id' => (string) $requirement->id,
+                'old_data' => $oldData,
+                'new_data' => [
+                    'kyc_profile_id' => $kycProfile->id,
+                    'requirement' => $requirement->fresh()?->toArray(),
+                    'resubmitted_document' => $resubmittedDocument?->toArray(),
+                    'profile_status' => $kycProfile->fresh()->status,
+                    'user_kyc_status' => $user->fresh()->kyc_status,
+                ],
+                'ip_address' => $request->ip(),
+                'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
+            ]);
+
+            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
+        });
+
+        return response()->json([
+            'message' => 'KYC requirement resubmitted.',
             'kyc_status' => $user->fresh()->kyc_status,
             'kyc_profile' => $kycProfile,
             'kyc_submission' => $kycProfile,
