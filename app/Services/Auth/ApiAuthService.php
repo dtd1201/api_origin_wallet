@@ -100,7 +100,9 @@ class ApiAuthService
     {
         $user->loadMissing(['profile', 'providerAccounts.provider', 'roles']);
 
-        $profileCompleted = $user->profile !== null && filled($user->profile->user_type);
+        $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
+        $legacyProfileCompleted = $user->profile !== null && filled($user->profile->user_type);
+        $profileCompleted = $legacyProfileCompleted || $internalKycVerified;
         $providerAccounts = $user->providerAccounts
             ->filter(fn ($account) => $account->provider !== null)
             ->values();
@@ -133,6 +135,7 @@ class ApiAuthService
             ],
             'onboarding' => [
                 'profile_completed' => $profileCompleted,
+                'internal_kyc_verified' => $internalKycVerified,
                 'selected_provider_code' => $selectedProviderCode,
                 'selected_provider_account_status' => $selectedProviderStatus,
                 'provider_account_statuses' => $providerStatuses,
@@ -141,8 +144,12 @@ class ApiAuthService
                     : ($selectedProviderCode === null ? 'select_provider' : null),
                 'message' => $profileCompleted
                     ? ($selectedProviderCode !== null
-                        ? 'Profile received. Account and KYC status remain pending until provider onboarding is completed.'
-                        : 'Profile received. Select a provider to start account onboarding.')
+                        ? ($internalKycVerified
+                            ? 'Profile verified. Provider onboarding remains pending until provider connection is completed.'
+                            : 'Profile received. Account and KYC status remain pending until provider onboarding is completed.')
+                        : ($internalKycVerified
+                            ? 'Profile verified. Select a provider to start account onboarding.'
+                            : 'Profile received. Select a provider to start account onboarding.'))
                     : 'Login successful. User must complete profile before using wallet features.',
             ],
             'providers' => IntegrationProvider::query()

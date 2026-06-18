@@ -19,6 +19,14 @@ class EnsureUserProfileIsComplete
             ], 401);
         }
 
+        $kycVerified = in_array(strtolower((string) $user->kyc_status), ['approved', 'verified'], true);
+
+        if ($kycVerified) {
+            return $next($request);
+        }
+
+        $user->loadMissing('profile');
+
         if ($user->profile === null) {
             return $this->profileRequiredResponse();
         }
