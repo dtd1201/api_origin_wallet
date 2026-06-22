@@ -22,7 +22,7 @@ class IntegrationProviderSeeder extends Seeder
                 ['code' => $provider['code']],
                 [
                     'name' => $provider['name'],
-                    'status' => 'active',
+                    'status' => $provider['code'] === 'nium' ? 'active' : 'inactive',
                 ]
             );
         });

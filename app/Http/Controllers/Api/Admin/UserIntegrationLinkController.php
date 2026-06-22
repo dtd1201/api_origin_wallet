@@ -8,6 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationLink;
 use App\Models\UserIntegrationRequest;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -24,13 +25,14 @@ class UserIntegrationLinkController extends Controller
 
         $providers = IntegrationProvider::query()
             ->where('status', 'active')
+            ->where('code', PrimaryProvider::code())
             ->orderBy('name')
             ->get();
 
         return response()->json([
             'user_id' => $user->id,
             'data' => $providers
-                ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding())
+                ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding() || PrimaryProvider::isPrimary($provider))
                 ->map(function (IntegrationProvider $provider) use ($user): array {
                     $link = $user->integrationLinks->firstWhere('provider_id', $provider->id);
                     $request = $user->integrationRequests->firstWhere('provider_id', $provider->id);
@@ -47,6 +49,7 @@ class UserIntegrationLinkController extends Controller
     public function upsert(Request $request, User $user, IntegrationProvider $provider): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
         $validated = $request->validate([
             'link_url' => ['required', 'url', 'max:2048'],
@@ -54,7 +57,7 @@ class UserIntegrationLinkController extends Controller
             'is_active' => ['sometimes', 'boolean'],
         ]);
 
-        if (! $provider->supportsOnboarding()) {
+        if (! $provider->supportsOnboarding() && ! PrimaryProvider::isPrimary($provider)) {
             return response()->json([
                 'message' => 'This provider is not available for onboarding yet.',
             ], 422);
@@ -133,8 +136,9 @@ class UserIntegrationLinkController extends Controller
     public function destroy(Request $request, User $user, IntegrationProvider $provider): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
-        if (! $provider->supportsOnboarding()) {
+        if (! $provider->supportsOnboarding() && ! PrimaryProvider::isPrimary($provider)) {
             return response()->json([
                 'message' => 'This provider is not available for onboarding yet.',
             ], 422);

@@ -9,6 +9,7 @@ use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -38,7 +39,7 @@ class TransferController extends Controller
         $validated = $request->validate([
             'transfer_no' => ['required', 'string', 'max:50', 'unique:transfers,transfer_no'],
             'user_id' => ['required', 'exists:users,id'],
-            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'source_bank_account_id' => ['nullable', 'exists:bank_accounts,id'],
             'beneficiary_id' => ['nullable', 'exists:beneficiaries,id'],
             'external_transfer_id' => ['nullable', 'string', 'max:255'],
@@ -61,18 +62,9 @@ class TransferController extends Controller
             'completed_at' => ['nullable', 'date'],
             'raw_data' => ['nullable', 'array'],
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong' => ['sometimes', 'array'],
-            'raw_data.pingpong.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.payout_type' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.use_pobo' => ['sometimes', 'nullable', 'in:Y,N'],
-            'raw_data.pingpong.pobo_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.payment_method' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.clearing_network' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.fee_bear' => ['sometimes', 'nullable', 'string', 'max:20'],
-            'raw_data.pingpong.middle_bank_code' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
-            'raw_data.pingpong.order_note' => ['sometimes', 'nullable', 'string', 'max:100'],
         ]);
+
+        $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null)->id;
 
         $transfer = DB::transaction(fn () => Transfer::create($validated));
 
@@ -94,6 +86,7 @@ class TransferController extends Controller
     public function syncStatus(Transfer $transfer, ProviderTransferManager $manager): JsonResponse
     {
         $provider = IntegrationProvider::query()->findOrFail($transfer->provider_id);
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
         try {
             $provider->assertSupportsCapability('transfer');
@@ -175,7 +168,7 @@ class TransferController extends Controller
         $validated = $request->validate([
             'transfer_no' => ['sometimes', 'string', 'max:50', 'unique:transfers,transfer_no,'.$transfer->id],
             'user_id' => ['sometimes', 'exists:users,id'],
-            'provider_id' => ['sometimes', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'source_bank_account_id' => ['sometimes', 'nullable', 'exists:bank_accounts,id'],
             'beneficiary_id' => ['sometimes', 'nullable', 'exists:beneficiaries,id'],
             'external_transfer_id' => ['sometimes', 'nullable', 'string', 'max:255'],
@@ -198,18 +191,11 @@ class TransferController extends Controller
             'completed_at' => ['sometimes', 'nullable', 'date'],
             'raw_data' => ['sometimes', 'nullable', 'array'],
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong' => ['sometimes', 'array'],
-            'raw_data.pingpong.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.payout_type' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.use_pobo' => ['sometimes', 'nullable', 'in:Y,N'],
-            'raw_data.pingpong.pobo_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.payment_method' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.clearing_network' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.fee_bear' => ['sometimes', 'nullable', 'string', 'max:20'],
-            'raw_data.pingpong.middle_bank_code' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
-            'raw_data.pingpong.order_note' => ['sometimes', 'nullable', 'string', 'max:100'],
         ]);
+
+        if (array_key_exists('provider_id', $validated)) {
+            $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
+        }
 
         $transfer = DB::transaction(function () use ($transfer, $validated): Transfer {
             $transfer->update($validated);

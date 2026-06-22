@@ -6,9 +6,11 @@ use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderOnboardingManager;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use RuntimeException;
 use Throwable;
 
@@ -26,7 +28,7 @@ class ProfileController extends Controller
         $validated = $request->validate([
             'phone' => ['sometimes', 'nullable', 'string', 'max:30'],
             'full_name' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'provider_code' => ['sometimes', 'string', 'exists:integration_providers,code'],
+            'provider_code' => ['sometimes', 'string', Rule::in([PrimaryProvider::code()]), 'exists:integration_providers,code'],
             'profile.user_type' => ['sometimes', 'string', 'max:20'],
             'profile.country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
             'profile.company_name' => ['sometimes', 'nullable', 'string', 'max:255'],
@@ -75,7 +77,7 @@ class ProfileController extends Controller
 
         $message = 'Profile updated successfully.';
 
-        if ($selectedProvider !== null) {
+        if ($selectedProvider !== null && ! PrimaryProvider::isPrimary($selectedProvider)) {
             try {
                 $onboarding = $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider']), true);
                 $message = "Profile updated. {$onboarding->message}";
@@ -100,7 +102,7 @@ class ProfileController extends Controller
         }
 
         return IntegrationProvider::query()
-            ->where('code', $providerCode)
+            ->where('code', PrimaryProvider::code())
             ->first();
     }
 }

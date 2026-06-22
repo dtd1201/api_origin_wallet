@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\FxOrder;
 use App\Models\IntegrationProvider;
 use App\Models\User;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -33,7 +34,7 @@ class FxOrderController extends Controller
     public function store(Request $request, User $user): JsonResponse
     {
         $validated = $request->validate([
-            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'source_currency' => ['required', 'string', 'size:3'],
             'target_currency' => ['required', 'string', 'size:3'],
             'source_amount' => ['required', 'numeric', 'gt:0'],
@@ -50,9 +51,7 @@ class FxOrderController extends Controller
             ], 422);
         }
 
-        $provider = IntegrationProvider::query()
-            ->where('status', 'active')
-            ->findOrFail($validated['provider_id']);
+        $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
 
         $user->loadMissing(['profile', 'kycProfile']);
 

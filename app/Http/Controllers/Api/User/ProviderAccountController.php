@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Models\UserIntegrationRequest;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use App\Services\Integrations\ProviderOnboardingManager;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -28,7 +29,7 @@ class ProviderAccountController extends Controller
 
         return response()->json([
             'data' => $providers
-                ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding())
+                ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding() || PrimaryProvider::isPrimary($provider))
                 ->map(function (IntegrationProvider $provider) use ($user): array {
                     $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
                     $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
@@ -63,9 +64,7 @@ class ProviderAccountController extends Controller
 
     public function show(User $user, IntegrationProvider $provider): JsonResponse
     {
-        if (! $provider->supportsOnboarding()) {
-            abort(404);
-        }
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
         $user->loadMissing([
             'integrationLinks.provider',
@@ -122,11 +121,7 @@ class ProviderAccountController extends Controller
 
     public function requestConnect(Request $request, User $user, IntegrationProvider $provider): JsonResponse
     {
-        if (! $provider->supportsOnboarding()) {
-            return response()->json([
-                'message' => 'This provider is not available for onboarding yet.',
-            ], 422);
-        }
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
         $validated = $request->validate([
             'note' => ['sometimes', 'nullable', 'string', 'max:1000'],
@@ -162,7 +157,7 @@ class ProviderAccountController extends Controller
         });
 
         return response()->json([
-            'message' => 'Provider connection request submitted successfully.',
+            'message' => 'Nium account setup request submitted successfully.',
             'provider' => $provider->summaryPayload(),
             'integration_request' => $integrationRequest,
             'request_pending' => true,
@@ -175,6 +170,8 @@ class ProviderAccountController extends Controller
         IntegrationProvider $provider,
         ProviderOnboardingManager $manager,
     ): JsonResponse {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
         try {
             $provider->assertSupportsCapability('onboarding');
 
@@ -203,6 +200,8 @@ class ProviderAccountController extends Controller
         IntegrationProvider $provider,
         ProviderOnboardingManager $manager,
     ): JsonResponse {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
         try {
             $provider->assertSupportsCapability('onboarding');
 

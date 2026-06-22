@@ -3,12 +3,13 @@
 namespace App\Services\Integrations;
 
 use App\Models\IntegrationProvider;
+use App\Support\PrimaryProvider;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Facades\Cache;
 
 class IntegrationProviderCatalog
 {
-    private const ACTIVE_PROVIDERS_CACHE_KEY = 'integration_provider_catalog:active:v1';
+    private const ACTIVE_PROVIDERS_CACHE_KEY = 'integration_provider_catalog:active:nium:v1';
 
     /**
      * @return EloquentCollection<int, IntegrationProvider>
@@ -20,9 +21,15 @@ class IntegrationProviderCatalog
             now()->addSeconds($this->cacheTtlSeconds()),
             fn (): EloquentCollection => IntegrationProvider::query()
                 ->where('status', 'active')
+                ->where('code', PrimaryProvider::code())
                 ->orderBy('name')
                 ->get(['id', 'code', 'name', 'logo_url', 'status'])
         );
+    }
+
+    public function primaryProvider(): IntegrationProvider
+    {
+        return PrimaryProvider::resolve();
     }
 
     /**

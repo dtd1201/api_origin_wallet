@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Transfers\TransferEligibilityService;
 use App\Services\Wallet\TransferApprovalService;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -41,7 +42,7 @@ class TransferController extends Controller
         TransferApprovalService $approvalService,
     ): JsonResponse {
         $validated = $request->validate([
-            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'source_bank_account_id' => ['nullable', 'exists:bank_accounts,id'],
             'beneficiary_id' => ['nullable', 'exists:beneficiaries,id'],
             'fx_quote_id' => ['nullable', 'exists:fx_quotes,id'],
@@ -58,34 +59,19 @@ class TransferController extends Controller
             'client_reference' => ['nullable', 'string', 'max:255'],
             'raw_data' => ['nullable', 'array'],
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong' => ['sometimes', 'array'],
-            'raw_data.pingpong.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.payout_type' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.use_pobo' => ['sometimes', 'nullable', 'in:Y,N'],
-            'raw_data.pingpong.pobo_id' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.payment_method' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.clearing_network' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.fee_bear' => ['sometimes', 'nullable', 'string', 'max:20'],
-            'raw_data.pingpong.middle_bank_code' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
-            'raw_data.pingpong.order_note' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.unlimit' => ['sometimes', 'array'],
-            'raw_data.unlimit.payment_method' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.unlimit.request' => ['sometimes', 'array'],
-            'raw_data.unlimit.merchant_order' => ['sometimes', 'array'],
-            'raw_data.unlimit.payout_data' => ['sometimes', 'array'],
-            'raw_data.unlimit.customer' => ['sometimes', 'array'],
-            'raw_data.unlimit.ewallet_account' => ['sometimes', 'array'],
-            'raw_data.unlimit.card_account' => ['sometimes', 'array'],
-            'raw_data.unlimit.payment_data' => ['sometimes', 'array'],
         ]);
 
-        $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);
+        $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
+        $validated['provider_id'] = $provider->id;
 
         try {
             $provider->assertSupportsCapability('transfer');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
-        } catch (RuntimeException $exception) {
+        } catch (RuntimeException|\Illuminate\Validation\ValidationException $exception) {
+            if ($exception instanceof \Illuminate\Validation\ValidationException) {
+                throw $exception;
+            }
+
             return response()->json([
                 'message' => $exception->getMessage(),
             ], 422);

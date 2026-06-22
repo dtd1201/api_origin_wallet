@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\IntegrationProviderCatalog;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,7 +20,12 @@ class IntegrationProviderController extends Controller
 
     public function index(): JsonResponse
     {
-        return response()->json(IntegrationProvider::latest('id')->paginate(15));
+        return response()->json(
+            IntegrationProvider::query()
+                ->where('code', PrimaryProvider::code())
+                ->latest('id')
+                ->paginate(15)
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -27,7 +33,7 @@ class IntegrationProviderController extends Controller
         $this->normalizeRequest($request);
 
         $validated = $request->validate([
-            'code' => ['required', 'string', 'max:50', 'regex:/^[a-z0-9_-]+$/i', 'unique:integration_providers,code'],
+            'code' => ['required', 'string', 'max:50', 'regex:/^[a-z0-9_-]+$/i', Rule::in([PrimaryProvider::code()]), 'unique:integration_providers,code'],
             'name' => ['required', 'string', 'max:100'],
             'logo_url' => ['nullable', 'url', 'max:2048'],
             'status' => ['nullable', 'string', 'max:30'],
@@ -48,11 +54,15 @@ class IntegrationProviderController extends Controller
 
     public function show(IntegrationProvider $integrationProvider): JsonResponse
     {
+        abort_unless(PrimaryProvider::isPrimary($integrationProvider), 404);
+
         return response()->json($integrationProvider);
     }
 
     public function update(Request $request, IntegrationProvider $integrationProvider): JsonResponse
     {
+        abort_unless(PrimaryProvider::isPrimary($integrationProvider), 404);
+
         $this->normalizeRequest($request);
 
         $validated = $request->validate([
@@ -61,6 +71,7 @@ class IntegrationProviderController extends Controller
                 'string',
                 'max:50',
                 'regex:/^[a-z0-9_-]+$/i',
+                Rule::in([PrimaryProvider::code()]),
                 Rule::unique('integration_providers', 'code')->ignore($integrationProvider->id),
             ],
             'name' => ['sometimes', 'string', 'max:100'],
@@ -87,15 +98,11 @@ class IntegrationProviderController extends Controller
 
     public function destroy(Request $request, IntegrationProvider $integrationProvider): JsonResponse
     {
-        $before = $integrationProvider->toArray();
+        abort_unless(PrimaryProvider::isPrimary($integrationProvider), 404);
 
-        DB::transaction(function () use ($before, $integrationProvider, $request): void {
-            $this->recordAdminAudit($request, 'provider.deleted', 'integration_provider', $integrationProvider->id, $before, null);
-            $integrationProvider->delete();
-        });
-        $this->providerCatalog->flush();
-
-        return response()->json(status: 204);
+        return response()->json([
+            'message' => 'Nium is the primary infrastructure rail and cannot be deleted.',
+        ], 422);
     }
 
     private function normalizePayload(array $payload): array

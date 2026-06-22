@@ -4,8 +4,10 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\Balance;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class WalletController extends Controller
 {
@@ -13,18 +15,17 @@ class WalletController extends Controller
     {
         $validated = $request->validate([
             'provider_id' => ['nullable', 'integer', 'exists:integration_providers,id'],
-            'provider_code' => ['nullable', 'string', 'max:50'],
+            'provider_code' => ['nullable', 'string', Rule::in(['all', PrimaryProvider::code()])],
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'currency' => ['nullable', 'string', 'size:3'],
             'search' => ['nullable', 'string', 'max:255'],
         ]);
 
+        $provider = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null);
+
         $balances = Balance::query()
             ->with(['user', 'provider', 'bankAccount'])
-            ->when(filled($validated['provider_id'] ?? null), fn ($query) => $query->where('provider_id', $validated['provider_id']))
-            ->when(filled($validated['provider_code'] ?? null), function ($query) use ($validated): void {
-                $query->whereHas('provider', fn ($query) => $query->where('code', $validated['provider_code']));
-            })
+            ->where('provider_id', $provider->id)
             ->when(filled($validated['user_id'] ?? null), fn ($query) => $query->where('user_id', $validated['user_id']))
             ->when(filled($validated['currency'] ?? null), fn ($query) => $query->where('currency', strtoupper((string) $validated['currency'])))
             ->when(filled($validated['search'] ?? null), function ($query) use ($validated): void {
@@ -50,6 +51,8 @@ class WalletController extends Controller
 
     public function show(Balance $wallet): JsonResponse
     {
+        abort_unless($wallet->provider !== null && PrimaryProvider::isPrimary($wallet->provider), 404);
+
         return response()->json($this->payload($wallet->load(['user', 'provider', 'bankAccount'])));
     }
 

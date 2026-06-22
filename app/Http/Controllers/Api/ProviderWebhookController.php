@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\ProviderWebhookManager;
+use App\Support\PrimaryProvider;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -19,6 +20,8 @@ class ProviderWebhookController extends Controller
         ProviderWebhookManager $manager,
         SensitiveDataSanitizer $sensitiveDataSanitizer,
     ): JsonResponse {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
         try {
             $result = $manager->handle($provider, $request);
         } catch (AccessDeniedHttpException $exception) {

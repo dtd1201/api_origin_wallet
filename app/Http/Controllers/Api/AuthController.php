@@ -11,11 +11,13 @@ use App\Services\Auth\GoogleTokenVerifier;
 use App\Services\Auth\PasswordResetService;
 use App\Services\Auth\RegistrationService;
 use App\Services\Integrations\ProviderOnboardingManager;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Throwable;
 
 class AuthController extends Controller
@@ -242,7 +244,7 @@ class AuthController extends Controller
         $validated = $request->validate([
             'phone' => ['sometimes', 'nullable', 'string', 'max:30'],
             'full_name' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'provider_code' => ['sometimes', 'string', 'exists:integration_providers,code'],
+            'provider_code' => ['sometimes', 'string', Rule::in([PrimaryProvider::code()]), 'exists:integration_providers,code'],
             'profile.user_type' => ['required', 'string', 'max:20'],
             'profile.country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
             'profile.company_name' => ['sometimes', 'nullable', 'string', 'max:255'],
@@ -289,7 +291,7 @@ class AuthController extends Controller
 
         $providerSyncMessage = null;
 
-        if ($selectedProvider !== null) {
+        if ($selectedProvider !== null && ! PrimaryProvider::isPrimary($selectedProvider)) {
             try {
                 $onboarding = $onboardingManager->linkUser($selectedProvider, $user->fresh(['profile', 'providerAccounts.provider', 'roles']), true);
                 $providerSyncMessage = "Profile submitted. {$onboarding->message}";
@@ -316,7 +318,7 @@ class AuthController extends Controller
         }
 
         return IntegrationProvider::query()
-            ->where('code', $providerCode)
+            ->where('code', PrimaryProvider::code())
             ->first();
     }
 

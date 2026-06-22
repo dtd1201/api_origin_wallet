@@ -7,12 +7,14 @@ use App\Models\AuditLog;
 use App\Models\WebhookEvent;
 use App\Services\Integrations\Contracts\ReprocessesWebhookEvent;
 use App\Services\Integrations\ProviderRegistry;
+use App\Support\PrimaryProvider;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Throwable;
 
 class ProviderWebhookEventController extends Controller
@@ -25,17 +27,14 @@ class ProviderWebhookEventController extends Controller
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'provider_code' => ['nullable', 'string', 'max:50'],
+            'provider_code' => ['nullable', 'string', Rule::in(['all', PrimaryProvider::code()])],
             'status' => ['nullable', 'string', 'max:30'],
             'search' => ['nullable', 'string', 'max:255'],
         ]);
 
         $events = WebhookEvent::query()
             ->with('provider')
-            ->when(
-                filled($validated['provider_code'] ?? null) && $validated['provider_code'] !== 'all',
-                fn ($query) => $query->whereHas('provider', fn ($query) => $query->where('code', $validated['provider_code']))
-            )
+            ->whereHas('provider', fn ($query) => $query->where('code', PrimaryProvider::code()))
             ->when(
                 filled($validated['status'] ?? null) && $validated['status'] !== 'all',
                 fn ($query) => $query->where('processing_status', $validated['status'])
@@ -62,6 +61,8 @@ class ProviderWebhookEventController extends Controller
 
     public function show(WebhookEvent $providerWebhookEvent): JsonResponse
     {
+        abort_unless($providerWebhookEvent->provider !== null && PrimaryProvider::isPrimary($providerWebhookEvent->provider), 404);
+
         return response()->json($this->payload($providerWebhookEvent->load('provider')));
     }
 
@@ -70,6 +71,8 @@ class ProviderWebhookEventController extends Controller
         WebhookEvent $providerWebhookEvent,
         ProviderRegistry $registry,
     ): JsonResponse {
+        abort_unless($providerWebhookEvent->provider !== null && PrimaryProvider::isPrimary($providerWebhookEvent->provider), 404);
+
         if ($providerWebhookEvent->processing_status === 'processed') {
             return response()->json([
                 'message' => 'This webhook event is already processed.',

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\BankAccount;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,7 +20,7 @@ class BankAccountController extends Controller
     {
         $validated = $request->validate([
             'user_id' => ['required', 'exists:users,id'],
-            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'external_account_id' => ['nullable', 'string', 'max:255'],
             'account_type' => ['nullable', 'string', 'max:50'],
             'currency' => ['required', 'string', 'size:3'],
@@ -37,6 +38,8 @@ class BankAccountController extends Controller
             'raw_data' => ['nullable', 'array'],
         ]);
 
+        $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null)->id;
+
         $bankAccount = DB::transaction(fn () => BankAccount::create($validated));
 
         return response()->json($bankAccount, 201);
@@ -51,7 +54,7 @@ class BankAccountController extends Controller
     {
         $validated = $request->validate([
             'user_id' => ['sometimes', 'exists:users,id'],
-            'provider_id' => ['sometimes', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'external_account_id' => ['sometimes', 'nullable', 'string', 'max:255'],
             'account_type' => ['sometimes', 'nullable', 'string', 'max:50'],
             'currency' => ['sometimes', 'string', 'size:3'],
@@ -68,6 +71,10 @@ class BankAccountController extends Controller
             'is_default' => ['sometimes', 'boolean'],
             'raw_data' => ['sometimes', 'nullable', 'array'],
         ]);
+
+        if (array_key_exists('provider_id', $validated)) {
+            $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
+        }
 
         $bankAccount = DB::transaction(function () use ($bankAccount, $validated): BankAccount {
             $bankAccount->update($validated);

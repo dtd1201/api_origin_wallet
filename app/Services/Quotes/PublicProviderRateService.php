@@ -3,10 +3,8 @@
 namespace App\Services\Quotes;
 
 use App\Models\IntegrationProvider;
-use App\Services\Airwallex\AirwallexService;
-use App\Services\Integrations\ProviderHttpClient;
 use App\Services\Nium\NiumService;
-use App\Services\Tazapay\TazapayService;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
@@ -16,9 +14,7 @@ use RuntimeException;
 class PublicProviderRateService
 {
     public function __construct(
-        private readonly AirwallexService $airwallexService,
         private readonly NiumService $niumService,
-        private readonly TazapayService $tazapayService,
         private readonly ManagedExchangeRateService $managedExchangeRateService,
         private readonly PublicProviderRateCache $rateCache,
     ) {}
@@ -51,6 +47,7 @@ class PublicProviderRateService
             $audience,
         ): array {
             $providers = IntegrationProvider::query()
+                ->where('code', PrimaryProvider::code())
                 ->orderBy('id')
                 ->get();
 
@@ -176,11 +173,7 @@ class PublicProviderRateService
         $providerCode = strtolower($provider->code);
 
         return match ($providerCode) {
-            'airwallex' => $this->airwallexQuote($sourceCurrency, $targetCurrency, $sourceAmount),
-            'currenxie' => $this->currenxieQuote($provider, $sourceCurrency, $targetCurrency, $sourceAmount),
             'nium' => $this->niumQuote($sourceCurrency, $targetCurrency, $sourceAmount),
-            'tazapay' => $this->tazapayQuote($sourceCurrency, $targetCurrency, $sourceAmount),
-            'wise' => $this->wiseQuote($provider, $sourceCurrency, $targetCurrency, $sourceAmount),
             default => throw new RuntimeException('Public quote preview is not implemented for this provider.'),
         };
     }
@@ -261,75 +254,6 @@ class PublicProviderRateService
         ];
     }
 
-    private function airwallexQuote(string $sourceCurrency, string $targetCurrency, float $sourceAmount): array
-    {
-        $payload = [
-            'buy_currency' => $targetCurrency,
-            'sell_currency' => $sourceCurrency,
-            'sell_amount' => (string) $sourceAmount,
-            'validity' => config('services.airwallex.quote_validity'),
-        ];
-
-        $response = $this->airwallexService->post(
-            path: (string) config('services.airwallex.quote_endpoint'),
-            payload: $payload,
-        );
-        $responseData = $this->successfulJson($response, 'Airwallex quote preview failed.');
-
-        return $this->quotePayload(
-            sourceCurrency: $sourceCurrency,
-            targetCurrency: $targetCurrency,
-            sourceAmount: $sourceAmount,
-            targetAmount: $responseData['buy_amount'] ?? $responseData['target_amount'] ?? null,
-            midRate: $responseData['mid_rate']
-                ?? Arr::get($responseData, 'rate.mid')
-                ?? Arr::get($responseData, 'client_rate.mid'),
-            netRate: $responseData['client_rate']
-                ?? $responseData['rate']
-                ?? Arr::get($responseData, 'rate.client_rate')
-                ?? Arr::get($responseData, 'rate_details.client_rate'),
-            feeAmount: $responseData['fee_amount'] ?? Arr::get($responseData, 'fees.total') ?? 0,
-            expiresAt: $responseData['expires_at']
-                ?? $responseData['valid_to']
-                ?? $responseData['quote_expiry_time']
-                ?? now()->addMinutes(15)->toISOString(),
-        );
-    }
-
-    private function currenxieQuote(
-        IntegrationProvider $provider,
-        string $sourceCurrency,
-        string $targetCurrency,
-        float $sourceAmount,
-    ): array {
-        $client = new ProviderHttpClient(
-            provider: $provider,
-            serviceConfigKey: 'currenxie',
-            headers: $this->currenxieRequestHeaders(),
-        );
-
-        $response = $client->post(
-            path: (string) config('services.currenxie.quote_endpoint'),
-            payload: [
-                'source_currency' => $sourceCurrency,
-                'target_currency' => $targetCurrency,
-                'source_amount' => $sourceAmount,
-            ],
-        );
-        $responseData = $this->successfulJson($response, 'Currenxie quote preview failed.');
-
-        return $this->quotePayload(
-            sourceCurrency: $sourceCurrency,
-            targetCurrency: $targetCurrency,
-            sourceAmount: $sourceAmount,
-            targetAmount: $responseData['target_amount'] ?? null,
-            midRate: $responseData['mid_rate'] ?? null,
-            netRate: $responseData['net_rate'] ?? $responseData['fx_rate'] ?? null,
-            feeAmount: $responseData['fee_amount'] ?? 0,
-            expiresAt: $responseData['expires_at'] ?? now()->addMinutes(15)->toISOString(),
-        );
-    }
-
     private function niumQuote(string $sourceCurrency, string $targetCurrency, float $sourceAmount): array
     {
         $response = $this->niumService->post(
@@ -359,83 +283,6 @@ class PublicProviderRateService
             netRate: $quote['fxRate'] ?? $quote['rate'] ?? $quote['exchangeRate'] ?? null,
             feeAmount: $quote['feeAmount'] ?? $quote['fee'] ?? 0,
             expiresAt: $quote['expiresAt'] ?? $quote['quoteExpiry'] ?? now()->addMinutes(15)->toISOString(),
-        );
-    }
-
-    private function tazapayQuote(string $sourceCurrency, string $targetCurrency, float $sourceAmount): array
-    {
-        $response = $this->tazapayService->post(
-            path: (string) config('services.tazapay.quote_endpoint'),
-            payload: [
-                'payout_type' => 'local',
-                'payout_info' => [
-                    'amount' => $sourceAmount,
-                    'currency' => $targetCurrency,
-                ],
-                'holding_info' => [
-                    'amount' => $sourceAmount,
-                    'currency' => $sourceCurrency,
-                ],
-            ],
-        );
-        $responseData = $this->successfulJson($response, 'Tazapay quote preview failed.');
-        $quote = (array) ($responseData['data'] ?? $responseData);
-
-        return $this->quotePayload(
-            sourceCurrency: $sourceCurrency,
-            targetCurrency: $targetCurrency,
-            sourceAmount: Arr::get($quote, 'holding_info.amount', $sourceAmount),
-            targetAmount: Arr::get($quote, 'payout_info.amount'),
-            midRate: Arr::get($quote, 'exchange_rates.holding_to_payout'),
-            netRate: Arr::get($quote, 'exchange_rates.holding_to_payout'),
-            feeAmount: $this->tazapayFeeAmount($quote),
-            expiresAt: $quote['valid_until'] ?? now()->addMinutes(15)->toISOString(),
-        );
-    }
-
-    private function wiseQuote(
-        IntegrationProvider $provider,
-        string $sourceCurrency,
-        string $targetCurrency,
-        float $sourceAmount,
-    ): array {
-        $profileId = (string) config('services.wise.public_profile_id', '');
-
-        if ($profileId === '') {
-            throw new RuntimeException('Wise public profile id is not configured.');
-        }
-
-        $client = new ProviderHttpClient(
-            provider: $provider,
-            serviceConfigKey: 'wise',
-        );
-
-        $response = $client->post(
-            path: str_replace(
-                '{profile}',
-                urlencode($profileId),
-                (string) config('services.wise.quote_endpoint'),
-            ),
-            payload: [
-                'sourceCurrency' => $sourceCurrency,
-                'targetCurrency' => $targetCurrency,
-                'sourceAmount' => $sourceAmount,
-                'profile' => $profileId,
-            ],
-        );
-        $responseData = $this->successfulJson($response, 'Wise quote preview failed.');
-
-        return $this->quotePayload(
-            sourceCurrency: $sourceCurrency,
-            targetCurrency: $targetCurrency,
-            sourceAmount: $responseData['sourceAmount'] ?? $sourceAmount,
-            targetAmount: $responseData['targetAmount'] ?? null,
-            midRate: $responseData['rate'] ?? null,
-            netRate: $responseData['rate'] ?? null,
-            feeAmount: $this->wiseQuoteFee($responseData),
-            expiresAt: $responseData['expirationTime']
-                ?? $responseData['rateExpirationTime']
-                ?? now()->addMinutes(30)->toISOString(),
         );
     }
 
@@ -480,18 +327,6 @@ class PublicProviderRateService
         return $responseData;
     }
 
-    private function currenxieRequestHeaders(): array
-    {
-        if (strtolower((string) config('services.currenxie.auth.mode', 'static_headers')) !== 'static_headers') {
-            return [];
-        }
-
-        return [
-            'X-API-KEY' => (string) config('services.currenxie.api_key'),
-            'X-API-SECRET' => (string) config('services.currenxie.api_secret'),
-        ];
-    }
-
     private function niumQuotePayload(array $responseData): array
     {
         $quote = Arr::get($responseData, 'quotes.0')
@@ -500,28 +335,6 @@ class PublicProviderRateService
             ?? $responseData;
 
         return is_array($quote) ? $quote : [];
-    }
-
-    private function tazapayFeeAmount(array $quote): float
-    {
-        $fixed = (float) Arr::get($quote, 'fee_info.fixed.in_holding_currency', 0);
-        $variable = (float) Arr::get($quote, 'fee_info.variable.in_holding_currency', 0);
-
-        return $fixed + $variable;
-    }
-
-    private function wiseQuoteFee(array $quote): float
-    {
-        $matchingPaymentOption = collect($quote['paymentOptions'] ?? [])
-            ->first(function ($item) use ($quote): bool {
-                return ($item['payOut'] ?? null) === ($quote['payOut'] ?? null);
-            });
-
-        return (float) (
-            Arr::get($matchingPaymentOption, 'fee.total')
-            ?? Arr::get($matchingPaymentOption, 'price.total.value.amount')
-            ?? 0
-        );
     }
 
     private function nullableFloat(mixed $value): ?float

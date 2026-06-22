@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\Transaction;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,7 +20,7 @@ class TransactionController extends Controller
     {
         $validated = $request->validate([
             'user_id' => ['required', 'exists:users,id'],
-            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'bank_account_id' => ['nullable', 'exists:bank_accounts,id'],
             'transfer_id' => ['nullable', 'exists:transfers,id'],
             'external_transaction_id' => ['required', 'string', 'max:255'],
@@ -36,6 +37,8 @@ class TransactionController extends Controller
             'raw_data' => ['nullable', 'array'],
         ]);
 
+        $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null)->id;
+
         $transaction = DB::transaction(fn () => Transaction::create($validated));
 
         return response()->json($transaction, 201);
@@ -50,7 +53,7 @@ class TransactionController extends Controller
     {
         $validated = $request->validate([
             'user_id' => ['sometimes', 'exists:users,id'],
-            'provider_id' => ['sometimes', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'bank_account_id' => ['sometimes', 'nullable', 'exists:bank_accounts,id'],
             'transfer_id' => ['sometimes', 'nullable', 'exists:transfers,id'],
             'external_transaction_id' => ['sometimes', 'string', 'max:255'],
@@ -66,6 +69,10 @@ class TransactionController extends Controller
             'value_date' => ['sometimes', 'nullable', 'date'],
             'raw_data' => ['sometimes', 'nullable', 'array'],
         ]);
+
+        if (array_key_exists('provider_id', $validated)) {
+            $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
+        }
 
         $transaction = DB::transaction(function () use ($transaction, $validated): Transaction {
             $transaction->update($validated);

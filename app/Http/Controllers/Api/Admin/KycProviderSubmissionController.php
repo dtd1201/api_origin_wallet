@@ -8,6 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\KycProviderSubmission;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
+use App\Support\PrimaryProvider;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,12 +23,13 @@ class KycProviderSubmissionController extends Controller
     {
         $validated = $request->validate([
             'status' => ['sometimes', 'string', Rule::in(['pending', 'approved', 'submitted', 'rejected', 'failed'])],
-            'provider_code' => ['sometimes', 'string', 'exists:integration_providers,code'],
+            'provider_code' => ['sometimes', 'string', Rule::in([PrimaryProvider::code()]), 'exists:integration_providers,code'],
         ]);
 
         $submissions = KycProviderSubmission::query()
             ->with(['user', 'kycProfile', 'provider', 'providerAccount', 'reviewedBy'])
             ->whereHas('user', fn (Builder $query) => $query->nonAdmin())
+            ->whereHas('provider', fn (Builder $query) => $query->where('code', PrimaryProvider::code()))
             ->when(
                 isset($validated['status']),
                 fn (Builder $query) => $query->where('status', $validated['status'])
@@ -53,6 +55,7 @@ class KycProviderSubmissionController extends Controller
             'user' => $user,
             'data' => $user->kycProviderSubmissions()
                 ->with(['provider', 'kycProfile', 'providerAccount', 'reviewedBy'])
+                ->whereHas('provider', fn (Builder $query) => $query->where('code', PrimaryProvider::code()))
                 ->latest('updated_at')
                 ->get(),
         ]);
@@ -65,6 +68,7 @@ class KycProviderSubmissionController extends Controller
         AmlScreeningService $amlScreeningService,
     ): JsonResponse {
         $user = $this->resolveManageableUser($user)->load('kycProfile');
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
         $validated = $request->validate([
             'review_note' => ['sometimes', 'nullable', 'string', 'max:1000'],
@@ -72,7 +76,6 @@ class KycProviderSubmissionController extends Controller
         ]);
 
         try {
-            $provider->assertSupportsCapability('onboarding');
             $this->ensureInternalKycVerified($user);
             $amlScreeningService->assertProfileClear($user->kycProfile);
         } catch (RuntimeException $exception) {
@@ -116,6 +119,7 @@ class KycProviderSubmissionController extends Controller
     public function reject(Request $request, User $user, IntegrationProvider $provider): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
         $validated = $request->validate([
             'rejection_reason' => ['required', 'string', 'max:2000'],

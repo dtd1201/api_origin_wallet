@@ -8,6 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationLink;
 use App\Services\Integrations\IntegrationProviderCatalog;
+use App\Support\PrimaryProvider;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -158,7 +159,9 @@ class UserController extends Controller
     private function activeProviderCodeRule(): Exists
     {
         return Rule::exists('integration_providers', 'code')
-            ->where(fn ($query) => $query->where('status', 'active'));
+            ->where(fn ($query) => $query
+                ->where('status', 'active')
+                ->where('code', PrimaryProvider::code()));
     }
 
     /**
@@ -172,6 +175,7 @@ class UserController extends Controller
 
         $providerIdsByCode = IntegrationProvider::query()
             ->whereIn('code', collect($integrationLinks)->pluck('provider_code')->all())
+            ->where('code', PrimaryProvider::code())
             ->pluck('id', 'code');
 
         $providerIds = [];

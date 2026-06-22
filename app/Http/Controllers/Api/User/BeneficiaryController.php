@@ -7,6 +7,7 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -32,7 +33,7 @@ class BeneficiaryController extends Controller
     public function store(Request $request, User $user, ProviderBeneficiaryManager $manager): JsonResponse
     {
         $validated = $request->validate([
-            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'external_beneficiary_id' => ['nullable', 'string', 'max:255'],
             'beneficiary_type' => ['required', 'string', 'max:20'],
             'full_name' => ['required', 'string', 'max:255'],
@@ -53,19 +54,6 @@ class BeneficiaryController extends Controller
             'state' => ['nullable', 'string', 'max:100'],
             'postal_code' => ['nullable', 'string', 'max:30'],
             'raw_data' => ['nullable', 'array'],
-            'raw_data.pingpong' => ['sometimes', 'array'],
-            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
-            'raw_data.pingpong.bank_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.bank_detail.account_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.branch_name' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.bank_detail.ifsc_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.sort_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.routing_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.bank_detail.cert_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.cert_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
             'raw_data.nium' => ['sometimes', 'array'],
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
@@ -76,16 +64,13 @@ class BeneficiaryController extends Controller
             'raw_data.nium.account_verification.proxyType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.account_verification.proxyValue' => ['sometimes', 'nullable', 'string', 'max:255'],
             'raw_data.nium.account_verification.routingInfo' => ['sometimes', 'array'],
-            'raw_data.unlimit' => ['sometimes', 'array'],
-            'raw_data.unlimit.customer' => ['sometimes', 'array'],
-            'raw_data.unlimit.ewallet_account' => ['sometimes', 'array'],
-            'raw_data.unlimit.card_account' => ['sometimes', 'array'],
-            'raw_data.unlimit.payment_data' => ['sometimes', 'array'],
         ]);
 
         try {
-            $beneficiary = DB::transaction(function () use ($user, $validated, $manager): Beneficiary {
-                $provider = IntegrationProvider::query()->findOrFail($validated['provider_id']);
+            $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
+            $validated['provider_id'] = $provider->id;
+
+            $beneficiary = DB::transaction(function () use ($user, $provider, $validated, $manager): Beneficiary {
                 $provider->assertSupportsCapability('beneficiary');
                 $beneficiary = $user->beneficiaries()->create([
                     ...$validated,
@@ -94,7 +79,11 @@ class BeneficiaryController extends Controller
 
                 return $manager->createBeneficiary($provider, $beneficiary->load('user'));
             });
-        } catch (RuntimeException|InvalidArgumentException $exception) {
+        } catch (RuntimeException|InvalidArgumentException|\Illuminate\Validation\ValidationException $exception) {
+            if ($exception instanceof \Illuminate\Validation\ValidationException) {
+                throw $exception;
+            }
+
             return response()->json([
                 'message' => $exception->getMessage(),
             ], 422);
@@ -132,19 +121,6 @@ class BeneficiaryController extends Controller
             'state' => ['sometimes', 'nullable', 'string', 'max:100'],
             'postal_code' => ['sometimes', 'nullable', 'string', 'max:30'],
             'raw_data' => ['sometimes', 'nullable', 'array'],
-            'raw_data.pingpong' => ['sometimes', 'array'],
-            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
-            'raw_data.pingpong.bank_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.bank_detail.account_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.branch_name' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.bank_detail.ifsc_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.sort_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.routing_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.bank_detail.cert_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.cert_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
             'raw_data.nium' => ['sometimes', 'array'],
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
@@ -155,11 +131,6 @@ class BeneficiaryController extends Controller
             'raw_data.nium.account_verification.proxyType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.account_verification.proxyValue' => ['sometimes', 'nullable', 'string', 'max:255'],
             'raw_data.nium.account_verification.routingInfo' => ['sometimes', 'array'],
-            'raw_data.unlimit' => ['sometimes', 'array'],
-            'raw_data.unlimit.customer' => ['sometimes', 'array'],
-            'raw_data.unlimit.ewallet_account' => ['sometimes', 'array'],
-            'raw_data.unlimit.card_account' => ['sometimes', 'array'],
-            'raw_data.unlimit.payment_data' => ['sometimes', 'array'],
         ]);
 
         try {

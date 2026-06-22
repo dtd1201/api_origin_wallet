@@ -6,9 +6,11 @@ use App\Http\Controllers\Controller;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\ProviderHttpClient;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
+use Illuminate\Validation\Rule;
 use Throwable;
 
 class ProviderHealthController extends Controller
@@ -16,10 +18,11 @@ class ProviderHealthController extends Controller
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'provider_code' => ['nullable', 'string', 'max:50'],
+            'provider_code' => ['nullable', 'string', Rule::in(['all', PrimaryProvider::code()])],
         ]);
 
         $providers = IntegrationProvider::query()
+            ->where('code', PrimaryProvider::code())
             ->when(
                 filled($validated['provider_code'] ?? null) && $validated['provider_code'] !== 'all',
                 fn ($query) => $query->where('code', $validated['provider_code'])
@@ -32,6 +35,8 @@ class ProviderHealthController extends Controller
 
     public function check(IntegrationProvider $provider): JsonResponse
     {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
         $serviceConfigKey = strtolower($provider->code);
 
         if (! $provider->isConfigured()) {

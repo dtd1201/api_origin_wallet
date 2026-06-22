@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\Beneficiary;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,7 +20,7 @@ class BeneficiaryController extends Controller
     {
         $validated = $request->validate([
             'user_id' => ['required', 'exists:users,id'],
-            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'external_beneficiary_id' => ['nullable', 'string', 'max:255'],
             'beneficiary_type' => ['required', 'string', 'max:20'],
             'full_name' => ['required', 'string', 'max:255'],
@@ -41,20 +42,9 @@ class BeneficiaryController extends Controller
             'postal_code' => ['nullable', 'string', 'max:30'],
             'status' => ['nullable', 'string', 'max:30'],
             'raw_data' => ['nullable', 'array'],
-            'raw_data.pingpong' => ['sometimes', 'array'],
-            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
-            'raw_data.pingpong.bank_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.bank_detail.account_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.branch_name' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.bank_detail.ifsc_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.sort_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.routing_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.bank_detail.cert_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.cert_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
         ]);
+
+        $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null)->id;
 
         $beneficiary = DB::transaction(fn () => Beneficiary::create($validated));
 
@@ -70,7 +60,7 @@ class BeneficiaryController extends Controller
     {
         $validated = $request->validate([
             'user_id' => ['sometimes', 'exists:users,id'],
-            'provider_id' => ['sometimes', 'exists:integration_providers,id'],
+            'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'external_beneficiary_id' => ['sometimes', 'nullable', 'string', 'max:255'],
             'beneficiary_type' => ['sometimes', 'string', 'max:20'],
             'full_name' => ['sometimes', 'string', 'max:255'],
@@ -92,20 +82,11 @@ class BeneficiaryController extends Controller
             'postal_code' => ['sometimes', 'nullable', 'string', 'max:30'],
             'status' => ['sometimes', 'string', 'max:30'],
             'raw_data' => ['sometimes', 'nullable', 'array'],
-            'raw_data.pingpong' => ['sometimes', 'array'],
-            'raw_data.pingpong.document' => ['sometimes', 'nullable', 'string'],
-            'raw_data.pingpong.bank_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.bank_detail.account_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.branch_name' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'raw_data.pingpong.bank_detail.ifsc_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.sort_code' => ['sometimes', 'nullable', 'string', 'max:50'],
-            'raw_data.pingpong.bank_detail.routing_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.bank_detail.cert_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.bank_detail.cert_no' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'raw_data.pingpong.recipient_detail' => ['sometimes', 'array'],
-            'raw_data.pingpong.recipient_detail.recipient_type' => ['sometimes', 'nullable', 'string', 'max:30'],
-            'raw_data.pingpong.recipient_detail.phone_prefix' => ['sometimes', 'nullable', 'string', 'max:20'],
         ]);
+
+        if (array_key_exists('provider_id', $validated)) {
+            $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
+        }
 
         $beneficiary = DB::transaction(function () use ($beneficiary, $validated): Beneficiary {
             $beneficiary->update($validated);

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderDataSyncManager;
+use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use RuntimeException;
 
@@ -13,6 +14,8 @@ class ProviderDataSyncController extends Controller
 {
     public function syncAccounts(User $user, IntegrationProvider $provider, ProviderDataSyncManager $manager): JsonResponse
     {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
         return $this->respond(function () use ($provider, $user, $manager): array {
             $provider->assertSupportsCapability('data_sync');
 
@@ -22,6 +25,8 @@ class ProviderDataSyncController extends Controller
 
     public function syncBalances(User $user, IntegrationProvider $provider, ProviderDataSyncManager $manager): JsonResponse
     {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
         return $this->respond(function () use ($provider, $user, $manager): array {
             $provider->assertSupportsCapability('data_sync');
 
@@ -31,6 +36,8 @@ class ProviderDataSyncController extends Controller
 
     public function syncTransactions(User $user, IntegrationProvider $provider, ProviderDataSyncManager $manager): JsonResponse
     {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
         return $this->respond(function () use ($provider, $user, $manager): array {
             $provider->assertSupportsCapability('data_sync');
 
