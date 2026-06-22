@@ -5,15 +5,17 @@ namespace App\Http\Controllers\Api\Admin;
 use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
+use App\Services\Integrations\IntegrationProviderCatalog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class IntegrationProviderController extends Controller
 {
     use RecordsAdminAudit;
+
+    public function __construct(private readonly IntegrationProviderCatalog $providerCatalog) {}
 
     public function index(): JsonResponse
     {
@@ -39,7 +41,7 @@ class IntegrationProviderController extends Controller
 
             return $provider;
         });
-        Cache::flush();
+        $this->providerCatalog->flush();
 
         return response()->json($provider, 201);
     }
@@ -78,7 +80,7 @@ class IntegrationProviderController extends Controller
 
             return $integrationProvider;
         });
-        Cache::flush();
+        $this->providerCatalog->flush();
 
         return response()->json($integrationProvider);
     }
@@ -91,7 +93,7 @@ class IntegrationProviderController extends Controller
             $this->recordAdminAudit($request, 'provider.deleted', 'integration_provider', $integrationProvider->id, $before, null);
             $integrationProvider->delete();
         });
-        Cache::flush();
+        $this->providerCatalog->flush();
 
         return response()->json(status: 204);
     }

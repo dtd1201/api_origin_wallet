@@ -11,6 +11,10 @@ return [
         'market_base_url' => env('PUBLIC_PROVIDER_MARKET_RATE_BASE_URL', 'https://open.er-api.com/v6/latest'),
     ],
 
+    'provider_catalog' => [
+        'cache_ttl_seconds' => env('PROVIDER_CATALOG_CACHE_TTL_SECONDS', 60),
+    ],
+
     'identity_verification' => [
         'provider' => env('IDENTITY_VERIFICATION_PROVIDER', 'origin_capture'),
         'session_ttl_minutes' => env('IDENTITY_VERIFICATION_SESSION_TTL_MINUTES', 60),

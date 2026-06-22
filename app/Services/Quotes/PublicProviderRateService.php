@@ -20,6 +20,7 @@ class PublicProviderRateService
         private readonly NiumService $niumService,
         private readonly TazapayService $tazapayService,
         private readonly ManagedExchangeRateService $managedExchangeRateService,
+        private readonly PublicProviderRateCache $rateCache,
     ) {}
 
     public function rates(
@@ -35,6 +36,7 @@ class PublicProviderRateService
         $cacheTtl = $this->cacheTtlSeconds();
         $cacheKey = implode(':', [
             'public_provider_rates',
+            'v'.$this->rateCache->version(),
             $sourceCurrency,
             $targetCurrency,
             number_format($sourceAmount, 8, '.', ''),

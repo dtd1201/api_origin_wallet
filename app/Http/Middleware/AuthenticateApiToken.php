@@ -34,9 +34,13 @@ class AuthenticateApiToken
             return $this->unauthorizedResponse('Token has expired.');
         }
 
-        $token->forceFill([
-            'last_used_at' => now(),
-        ])->save();
+        $now = now();
+
+        if ($token->last_used_at === null || $token->last_used_at->lt($now->copy()->subMinute())) {
+            $token->forceFill([
+                'last_used_at' => $now,
+            ])->save();
+        }
 
         Auth::setUser($token->user);
         $request->setUserResolver(fn () => $token->user);

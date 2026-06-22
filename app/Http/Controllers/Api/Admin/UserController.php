@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationLink;
+use App\Services\Integrations\IntegrationProviderCatalog;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -17,6 +18,8 @@ use Illuminate\Validation\Rules\Exists;
 class UserController extends Controller
 {
     use RecordsAdminAudit;
+
+    public function __construct(private readonly IntegrationProviderCatalog $providerCatalog) {}
 
     public function index(): JsonResponse
     {
@@ -148,11 +151,7 @@ class UserController extends Controller
     {
         return [
             ...$user->toArray(),
-            'available_providers' => IntegrationProvider::query()
-                ->where('status', 'active')
-                ->orderBy('name')
-                ->get(['id', 'code', 'name', 'logo_url', 'status'])
-                ->toArray(),
+            'available_providers' => $this->providerCatalog->activePublicPayloads(),
         ];
     }
 

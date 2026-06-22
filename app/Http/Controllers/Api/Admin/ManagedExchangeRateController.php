@@ -6,9 +6,9 @@ use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\ManagedExchangeRate;
+use App\Services\Quotes\PublicProviderRateCache;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -16,6 +16,8 @@ use Illuminate\Validation\ValidationException;
 class ManagedExchangeRateController extends Controller
 {
     use RecordsAdminAudit;
+
+    public function __construct(private readonly PublicProviderRateCache $publicProviderRateCache) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -183,6 +185,6 @@ class ManagedExchangeRateController extends Controller
 
     private function clearRateCaches(): void
     {
-        Cache::flush();
+        $this->publicProviderRateCache->flush();
     }
 }

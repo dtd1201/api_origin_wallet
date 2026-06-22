@@ -4,15 +4,17 @@ namespace App\Services\Auth;
 
 use App\Mail\LoginVerificationCodeMail;
 use App\Models\ApiToken;
-use App\Models\IntegrationProvider;
 use App\Models\PendingLogin;
 use App\Models\User;
+use App\Services\Integrations\IntegrationProviderCatalog;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 
 class ApiAuthService
 {
+    public function __construct(private readonly IntegrationProviderCatalog $providerCatalog) {}
+
     public function issueToken(User $user, string $tokenName): string
     {
         $plainToken = Str::random(80);
@@ -152,13 +154,7 @@ class ApiAuthService
                             : 'Profile received. Select a provider to start account onboarding.'))
                     : 'Login successful. User must complete profile before using wallet features.',
             ],
-            'providers' => IntegrationProvider::query()
-                ->where('status', 'active')
-                ->orderBy('name')
-                ->get(['id', 'code', 'name', 'logo_url', 'status'])
-                ->map(fn (IntegrationProvider $provider) => $this->transformProvider($provider))
-                ->values()
-                ->all(),
+            'providers' => $this->providerCatalog->activePublicPayloads(),
         ], static fn ($value) => $value !== null);
     }
 
@@ -169,11 +165,6 @@ class ApiAuthService
                 $token->delete();
             }
         });
-    }
-
-    private function transformProvider(IntegrationProvider $provider): array
-    {
-        return $provider->publicPayload();
     }
 
     private function generateVerificationCode(): string

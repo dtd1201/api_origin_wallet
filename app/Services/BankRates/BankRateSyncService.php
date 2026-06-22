@@ -3,9 +3,9 @@
 namespace App\Services\BankRates;
 
 use App\Models\ManagedExchangeRate;
+use App\Services\Quotes\PublicProviderRateCache;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -13,6 +13,8 @@ use Throwable;
 
 class BankRateSyncService
 {
+    public function __construct(private readonly PublicProviderRateCache $publicProviderRateCache) {}
+
     public function sync(?array $sourceKeys = null): array
     {
         $sources = $this->sourceConfigs($sourceKeys);
@@ -48,7 +50,7 @@ class BankRateSyncService
         }
 
         if ($summary['upserted'] > 0) {
-            Cache::flush();
+            $this->publicProviderRateCache->flush();
         }
 
         return $summary;

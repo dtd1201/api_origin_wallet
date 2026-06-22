@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationRequest;
+use App\Services\Integrations\IntegrationProviderCatalog;
 use App\Services\Integrations\ProviderOnboardingManager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -14,7 +15,7 @@ use RuntimeException;
 
 class ProviderAccountController extends Controller
 {
-    public function index(User $user): JsonResponse
+    public function index(User $user, IntegrationProviderCatalog $providerCatalog): JsonResponse
     {
         $user->load([
             'providerAccounts.provider',
@@ -23,10 +24,7 @@ class ProviderAccountController extends Controller
             'kycProviderSubmissions.provider',
         ]);
 
-        $providers = IntegrationProvider::query()
-            ->where('status', 'active')
-            ->orderBy('name')
-            ->get(['id', 'code', 'name', 'logo_url', 'status']);
+        $providers = $providerCatalog->activeProviders();
 
         return response()->json([
             'data' => $providers
