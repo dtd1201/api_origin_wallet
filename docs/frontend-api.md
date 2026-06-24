@@ -14,13 +14,13 @@ Use it for:
 Base URL:
 
 ```text
-https://api.khoinguyenoriginwallet.com/api
+https://api.originwallet.asia/api
 ```
 
 Production host:
 
 ```text
-https://api.khoinguyenoriginwallet.com
+https://api.originwallet.asia
 ```
 
 Default headers:
@@ -90,7 +90,7 @@ Current backend CORS behavior:
 Production example:
 
 ```env
-CORS_ALLOWED_ORIGINS=https://khoinguyenoriginwallet.com,https://www.khoinguyenoriginwallet.com,https://admin.khoinguyenoriginwallet.com
+CORS_ALLOWED_ORIGINS=https://originwallet.asia,https://www.originwallet.asia,https://admin.originwallet.asia
 ```
 
 Local development example:
@@ -334,13 +334,13 @@ Pagination payload:
 {
   "current_page": 1,
   "data": [],
-  "first_page_url": "https://api.khoinguyenoriginwallet.com/api/admin/users?page=1",
+  "first_page_url": "https://api.originwallet.asia/api/admin/users?page=1",
   "from": 1,
   "last_page": 1,
-  "last_page_url": "https://api.khoinguyenoriginwallet.com/api/admin/users?page=1",
+  "last_page_url": "https://api.originwallet.asia/api/admin/users?page=1",
   "links": [],
   "next_page_url": null,
-  "path": "https://api.khoinguyenoriginwallet.com/api/admin/users",
+  "path": "https://api.originwallet.asia/api/admin/users",
   "per_page": 15,
   "prev_page_url": null,
   "to": 1,

@@ -1,4 +1,4 @@
-# VPS Deployment Guide For `api.khoinguyenoriginwallet.com`
+# VPS Deployment Guide For `api.originwallet.asia`
 
 This guide is tailored for deploying this Laravel API to a single VPS on Vultr.
 
@@ -49,7 +49,7 @@ Create an `A` record:
 Final domain:
 
 ```text
-https://api.khoinguyenoriginwallet.com
+https://api.originwallet.asia
 ```
 
 ## Initial Server Setup
@@ -71,7 +71,7 @@ If you want a near one-shot setup, use the bootstrap script in this repo instead
 git clone <your-repo-url> /root/origin_wallet
 cd /root/origin_wallet
 DB_PASSWORD='change-this-password' \
-APP_DOMAIN='api.khoinguyenoriginwallet.com' \
+APP_DOMAIN='api.originwallet.asia' \
 REPO_URL='<your-repo-url>' \
 REPO_REF='main' \
 INSTALL_CERTBOT=1 \
@@ -161,7 +161,7 @@ composer install --no-dev --optimize-autoloader
 Create environment file:
 
 ```bash
-cp deploy/env/api.khoinguyenoriginwallet.com.env.example .env
+cp deploy/env/api.originwallet.asia.env.example .env
 php artisan key:generate
 ```
 
@@ -204,8 +204,8 @@ That is the safest simple starting point for this API.
 Copy the provided Nginx config:
 
 ```bash
-sudo cp /var/www/origin_wallet/deploy/nginx/api.khoinguyenoriginwallet.com.conf /etc/nginx/sites-available/api.khoinguyenoriginwallet.com
-sudo ln -s /etc/nginx/sites-available/api.khoinguyenoriginwallet.com /etc/nginx/sites-enabled/
+sudo cp /var/www/origin_wallet/deploy/nginx/api.originwallet.asia.conf /etc/nginx/sites-available/api.originwallet.asia
+sudo ln -s /etc/nginx/sites-available/api.originwallet.asia /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl reload nginx
@@ -216,13 +216,13 @@ sudo systemctl reload nginx
 Run:
 
 ```bash
-sudo certbot --nginx -d api.khoinguyenoriginwallet.com
+sudo certbot --nginx -d api.originwallet.asia
 ```
 
 Verify:
 
 ```bash
-curl -I https://api.khoinguyenoriginwallet.com/api/test
+curl -I https://api.originwallet.asia/api/test
 ```
 
 ## PHP-FPM Notes
@@ -243,7 +243,7 @@ For this codebase right now, queue workers are optional if:
 If later you switch to queued mail or background jobs:
 
 ```bash
-sudo cp /var/www/origin_wallet/deploy/supervisor/api.khoinguyenoriginwallet.com-worker.conf /etc/supervisor/conf.d/origin_wallet-worker.conf
+sudo cp /var/www/origin_wallet/deploy/supervisor/api.originwallet.asia-worker.conf /etc/supervisor/conf.d/origin_wallet-worker.conf
 sudo supervisorctl reread
 sudo supervisorctl update
 sudo supervisorctl status
@@ -255,7 +255,7 @@ Must set these:
 
 - `APP_ENV=production`
 - `APP_DEBUG=false`
-- `APP_URL=https://api.khoinguyenoriginwallet.com`
+- `APP_URL=https://api.originwallet.asia`
 - `DB_CONNECTION=pgsql`
 - `DB_HOST=127.0.0.1`
 - `DB_PORT=5432`
@@ -284,8 +284,8 @@ Must set these:
 
 Run these checks:
 
-1. `GET https://api.khoinguyenoriginwallet.com/api/test`
-2. `GET https://api.khoinguyenoriginwallet.com/api/providers`
+1. `GET https://api.originwallet.asia/api/test`
+2. `GET https://api.originwallet.asia/api/providers`
 3. register a new account
 4. verify registration by code or email link
 5. login and verify OTP

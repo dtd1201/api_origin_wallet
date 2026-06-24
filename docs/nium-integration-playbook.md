@@ -5,7 +5,7 @@ This document shows how to call the wallet backend for Nium flows.
 Base API:
 
 ```text
-https://api.khoinguyenoriginwallet.com/api
+https://api.originwallet.asia/api
 ```
 
 Authenticated user header:
@@ -38,7 +38,7 @@ Find the local provider id:
 
 ```bash
 curl --request GET \
-  --url 'https://api.khoinguyenoriginwallet.com/api/providers' \
+  --url 'https://api.originwallet.asia/api/providers' \
   --header 'Accept: application/json'
 ```
 
@@ -62,7 +62,7 @@ Example:
 
 ```bash
 curl --request POST \
-  --url 'https://api.khoinguyenoriginwallet.com/api/user/users/123/fx-quotes' \
+  --url 'https://api.originwallet.asia/api/user/users/123/fx-quotes' \
   --header 'Authorization: Bearer {user_token}' \
   --header 'Accept: application/json' \
   --header 'Content-Type: application/json' \
@@ -109,7 +109,7 @@ Example:
 
 ```bash
 curl --request POST \
-  --url 'https://api.khoinguyenoriginwallet.com/api/user/users/123/beneficiaries' \
+  --url 'https://api.originwallet.asia/api/user/users/123/beneficiaries' \
   --header 'Authorization: Bearer {user_token}' \
   --header 'Accept: application/json' \
   --header 'Content-Type: application/json' \
@@ -201,7 +201,7 @@ Draft example:
 
 ```bash
 curl --request POST \
-  --url 'https://api.khoinguyenoriginwallet.com/api/user/users/123/transfers' \
+  --url 'https://api.originwallet.asia/api/user/users/123/transfers' \
   --header 'Authorization: Bearer {user_token}' \
   --header 'Accept: application/json' \
   --header 'Content-Type: application/json' \
@@ -256,7 +256,7 @@ Example:
 
 ```bash
 curl --request POST \
-  --url 'https://api.khoinguyenoriginwallet.com/api/user/users/123/transfers/777/submit' \
+  --url 'https://api.originwallet.asia/api/user/users/123/transfers/777/submit' \
   --header 'Authorization: Bearer {user_token}' \
   --header 'Accept: application/json'
 ```
@@ -284,7 +284,7 @@ Example:
 
 ```bash
 curl --request POST \
-  --url 'https://api.khoinguyenoriginwallet.com/api/user/users/123/transfers/777/sync-status' \
+  --url 'https://api.originwallet.asia/api/user/users/123/transfers/777/sync-status' \
   --header 'Authorization: Bearer {user_token}' \
   --header 'Accept: application/json'
 ```

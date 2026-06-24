@@ -19,16 +19,16 @@ You do not need the domain before building the server, but you do need it before
 
 Recommended structure:
 
-- Main website: `khoinguyenoriginwallet.com`
-- API subdomain: `api.khoinguyenoriginwallet.com`
+- Main website: `originwallet.asia`
+- API subdomain: `api.originwallet.asia`
 
 What to buy:
 
-- one domain: `khoinguyenoriginwallet.com`
+- one domain: `originwallet.asia`
 
 What you will create later:
 
-- `A` record for `api.khoinguyenoriginwallet.com`
+- `A` record for `api.originwallet.asia`
 
 Good registrars:
 
@@ -82,7 +82,7 @@ You should have real values ready for:
 - `APP_NAME`
 - `APP_ENV=production`
 - `APP_DEBUG=false`
-- `APP_URL=https://api.khoinguyenoriginwallet.com`
+- `APP_URL=https://api.originwallet.asia`
 - `APP_KEY`
 - `DB_*`
 - `MAIL_*`
@@ -96,7 +96,7 @@ You should have real values ready for:
 
 Use this file as the starting template:
 
-- [api.khoinguyenoriginwallet.com.env.example](/home/tiendat/origin_wallet/deploy/env/api.khoinguyenoriginwallet.com.env.example)
+- [api.originwallet.asia.env.example](/home/tiendat/origin_wallet/deploy/env/api.originwallet.asia.env.example)
 
 ## 7. Mail / SMTP Requirements
 
@@ -153,13 +153,13 @@ Optional:
 You already have:
 
 - deploy guide:
-  [vps-deployment-api.khoinguyenoriginwallet.com.md](/home/tiendat/origin_wallet/docs/vps-deployment-api.khoinguyenoriginwallet.com.md)
+  [vps-deployment-api.originwallet.asia.md](/home/tiendat/origin_wallet/docs/vps-deployment-api.originwallet.asia.md)
 - bootstrap script:
   [bootstrap_vps.sh](/home/tiendat/origin_wallet/deploy/scripts/bootstrap_vps.sh)
 - Nginx config:
-  [api.khoinguyenoriginwallet.com.conf](/home/tiendat/origin_wallet/deploy/nginx/api.khoinguyenoriginwallet.com.conf)
+  [api.originwallet.asia.conf](/home/tiendat/origin_wallet/deploy/nginx/api.originwallet.asia.conf)
 - Supervisor config:
-  [api.khoinguyenoriginwallet.com-worker.conf](/home/tiendat/origin_wallet/deploy/supervisor/api.khoinguyenoriginwallet.com-worker.conf)
+  [api.originwallet.asia-worker.conf](/home/tiendat/origin_wallet/deploy/supervisor/api.originwallet.asia-worker.conf)
 - frontend API reference:
   [frontend-api.md](/home/tiendat/origin_wallet/docs/frontend-api.md)
 

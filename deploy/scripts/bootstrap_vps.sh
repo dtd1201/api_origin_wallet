@@ -7,7 +7,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-APP_DOMAIN="${APP_DOMAIN:-api.khoinguyenoriginwallet.com}"
+APP_DOMAIN="${APP_DOMAIN:-api.originwallet.asia}"
 APP_DIR="${APP_DIR:-/var/www/origin_wallet}"
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 DEPLOY_GROUP="${DEPLOY_GROUP:-www-data}"
@@ -24,7 +24,7 @@ SWAP_SIZE_GB="${SWAP_SIZE_GB:-2}"
 if [[ -z "${DB_PASSWORD}" ]]; then
   echo "DB_PASSWORD is required."
   echo "Example:"
-  echo "  DB_PASSWORD='strong-password' APP_DOMAIN='api.khoinguyenoriginwallet.com' bash deploy/scripts/bootstrap_vps.sh"
+  echo "  DB_PASSWORD='strong-password' APP_DOMAIN='api.originwallet.asia' bash deploy/scripts/bootstrap_vps.sh"
   exit 1
 fi
 
