@@ -35,6 +35,9 @@ class Transfer extends Model
         'failure_reason',
         'submitted_at',
         'completed_at',
+        'compliance_review_required',
+        'compliance_status',
+        'compliance_reviewed_at',
         'raw_data',
     ];
 
@@ -47,6 +50,8 @@ class Transfer extends Model
             'fee_amount' => 'decimal:8',
             'submitted_at' => 'datetime',
             'completed_at' => 'datetime',
+            'compliance_review_required' => 'boolean',
+            'compliance_reviewed_at' => 'datetime',
             'raw_data' => 'array',
         ];
     }

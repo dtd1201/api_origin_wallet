@@ -93,6 +93,14 @@ return [
         'webhook_secret' => env('NIUM_WEBHOOK_SECRET'),
         'webhook_signature_header' => env('NIUM_WEBHOOK_SIGNATURE_HEADER'),
         'webhook_signature_algorithm' => env('NIUM_WEBHOOK_SIGNATURE_ALGORITHM', 'sha256'),
+        'webhook' => [
+            'static_header_name' => env('NIUM_WEBHOOK_STATIC_HEADER_NAME', 'x-partner-key'),
+            'static_header_value' => env('NIUM_WEBHOOK_STATIC_HEADER_VALUE'),
+        ],
+        'compliance_callback' => [
+            'static_header_name' => env('NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_NAME', 'x-partner-key'),
+            'static_header_value' => env('NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_VALUE'),
+        ],
     ],
 
     'managed_exchange_rates' => [

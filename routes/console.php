@@ -28,9 +28,33 @@ Artisan::command(
         $baseUrl = (string) config('services.nium.base_url', '');
         $apiKey = (string) config('services.nium.auth.header_value', '');
         $clientId = (string) config('services.nium.client_id', '');
+        $authHeaderName = (string) config('services.nium.auth.header_name', '');
+        $webhookHeaderName = (string) config('services.nium.webhook.static_header_name', '');
+        $webhookHeaderValue = (string) config('services.nium.webhook.static_header_value', '');
+        $complianceHeaderName = (string) config('services.nium.compliance_callback.static_header_name', '');
+        $complianceHeaderValue = (string) config('services.nium.compliance_callback.static_header_value', '');
+        $appUrl = rtrim((string) config('app.url', ''), '/');
 
-        if ($baseUrl === '' || $apiKey === '' || $clientId === '') {
-            $this->error('Nium is not fully configured. Please set NIUM_BASE_URL, NIUM_API_KEY, and NIUM_CLIENT_ID.');
+        $this->line('Nium webhook URL: '.$appUrl.'/api/webhooks/providers/nium');
+        $this->line('Nium compliance callback URL: '.$appUrl.'/api/callbacks/nium/transaction-compliance');
+
+        $requiredConfiguration = [
+            'NIUM_BASE_URL' => $baseUrl,
+            'NIUM_AUTH_HEADER_NAME' => $authHeaderName,
+            'NIUM_API_KEY' => $apiKey,
+            'NIUM_CLIENT_ID' => $clientId,
+            'NIUM_WEBHOOK_STATIC_HEADER_NAME' => $webhookHeaderName,
+            'NIUM_WEBHOOK_STATIC_HEADER_VALUE' => $webhookHeaderValue,
+            'NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_NAME' => $complianceHeaderName,
+            'NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_VALUE' => $complianceHeaderValue,
+        ];
+        $missingConfiguration = array_keys(array_filter(
+            $requiredConfiguration,
+            static fn (string $value): bool => $value === '',
+        ));
+
+        if ($missingConfiguration !== []) {
+            $this->error('Nium is not fully configured. Missing: '.implode(', ', $missingConfiguration).'.');
 
             return Command::FAILURE;
         }

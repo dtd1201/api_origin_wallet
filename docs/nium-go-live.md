@@ -8,21 +8,47 @@ Set these values in the API environment:
 
 ```dotenv
 NIUM_BASE_URL=
+NIUM_AUTH_MODE=header
+NIUM_AUTH_HEADER_NAME=x-api-key
 NIUM_API_KEY=
 NIUM_CLIENT_ID=
-NIUM_HEALTH_ENDPOINT=/api/v1/client/{client}
+NIUM_HEALTH_ENDPOINT=/api/v1/client/{clientHashId}
 NIUM_CUSTOMER_ENDPOINT=
-NIUM_WALLET_BALANCE_ENDPOINT=/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/balance
-NIUM_WALLET_TRANSACTIONS_ENDPOINT=/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/transactions
-NIUM_QUOTE_ENDPOINT=/api/v1/client/{client}/quotes
-NIUM_BENEFICIARY_ENDPOINT=/api/v2/client/{client}/customer/{customer}/beneficiaries
-NIUM_ACCOUNT_VERIFICATION_ENDPOINT=/api/v1/client/{client}/customer/{customer}/accountVerification
-NIUM_TRANSFER_ENDPOINT=/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/remittance
-NIUM_TRANSFER_STATUS_ENDPOINT=/api/v1/client/{client}/customer/{customer}/wallet/{wallet}/remittance/{transfer}/audit
-NIUM_WEBHOOK_SECRET=
-NIUM_WEBHOOK_SIGNATURE_HEADER=
-NIUM_WEBHOOK_SIGNATURE_ALGORITHM=sha256
+NIUM_WALLET_BALANCE_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}
+NIUM_WALLET_TRANSACTIONS_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions
+NIUM_QUOTE_ENDPOINT=/api/v1/client/{clientHashId}/quotes
+NIUM_BENEFICIARY_ENDPOINT=/api/v2/client/{clientHashId}/customer/{customerHashId}/beneficiaries
+NIUM_BENEFICIARY_UPDATE_ENDPOINT=/api/v2/client/{clientHashId}/customer/{customerHashId}/beneficiaries/{beneficiaryHashId}
+NIUM_BENEFICIARY_DELETE_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/beneficiaries/{beneficiaryHashId}
+NIUM_ACCOUNT_VERIFICATION_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/accountVerification
+NIUM_TRANSFER_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance
+NIUM_TRANSFER_STATUS_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance/{systemReferenceNumber}/audit
+NIUM_WEBHOOK_STATIC_HEADER_NAME=x-partner-key
+NIUM_WEBHOOK_STATIC_HEADER_VALUE=
+NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_NAME=x-partner-key
+NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_VALUE=
 ```
+
+`x-partner-key` is a static header value and is not an HMAC signature. Generate separate random values for the general webhook and compliance callback. Do not commit or log either value. The legacy Nium HMAC settings remain available only as a compatibility fallback when no static webhook value is configured.
+
+## Network And Callback Details
+
+Nium must whitelist the static outbound IPv4 address used by the API server to call Nium. Run this command on the actual VPS, not a developer laptop:
+
+```bash
+curl -4 https://api.ipify.org
+```
+
+Do not submit a Cloudflare edge IP. If sandbox and production use different servers or NAT gateways, provide both egress IPs and identify their environments.
+
+Submit these public endpoints to Nium:
+
+```text
+Webhook URL: https://api.originwallet.asia/api/webhooks/providers/nium
+Compliance callback URL: https://api.originwallet.asia/api/callbacks/nium/transaction-compliance
+```
+
+PGP-encrypted daily reports and SFTP access are optional. Leave the PGP section blank or mark it `N/A` until report delivery is enabled. When enabled, use a dedicated PGP key pair and send Nium only the public key.
 
 Keep these controls enabled for live:
 
@@ -34,17 +60,18 @@ TRANSFER_APPROVAL_THRESHOLD_AMOUNT=0
 TRANSFER_ALLOWED_PROVIDER_ACCOUNT_STATUSES=active
 ```
 
-## Deployment Order
+## Sandbox Readiness
 
 1. Deploy code.
 2. Run `php artisan migrate --force`.
 3. Clear and warm config: `php artisan config:clear && php artisan config:cache`.
 4. Confirm the Nium provider row exists and is active.
-5. Confirm webhook URL in Nium points to:
-
-```text
-https://<api-domain>/api/webhooks/providers/nium
-```
+5. Configure the Nium sandbox base URL, API key, client hash ID, and two static partner keys.
+6. Run `php artisan nium:smoke-test`; copy the two URLs printed by the command into the Nium setup sheet.
+7. Ask Nium to send a signed sandbox payout webhook and an `ACTION_REQUIRED` compliance callback.
+8. Confirm valid callbacks return 2xx, invalid keys return 403, and duplicate events do not create duplicate rows.
+9. Confirm unmatched callbacks appear in `GET /api/admin/nium-compliance-events?review_status=pending`.
+10. Complete a sandbox quote, beneficiary, transfer, status sync, and terminal payout webhook test.
 
 ## Smoke Tests
 
@@ -83,11 +110,29 @@ php artisan nium:smoke-test <userId> --quote --source-currency=USD --target-curr
 
 - `php artisan route:list --path=api/admin/transfers`
 - `php artisan route:list --path=api/webhooks`
+- `php artisan route:list --path=api/callbacks/nium`
+- `php artisan route:list --path=api/admin/nium-compliance-events`
 - `php artisan migrate:status`
 - `php artisan nium:smoke-test`
 - Admin UI build deployed with `VITE_API_BASE_URL=https://<api-domain>/api`
 - Webhook events page shows Nium events and retry can reprocess failed events.
 - Ledger page shows hold/debit/release entries for test transfers.
+- Compliance events with `ACTION_REQUIRED` create a pending review task and flag the related transfer or transaction.
+
+## Production Go-Live
+
+Production must use credentials and static partner keys that are different from sandbox.
+
+1. Complete every sandbox readiness check.
+2. Obtain the production base URL, API key, client hash ID, enabled products, webhook schema, and compliance callback schema from Nium.
+3. Confirm Nium has whitelisted the production egress IP.
+4. Replace sandbox credentials with production secrets through the deployment secret store.
+5. Run migrations and rebuild the Laravel configuration cache.
+6. Run `php artisan nium:smoke-test` against the production client-details endpoint before enabling live transfers.
+7. Ask Nium to send non-monetary production webhook/callback verification events.
+8. Enable live transfers only after authentication, idempotency, matching, admin review, and ledger checks pass.
+
+The compliance callback parser intentionally accepts nested and temporarily variable payload shapes. It recognizes common event IDs, request IDs, transaction/remittance/payment references, customer hash IDs, and compliance status fields. Final field mapping remains pending until Nium supplies the official transaction compliance callback schema.
 
 ## Rollback Notes
 

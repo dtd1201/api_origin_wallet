@@ -12,12 +12,16 @@ class SensitiveDataSanitizerTest extends TestCase
         $sanitized = app(SensitiveDataSanitizer::class)->sanitize([
             'x-api-key' => 'nium-api-key-value',
             'header_value' => 'another-provider-key',
+            'x-partner-key' => 'nium-partner-key',
+            'clientHashId' => 'nium-client-hash-id',
             'client_secret' => 'client-secret-value',
             'safe' => 'visible',
         ]);
 
         $this->assertSame('[REDACTED]', $sanitized['x-api-key']);
         $this->assertSame('[REDACTED]', $sanitized['header_value']);
+        $this->assertSame('[REDACTED]', $sanitized['x-partner-key']);
+        $this->assertSame('[REDACTED]', $sanitized['clientHashId']);
         $this->assertSame('[REDACTED]', $sanitized['client_secret']);
         $this->assertSame('visible', $sanitized['safe']);
     }

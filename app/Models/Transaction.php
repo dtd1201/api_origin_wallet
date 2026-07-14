@@ -26,6 +26,9 @@ class Transaction extends Model
         'status',
         'booked_at',
         'value_date',
+        'compliance_review_required',
+        'compliance_status',
+        'compliance_reviewed_at',
         'raw_data',
     ];
 
@@ -36,6 +39,8 @@ class Transaction extends Model
             'fee_amount' => 'decimal:8',
             'booked_at' => 'datetime',
             'value_date' => 'date',
+            'compliance_review_required' => 'boolean',
+            'compliance_reviewed_at' => 'datetime',
             'raw_data' => 'array',
         ];
     }

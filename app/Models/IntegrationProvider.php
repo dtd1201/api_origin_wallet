@@ -90,6 +90,16 @@ class IntegrationProvider extends Model
 
     public function isConfigured(): bool
     {
+        if (strtolower($this->code) === 'nium') {
+            $config = $this->serviceConfig();
+
+            return filled($config['base_url'] ?? null)
+                && filled($config['client_id'] ?? null)
+                && strtolower((string) ($config['auth']['mode'] ?? '')) === 'header'
+                && filled($config['auth']['header_name'] ?? null)
+                && filled($config['auth']['header_value'] ?? null);
+        }
+
         return filled($this->serviceConfig()['base_url'] ?? null);
     }
 

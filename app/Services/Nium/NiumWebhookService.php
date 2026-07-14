@@ -9,12 +9,14 @@ use App\Models\WebhookEvent;
 use App\Services\Integrations\Contracts\ReprocessesWebhookEvent;
 use App\Services\Integrations\Contracts\WebhookProvider;
 use App\Services\Integrations\Support\HmacWebhookSignatureVerifier;
+use App\Services\Integrations\Support\StaticWebhookHeaderVerifier;
 use App\Services\Wallet\LedgerService;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Throwable;
@@ -24,6 +26,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
     public function __construct(
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer,
         private readonly HmacWebhookSignatureVerifier $signatureVerifier,
+        private readonly StaticWebhookHeaderVerifier $staticHeaderVerifier,
         private readonly LedgerService $ledgerService,
     ) {}
 
@@ -42,6 +45,11 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             ->first();
 
         if ($existingEvent !== null) {
+            Log::info('Duplicate Nium webhook ignored.', [
+                'provider_id' => $provider->id,
+                'event_id' => $eventId,
+            ]);
+
             return [
                 'message' => 'Webhook already received.',
                 'provider' => $provider->code,
@@ -226,17 +234,38 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     private function verifyWebhookIfConfigured(Request $request): void
     {
+        $staticHeaderName = (string) config('services.nium.webhook.static_header_name', 'x-partner-key');
+        $staticHeaderValue = (string) config('services.nium.webhook.static_header_value', '');
+
+        if ($staticHeaderValue !== '') {
+            if (! $this->staticHeaderVerifier->isValid($request, $staticHeaderName, $staticHeaderValue)) {
+                Log::warning('Rejected Nium webhook with invalid static authentication header.', [
+                    'header_name' => $staticHeaderName,
+                    'ip_address' => $request->ip(),
+                ]);
+
+                throw new AccessDeniedHttpException('Invalid Nium webhook authentication.');
+            }
+
+            return;
+        }
+
         $secret = (string) config('services.nium.webhook_secret', '');
         $headerName = (string) config('services.nium.webhook_signature_header', '');
 
         if ($secret === '' || $headerName === '') {
-            return;
+            throw new RuntimeException('Nium webhook authentication is not configured.');
         }
 
         $receivedSignature = (string) $request->header($headerName);
         $algorithm = (string) config('services.nium.webhook_signature_algorithm', 'sha256');
 
         if (! $this->signatureVerifier->isValid($request->getContent(), $secret, $receivedSignature, $algorithm)) {
+            Log::warning('Rejected Nium webhook with invalid HMAC signature.', [
+                'header_name' => $headerName,
+                'ip_address' => $request->ip(),
+            ]);
+
             throw new AccessDeniedHttpException('Invalid Nium webhook signature.');
         }
     }

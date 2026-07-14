@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BankRateController;
 use App\Http\Controllers\Api\ChatbotController;
 use App\Http\Controllers\Api\ContactSubmissionController;
+use App\Http\Controllers\Api\NiumComplianceCallbackController;
 use App\Http\Controllers\Api\ProviderController;
 use App\Http\Controllers\Api\ProviderWebhookController;
 use App\Http\Controllers\Api\PublicProviderRateController;
@@ -67,6 +68,9 @@ Route::prefix('admin/auth')->group(function (): void {
 
 Route::post('webhooks/providers/{provider}', ProviderWebhookController::class)
     ->name('webhooks.providers.handle');
+
+Route::post('callbacks/nium/transaction-compliance', NiumComplianceCallbackController::class)
+    ->name('callbacks.nium.transaction-compliance');
 
 Route::prefix('user')
     ->as('user.')

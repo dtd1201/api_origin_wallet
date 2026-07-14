@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\Admin\IntegrationProviderController;
 use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
 use App\Http\Controllers\Api\Admin\LedgerEntryController;
 use App\Http\Controllers\Api\Admin\ManagedExchangeRateController;
+use App\Http\Controllers\Api\Admin\NiumComplianceEventController;
 use App\Http\Controllers\Api\Admin\ProviderHealthController;
 use App\Http\Controllers\Api\Admin\ProviderSyncController;
 use App\Http\Controllers\Api\Admin\ProviderWebhookEventController;
@@ -45,6 +46,11 @@ Route::apiResource('provider-webhook-events', ProviderWebhookEventController::cl
     ->parameters(['provider-webhook-events' => 'providerWebhookEvent']);
 Route::post('provider-webhook-events/{providerWebhookEvent}/retry', [ProviderWebhookEventController::class, 'retry'])
     ->name('provider-webhook-events.retry');
+Route::apiResource('nium-compliance-events', NiumComplianceEventController::class)
+    ->only(['index', 'show'])
+    ->parameters(['nium-compliance-events' => 'niumComplianceEvent']);
+Route::post('nium-compliance-events/{niumComplianceEvent}/review', [NiumComplianceEventController::class, 'review'])
+    ->name('nium-compliance-events.review');
 
 Route::apiResource('fx-orders', FxOrderController::class)
     ->except(['store'])
