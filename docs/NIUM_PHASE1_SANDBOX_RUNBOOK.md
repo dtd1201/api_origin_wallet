@@ -13,6 +13,7 @@ Export values without committing them:
 export API_BASE_URL='http://127.0.0.1:8000/api'
 export USER_ID='<approved-origin-wallet-user-id>'
 export USER_TOKEN='<origin-wallet-user-token>'
+export ADMIN_TOKEN='<origin-wallet-admin-token>'
 export NIUM_BASE_URL='https://gateway.nium.com'
 export NIUM_CLIENT_ID='<sandbox-clientHashId>'
 export NIUM_API_KEY='<sandbox-api-key>'
@@ -20,8 +21,73 @@ export NIUM_PARTNER_KEY='<sandbox-x-partner-key>'
 ```
 
 Configure the backend with the exact Phase 1 variables documented in
-`docs/nium-go-live.md`, run `php artisan migrate --force`, and confirm the user
-has approved internal KYC/KYB plus an approved Nium provider submission.
+`docs/nium-go-live.md`, run the exact Phase 1 migration shown below, and confirm
+the user has approved internal KYC/KYB plus an approved Nium provider
+submission.
+
+```bash
+php artisan migrate \
+  --path=database/migrations/2026_07_14_000002_add_provider_onboarding_state_to_user_provider_accounts.php \
+  --force
+php artisan nium:smoke-test
+```
+
+The smoke test is configuration-only by default. It sends the authenticated
+Get Client request only with `--live`. Validate the separate transaction
+compliance callback only when required:
+
+```bash
+php artisan nium:smoke-test --live
+php artisan nium:smoke-test --compliance-callback
+```
+
+## Verified Phase 1 application routes
+
+These routes come from the current `php artisan route:list --json` output.
+`{provider}` uses the provider code, so Nium requests use `nium`.
+
+| Operation | Method and URI | Authentication | Success | Expected failures |
+| --- | --- | --- | --- | --- |
+| Provider list/status | `GET /api/providers` | Public API middleware; no bearer token | `200`, body contains `data[]` and Nium configuration/capability flags | Unexpected application/database failure: `500` |
+| User Nium onboarding/link | `POST /api/user/users/{user}/provider-accounts/nium/link` | Bearer user token; token user must match `{user}`; completed profile middleware | `200`, body contains `provider_account` and `onboarding` | `401` missing/invalid token; `403` wrong user; `409` incomplete profile; `404` unknown user/provider; controlled `422` for KYC, provider configuration, or Nium failure |
+| Nium webhook receiver | `POST /api/webhooks/providers/nium` | `x-partner-key` plus non-empty `x-request-id` for customer lifecycle events | `200`; duplicate delivery also `200` with `duplicate=true` | `403` invalid partner key or mismatching `clientHashId`; `404` unknown provider; controlled `422` for invalid envelope or failed reconciliation |
+| Admin provider health/Get Client | `POST /api/admin/provider-health/nium/check` | Bearer admin token | `200`, body contains `provider_health` | `401` missing/invalid token; `403` non-admin; `404` unknown provider; `422` unsafe configuration, network failure, or non-success Nium response |
+| Admin user/provider sync | `POST /api/admin/providers/nium/users/{user}/sync` | Bearer admin token | `200`, body contains authoritative `provider_account` | `401` missing/invalid token; `403` non-admin; `404` unknown user/provider; controlled `422` for KYC, configuration, or Nium reconciliation failure |
+| Admin webhook retry | `POST /api/admin/provider-webhook-events/{providerWebhookEvent}/retry` | Bearer admin token | `200`, body contains the reprocessed `webhook_event`; successful synchronous retry has status `processed` | `401` missing/invalid token; `403` non-admin; `404` unknown/non-Nium event; `422` already processed or retry failed |
+
+## Repository-backed deployment values
+
+The repository deployment configuration currently defines the following
+defaults. Confirm each value on the staging host before running commands;
+`APP_DIR` and `PHP_VERSION` can override the bootstrap defaults.
+
+| Value | Repository default | Evidence | Staging action |
+| --- | --- | --- | --- |
+| Release directory | `/var/www/origin_wallet` | `deploy/scripts/bootstrap_vps.sh`, Nginx and Supervisor configs | Confirm the deployed checkout path |
+| PHP-FPM service | `php8.3-fpm` | bootstrap default `PHP_VERSION=8.3` and Nginx socket `php8.3-fpm.sock` | Confirm with `systemctl status php8.3-fpm`; substitute the installed service if overridden |
+| Supervisor program | `origin_wallet_worker` | `deploy/supervisor/api.originwallet.asia-worker.conf` | Confirm with `supervisorctl status origin_wallet_worker:*` |
+| Public application health | `GET /api/test` | `routes/api.php` | Expect `200` with `{"message":"API working"}` |
+| Nium provider health | `POST /api/admin/provider-health/nium/check` | `routes/admin.php` | Requires admin bearer token and performs Get Client |
+| Webhook receiver | `POST /api/webhooks/providers/nium` | `routes/api.php` | Publicly reachable over TLS; authenticated by partner key |
+
+Verification commands for the repository defaults:
+
+```bash
+cd /var/www/origin_wallet # confirm APP_DIR on staging first
+sudo systemctl status php8.3-fpm --no-pager # confirm PHP_VERSION first
+sudo supervisorctl status 'origin_wallet_worker:*'
+curl --fail-with-body "${API_BASE_URL%/api}/api/test"
+php artisan route:list --path=api/webhooks/providers
+php artisan migrate:status
+```
+
+Exact rollback for the Phase 1 migration:
+
+```bash
+php artisan migrate:rollback \
+  --path=database/migrations/2026_07_14_000002_add_provider_onboarding_state_to_user_provider_accounts.php \
+  --force
+```
 
 Useful database queries (PostgreSQL):
 
@@ -61,6 +127,14 @@ curl --fail-with-body --request GET \
 
 - Expected HTTP: Nium `200`; missing/invalid API key is `401/403`. Backend
   admin health check returns operational only on the authenticated `200`.
+- Backend health request:
+
+```bash
+curl --fail-with-body --request POST \
+  "$API_BASE_URL/admin/provider-health/nium/check" \
+  --header "Authorization: Bearer $ADMIN_TOKEN"
+```
+
 - Expected DB: one allowlisted `api_request_logs` row when the backend health
   endpoint is used; no API key, clientHashId, or PII in serialized log fields.
 - Integration state: unchanged.
@@ -244,8 +318,24 @@ curl --fail-with-body --request POST "$API_BASE_URL/webhooks/providers/nium" \
 
 - Prerequisites: leave a failed reconciliation event from test 5; restart PHP
   workers/backend without editing provider IDs.
-- Request: invoke the existing admin webhook retry for that event or call the
-  user onboarding sync endpoint after Nium GET Customer is healthy.
+- Request: after confirming the repository-backed service names against the
+  staging host, restart the services and invoke one of the exact admin routes:
+
+```bash
+sudo systemctl restart php8.3-fpm # replace only if staging uses a confirmed override
+sudo supervisorctl restart 'origin_wallet_worker:*'
+
+curl --fail-with-body --request POST \
+  "$API_BASE_URL/admin/providers/nium/users/$USER_ID/sync" \
+  --header "Authorization: Bearer $ADMIN_TOKEN"
+
+curl --fail-with-body --request POST \
+  "$API_BASE_URL/admin/provider-webhook-events/<failed-event-id>/retry" \
+  --header "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+  Use the sync request or the retry request appropriate to the test; neither
+  route accepts a user bearer token.
 - Expected HTTP: admin retry/sync `200` on successful GET.
 - Expected DB: same event/account IDs; event becomes processed; reconciliation
   becomes reconciled; no new customer or externalId.

@@ -119,7 +119,7 @@ TRANSFER_ALLOWED_PROVIDER_ACCOUNT_STATUSES=active
 3. Clear and warm config: `php artisan config:clear && php artisan config:cache`.
 4. Confirm the Nium provider row exists and is active.
 5. Configure the Nium sandbox base URL, API key, client hash ID, and two static partner keys.
-6. Run `php artisan nium:smoke-test`; copy the two URLs printed by the command into the Nium setup sheet.
+6. Run `php artisan nium:smoke-test --compliance-callback`; copy the two URLs printed by the command into the Nium setup sheet. Add `--live` only when the authenticated Get Client request is intended.
 7. Ask Nium to send a signed sandbox payout webhook and an `ACTION_REQUIRED` compliance callback.
 8. Confirm valid callbacks return 2xx, invalid keys return 403, and duplicate events do not create duplicate rows.
 9. Confirm unmatched callbacks appear in `GET /api/admin/nium-compliance-events?review_status=pending`.
@@ -130,19 +130,19 @@ TRANSFER_ALLOWED_PROVIDER_ACCOUNT_STATUSES=active
 Connectivity:
 
 ```bash
-php artisan nium:smoke-test
+php artisan nium:smoke-test --live
 ```
 
 Customer wallet sync:
 
 ```bash
-php artisan nium:smoke-test <userId> --sync
+php artisan nium:smoke-test <userId> --live --sync
 ```
 
 Quote:
 
 ```bash
-php artisan nium:smoke-test <userId> --quote --source-currency=USD --target-currency=EUR --amount=100
+php artisan nium:smoke-test <userId> --live --quote --source-currency=USD --target-currency=EUR --amount=100
 ```
 
 ## Live Transfer Control Flow
@@ -165,7 +165,8 @@ php artisan nium:smoke-test <userId> --quote --source-currency=USD --target-curr
 - `php artisan route:list --path=api/callbacks/nium`
 - `php artisan route:list --path=api/admin/nium-compliance-events`
 - `php artisan migrate:status`
-- `php artisan nium:smoke-test`
+- `php artisan nium:smoke-test` for configuration-only validation
+- `php artisan nium:smoke-test --live` for the explicit Get Client readiness request
 - Admin UI build deployed with `VITE_API_BASE_URL=https://<api-domain>/api`
 - Webhook events page shows Nium events and retry can reprocess failed events.
 - Ledger page shows hold/debit/release entries for test transfers.
@@ -180,7 +181,7 @@ Production must use credentials and static partner keys that are different from 
 3. Confirm Nium has whitelisted the production egress IP.
 4. Replace sandbox credentials with production secrets through the deployment secret store.
 5. Run migrations and rebuild the Laravel configuration cache.
-6. Run `php artisan nium:smoke-test` against the production client-details endpoint before enabling live transfers.
+6. Run `php artisan nium:smoke-test --live` against the production client-details endpoint before enabling live transfers.
 7. Ask Nium to send non-monetary production webhook/callback verification events.
 8. Enable live transfers only after authentication, idempotency, matching, admin review, and ledger checks pass.
 

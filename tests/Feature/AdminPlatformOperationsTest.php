@@ -113,7 +113,12 @@ class AdminPlatformOperationsTest extends TestCase
             'header_name' => 'x-api-key',
             'header_value' => 'nium-api-key',
         ]);
-        config()->set('services.nium.health_endpoint', '/api/v1/client/{client}');
+        config()->set('services.nium.health_endpoint', '/api/v1/client/{clientHashId}');
+        config()->set('services.nium.customer_create_endpoint', '/api/v5/client/{clientHashId}/customers');
+        config()->set('services.nium.customer_get_endpoint', '/api/v5/client/{clientHashId}/customer/{customerHashId}');
+        config()->set('services.nium.customer_list_endpoint', '/api/v5/client/{clientHashId}/customers');
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'platform-operations-test-partner-key');
 
         Http::fake([
             'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123' => Http::response([
@@ -146,7 +151,7 @@ class AdminPlatformOperationsTest extends TestCase
         $this->withToken($token)
             ->postJson("/api/admin/provider-webhook-events/{$webhookEvent->id}/retry")
             ->assertOk()
-            ->assertJsonPath('webhook_event.status', 'retrying')
+            ->assertJsonPath('webhook_event.status', 'processed')
             ->assertJsonPath('webhook_event.attempts', 1);
 
         $this->assertDatabaseHas('audit_logs', [

@@ -19,6 +19,8 @@ Artisan::command('inspire', function () {
 Artisan::command(
     'nium:smoke-test
     {userId? : User ID used for customer, wallet, sync, or quote checks}
+    {--live : Perform the authenticated Get Client request}
+    {--compliance-callback : Also validate the separate transaction compliance callback configuration}
     {--sync : Run account, balance, and transaction sync for the user}
     {--quote : Create a test quote for the user}
     {--source-currency=USD : Quote sell currency}
@@ -31,38 +33,118 @@ Artisan::command(
         $authHeaderName = (string) config('services.nium.auth.header_name', '');
         $webhookHeaderName = (string) config('services.nium.webhook.static_header_name', '');
         $webhookHeaderValue = (string) config('services.nium.webhook.static_header_value', '');
-        $complianceHeaderName = (string) config('services.nium.compliance_callback.static_header_name', '');
-        $complianceHeaderValue = (string) config('services.nium.compliance_callback.static_header_value', '');
         $appUrl = rtrim((string) config('app.url', ''), '/');
 
         $this->line('Nium webhook URL: '.$appUrl.'/api/webhooks/providers/nium');
-        $this->line('Nium compliance callback URL: '.$appUrl.'/api/callbacks/nium/transaction-compliance');
 
-        $requiredConfiguration = [
-            'NIUM_BASE_URL' => $baseUrl,
-            'NIUM_AUTH_HEADER_NAME' => $authHeaderName,
-            'NIUM_API_KEY' => $apiKey,
-            'NIUM_CLIENT_ID' => $clientId,
-            'NIUM_WEBHOOK_STATIC_HEADER_NAME' => $webhookHeaderName,
-            'NIUM_WEBHOOK_STATIC_HEADER_VALUE' => $webhookHeaderValue,
-            'NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_NAME' => $complianceHeaderName,
-            'NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_VALUE' => $complianceHeaderValue,
+        $configurationErrors = [];
+        $baseUrlParts = parse_url($baseUrl);
+
+        if ($baseUrl === '') {
+            $configurationErrors[] = 'NIUM_BASE_URL is required.';
+        } elseif (
+            ! is_array($baseUrlParts)
+            || strtolower((string) ($baseUrlParts['scheme'] ?? '')) !== 'https'
+            || blank($baseUrlParts['host'] ?? null)
+            || isset($baseUrlParts['user'])
+            || isset($baseUrlParts['pass'])
+            || isset($baseUrlParts['query'])
+            || isset($baseUrlParts['fragment'])
+        ) {
+            $configurationErrors[] = 'NIUM_BASE_URL must be a safe HTTPS origin without credentials, query, or fragment.';
+        }
+
+        if (strtolower((string) config('services.nium.auth.mode', '')) !== 'header') {
+            $configurationErrors[] = 'NIUM_AUTH_MODE must be header.';
+        }
+
+        if (strtolower(trim($authHeaderName)) !== 'x-api-key') {
+            $configurationErrors[] = 'NIUM_AUTH_HEADER_NAME must be x-api-key.';
+        }
+
+        if ($apiKey === '') {
+            $configurationErrors[] = 'NIUM_API_KEY is required.';
+        }
+
+        if ($clientId === '') {
+            $configurationErrors[] = 'NIUM_CLIENT_ID is required.';
+        }
+
+        if (strtolower(trim($webhookHeaderName)) !== 'x-partner-key') {
+            $configurationErrors[] = 'NIUM_WEBHOOK_STATIC_HEADER_NAME must be x-partner-key.';
+        }
+
+        if ($webhookHeaderValue === '') {
+            $configurationErrors[] = 'NIUM_WEBHOOK_STATIC_HEADER_VALUE is required.';
+        }
+
+        $endpointRequirements = [
+            'NIUM_HEALTH_ENDPOINT' => ['health_endpoint', ['clientHashId']],
+            'NIUM_CUSTOMER_CREATE_ENDPOINT' => ['customer_create_endpoint', ['clientHashId']],
+            'NIUM_CUSTOMER_GET_ENDPOINT' => ['customer_get_endpoint', ['clientHashId', 'customerHashId']],
+            'NIUM_CUSTOMER_LIST_ENDPOINT' => ['customer_list_endpoint', ['clientHashId']],
         ];
-        $missingConfiguration = array_keys(array_filter(
-            $requiredConfiguration,
-            static fn (string $value): bool => $value === '',
-        ));
 
-        if ($missingConfiguration !== []) {
-            $this->error('Nium is not fully configured. Missing: '.implode(', ', $missingConfiguration).'.');
+        foreach ($endpointRequirements as $environmentName => [$configKey, $requiredPlaceholders]) {
+            $endpoint = trim((string) config('services.nium.'.$configKey, ''));
+            preg_match_all('/\{([^}]+)\}/', $endpoint, $matches);
+            $placeholders = array_values(array_unique($matches[1] ?? []));
+            sort($placeholders);
+            sort($requiredPlaceholders);
+            $withoutPlaceholders = preg_replace('/\{[^}]+\}/', '', $endpoint) ?? $endpoint;
+
+            if (
+                $endpoint === ''
+                || ! str_starts_with($endpoint, '/')
+                || str_starts_with($endpoint, '//')
+                || preg_match('/[\x00-\x20]/', $endpoint) === 1
+                || preg_match('#^https?://#i', $endpoint) === 1
+                || str_contains($withoutPlaceholders, '{')
+                || str_contains($withoutPlaceholders, '}')
+                || $placeholders !== $requiredPlaceholders
+            ) {
+                $configurationErrors[] = $environmentName.' must be a safe relative path using exactly: '.implode(', ', $requiredPlaceholders).'.';
+            }
+        }
+
+        if ($configurationErrors !== []) {
+            $this->error('Nium onboarding configuration validation failed.');
+
+            foreach ($configurationErrors as $configurationError) {
+                $this->line('- '.$configurationError);
+            }
 
             return Command::FAILURE;
         }
 
-        $provider = IntegrationProvider::query()->firstOrCreate(
-            ['code' => 'nium'],
-            ['name' => 'Nium', 'status' => 'active'],
-        );
+        $provider = IntegrationProvider::query()->where('code', 'nium')->first();
+
+        if ($provider === null) {
+            $this->error('Nium integration provider is not registered.');
+
+            return Command::FAILURE;
+        }
+
+        if (! $provider->isAvailableForOnboarding()) {
+            $this->error('Nium onboarding capability is unavailable or the provider configuration is unsafe.');
+
+            return Command::FAILURE;
+        }
+
+        if ($this->option('compliance-callback')) {
+            $complianceHeaderName = (string) config('services.nium.compliance_callback.static_header_name', '');
+            $complianceHeaderValue = (string) config('services.nium.compliance_callback.static_header_value', '');
+
+            $this->line('Nium compliance callback URL: '.$appUrl.'/api/callbacks/nium/transaction-compliance');
+
+            if (strtolower(trim($complianceHeaderName)) !== 'x-partner-key' || $complianceHeaderValue === '') {
+                $this->error('Nium transaction compliance callback authentication is not configured.');
+
+                return Command::FAILURE;
+            }
+
+            $this->info('Nium transaction compliance callback configuration is valid.');
+        }
 
         $userId = $this->argument('userId');
         $user = $userId !== null ? User::query()->with('providerAccounts')->find($userId) : null;
@@ -77,6 +159,18 @@ Artisan::command(
             $this->error('A userId is required when using --sync or --quote.');
 
             return Command::FAILURE;
+        }
+
+        if (! $this->option('live')) {
+            if ($this->option('sync') || $this->option('quote')) {
+                $this->error('--sync and --quote require the explicit --live flag.');
+
+                return Command::FAILURE;
+            }
+
+            $this->info('Nium onboarding configuration validation passed. No outbound request was made.');
+
+            return Command::SUCCESS;
         }
 
         try {
@@ -141,11 +235,11 @@ Artisan::command(
             return Command::FAILURE;
         }
 
-        $this->info('Nium smoke test completed.');
+        $this->info('Nium live smoke test completed.');
 
         return Command::SUCCESS;
     }
-)->purpose('Verify Nium credentials and optionally run sync or quote checks.');
+)->purpose('Validate Nium Customer Onboarding V5 configuration and optionally perform an explicit live readiness check.');
 
 Artisan::command(
     'bank-rates:sync
