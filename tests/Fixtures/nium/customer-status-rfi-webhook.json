@@ -1,0 +1,19 @@
+{
+  "customerHashId": "2ba22977-eb3d-4db0-aa3f-7d8459ed6420",
+  "template": "CUSTOMER_STATUS_WEBHOOK",
+  "customerType": "INDIVIDUAL",
+  "walletHashIds": [
+    "235a58d9-9a83-4e98-9711-a5fa1dcfecda"
+  ],
+  "externalId": "9ba22977-eb3d-4db0-aa3f-7d8459ed6427",
+  "isResubmissionAllowed": "true",
+  "subStatus": "rfi_requested",
+  "clientHashId": "b23b124c-9cc8-4550-b66f-ed8250ff8a5e",
+  "status": "clear",
+  "tags": [
+    {
+      "value": "value",
+      "key": "key"
+    }
+  ]
+}

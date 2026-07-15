@@ -93,11 +93,30 @@ class IntegrationProvider extends Model
         if (strtolower($this->code) === 'nium') {
             $config = $this->serviceConfig();
 
-            return filled($config['base_url'] ?? null)
-                && filled($config['client_id'] ?? null)
+            $baseUrl = trim((string) ($config['base_url'] ?? ''));
+            $scheme = strtolower((string) parse_url($baseUrl, PHP_URL_SCHEME));
+            $host = strtolower((string) parse_url($baseUrl, PHP_URL_HOST));
+            $allowLocalHttp = (bool) ($config['allow_insecure_local'] ?? false)
+                && app()->environment(['local', 'testing'])
+                && in_array($host, ['localhost', '127.0.0.1', '::1'], true);
+
+            return $baseUrl !== ''
+                && $host !== ''
+                && parse_url($baseUrl, PHP_URL_USER) === null
+                && parse_url($baseUrl, PHP_URL_PASS) === null
+                && parse_url($baseUrl, PHP_URL_QUERY) === null
+                && parse_url($baseUrl, PHP_URL_FRAGMENT) === null
+                && ($scheme === 'https' || ($scheme === 'http' && $allowLocalHttp))
+                && filled(trim((string) ($config['client_id'] ?? '')))
                 && strtolower((string) ($config['auth']['mode'] ?? '')) === 'header'
-                && filled($config['auth']['header_name'] ?? null)
-                && filled($config['auth']['header_value'] ?? null);
+                && strtolower(trim((string) ($config['auth']['header_name'] ?? ''))) === 'x-api-key'
+                && filled(trim((string) ($config['auth']['header_value'] ?? '')))
+                && strtolower(trim((string) ($config['webhook']['static_header_name'] ?? ''))) === 'x-partner-key'
+                && filled(trim((string) ($config['webhook']['static_header_value'] ?? '')))
+                && $this->validNiumEndpoint($config['health_endpoint'] ?? null, ['clientHashId'])
+                && $this->validNiumEndpoint($config['customer_create_endpoint'] ?? null, ['clientHashId'])
+                && $this->validNiumEndpoint($config['customer_list_endpoint'] ?? null, ['clientHashId'])
+                && $this->validNiumEndpoint($config['customer_get_endpoint'] ?? null, ['clientHashId', 'customerHashId']);
         }
 
         return filled($this->serviceConfig()['base_url'] ?? null);
@@ -106,7 +125,8 @@ class IntegrationProvider extends Model
     public function isAvailableForOnboarding(): bool
     {
         return $this->status === 'active'
-            && $this->supportsOnboarding();
+            && $this->supportsOnboarding()
+            && (strtolower($this->code) !== 'nium' || $this->isNiumOnboardingConfigured());
     }
 
     public function assertSupportsCapability(string $capability): void
@@ -122,7 +142,9 @@ class IntegrationProvider extends Model
         };
 
         $supported = match ($capability) {
-            'onboarding' => $this->supportsOnboarding() && $this->status === 'active',
+            'onboarding' => $this->supportsOnboarding()
+                && $this->status === 'active'
+                && (strtolower($this->code) !== 'nium' || $this->isNiumOnboardingConfigured()),
             'beneficiary' => $this->supportsBeneficiaries() && $this->isConfigured(),
             'data_sync' => $this->supportsDataSync() && $this->isConfigured(),
             'quote' => $this->supportsQuotes() && $this->isConfigured(),
@@ -139,6 +161,32 @@ class IntegrationProvider extends Model
     public function getRouteKeyName(): string
     {
         return 'code';
+    }
+
+    private function validNiumEndpoint(mixed $endpoint, array $requiredPlaceholders): bool
+    {
+        $endpoint = trim((string) $endpoint);
+
+        if ($endpoint === '' || ! str_starts_with($endpoint, '/') || str_starts_with($endpoint, '//')) {
+            return false;
+        }
+
+        if (preg_match('/[\x00-\x20]/', $endpoint) === 1 || preg_match('#^https?://#i', $endpoint) === 1) {
+            return false;
+        }
+
+        foreach ($requiredPlaceholders as $placeholder) {
+            if (! str_contains($endpoint, '{'.$placeholder.'}')) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function isNiumOnboardingConfigured(): bool
+    {
+        return $this->isConfigured();
     }
 
     public function userAccounts(): HasMany

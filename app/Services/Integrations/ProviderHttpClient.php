@@ -8,10 +8,10 @@ use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
 use App\Support\SensitiveDataSanitizer;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
@@ -21,9 +21,8 @@ class ProviderHttpClient implements ProviderClient
         private readonly IntegrationProvider $provider,
         private readonly string $serviceConfigKey,
         private readonly array $headers = [],
-        private readonly SensitiveDataSanitizer $sensitiveDataSanitizer = new SensitiveDataSanitizer(),
-    ) {
-    }
+        private readonly SensitiveDataSanitizer $sensitiveDataSanitizer = new SensitiveDataSanitizer,
+    ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
     {
@@ -364,6 +363,12 @@ class ProviderHttpClient implements ProviderClient
     ): void {
         $responseBody = $response->json() ?? ['raw' => $response->body()];
 
+        if ($this->serviceConfigKey === 'nium') {
+            $this->logNiumRequest($user, $relatedTransferId, $method, $url, $payload, $response, $responseBody, $durationMs);
+
+            return;
+        }
+
         ApiRequestLog::create([
             'provider_id' => $this->provider->id,
             'user_id' => $user?->id,
@@ -380,5 +385,74 @@ class ProviderHttpClient implements ProviderClient
             'duration_ms' => $durationMs,
             'is_success' => $response->successful(),
         ]);
+    }
+
+    private function logNiumRequest(
+        ?User $user,
+        ?int $relatedTransferId,
+        string $method,
+        string $url,
+        array $payload,
+        Response $response,
+        mixed $responseBody,
+        int $durationMs,
+    ): void {
+        $requestId = collect($this->headers)
+            ->first(fn ($value, $key) => strtolower((string) $key) === 'x-request-id');
+        $responseData = is_array($responseBody) ? $responseBody : [];
+
+        ApiRequestLog::create([
+            'provider_id' => $this->provider->id,
+            'user_id' => $user?->id,
+            'related_transfer_id' => $relatedTransferId,
+            'request_method' => $method,
+            'request_url' => $this->safeNiumUrl($url),
+            'request_headers' => array_filter([
+                'x-request-id' => is_string($requestId) ? $requestId : null,
+            ]),
+            'request_body' => array_filter([
+                'external_id_fingerprint' => $this->fingerprint($payload['externalId'] ?? null),
+                'customer_type' => is_string($payload['type'] ?? null) ? $payload['type'] : null,
+                'region' => is_string($payload['region'] ?? null) ? $payload['region'] : null,
+            ]),
+            'response_status' => $response->status(),
+            'response_headers' => array_filter([
+                'x-request-id' => $response->header('x-request-id'),
+                'content-type' => $response->header('content-type'),
+            ]),
+            'response_body' => array_filter([
+                'status' => is_string($responseData['status'] ?? null) ? $responseData['status'] : null,
+                'sub_status' => is_string($responseData['subStatus'] ?? null) ? $responseData['subStatus'] : null,
+                'error_code' => Arr::get($responseData, 'errors.0.code')
+                    ?? Arr::get($responseData, 'errorCode')
+                    ?? Arr::get($responseData, 'code'),
+                'customer_id_fingerprint' => $this->fingerprint($responseData['customerHashId'] ?? null),
+                'wallet_id_fingerprint' => $this->fingerprint(
+                    $responseData['walletHashId'] ?? Arr::get($responseData, 'wallets.0.walletHashId'),
+                ),
+            ]),
+            'duration_ms' => $durationMs,
+            'is_success' => $response->successful(),
+        ]);
+    }
+
+    private function safeNiumUrl(string $url): string
+    {
+        $parts = parse_url($url);
+        $path = (string) ($parts['path'] ?? '/');
+        $path = preg_replace(
+            '#/(client|customer|wallet)/[^/]+#i',
+            '/$1/[REDACTED]',
+            $path,
+        ) ?: '/';
+
+        return ($parts['scheme'] ?? 'https').'://'.($parts['host'] ?? 'configured-nium-host').$path;
+    }
+
+    private function fingerprint(mixed $value): ?string
+    {
+        return is_scalar($value) && trim((string) $value) !== ''
+            ? substr(hash('sha256', (string) $value), 0, 16)
+            : null;
     }
 }

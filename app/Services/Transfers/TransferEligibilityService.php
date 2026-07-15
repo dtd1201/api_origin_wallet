@@ -6,6 +6,7 @@ use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
+use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Wallet\TransferApprovalService;
 use RuntimeException;
 
@@ -13,12 +14,17 @@ class TransferEligibilityService
 {
     public function __construct(
         private readonly TransferApprovalService $approvalService,
+        private readonly NiumProviderAccountStateService $niumAccountStateService,
     ) {}
 
     public function ensureUserCanCreateForProvider(User $user, IntegrationProvider $provider): void
     {
         if (! in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true)) {
             throw new RuntimeException('User KYC/KYB must be verified before creating transfers.');
+        }
+
+        if (strtolower((string) $provider->code) === 'nium') {
+            $this->niumAccountStateService->assertEligible($user);
         }
 
         $providerAccount = $user->providerAccounts()

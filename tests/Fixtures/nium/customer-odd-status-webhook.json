@@ -1,0 +1,8 @@
+{
+  "clientHashId": "b23b124c-9cc8-4550-b66f-ed8250ff8a5e",
+  "customerHashId": "2ba22977-eb3d-4db0-aa3f-7d8459ed6420",
+  "externalId": "9ba22977-eb3d-4db0-aa3f-7d8459ed6427",
+  "oddStatus": "odd_due",
+  "template": "CUSTOMER_ODD_STATUS_WEBHOOK",
+  "customerType": "corporate"
+}

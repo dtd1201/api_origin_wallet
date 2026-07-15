@@ -36,4 +36,32 @@ class SensitiveDataSanitizerTest extends TestCase
 
         $this->assertSame('Provider echoed x-api-key: [REDACTED] in a debug response.', $sanitized['raw']);
     }
+
+    public function test_recursively_redacts_authentication_identity_and_document_fields(): void
+    {
+        $sanitized = app(SensitiveDataSanitizer::class)->sanitize([
+            'authenticationCode' => 'one-time-secret',
+            'customer' => [
+                'firstName' => 'John',
+                'email' => 'john@example.test',
+                'billingAddress' => ['addressLine1' => '1 Secret Street'],
+                'documents' => [[
+                    'documentNumber' => 'P1234567',
+                    'status' => 'verified',
+                ]],
+            ],
+            'stakeholders' => [[
+                'firstName' => 'Director',
+                'dateOfBirth' => '1980-01-01',
+                'identityDocument' => ['documentNumber' => 'STAKEHOLDER-ID'],
+            ]],
+        ]);
+
+        $this->assertSame('[REDACTED]', $sanitized['authenticationCode']);
+        $this->assertSame('[REDACTED]', $sanitized['customer']['firstName']);
+        $this->assertSame('[REDACTED]', $sanitized['customer']['email']);
+        $this->assertSame('[REDACTED]', $sanitized['customer']['billingAddress']['addressLine1']);
+        $this->assertSame('[REDACTED]', $sanitized['customer']['documents']);
+        $this->assertSame('[REDACTED]', $sanitized['stakeholders']);
+    }
 }

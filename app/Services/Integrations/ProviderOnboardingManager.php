@@ -48,7 +48,11 @@ class ProviderOnboardingManager
         if (
             ! $force &&
             $existingProviderAccount !== null &&
-            in_array($existingProviderAccount->status, ['submitted', 'under_review', 'active'], true)
+            in_array($existingProviderAccount->status, ['submitted', 'under_review', 'active'], true) &&
+            (
+                strtolower((string) $provider->code) !== 'nium' ||
+                $existingProviderAccount->status === 'active'
+            )
         ) {
             return new ProviderOnboardingResult(
                 providerAccount: $existingProviderAccount->fresh('provider'),

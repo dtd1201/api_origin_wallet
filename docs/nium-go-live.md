@@ -8,12 +8,15 @@ Set these values in the API environment:
 
 ```dotenv
 NIUM_BASE_URL=
+NIUM_ALLOW_INSECURE_LOCAL=false
 NIUM_AUTH_MODE=header
 NIUM_AUTH_HEADER_NAME=x-api-key
 NIUM_API_KEY=
 NIUM_CLIENT_ID=
 NIUM_HEALTH_ENDPOINT=/api/v1/client/{clientHashId}
-NIUM_CUSTOMER_ENDPOINT=
+NIUM_CUSTOMER_CREATE_ENDPOINT=/api/v5/client/{clientHashId}/customers
+NIUM_CUSTOMER_GET_ENDPOINT=/api/v5/client/{clientHashId}/customer/{customerHashId}
+NIUM_CUSTOMER_LIST_ENDPOINT=/api/v5/client/{clientHashId}/customers
 NIUM_WALLET_BALANCE_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}
 NIUM_WALLET_TRANSACTIONS_ENDPOINT=/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions
 NIUM_QUOTE_ENDPOINT=/api/v1/client/{clientHashId}/quotes
@@ -29,7 +32,56 @@ NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_NAME=x-partner-key
 NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_VALUE=
 ```
 
-`x-partner-key` is a static header value and is not an HMAC signature. Generate separate random values for the general webhook and compliance callback. Do not commit or log either value. The legacy Nium HMAC settings remain available only as a compatibility fallback when no static webhook value is configured.
+For Phase 1 onboarding, the required values are exactly `NIUM_BASE_URL`,
+`NIUM_API_KEY`, `NIUM_CLIENT_ID`, `NIUM_AUTH_MODE=header`,
+`NIUM_AUTH_HEADER_NAME=x-api-key`, the four client/customer endpoints shown
+above, and `NIUM_WEBHOOK_STATIC_HEADER_NAME=x-partner-key` plus a non-empty
+`NIUM_WEBHOOK_STATIC_HEADER_VALUE`. `NIUM_BASE_URL` must use HTTPS. HTTP is
+accepted only for `localhost`, `127.0.0.1`, or `::1` when both
+`APP_ENV=local|testing` and `NIUM_ALLOW_INSECURE_LOCAL=true` are set.
+
+Legacy variable migration:
+
+| Old setting | Phase 1 setting |
+| --- | --- |
+| `NIUM_WEBHOOK_SECRET` | `NIUM_WEBHOOK_STATIC_HEADER_VALUE` |
+| `NIUM_WEBHOOK_SIGNATURE_HEADER` | `NIUM_WEBHOOK_STATIC_HEADER_NAME=x-partner-key` |
+| `NIUM_WEBHOOK_SIGNATURE_ALGORITHM` | Remove; lifecycle webhooks use constant-time static partner-key comparison |
+| endpoint placeholders such as `{client}` / `{customer}` | `{clientHashId}` / `{customerHashId}` |
+
+The legacy HMAC variables are not accepted for Nium customer lifecycle
+webhooks. Missing or unsafe configuration reports `not_configured` and no Nium
+request is sent. Unresolved endpoint placeholders also fail before I/O.
+
+## Production migration preflight
+
+Run these read-only queries before `php artisan migrate --force`. Both result
+sets must be empty. Resolve every duplicate manually; do not delete, merge, or
+renumber records in the migration.
+
+```sql
+SELECT user_id, provider_id, COUNT(*) AS duplicate_count,
+       ARRAY_AGG(id ORDER BY id) AS record_ids
+FROM user_provider_accounts
+GROUP BY user_id, provider_id
+HAVING COUNT(*) > 1;
+
+SELECT provider_id, event_id, COUNT(*) AS duplicate_count,
+       ARRAY_AGG(id ORDER BY id) AS record_ids
+FROM webhook_events
+WHERE event_id IS NOT NULL
+GROUP BY provider_id, event_id
+HAVING COUNT(*) > 1;
+```
+
+The Phase 1 migration repeats the first preflight and aborts with safe record
+IDs when duplicates exist. The webhook table already enforces
+`UNIQUE(provider_id, event_id)`; customer lifecycle code now stores canonical
+`x-request-id` in `event_id`.
+
+`x-partner-key` is a static header value and is not an HMAC signature. Generate separate random values for the general webhook and compliance callback. Do not commit or log either value.
+
+Enable `CUSTOMER_STATUS_WEBHOOK`, `CUSTOMER_ENTITY_KYC_STATUS`, `CUSTOMER_COMPLIANCE_STATUS`, `CUSTOMER_ODD_STATUS_WEBHOOK`, and customer registration events for the configured webhook URL. Nium customer and wallet identifiers must never be populated manually.
 
 ## Network And Callback Details
 

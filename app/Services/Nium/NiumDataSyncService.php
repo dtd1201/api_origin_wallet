@@ -7,7 +7,6 @@ use App\Models\IntegrationProvider;
 use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\User;
-use App\Models\UserProviderAccount;
 use App\Services\Integrations\Contracts\DataSyncProvider;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
@@ -18,57 +17,19 @@ class NiumDataSyncService implements DataSyncProvider
 {
     public function __construct(
         private readonly NiumService $niumService,
+        private readonly NiumCustomerOnboardingService $customerOnboardingService,
     ) {}
 
     public function syncAccounts(IntegrationProvider $provider, User $user): array
     {
-        $endpoint = (string) config('services.nium.customer_endpoint', '');
-        $providerAccount = $this->providerAccount($provider, $user);
+        $providerAccount = $this->customerOnboardingService->syncUser($provider, $user);
 
-        if ($endpoint === '') {
-            return [
-                'synced_accounts' => $providerAccount !== null ? 1 : 0,
-                'skipped' => 'NIUM_CUSTOMER_ENDPOINT is not configured.',
-            ];
-        }
-
-        $response = $this->niumService->get(
-            path: $this->niumService->path($endpoint, [
-                'client' => $this->niumService->clientId(),
-                'customer' => $this->niumService->customerId($user),
-                'wallet' => $this->niumService->walletId($user),
-            ]),
-            user: $user,
-        );
-
-        $data = $this->successfulJson($response, 'Nium account sync failed.');
-        $resource = $this->resource($data);
-
-        DB::transaction(function () use ($provider, $resource, $user): void {
-            UserProviderAccount::query()->updateOrCreate(
-                [
-                    'user_id' => $user->id,
-                    'provider_id' => $provider->id,
-                    'external_account_id' => (string) (
-                        $this->value($resource, ['walletHashId', 'wallet_hash_id', 'walletId', 'wallet_id'])
-                        ?: $this->niumService->walletId($user)
-                    ),
-                ],
-                [
-                    'external_customer_id' => (string) (
-                        $this->value($resource, ['customerHashId', 'customer_hash_id', 'customerId', 'customer_id'])
-                        ?: $this->niumService->customerId($user)
-                    ),
-                    'account_name' => $this->value($resource, ['name', 'customerName', 'fullName']) ?? $user->full_name,
-                    'status' => $this->normalizeAccountStatus($this->value($resource, ['status', 'complianceStatus'])),
-                    'metadata' => array_merge($resource, [
-                        'synced_at' => now()->toISOString(),
-                    ]),
-                ],
-            );
-        });
-
-        return ['synced_accounts' => 1];
+        return [
+            'synced_accounts' => 1,
+            'provider_account_status' => $providerAccount->status,
+            'provider_status' => $providerAccount->provider_status,
+            'provider_sub_status' => $providerAccount->provider_sub_status,
+        ];
     }
 
     public function syncBalances(IntegrationProvider $provider, User $user): array
@@ -256,14 +217,6 @@ class NiumDataSyncService implements DataSyncProvider
         return ['synced_transactions' => $count];
     }
 
-    private function providerAccount(IntegrationProvider $provider, User $user): ?UserProviderAccount
-    {
-        return $user->providerAccounts()
-            ->where('provider_id', $provider->id)
-            ->latest('id')
-            ->first();
-    }
-
     private function successfulJson(Response $response, string $message): array
     {
         $data = $response->json() ?? ['raw' => $response->body()];
@@ -273,14 +226,6 @@ class NiumDataSyncService implements DataSyncProvider
         }
 
         return is_array($data) ? $data : [];
-    }
-
-    private function resource(array $data): array
-    {
-        return (array) (Arr::get($data, 'data.customer')
-            ?? Arr::get($data, 'customer')
-            ?? Arr::get($data, 'data')
-            ?? $data);
     }
 
     private function balanceItems(array $data): array
@@ -375,15 +320,6 @@ class NiumDataSyncService implements DataSyncProvider
         }
 
         return (float) $amount < 0 ? 'debit' : 'credit';
-    }
-
-    private function normalizeAccountStatus(mixed $status): string
-    {
-        return match (strtolower((string) $status)) {
-            'active', 'approved', 'completed', 'verified' => 'active',
-            'blocked', 'suspended', 'rejected', 'failed' => 'blocked',
-            default => 'pending',
-        };
     }
 
     private function normalizeTransactionStatus(mixed $status): string

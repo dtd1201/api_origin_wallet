@@ -71,6 +71,7 @@ return [
 
     'nium' => [
         'base_url' => env('NIUM_BASE_URL'),
+        'allow_insecure_local' => env('NIUM_ALLOW_INSECURE_LOCAL', false),
         'timeout' => env('NIUM_TIMEOUT', 30),
         'client_id' => env('NIUM_CLIENT_ID'),
         'auth' => [
@@ -79,7 +80,9 @@ return [
             'header_value' => env('NIUM_API_KEY'),
         ],
         'health_endpoint' => env('NIUM_HEALTH_ENDPOINT', '/api/v1/client/{clientHashId}'),
-        'customer_endpoint' => env('NIUM_CUSTOMER_ENDPOINT'),
+        'customer_create_endpoint' => env('NIUM_CUSTOMER_CREATE_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
+        'customer_get_endpoint' => env('NIUM_CUSTOMER_GET_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}'),
+        'customer_list_endpoint' => env('NIUM_CUSTOMER_LIST_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
         'wallet_balance_endpoint' => env('NIUM_WALLET_BALANCE_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}'),
         'wallet_transactions_endpoint' => env('NIUM_WALLET_TRANSACTIONS_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions'),
         'transaction_sync_days' => env('NIUM_TRANSACTION_SYNC_DAYS', 30),

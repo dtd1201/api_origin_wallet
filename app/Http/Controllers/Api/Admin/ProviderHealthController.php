@@ -41,7 +41,8 @@ class ProviderHealthController extends Controller
 
         if (! $provider->isConfigured()) {
             return response()->json([
-                'message' => "{$provider->name} base URL is not configured.",
+                'message' => "{$provider->name} integration configuration is incomplete or unsafe.",
+                'provider_health' => $this->payload($provider),
             ], 422);
         }
 
@@ -116,7 +117,7 @@ class ProviderHealthController extends Controller
         }
 
         if (! $provider->isConfigured()) {
-            return 'degraded';
+            return 'not_configured';
         }
 
         if ($latestLog === null) {
@@ -143,7 +144,11 @@ class ProviderHealthController extends Controller
         $clientId = (string) config("services.{$serviceConfigKey}.client_id", '');
 
         if ($clientId !== '') {
-            $endpoint = str_replace('{client}', urlencode($clientId), $endpoint);
+            $endpoint = str_replace(
+                ['{client}', '{clientHashId}'],
+                urlencode($clientId),
+                $endpoint,
+            );
         }
 
         return $endpoint !== '' ? $endpoint : '/';

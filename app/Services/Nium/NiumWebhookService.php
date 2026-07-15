@@ -5,10 +5,10 @@ namespace App\Services\Nium;
 use App\Models\IntegrationProvider;
 use App\Models\Transaction;
 use App\Models\Transfer;
+use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Integrations\Contracts\ReprocessesWebhookEvent;
 use App\Services\Integrations\Contracts\WebhookProvider;
-use App\Services\Integrations\Support\HmacWebhookSignatureVerifier;
 use App\Services\Integrations\Support\StaticWebhookHeaderVerifier;
 use App\Services\Wallet\LedgerService;
 use App\Support\SensitiveDataSanitizer;
@@ -17,6 +17,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Throwable;
@@ -25,9 +26,10 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 {
     public function __construct(
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer,
-        private readonly HmacWebhookSignatureVerifier $signatureVerifier,
         private readonly StaticWebhookHeaderVerifier $staticHeaderVerifier,
         private readonly LedgerService $ledgerService,
+        private readonly NiumProviderAccountStateService $providerAccountStateService,
+        private readonly NiumCustomerOnboardingService $customerOnboardingService,
     ) {}
 
     public function handleWebhook(IntegrationProvider $provider, Request $request): array
@@ -35,8 +37,17 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         $this->verifyWebhookIfConfigured($request);
 
         $payload = $request->json()->all();
-        $eventId = $this->eventId($payload, $request);
-        $eventType = $this->eventType($payload);
+        $template = strtoupper((string) ($payload['template'] ?? ''));
+        $isCustomerLifecycle = $this->providerAccountStateService->isCustomerLifecycleTemplate($template);
+
+        if ($isCustomerLifecycle) {
+            $this->verifyCustomerLifecycleEnvelope($payload, $request);
+        }
+
+        $eventId = $this->eventId($payload, $request, $isCustomerLifecycle);
+        $eventType = $isCustomerLifecycle
+            ? $template
+            : $this->eventType($payload);
         $resource = $this->resourcePayload($payload);
 
         $existingEvent = WebhookEvent::query()
@@ -58,26 +69,16 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             ];
         }
 
-        $event = null;
-
         try {
-            DB::transaction(function () use (&$event, $eventId, $eventType, $payload, $provider, $request, $resource): void {
-                $event = WebhookEvent::query()->create([
+            $event = DB::transaction(function () use ($eventId, $eventType, $payload, $provider, $resource): WebhookEvent {
+                return WebhookEvent::query()->create([
                     'provider_id' => $provider->id,
                     'event_id' => $eventId,
                     'event_type' => $eventType,
                     'external_resource_id' => $this->externalResourceId($payload, $resource),
                     'payload' => $this->sensitiveDataSanitizer->sanitize($payload),
-                    'signature' => $this->receivedSignature($request) !== '' ? '[REDACTED]' : null,
+                    'signature' => '[REDACTED]',
                     'processing_status' => 'received',
-                ]);
-
-                $this->processPayload($provider, $payload, $resource);
-
-                $event->update([
-                    'processing_status' => 'processed',
-                    'processed_at' => now(),
-                    'error_message' => null,
                 ]);
             });
         } catch (QueryException $exception) {
@@ -91,13 +92,27 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             }
 
             throw $exception;
+        }
+
+        try {
+            $this->processPayload($provider, $payload, $resource, $request);
+
+            $event->update([
+                'processing_status' => 'processed',
+                'processed_at' => now(),
+                'error_message' => null,
+            ]);
         } catch (Throwable $exception) {
-            $event?->update([
+            $event->update([
                 'processing_status' => 'failed',
-                'error_message' => $exception->getMessage(),
+                'error_message' => Str::limit($this->safeOperationalError($exception), 1000, ''),
             ]);
 
-            throw new RuntimeException($exception->getMessage(), previous: $exception);
+            if ($exception instanceof AccessDeniedHttpException) {
+                throw $exception;
+            }
+
+            throw new RuntimeException($this->safeOperationalError($exception), previous: $exception);
         }
 
         return [
@@ -109,46 +124,71 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     public function reprocessWebhookEvent(IntegrationProvider $provider, WebhookEvent $event): WebhookEvent
     {
-        return DB::transaction(function () use ($event, $provider): WebhookEvent {
+        $event = DB::transaction(function () use ($event): WebhookEvent {
             $event = WebhookEvent::query()
                 ->whereKey($event->id)
                 ->lockForUpdate()
                 ->firstOrFail();
 
             if ($event->processing_status === 'processed') {
-                return $event->fresh('provider');
+                return $event;
             }
+            $event->update([
+                'processing_status' => 'retrying',
+                'error_message' => null,
+            ]);
 
-            $payload = (array) ($event->payload ?? []);
-
-            try {
-                $event->update([
-                    'processing_status' => 'retrying',
-                    'error_message' => null,
-                ]);
-
-                $this->processPayload($provider, $payload, $this->resourcePayload($payload));
-
-                $event->update([
-                    'processing_status' => 'processed',
-                    'processed_at' => now(),
-                    'error_message' => null,
-                ]);
-            } catch (Throwable $exception) {
-                $event->update([
-                    'processing_status' => 'failed',
-                    'error_message' => $exception->getMessage(),
-                ]);
-
-                throw new RuntimeException($exception->getMessage(), previous: $exception);
-            }
-
-            return $event->fresh('provider');
+            return $event->fresh();
         });
+
+        if ($event->processing_status === 'processed') {
+            return $event->fresh('provider');
+        }
+
+        $payload = (array) ($event->payload ?? []);
+
+        if (
+            $this->providerAccountStateService->isCustomerLifecycleTemplate($payload['template'] ?? null) &&
+            ($payload['clientHashId'] ?? null) === '[REDACTED]'
+        ) {
+            $payload['clientHashId'] = (string) config('services.nium.client_id', '');
+        }
+
+        try {
+            $retryRequest = Request::create('/internal/nium-webhook-retry', 'POST');
+            $retryRequest->headers->set('x-request-id', (string) $event->event_id);
+            $this->processPayload($provider, $payload, $this->resourcePayload($payload), $retryRequest);
+            $event->update([
+                'processing_status' => 'processed',
+                'processed_at' => now(),
+                'error_message' => null,
+            ]);
+        } catch (Throwable $exception) {
+            $event->update([
+                'processing_status' => 'failed',
+                'error_message' => Str::limit($this->safeOperationalError($exception), 1000, ''),
+            ]);
+
+            throw new RuntimeException($this->safeOperationalError($exception), previous: $exception);
+        }
+
+        return $event->fresh('provider');
     }
 
-    private function processPayload(IntegrationProvider $provider, array $payload, array $resource): void
-    {
+    private function processPayload(
+        IntegrationProvider $provider,
+        array $payload,
+        array $resource,
+        ?Request $request = null,
+    ): void {
+        $template = strtoupper((string) ($payload['template'] ?? ''));
+
+        if ($this->providerAccountStateService->isCustomerLifecycleTemplate($template)) {
+            $this->processCustomerLifecyclePayload($provider, $payload, $request);
+
+            return;
+        }
+
         $transfer = $this->findTransfer($provider, $payload, $resource);
 
         if ($transfer !== null) {
@@ -191,6 +231,131 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             $this->ledgerService->applyTransferTerminalStatus($transfer);
             $this->syncTransaction($provider, $transfer, $payload, $resource);
         }
+    }
+
+    private function processCustomerLifecyclePayload(
+        IntegrationProvider $provider,
+        array $payload,
+        ?Request $request,
+    ): void {
+        $providerAccount = $this->findCustomerProviderAccount($provider, $payload);
+
+        if ($providerAccount === null) {
+            throw new RuntimeException('Nium customer webhook could not be mapped to an existing onboarding account.');
+        }
+        $source = 'nium_webhook_notification:'.strtolower((string) $payload['template']);
+        $this->assertNotificationIdentifiersMatch($providerAccount, $payload, $source, $request);
+        $providerAccount = $this->providerAccountStateService->applyRestrictiveNotification(
+            $providerAccount,
+            $payload,
+            $source,
+        );
+
+        try {
+            $providerAccount = $this->customerOnboardingService->retrieveCustomer(
+                $providerAccount->fresh(),
+                verifiedCustomerHashId: filled($payload['customerHashId'] ?? null)
+                    ? (string) $payload['customerHashId']
+                    : null,
+                requestId: (string) $request?->header('x-request-id'),
+            );
+            $this->providerAccountStateService->recordVerifiedNotificationDetails(
+                $providerAccount,
+                $payload,
+                $source,
+            );
+        } catch (NiumProviderIdConflictException $exception) {
+            throw new RuntimeException('Nium customer reconciliation found a verified identifier conflict.', previous: $exception);
+        } catch (Throwable $exception) {
+            $this->providerAccountStateService->markReconciliationFailure(
+                $providerAccount,
+                'authoritative_get_customer_failed',
+                $source,
+                (string) $request?->header('x-request-id'),
+            );
+
+            throw new RuntimeException('Nium customer reconciliation failed; access remains restricted.', previous: $exception);
+        }
+    }
+
+    private function verifyCustomerLifecycleEnvelope(array $payload, Request $request): void
+    {
+        $requestId = trim((string) $request->header('x-request-id'));
+
+        if ($requestId === '') {
+            throw new RuntimeException('Nium lifecycle webhook requires a non-empty x-request-id header.');
+        }
+
+        $configuredClientHashId = (string) config('services.nium.client_id', '');
+        $incomingClientHashId = (string) ($payload['clientHashId'] ?? '');
+
+        if ($configuredClientHashId === '' || $incomingClientHashId === '' || ! hash_equals($configuredClientHashId, $incomingClientHashId)) {
+            throw new AccessDeniedHttpException('Nium webhook clientHashId does not match this integration.');
+        }
+    }
+
+    private function assertNotificationIdentifiersMatch(
+        UserProviderAccount $account,
+        array $payload,
+        string $source,
+        ?Request $request,
+    ): void {
+        $incomingCustomer = trim((string) ($payload['customerHashId'] ?? ''));
+        $incomingWallet = trim((string) (
+            $payload['walletHashId']
+            ?? Arr::get($payload, 'wallets.0.walletHashId')
+            ?? Arr::get($payload, 'walletHashIds.0')
+            ?? ''
+        ));
+
+        foreach ([
+            ['external_customer_id', (string) $account->external_customer_id, $incomingCustomer],
+            ['external_account_id', (string) $account->external_account_id, $incomingWallet],
+        ] as [$field, $current, $incoming]) {
+            if ($current !== '' && $incoming !== '' && ! hash_equals($current, $incoming)) {
+                $this->providerAccountStateService->quarantineIdentifierConflict(
+                    $account,
+                    $field,
+                    $current,
+                    $incoming,
+                    $source,
+                    (string) $request?->header('x-request-id'),
+                );
+
+                throw new RuntimeException('Nium lifecycle webhook identifier conflict was quarantined.');
+            }
+        }
+    }
+
+    private function findCustomerProviderAccount(IntegrationProvider $provider, array $payload): ?UserProviderAccount
+    {
+        $customerHashId = $payload['customerHashId'] ?? null;
+        $externalReference = $payload['externalId'] ?? null;
+
+        if (! filled($customerHashId) && ! filled($externalReference)) {
+            return null;
+        }
+
+        $byCustomer = filled($customerHashId)
+            ? UserProviderAccount::query()
+                ->where('provider_id', $provider->id)
+                ->where('external_customer_id', (string) $customerHashId)
+                ->latest('id')
+                ->first()
+            : null;
+        $byExternalReference = filled($externalReference)
+            ? UserProviderAccount::query()
+                ->where('provider_id', $provider->id)
+                ->where('external_reference', (string) $externalReference)
+                ->latest('id')
+                ->first()
+            : null;
+
+        if ($byCustomer !== null && $byExternalReference !== null && $byCustomer->id !== $byExternalReference->id) {
+            throw new RuntimeException('Nium customer webhook identifiers map to different provider accounts.');
+        }
+
+        return $byCustomer ?? $byExternalReference;
     }
 
     private function syncTransaction(IntegrationProvider $provider, Transfer $transfer, array $payload, array $resource): void
@@ -237,36 +402,16 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         $staticHeaderName = (string) config('services.nium.webhook.static_header_name', 'x-partner-key');
         $staticHeaderValue = (string) config('services.nium.webhook.static_header_value', '');
 
-        if ($staticHeaderValue !== '') {
-            if (! $this->staticHeaderVerifier->isValid($request, $staticHeaderName, $staticHeaderValue)) {
-                Log::warning('Rejected Nium webhook with invalid static authentication header.', [
-                    'header_name' => $staticHeaderName,
-                    'ip_address' => $request->ip(),
-                ]);
-
-                throw new AccessDeniedHttpException('Invalid Nium webhook authentication.');
-            }
-
-            return;
+        if (strtolower(trim($staticHeaderName)) !== 'x-partner-key' || $staticHeaderValue === '') {
+            throw new RuntimeException('Nium webhook x-partner-key authentication is not configured.');
         }
 
-        $secret = (string) config('services.nium.webhook_secret', '');
-        $headerName = (string) config('services.nium.webhook_signature_header', '');
-
-        if ($secret === '' || $headerName === '') {
-            throw new RuntimeException('Nium webhook authentication is not configured.');
-        }
-
-        $receivedSignature = (string) $request->header($headerName);
-        $algorithm = (string) config('services.nium.webhook_signature_algorithm', 'sha256');
-
-        if (! $this->signatureVerifier->isValid($request->getContent(), $secret, $receivedSignature, $algorithm)) {
-            Log::warning('Rejected Nium webhook with invalid HMAC signature.', [
-                'header_name' => $headerName,
+        if (! $this->staticHeaderVerifier->isValid($request, $staticHeaderName, $staticHeaderValue)) {
+            Log::warning('Rejected Nium webhook with invalid static authentication header.', [
                 'ip_address' => $request->ip(),
             ]);
 
-            throw new AccessDeniedHttpException('Invalid Nium webhook signature.');
+            throw new AccessDeniedHttpException('Invalid Nium webhook authentication.');
         }
     }
 
@@ -296,8 +441,12 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             ->first();
     }
 
-    private function eventId(array $payload, Request $request): string
+    private function eventId(array $payload, Request $request, bool $isCustomerLifecycle = false): string
     {
+        if ($isCustomerLifecycle) {
+            return trim((string) $request->header('x-request-id'));
+        }
+
         $explicitId = $this->value($payload, [
             'id',
             'eventId',
@@ -336,6 +485,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
     private function externalResourceId(array $payload, array $resource): ?string
     {
         $value = $this->value($resource, [
+            'customerHashId',
             'systemReferenceNumber',
             'system_reference_number',
             'paymentId',
@@ -399,14 +549,20 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         $sqlState = $exception->errorInfo[0] ?? null;
         $constraint = $exception->errorInfo[2] ?? '';
 
-        return $sqlState === '23505'
-            && str_contains($constraint, 'webhook_events_provider_id_event_id_unique');
+        return in_array($sqlState, ['23000', '23505'], true)
+            && (
+                str_contains($constraint, 'webhook_events_provider_id_event_id_unique')
+                || str_contains($constraint, 'webhook_events.provider_id, webhook_events.event_id')
+            );
     }
 
-    private function receivedSignature(Request $request): string
+    private function safeOperationalError(Throwable $exception): string
     {
-        $headerName = (string) config('services.nium.webhook_signature_header', '');
-
-        return $headerName !== '' ? (string) $request->header($headerName) : '';
+        return match (true) {
+            $exception instanceof NiumProviderIdConflictException => 'verified_identifier_conflict',
+            $exception instanceof AccessDeniedHttpException => 'webhook_authentication_failed',
+            str_contains(strtolower($exception->getMessage()), 'reconciliation') => 'customer_reconciliation_failed',
+            default => 'webhook_processing_failed',
+        };
     }
 }

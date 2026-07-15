@@ -21,8 +21,8 @@ Content-Type: application/json
 Before the user can use Nium payout APIs in this backend:
 
 - provider `nium` must exist and be configured
-- the user must already have an active Nium provider account
-- that provider account must contain:
+- the user must complete Customer Onboarding V5 and have `status=clear` with an empty `subStatus`
+- the provider account identifiers must have been verified from an authenticated Nium API response or webhook:
   - `external_customer_id` = Nium `customerHashId`
   - `external_account_id` = Nium `walletHashId`
 
@@ -31,6 +31,14 @@ The backend also requires:
 - `NIUM_BASE_URL`
 - `NIUM_API_KEY`
 - `NIUM_CLIENT_ID`
+- `NIUM_CUSTOMER_CREATE_ENDPOINT`, `NIUM_CUSTOMER_GET_ENDPOINT`, and `NIUM_CUSTOMER_LIST_ENDPOINT`
+- `NIUM_WEBHOOK_STATIC_HEADER_NAME=x-partner-key`
+- a non-empty `NIUM_WEBHOOK_STATIC_HEADER_VALUE`
+
+The account becomes financially eligible only when both
+`customer_id_verified_at` and `wallet_id_verified_at` were set independently
+from authenticated Nium responses, `status=clear`, and `subStatus` is empty.
+The compatibility field `provider_ids_verified_at` alone never grants access.
 
 ## 1. Resolve Provider Id
 

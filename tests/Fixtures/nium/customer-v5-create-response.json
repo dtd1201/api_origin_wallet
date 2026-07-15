@@ -1,0 +1,29 @@
+{
+  "billingAddress": {
+    "addressLine1": "456 Corporate Ave",
+    "addressLine2": "Suite 8",
+    "city": "Cardiff",
+    "country": "UK",
+    "postCode": "CF24"
+  },
+  "customerHashId": "2ba22977-eb3d-4db0-aa3f-7d8459ed6420",
+  "dateOfBirth": "1985-05-15",
+  "email": "john.doe@example.com",
+  "externalId": "9ba22977-eb3d-4db0-aa3f-7d8459ed6427",
+  "firstName": "John",
+  "kycType": "minimum",
+  "lastName": "Doe",
+  "mobile": "123456789",
+  "mobileCountryCode": "44",
+  "nationality": "AU",
+  "region": "UK",
+  "status": "clear",
+  "subStatus": "",
+  "type": "individual",
+  "wallets": [
+    {
+      "walletHashId": "235a58d9-9a83-4e98-9711-a5fa1dcfecda",
+      "walletType": "virtual"
+    }
+  ]
+}

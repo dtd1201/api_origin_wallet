@@ -39,9 +39,10 @@ class ProviderAccountController extends Controller
                         ->sortByDesc('id')
                         ->first();
                     $linkAvailable = $provider->isAvailableForOnboarding()
-                        && $integrationLink !== null
-                        && $integrationLink->is_active
-                        && filled($integrationLink->link_url);
+                        && (
+                            strtolower((string) $provider->code) === 'nium' ||
+                            ($integrationLink !== null && $integrationLink->is_active && filled($integrationLink->link_url))
+                        );
                     $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
                     $providerSubmissionApproved = in_array($kycProviderSubmission?->status, ['approved', 'submitted'], true);
 
@@ -82,9 +83,10 @@ class ProviderAccountController extends Controller
         $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
         $kycProviderSubmission = $user->kycProviderSubmissions->firstWhere('provider_id', $provider->id);
         $linkAvailable = $provider->isAvailableForOnboarding()
-            && $integrationLink !== null
-            && $integrationLink->is_active
-            && filled($integrationLink->link_url);
+            && (
+                strtolower((string) $provider->code) === 'nium' ||
+                ($integrationLink !== null && $integrationLink->is_active && filled($integrationLink->link_url))
+            );
         $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
         $providerSubmissionApproved = in_array($kycProviderSubmission?->status, ['approved', 'submitted'], true);
 
@@ -131,9 +133,10 @@ class ProviderAccountController extends Controller
 
         $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
         $linkAvailable = $provider->isAvailableForOnboarding()
-            && $integrationLink !== null
-            && $integrationLink->is_active
-            && filled($integrationLink->link_url);
+            && (
+                strtolower((string) $provider->code) === 'nium' ||
+                ($integrationLink !== null && $integrationLink->is_active && filled($integrationLink->link_url))
+            );
 
         if ($linkAvailable) {
             return response()->json([

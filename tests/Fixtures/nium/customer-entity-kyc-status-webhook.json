@@ -1,0 +1,11 @@
+{
+  "customerHashId": "2ba22977-eb3d-4db0-aa3f-7d8459ed6420",
+  "template": "CUSTOMER_ENTITY_KYC_STATUS",
+  "customerType": "corporate",
+  "kycStatus": "submitted",
+  "kycMode": "manual_kyc",
+  "entityType": "applicant",
+  "externalId": "origin-wallet-person-1",
+  "referenceId": "b80612ea-1822-4788-aa3d-f0b4585f6015",
+  "clientHashId": "b23b124c-9cc8-4550-b66f-ed8250ff8a5e"
+}

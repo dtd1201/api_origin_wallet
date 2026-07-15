@@ -14,6 +14,14 @@ class NiumQuoteServiceTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
+    }
+
     public function test_create_quote_maps_nium_response_to_fx_quote(): void
     {
         $provider = IntegrationProvider::query()->create([
@@ -29,6 +37,10 @@ class NiumQuoteServiceTest extends TestCase
             'external_customer_id' => 'cust_hash_123',
             'external_account_id' => 'wallet_hash_123',
             'status' => 'active',
+            'provider_status' => 'clear',
+            'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(),
+            'provider_ids_verified_at' => now(),
         ]);
 
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');

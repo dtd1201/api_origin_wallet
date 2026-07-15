@@ -29,7 +29,6 @@ class NiumComplianceCallbackController extends Controller
 
         if (! $staticHeaderVerifier->isValid($request, $headerName, $headerValue)) {
             Log::warning('Rejected Nium compliance callback with invalid static authentication header.', [
-                'header_name' => $headerName,
                 'ip_address' => $request->ip(),
             ]);
 

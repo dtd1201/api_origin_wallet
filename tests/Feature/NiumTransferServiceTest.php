@@ -16,6 +16,14 @@ class NiumTransferServiceTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
+    }
+
     public function test_submit_transfer_creates_nium_remittance_and_updates_transfer(): void
     {
         $provider = IntegrationProvider::query()->create([
@@ -32,6 +40,10 @@ class NiumTransferServiceTest extends TestCase
             'external_customer_id' => 'cust_hash_123',
             'external_account_id' => 'wallet_hash_123',
             'status' => 'active',
+            'provider_status' => 'clear',
+            'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(),
+            'provider_ids_verified_at' => now(),
         ]);
 
         Balance::query()->create([
@@ -124,6 +136,10 @@ class NiumTransferServiceTest extends TestCase
             'external_customer_id' => 'cust_hash_123',
             'external_account_id' => 'wallet_hash_123',
             'status' => 'active',
+            'provider_status' => 'clear',
+            'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(),
+            'provider_ids_verified_at' => now(),
         ]);
 
         $beneficiary = Beneficiary::query()->create([

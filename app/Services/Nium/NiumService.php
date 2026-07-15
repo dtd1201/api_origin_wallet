@@ -4,7 +4,6 @@ namespace App\Services\Nium;
 
 use App\Models\IntegrationProvider;
 use App\Models\User;
-use App\Models\UserProviderAccount;
 use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Str;
@@ -12,6 +11,10 @@ use RuntimeException;
 
 class NiumService
 {
+    public function __construct(
+        private readonly NiumProviderAccountStateService $stateService,
+    ) {}
+
     public function get(string $path, array $query = [], ?User $user = null): Response
     {
         return $this->client()->get($path, $query, $user);
@@ -34,40 +37,24 @@ class NiumService
 
     public function customerId(User $user): string
     {
-        $providerAccount = $this->providerAccount($user);
+        $providerAccount = $this->stateService->assertEligible($user);
 
         if (filled($providerAccount?->external_customer_id)) {
             return (string) $providerAccount->external_customer_id;
         }
 
-        $metadata = (array) ($providerAccount?->metadata ?? []);
-
-        foreach (['customer_id', 'customer_hash_id', 'nium_customer_id'] as $key) {
-            if (filled($metadata[$key] ?? null)) {
-                return (string) $metadata[$key];
-            }
-        }
-
-        throw new RuntimeException('Nium customer id is not configured for this user.');
+        throw new RuntimeException('Nium customer id is not available from an authenticated Nium response.');
     }
 
     public function walletId(User $user): string
     {
-        $providerAccount = $this->providerAccount($user);
+        $providerAccount = $this->stateService->assertEligible($user);
 
         if (filled($providerAccount?->external_account_id)) {
             return (string) $providerAccount->external_account_id;
         }
 
-        $metadata = (array) ($providerAccount?->metadata ?? []);
-
-        foreach (['wallet_id', 'wallet_hash_id', 'nium_wallet_id'] as $key) {
-            if (filled($metadata[$key] ?? null)) {
-                return (string) $metadata[$key];
-            }
-        }
-
-        throw new RuntimeException('Nium wallet id is not configured for this user.');
+        throw new RuntimeException('Nium wallet id is not available from an authenticated Nium response.');
     }
 
     public function clientId(): string
@@ -83,11 +70,29 @@ class NiumService
 
     public function path(string $template, array $replacements = []): string
     {
+        $template = trim($template);
+
+        if ($template === '' || ! str_starts_with($template, '/') || str_starts_with($template, '//')) {
+            throw new RuntimeException('Nium endpoint must be a configured relative path.');
+        }
+
+        if (preg_match('/[\x00-\x20]/', $template) === 1 || preg_match('#^https?://#i', $template) === 1) {
+            throw new RuntimeException('Nium endpoint contains an invalid scheme or whitespace.');
+        }
+
         $replacements = $this->withOfficialPathAliases($replacements);
         $path = $template;
 
         foreach ($replacements as $key => $value) {
+            if (! is_scalar($value) || trim((string) $value) === '') {
+                throw new RuntimeException("Nium endpoint replacement [{$key}] is empty.");
+            }
+
             $path = str_replace('{'.$key.'}', urlencode((string) $value), $path);
+        }
+
+        if (preg_match('/\{[^}]+\}/', $path) === 1) {
+            throw new RuntimeException('Nium endpoint contains an unresolved placeholder.');
         }
 
         return $path;
@@ -114,8 +119,14 @@ class NiumService
 
     private function client(): ProviderHttpClient
     {
+        $provider = $this->provider();
+
+        if (! $provider->isConfigured()) {
+            throw new RuntimeException('Nium integration configuration is incomplete or unsafe.');
+        }
+
         return new ProviderHttpClient(
-            provider: $this->provider(),
+            provider: $provider,
             serviceConfigKey: 'nium',
             headers: [
                 'x-request-id' => (string) Str::uuid(),
@@ -132,18 +143,5 @@ class NiumService
                 'status' => 'active',
             ]
         );
-    }
-
-    private function providerAccount(User $user): ?UserProviderAccount
-    {
-        return $user->relationLoaded('providerAccounts')
-            ? $user->providerAccounts
-                ->where('provider_id', $this->provider()->id)
-                ->sortByDesc('id')
-                ->first()
-            : $user->providerAccounts()
-                ->where('provider_id', $this->provider()->id)
-                ->latest('id')
-                ->first();
     }
 }
