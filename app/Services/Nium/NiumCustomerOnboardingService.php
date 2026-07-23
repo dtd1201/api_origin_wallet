@@ -19,40 +19,68 @@ class NiumCustomerOnboardingService implements OnboardingProvider
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumCustomerPayloadFactory $payloadFactory,
+        private readonly NiumCustomerDocumentPreparationService $documentPreparationService,
         private readonly NiumProviderAccountStateService $stateService,
         private readonly NiumCustomerErrorMapper $errorMapper,
     ) {}
 
     public function syncUser(IntegrationProvider $provider, User $user): UserProviderAccount
     {
+        return $this->synchronizeUser($provider, $user)['account'];
+    }
+
+    /**
+     * @return array{account: UserProviderAccount, pending_document_count: int}
+     */
+    private function synchronizeUser(IntegrationProvider $provider, User $user): array
+    {
         $providerAccount = $this->provisionProviderAccount($provider, $user);
 
         try {
-            return DB::transaction(function () use ($providerAccount, $user): UserProviderAccount {
-                $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
+            $account = $providerAccount->fresh();
 
-                try {
-                    if (filled($account->external_customer_id)) {
-                        return $this->retrieveCustomer($account, $user);
-                    }
+            if (filled($account->external_customer_id)) {
+                return [
+                    'account' => $this->retrieveCustomer($account, $user),
+                    'pending_document_count' => 0,
+                ];
+            }
 
-                    $lookup = $this->findByExternalReference($account, $user);
+            $preparation = $this->documentPreparationService->prepare($user);
 
-                    if ($lookup['ambiguous']) {
-                        return $this->stateService->markReconciliationFailure(
-                            $account,
-                            'external_id_lookup_ambiguous',
-                            'nium_v5_customer_list_response',
-                        );
-                    }
+            if (! $preparation['ready']) {
+                return [
+                    'account' => $account->fresh(),
+                    'pending_document_count' => $preparation['pending_document_count'],
+                ];
+            }
 
-                    return $lookup['customer'] !== null
-                        ? $this->applyResolvedCustomer($account, $lookup['customer'], 'nium_v5_customer_list_response')
-                        : $this->createCustomer($account, $user);
-                } catch (NiumProviderIdConflictException) {
-                    return $account->fresh();
-                }
-            }, 3);
+            $lookup = $this->findByExternalReference($account, $user);
+
+            if ($lookup['ambiguous']) {
+                return [
+                    'account' => $this->stateService->markReconciliationFailure(
+                        $account,
+                        'external_id_lookup_ambiguous',
+                        'nium_v5_customer_list_response',
+                    ),
+                    'pending_document_count' => 0,
+                ];
+            }
+
+            $account = $lookup['customer'] !== null
+                ? $this->applyResolvedCustomer($account, $lookup['customer'], 'nium_v5_customer_list_response')
+                : $this->createCustomer($account, $user);
+
+            return [
+                'account' => $account,
+                'pending_document_count' => 0,
+            ];
+        } catch (NiumProviderIdConflictException) {
+            return [
+                'account' => $providerAccount->fresh(),
+                'pending_document_count' => 0,
+            ];
         } catch (Throwable $exception) {
             $this->stateService->markReconciliationFailure(
                 $providerAccount,
@@ -69,9 +97,13 @@ class NiumCustomerOnboardingService implements OnboardingProvider
         User $user,
         ?UserProviderAccount $existingProviderAccount = null,
     ): ProviderOnboardingResult {
-        $providerAccount = $this->syncUser($provider, $user);
+        $synchronization = $this->synchronizeUser($provider, $user);
 
-        return $this->result($provider, $providerAccount);
+        return $this->result(
+            $provider,
+            $synchronization['account'],
+            $synchronization['pending_document_count'],
+        );
     }
 
     public function completeOnboarding(
@@ -270,27 +302,35 @@ class NiumCustomerOnboardingService implements OnboardingProvider
             || filled(Arr::get($data, 'walletHashIds.0'));
     }
 
-    private function result(IntegrationProvider $provider, UserProviderAccount $providerAccount): ProviderOnboardingResult
-    {
+    private function result(
+        IntegrationProvider $provider,
+        UserProviderAccount $providerAccount,
+        int $pendingDocumentCount = 0,
+    ): ProviderOnboardingResult {
         $status = (string) $providerAccount->status;
+        $awaitingDocuments = $pendingDocumentCount > 0;
 
         return new ProviderOnboardingResult(
             providerAccount: $providerAccount->fresh('provider'),
             status: $status,
-            nextAction: match ($status) {
-                'active' => 'provider_onboarding_completed',
-                'rejected', 'failed', 'blocked' => 'contact_support',
-                default => $providerAccount->rfi_status === 'requested' ? 'respond_to_rfi' : 'wait_for_provider_review',
-            },
-            message: match ($status) {
-                'active' => 'Nium customer onboarding is clear and the wallet is ready.',
-                'rejected' => 'Nium customer onboarding was rejected.',
-                'failed' => 'Nium customer onboarding failed.',
-                'blocked' => 'Nium customer account is not eligible.',
-                default => $providerAccount->rfi_status === 'requested'
-                    ? 'Nium requires additional information before the account can be activated.'
-                    : 'Nium customer onboarding is in progress.',
-            },
+            nextAction: $awaitingDocuments
+                ? 'wait_for_document_processing'
+                : match ($status) {
+                    'active' => 'provider_onboarding_completed',
+                    'rejected', 'failed', 'blocked' => 'contact_support',
+                    default => $providerAccount->rfi_status === 'requested' ? 'respond_to_rfi' : 'wait_for_provider_review',
+                },
+            message: $awaitingDocuments
+                ? 'Nium customer onboarding is waiting for KYC document processing. Retry onboarding shortly.'
+                : match ($status) {
+                    'active' => 'Nium customer onboarding is clear and the wallet is ready.',
+                    'rejected' => 'Nium customer onboarding was rejected.',
+                    'failed' => 'Nium customer onboarding failed.',
+                    'blocked' => 'Nium customer account is not eligible.',
+                    default => $providerAccount->rfi_status === 'requested'
+                        ? 'Nium requires additional information before the account can be activated.'
+                        : 'Nium customer onboarding is in progress.',
+                },
             metadata: [
                 'provider_code' => $provider->code,
                 'provider_account_status' => $providerAccount->status,
@@ -298,6 +338,9 @@ class NiumCustomerOnboardingService implements OnboardingProvider
                 'provider_sub_status' => $providerAccount->provider_sub_status,
                 'compliance_status' => $providerAccount->compliance_status,
                 'rfi_status' => $providerAccount->rfi_status,
+                'pending_document_count' => $awaitingDocuments
+                    ? $pendingDocumentCount
+                    : null,
             ],
         );
     }

@@ -7,10 +7,15 @@ use App\Models\KycProfile;
 use App\Models\KycRelatedPerson;
 use App\Models\User;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class NiumCustomerPayloadFactory
 {
+    public function __construct(
+        private readonly NiumCustomerDocumentResolver $documentResolver,
+    ) {}
+
     /**
      * Build a Customer Onboarding V5 request from the internally approved KYC record.
      * Provider identifiers and lifecycle fields are deliberately never accepted here.
@@ -59,7 +64,7 @@ class NiumCustomerPayloadFactory
             'mobile' => $mobile,
             'nationality' => strtoupper((string) ($profile->nationality_country_code ?: $profile->country_code)),
             'billingAddress' => $this->address($profile),
-            'documents' => $this->documents($profile->documents->whereNull('kyc_related_person_id')),
+            'documents' => $this->documents($this->documentResolver->profileDocuments($profile)),
         ]));
 
         if ($region === 'UK' && $kycType === 'minimum') {
@@ -116,7 +121,7 @@ class NiumCustomerPayloadFactory
             ],
             'applicant' => $this->person($applicant, $user->email, (string) $user->phone, ['director']),
             'stakeholders' => $this->stakeholders($profile, $applicant),
-            'documents' => $this->documents($profile->documents->whereNull('kyc_related_person_id')),
+            'documents' => $this->documents($this->documentResolver->profileDocuments($profile)),
         ]));
 
         if (in_array($region, ['UK', 'EU'], true) && $kycType === 'minimum') {
@@ -157,7 +162,7 @@ class NiumCustomerPayloadFactory
             'sharePercentage' => $person->ownership_percentage !== null
                 ? (float) $person->ownership_percentage
                 : null,
-            'documents' => $this->documents($person->documents),
+            'documents' => $this->documents($this->documentResolver->relatedPersonDocuments($person)),
         ]);
     }
 
@@ -184,6 +189,17 @@ class NiumCustomerPayloadFactory
         return collect($documents)
             ->map(function (KycDocument $document): array {
                 $metadata = (array) ($document->metadata ?? []);
+                $fileId = is_string($metadata['nium_file_id'] ?? null)
+                    ? trim($metadata['nium_file_id'])
+                    : '';
+                $state = strtoupper(trim((string) ($metadata['nium_file_state'] ?? '')));
+
+                if ($fileId === '' || ! Str::isUuid($fileId) || $state !== 'AVAILABLE') {
+                    throw new RuntimeException(
+                        "KYC document [{$document->getKey()}] is not ready for Nium customer onboarding.",
+                    );
+                }
+
                 $type = strtolower((string) $document->type);
                 $type = match (true) {
                     str_contains($type, 'passport') => 'passport',
@@ -198,9 +214,7 @@ class NiumCustomerPayloadFactory
                     'identificationNumber' => $document->document_number,
                     'issuanceCountry' => strtoupper((string) $document->issuing_country_code),
                     'expiryDate' => $document->expires_at?->toDateString(),
-                    'fileIds' => filled($metadata['nium_file_id'] ?? null)
-                        ? [(string) $metadata['nium_file_id']]
-                        : null,
+                    'fileIds' => [$fileId],
                 ]);
             })
             ->filter(fn (array $document) => filled($document['identificationNumber'] ?? null) || filled($document['fileIds'] ?? null))
