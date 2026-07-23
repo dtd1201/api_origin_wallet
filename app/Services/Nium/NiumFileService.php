@@ -107,18 +107,18 @@ class NiumFileService
             $user ?? $document->kycProfile?->user,
             $document,
         );
+        $now = now()->toISOString();
         $metadata = [
             ...(array) $document->metadata,
             'nium_file_state' => $details['state'] ?? null,
-            'nium_last_checked_at' => now()->toISOString(),
+            'nium_last_checked_at' => $now,
         ];
 
-        if (array_key_exists('size', $details)) {
-            $metadata['nium_file_size'] = $details['size'];
-        }
-
-        if (array_key_exists('mimeType', $details)) {
-            $metadata['nium_file_mime_type'] = $details['mimeType'];
+        if (
+            strtoupper((string) ($details['state'] ?? '')) === 'AVAILABLE'
+            && $this->metadataString($document, 'nium_available_at') === null
+        ) {
+            $metadata['nium_available_at'] = $now;
         }
 
         $document->forceFill(['metadata' => $metadata])->save();
@@ -279,6 +279,12 @@ class NiumFileService
             throw new RuntimeException('Nium file details response did not include an id.');
         }
 
+        $state = $this->responseString($data, 'state', 100);
+
+        if ($state === null) {
+            throw new RuntimeException('Nium file details response did not include a state.');
+        }
+
         $size = $data['size'] ?? null;
         $size = is_numeric($size) && (int) $size >= 0 ? (int) $size : null;
 
@@ -287,7 +293,7 @@ class NiumFileService
             'name' => $this->responseString($data, 'name', 255),
             'size' => $size,
             'mimeType' => $this->responseString($data, 'mimeType', 100),
-            'state' => $this->responseString($data, 'state', 100),
+            'state' => $state,
         ], static fn (mixed $value): bool => $value !== null);
     }
 

@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use RuntimeException;
+use Symfony\Component\Console\Command\Command;
 use Tests\TestCase;
 
 class NiumFileServiceTest extends TestCase
@@ -193,6 +194,9 @@ class NiumFileServiceTest extends TestCase
             'existing_key' => 'existing-value',
             'nium_file_id' => self::AVAILABLE_FILE_ID,
             'nium_file_state' => 'PROCESSING',
+            'nium_uploaded_at' => '2026-07-23T05:00:00.000000Z',
+            'nium_file_size' => 999,
+            'nium_file_mime_type' => 'application/pdf',
         ]);
 
         Http::fake([
@@ -213,9 +217,11 @@ class NiumFileServiceTest extends TestCase
         $this->assertSame('existing-value', $metadata['existing_key']);
         $this->assertSame(self::AVAILABLE_FILE_ID, $metadata['nium_file_id']);
         $this->assertSame('AVAILABLE', $metadata['nium_file_state']);
-        $this->assertSame(1234, $metadata['nium_file_size']);
-        $this->assertSame('image/png', $metadata['nium_file_mime_type']);
+        $this->assertSame('2026-07-23T05:00:00.000000Z', $metadata['nium_uploaded_at']);
+        $this->assertSame(999, $metadata['nium_file_size']);
+        $this->assertSame('application/pdf', $metadata['nium_file_mime_type']);
         $this->assertNotEmpty($metadata['nium_last_checked_at']);
+        $this->assertSame($metadata['nium_last_checked_at'], $metadata['nium_available_at']);
         $this->assertArrayNotHasKey('storagePath', $metadata);
     }
 
@@ -362,6 +368,168 @@ class NiumFileServiceTest extends TestCase
         ]);
 
         $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('disabled in production', Artisan::output());
+        Http::assertNothingSent();
+    }
+
+    public function test_refresh_command_updates_processing_to_available_without_uploading_or_leaking_sensitive_data(): void
+    {
+        $storagePath = '/must/not/be-persisted-or-logged';
+        $uploadedAt = '2026-07-23T05:00:00.000000Z';
+        [$document] = $this->createDocument(
+            storeFile: false,
+            metadata: [
+                'existing_key' => 'existing-value',
+                'review_source' => 'internal',
+                'nium_file_id' => self::AVAILABLE_FILE_ID,
+                'nium_file_state' => 'PROCESSING',
+                'nium_uploaded_at' => $uploadedAt,
+            ],
+        );
+
+        Http::fake([
+            '*' => Http::response([
+                'id' => self::AVAILABLE_FILE_ID,
+                'name' => 'passport-front.png',
+                'size' => 1234,
+                'mimeType' => 'image/png',
+                'storagePath' => $storagePath,
+                'state' => 'AVAILABLE',
+            ]),
+        ]);
+
+        $exitCode = Artisan::call('nium:file:refresh', [
+            'kycDocumentId' => $document->id,
+        ]);
+        $output = Artisan::output();
+        $metadata = (array) $document->fresh()->metadata;
+        $serializedLogs = json_encode(ApiRequestLog::query()->get()->toArray(), JSON_THROW_ON_ERROR);
+
+        $this->assertSame(Command::SUCCESS, $exitCode);
+        $this->assertSame(
+            "KYC document ID: {$document->id}\nNium file ID: ".self::AVAILABLE_FILE_ID."\nState: AVAILABLE\n",
+            $output,
+        );
+        $this->assertSame('existing-value', $metadata['existing_key']);
+        $this->assertSame('internal', $metadata['review_source']);
+        $this->assertSame(self::AVAILABLE_FILE_ID, $metadata['nium_file_id']);
+        $this->assertSame('AVAILABLE', $metadata['nium_file_state']);
+        $this->assertSame($uploadedAt, $metadata['nium_uploaded_at']);
+        $this->assertNotEmpty($metadata['nium_last_checked_at']);
+        $this->assertSame($metadata['nium_last_checked_at'], $metadata['nium_available_at']);
+        $this->assertArrayNotHasKey('storagePath', $metadata);
+        $this->assertStringNotContainsString($storagePath, $serializedLogs);
+        $this->assertStringNotContainsString('sandbox-file-api-key', $serializedLogs);
+        $this->assertStringNotContainsString($storagePath, $output);
+        $this->assertStringNotContainsString('sandbox-file-api-key', $output);
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
+            && $request->url() === 'https://document-storage-sandbox.nium.test/api/v1/client/sandbox-client-hash-id/files/'.self::AVAILABLE_FILE_ID
+            && $request->hasHeader('x-api-key', 'sandbox-file-api-key'));
+    }
+
+    public function test_refresh_command_is_idempotent_when_file_is_already_available(): void
+    {
+        $availableAt = '2026-07-23T06:00:00.000000Z';
+        $uploadedAt = '2026-07-23T05:00:00.000000Z';
+        [$document] = $this->createDocument(metadata: [
+            'existing_key' => 'existing-value',
+            'nium_file_id' => self::AVAILABLE_FILE_ID,
+            'nium_file_state' => 'AVAILABLE',
+            'nium_uploaded_at' => $uploadedAt,
+            'nium_available_at' => $availableAt,
+        ]);
+
+        Http::fake([
+            '*' => Http::response([
+                'id' => self::AVAILABLE_FILE_ID,
+                'state' => 'AVAILABLE',
+            ]),
+        ]);
+
+        $firstExitCode = Artisan::call('nium:file:refresh', [
+            'kycDocumentId' => $document->id,
+        ]);
+        $secondExitCode = Artisan::call('nium:file:refresh', [
+            'kycDocumentId' => $document->id,
+        ]);
+        $metadata = (array) $document->fresh()->metadata;
+
+        $this->assertSame(Command::SUCCESS, $firstExitCode);
+        $this->assertSame(Command::SUCCESS, $secondExitCode);
+        $this->assertSame(self::AVAILABLE_FILE_ID, $metadata['nium_file_id']);
+        $this->assertSame('AVAILABLE', $metadata['nium_file_state']);
+        $this->assertSame($uploadedAt, $metadata['nium_uploaded_at']);
+        $this->assertSame($availableAt, $metadata['nium_available_at']);
+        $this->assertSame('existing-value', $metadata['existing_key']);
+        Http::assertSentCount(2);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'GET');
+    }
+
+    public function test_refresh_command_rejects_document_without_nium_file_id(): void
+    {
+        [$document] = $this->createDocument(metadata: [
+            'existing_key' => 'existing-value',
+            'nium_file_state' => 'PROCESSING',
+        ]);
+        $metadataBefore = $document->metadata;
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:file:refresh', [
+            'kycDocumentId' => $document->id,
+        ]);
+
+        $this->assertSame(Command::FAILURE, $exitCode);
+        $this->assertSame($metadataBefore, $document->fresh()->metadata);
+        $this->assertStringContainsString('refresh failed', Artisan::output());
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('api_request_logs', 0);
+    }
+
+    public function test_refresh_command_does_not_mark_available_when_api_fails(): void
+    {
+        $metadataBefore = [
+            'existing_key' => 'existing-value',
+            'nium_file_id' => self::AVAILABLE_FILE_ID,
+            'nium_file_state' => 'PROCESSING',
+            'nium_uploaded_at' => '2026-07-23T05:00:00.000000Z',
+        ];
+        [$document] = $this->createDocument(metadata: $metadataBefore);
+
+        Http::fake([
+            '*' => Http::response([
+                'id' => self::AVAILABLE_FILE_ID,
+                'state' => 'AVAILABLE',
+                'storagePath' => '/must/not-be-persisted',
+            ], 500),
+        ]);
+
+        $exitCode = Artisan::call('nium:file:refresh', [
+            'kycDocumentId' => $document->id,
+        ]);
+
+        $this->assertSame(Command::FAILURE, $exitCode);
+        $this->assertSame($metadataBefore, $document->fresh()->metadata);
+        $this->assertArrayNotHasKey('nium_available_at', (array) $document->fresh()->metadata);
+        Http::assertSentCount(1);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'GET');
+    }
+
+    public function test_refresh_command_refuses_to_run_in_production(): void
+    {
+        [$document] = $this->createDocument(metadata: [
+            'nium_file_id' => self::AVAILABLE_FILE_ID,
+            'nium_file_state' => 'PROCESSING',
+        ]);
+        config()->set('app.env', 'production');
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:file:refresh', [
+            'kycDocumentId' => $document->id,
+        ]);
+
+        $this->assertSame(Command::FAILURE, $exitCode);
         $this->assertStringContainsString('disabled in production', Artisan::output());
         Http::assertNothingSent();
     }

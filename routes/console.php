@@ -283,6 +283,45 @@ Artisan::command(
 )->purpose('Upload one existing KYC document to the configured Nium File API outside production.');
 
 Artisan::command(
+    'nium:file:refresh
+    {kycDocumentId : Existing local KYC document ID with a Nium file ID}',
+    function (): int {
+        if (app()->environment('production') || strtolower((string) config('app.env')) === 'production') {
+            $this->error('Nium file sandbox refresh is disabled in production.');
+
+            return Command::FAILURE;
+        }
+
+        $document = KycDocument::query()
+            ->with('kycProfile.user')
+            ->find($this->argument('kycDocumentId'));
+
+        if ($document === null) {
+            $this->error('The requested KYC document was not found.');
+
+            return Command::FAILURE;
+        }
+
+        try {
+            $result = app(NiumFileService::class)->refreshDocumentState(
+                $document,
+                $document->kycProfile?->user,
+            );
+        } catch (Throwable) {
+            $this->error('Nium file sandbox refresh failed.');
+
+            return Command::FAILURE;
+        }
+
+        $this->line('KYC document ID: '.$document->id);
+        $this->line('Nium file ID: '.$result['id']);
+        $this->line('State: '.($result['state'] ?? 'UNKNOWN'));
+
+        return Command::SUCCESS;
+    }
+)->purpose('Refresh one uploaded KYC document from the configured Nium File API outside production.');
+
+Artisan::command(
     'bank-rates:sync
     {--source=* : Limit sync to source keys such as vcb or techcombank}',
     function (): int {
