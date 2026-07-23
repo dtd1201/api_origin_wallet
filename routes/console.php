@@ -1,9 +1,11 @@
 <?php
 
 use App\Models\IntegrationProvider;
+use App\Models\KycDocument;
 use App\Models\User;
 use App\Services\BankRates\BankRateSyncService;
 use App\Services\Nium\NiumDataSyncService;
+use App\Services\Nium\NiumFileService;
 use App\Services\Nium\NiumQuoteService;
 use App\Services\Nium\NiumService;
 use App\Support\SensitiveDataSanitizer;
@@ -240,6 +242,45 @@ Artisan::command(
         return Command::SUCCESS;
     }
 )->purpose('Validate Nium Customer Onboarding V5 configuration and optionally perform an explicit live readiness check.');
+
+Artisan::command(
+    'nium:file:test
+    {kycDocumentId : Existing local KYC document ID}',
+    function (): int {
+        if (app()->environment('production') || strtolower((string) config('app.env')) === 'production') {
+            $this->error('Nium file sandbox testing is disabled in production.');
+
+            return Command::FAILURE;
+        }
+
+        $document = KycDocument::query()
+            ->with('kycProfile.user')
+            ->find($this->argument('kycDocumentId'));
+
+        if ($document === null) {
+            $this->error('The requested KYC document was not found.');
+
+            return Command::FAILURE;
+        }
+
+        try {
+            $result = app(NiumFileService::class)->createFile(
+                $document,
+                $document->kycProfile?->user,
+            );
+        } catch (Throwable) {
+            $this->error('Nium file sandbox upload failed.');
+
+            return Command::FAILURE;
+        }
+
+        $this->line('KYC document ID: '.$document->id);
+        $this->line('Nium file ID: '.$result['id']);
+        $this->line('State: '.($result['state'] ?? 'UNKNOWN'));
+
+        return Command::SUCCESS;
+    }
+)->purpose('Upload one existing KYC document to the configured Nium File API outside production.');
 
 Artisan::command(
     'bank-rates:sync
