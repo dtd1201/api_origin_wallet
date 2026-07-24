@@ -23,21 +23,32 @@ class NiumCustomerPayloadFactory
     public function build(User $user, string $externalReference): array
     {
         $user->loadMissing(['kycProfile.documents', 'kycProfile.relatedPersons.documents']);
-        $profile = $user->kycProfile;
-
-        if ($profile === null || ! in_array(strtolower((string) $profile->status), ['approved', 'verified'], true)) {
-            throw new RuntimeException('An approved internal KYC/KYB profile is required for Nium onboarding.');
-        }
+        $profile = $this->approvedProfile($user);
 
         $metadata = (array) ($profile->metadata ?? []);
         $region = strtoupper((string) ($metadata['nium_region'] ?? $this->regionFor($profile)));
         $kycType = strtolower((string) ($metadata['nium_kyc_type'] ?? 'minimum'));
+        $this->validateRequiredSourceDataFor($profile, $region, $kycType);
 
         $payload = $profile->applicant_type === 'business'
             ? $this->corporatePayload($user, $profile, $externalReference, $region, $kycType)
             : $this->individualPayload($user, $profile, $externalReference, $region, $kycType);
 
         return $this->withoutProviderControlledFields($payload);
+    }
+
+    /**
+     * Validate required approved source data before document or customer API calls.
+     */
+    public function validateRequiredSourceData(User $user): void
+    {
+        $user->loadMissing('kycProfile');
+        $profile = $this->approvedProfile($user);
+        $metadata = (array) ($profile->metadata ?? []);
+        $region = strtoupper((string) ($metadata['nium_region'] ?? $this->regionFor($profile)));
+        $kycType = strtolower((string) ($metadata['nium_kyc_type'] ?? 'minimum'));
+
+        $this->validateRequiredSourceDataFor($profile, $region, $kycType);
     }
 
     private function individualPayload(
@@ -300,6 +311,98 @@ class NiumCustomerPayloadFactory
         }
 
         return $payload;
+    }
+
+    private function approvedProfile(User $user): KycProfile
+    {
+        $profile = $user->kycProfile;
+
+        if ($profile === null || ! in_array(strtolower((string) $profile->status), ['approved', 'verified'], true)) {
+            throw new RuntimeException('An approved internal KYC/KYB profile is required for Nium onboarding.');
+        }
+
+        return $profile;
+    }
+
+    private function validateRequiredSourceDataFor(KycProfile $profile, string $region, string $kycType): void
+    {
+        if ($profile->applicant_type !== 'business' || $region !== 'SG' || $kycType !== 'minimum') {
+            return;
+        }
+
+        $natureOfBusiness = $this->requiredSgCorporateObject($profile, 'natureOfBusiness');
+        $industryCodes = $natureOfBusiness['industryCodes'] ?? null;
+
+        if (! $this->isNonEmptyStringList($industryCodes)) {
+            throw new RuntimeException(
+                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                .'nium_v5_fields.natureOfBusiness.industryCodes as a non-empty array of Nium Corporate Constants.',
+            );
+        }
+
+        $expectedAccountUsage = $this->requiredSgCorporateObject($profile, 'expectedAccountUsage');
+        $intendedUses = $expectedAccountUsage['intendedUses'] ?? null;
+
+        if (! $this->isNonEmptyStringList($intendedUses)) {
+            throw new RuntimeException(
+                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                .'nium_v5_fields.expectedAccountUsage.intendedUses as a non-empty array of Nium Corporate Constants.',
+            );
+        }
+
+        $credit = $expectedAccountUsage['credit'] ?? null;
+
+        if (! is_array($credit) || $credit === [] || array_is_list($credit)) {
+            throw new RuntimeException(
+                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                .'nium_v5_fields.expectedAccountUsage.credit as an object.',
+            );
+        }
+
+        foreach (['averageTransactionValue', 'monthlyTransactionVolume', 'monthlyTransactions'] as $field) {
+            if (! is_string($credit[$field] ?? null) || trim($credit[$field]) === '') {
+                throw new RuntimeException(
+                    'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                    ."nium_v5_fields.expectedAccountUsage.credit.{$field} as a Nium Corporate Constant.",
+                );
+            }
+        }
+
+        $sizeOfBusiness = $this->requiredSgCorporateObject($profile, 'sizeOfBusiness');
+
+        if (
+            ! is_string($sizeOfBusiness['annualTurnover'] ?? null)
+            || trim($sizeOfBusiness['annualTurnover']) === ''
+        ) {
+            throw new RuntimeException(
+                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                .'nium_v5_fields.sizeOfBusiness.annualTurnover as a Nium Corporate Constant.',
+            );
+        }
+    }
+
+    private function requiredSgCorporateObject(KycProfile $profile, string $field): array
+    {
+        $value = Arr::get((array) $profile->metadata, "nium_v5_fields.{$field}");
+
+        if (! is_array($value) || $value === [] || array_is_list($value)) {
+            throw new RuntimeException(
+                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                ."nium_v5_fields.{$field} as an object.",
+            );
+        }
+
+        return $value;
+    }
+
+    private function isNonEmptyStringList(mixed $value): bool
+    {
+        return is_array($value)
+            && $value !== []
+            && array_is_list($value)
+            && ! collect($value)->contains(
+                fn ($item): bool => ! is_string($item) || trim($item) === '',
+            );
     }
 
     private function regionFields(KycProfile $profile): array

@@ -477,7 +477,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'John Doe', $user->email, $user->phone, 'john.doe@example.com', '1985-05-15',
             '456 Corporate Ave', 'PR123456', 'sandbox-api-key',
             'secret-authentication-code', 'x-partner-key',
-            'safe-individual-file-bytes', "kyc/{$user->id}/passport-front.jpg", 'storagePath',
+            'safe-individual-file-bytes', "kyc/{$user->id}/passport-front.jpg", 'storagePath', 'is112',
         ] as $secret) {
             $this->assertStringNotContainsString($secret, $serialized);
         }
@@ -1068,6 +1068,19 @@ class NiumCustomerOnboardingV5Test extends TestCase
             $payload = $request->data();
 
             return $payload['type'] === 'corporate'
+                && is_array($payload['natureOfBusiness'])
+                && is_array($payload['natureOfBusiness']['industryCodes'])
+                && $payload['natureOfBusiness']['industryCodes'] === ['IS144']
+                && is_array($payload['expectedAccountUsage'])
+                && is_array($payload['expectedAccountUsage']['credit'])
+                && is_string($payload['expectedAccountUsage']['credit']['averageTransactionValue'])
+                && is_string($payload['expectedAccountUsage']['credit']['monthlyTransactionVolume'])
+                && is_string($payload['expectedAccountUsage']['credit']['monthlyTransactions'])
+                && is_array($payload['expectedAccountUsage']['intendedUses'])
+                && $payload['expectedAccountUsage']['intendedUses'] === ['IU003']
+                && is_array($payload['sizeOfBusiness'])
+                && is_string($payload['sizeOfBusiness']['annualTurnover'])
+                && $payload['sizeOfBusiness']['annualTurnover'] === 'SG011'
                 && $payload['documents'][0]['fileIds'] === [self::BUSINESS_FILE_ID]
                 && $payload['applicant']['documents'][0]['fileIds'] === [self::APPLICANT_FILE_ID]
                 && $payload['stakeholders']['individual'][0]['documents'][0]['fileIds'] === [self::STAKEHOLDER_FILE_ID];
@@ -1076,6 +1089,141 @@ class NiumCustomerOnboardingV5Test extends TestCase
             $request->url(),
             'document-storage-sandbox.nium.test',
         ));
+    }
+
+    public function test_missing_sg_corporate_nature_of_business_fails_before_http_and_retry_reuses_available_files(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        unset($metadata['nium_v5_fields']['natureOfBusiness']);
+        $profile->update(['metadata' => $metadata]);
+        $fileIdsBefore = KycDocument::query()
+            ->where('kyc_profile_id', $profile->id)
+            ->orderBy('id')
+            ->get()
+            ->mapWithKeys(fn (KycDocument $document): array => [
+                $document->id => $document->metadata['nium_file_id'],
+            ])
+            ->all();
+        $this->assertCount(3, $fileIdsBefore);
+        $this->assertSame(
+            ['AVAILABLE'],
+            KycDocument::query()
+                ->where('kyc_profile_id', $profile->id)
+                ->pluck('metadata')
+                ->map(fn (array $metadata): string => (string) $metadata['nium_file_state'])
+                ->unique()
+                ->values()
+                ->all(),
+        );
+        $allowCustomerRequests = false;
+        $customerLookupCalls = 0;
+        $customerCreateCalls = 0;
+        $createResponse = $this->fixture('customer-v5-create-response.json');
+
+        Http::fake(function (Request $request) use (
+            &$allowCustomerRequests,
+            &$customerLookupCalls,
+            &$customerCreateCalls,
+            $createResponse,
+        ) {
+            if (! $allowCustomerRequests) {
+                return Http::response(['message' => 'unexpected HTTP request'], 500);
+            }
+
+            if ($request->method() === 'GET') {
+                $customerLookupCalls++;
+
+                return Http::response(['customers' => []]);
+            }
+
+            $customerCreateCalls++;
+
+            return Http::response([
+                ...$createResponse,
+                'externalId' => $request->data()['externalId'],
+            ]);
+        });
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected missing corporate natureOfBusiness to block Nium onboarding.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame(
+                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                .'nium_v5_fields.natureOfBusiness as an object.',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+        $this->assertSame(
+            $fileIdsBefore,
+            KycDocument::query()
+                ->where('kyc_profile_id', $profile->id)
+                ->orderBy('id')
+                ->get()
+                ->mapWithKeys(fn (KycDocument $document): array => [
+                    $document->id => $document->metadata['nium_file_id'],
+                ])
+                ->all(),
+        );
+
+        $metadata['nium_v5_fields']['natureOfBusiness'] = [
+            'industryCodes' => ['IS144'],
+        ];
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        $allowCustomerRequests = true;
+
+        $account = app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+        $serializedLogs = ApiRequestLog::query()->get()
+            ->map(fn (ApiRequestLog $log): string => json_encode($log->toArray(), JSON_THROW_ON_ERROR))
+            ->implode('\n');
+
+        $this->assertSame('active', $account->status);
+        $this->assertSame(1, $customerLookupCalls);
+        $this->assertSame(1, $customerCreateCalls);
+        $this->assertSame(
+            $fileIdsBefore,
+            KycDocument::query()
+                ->where('kyc_profile_id', $profile->id)
+                ->orderBy('id')
+                ->get()
+                ->mapWithKeys(fn (KycDocument $document): array => [
+                    $document->id => $document->metadata['nium_file_id'],
+                ])
+                ->all(),
+        );
+        foreach (['IS144', 'IU003', 'ATVSG02', 'MVSG10', 'ATC03', 'SG011'] as $rawFieldValue) {
+            $this->assertStringNotContainsString($rawFieldValue, $serializedLogs);
+        }
+        Http::assertSentCount(2);
+        Http::assertNotSent(fn (Request $request): bool => str_contains(
+            $request->url(),
+            'document-storage-sandbox.nium.test',
+        ));
+    }
+
+    public function test_missing_sg_corporate_expected_account_usage_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateSourceFieldFailsBeforeHttp(
+            'expectedAccountUsage',
+            'Nium SG corporate minimum KYC requires approved KYC metadata field '
+            .'nium_v5_fields.expectedAccountUsage as an object.',
+        );
+    }
+
+    public function test_missing_sg_corporate_size_of_business_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateSourceFieldFailsBeforeHttp(
+            'sizeOfBusiness',
+            'Nium SG corporate minimum KYC requires approved KYC metadata field '
+            .'nium_v5_fields.sizeOfBusiness as an object.',
+        );
     }
 
     public function test_shared_document_selection_ignores_rejected_superseded_and_older_duplicate_documents(): void
@@ -1575,6 +1723,29 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertDatabaseHas('webhook_events', ['event_id' => 'header-key-two']);
     }
 
+    private function assertMissingSgCorporateSourceFieldFailsBeforeHttp(
+        string $field,
+        string $expectedMessage,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        unset($metadata['nium_v5_fields'][$field]);
+        $profile->update(['metadata' => $metadata]);
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail("Expected missing {$field} to block Nium onboarding.");
+        } catch (RuntimeException $exception) {
+            $this->assertSame($expectedMessage, $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+    }
+
     private function provider(): IntegrationProvider
     {
         return IntegrationProvider::query()->firstOrCreate([
@@ -1696,6 +1867,22 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 'nium_kyc_type' => 'minimum',
                 'registered_date' => '2020-01-15',
                 'nium_business_type' => 'private_company',
+                'nium_v5_fields' => [
+                    'natureOfBusiness' => [
+                        'industryCodes' => ['IS144'],
+                    ],
+                    'expectedAccountUsage' => [
+                        'credit' => [
+                            'averageTransactionValue' => 'ATVSG02',
+                            'monthlyTransactionVolume' => 'MVSG10',
+                            'monthlyTransactions' => 'ATC03',
+                        ],
+                        'intendedUses' => ['IU003'],
+                    ],
+                    'sizeOfBusiness' => [
+                        'annualTurnover' => 'SG011',
+                    ],
+                ],
             ],
         ]);
         $applicant = $kycProfile->relatedPersons()->create([
