@@ -288,12 +288,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
             return $data;
         }
 
-        $description = Arr::get($data, 'errors.0.description')
-            ?? Arr::get($data, 'description')
-            ?? Arr::get($data, 'message')
-            ?? $fallback;
-
-        throw new RuntimeException((string) $description);
+        throw NiumProviderRequestException::fromResponse($response, $fallback);
     }
 
     private function hasWallet(array $data): bool

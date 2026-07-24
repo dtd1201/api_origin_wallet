@@ -33,6 +33,10 @@ class NiumCustomerErrorMapper
 
     public function codeFromThrowable(Throwable $exception): ?string
     {
+        if ($exception instanceof NiumProviderRequestException) {
+            return $exception->providerCode;
+        }
+
         $message = strtolower($exception->getMessage());
 
         foreach (['customer_exists', 'duplicate_external_id', 'timeout', 'connection'] as $code) {

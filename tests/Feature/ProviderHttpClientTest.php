@@ -2,7 +2,9 @@
 
 namespace Tests\Feature;
 
+use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
+use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
@@ -401,5 +403,179 @@ class ProviderHttpClientTest extends TestCase
             return $request->url() === 'https://api.wise-sandbox.com/v2/profiles'
                 && $request->hasHeader('Authorization', 'Bearer wise-user-token');
         });
+    }
+
+    public function test_nium_error_log_keeps_only_safe_schema_diagnostics(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+        $user = User::factory()->create();
+        $apiKey = 'sandbox-secret-api-key';
+        $fileId = '55555555-5555-4555-8555-555555555555';
+        $longSuffix = str_repeat(' safe diagnostic context', 30);
+
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.timeout', 30);
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => $apiKey,
+        ]);
+
+        Http::fake([
+            '*' => Http::response([
+                'errors' => [[
+                    'code' => 'invalid_input',
+                    'field' => 'stakeholders.individual[0].positions[0].title',
+                    'path' => 'stakeholders.individual[0].positions[0].title',
+                    'parameter' => 'positions[0].title',
+                    'description' => 'Invalid role for Jane Doe at jane@example.test. '
+                        ."Value: ultimate_beneficial_owner. Bearer {$apiKey}. "
+                        ."File {$fileId}. Address 10 Private Road.{$longSuffix}",
+                ]],
+                'rawResponse' => 'must-not-be-persisted',
+                'authorization' => 'must-not-be-persisted',
+            ], 400),
+        ]);
+
+        $client = new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'nium',
+            headers: [
+                'x-request-id' => 'safe-request-id',
+            ],
+        );
+
+        $client->post('/api/v5/client/client-id/customers', [
+            'type' => 'corporate',
+            'region' => 'SG',
+            'externalId' => 'external-reference-secret',
+            'stakeholders' => [
+                'individual' => [[
+                    'firstName' => 'Jane',
+                    'lastName' => 'Doe',
+                    'email' => 'jane@example.test',
+                    'address' => ['addressLine1' => '10 Private Road'],
+                    'positions' => [['title' => 'ultimate_beneficial_owner']],
+                    'documents' => [['fileIds' => [$fileId]]],
+                ]],
+            ],
+        ], $user);
+
+        $log = ApiRequestLog::query()->sole();
+        $responseBody = $log->response_body;
+        $serializedLog = json_encode($log->toArray(), JSON_THROW_ON_ERROR);
+
+        $this->assertSame('invalid_input', $responseBody['error_code']);
+        $this->assertSame(
+            'stakeholders.individual[0].positions[0].title',
+            $responseBody['error_field'],
+        );
+        $this->assertSame(
+            'stakeholders.individual[0].positions[0].title',
+            $responseBody['error_path'],
+        );
+        $this->assertSame('positions[0].title', $responseBody['error_parameter']);
+        $this->assertArrayNotHasKey('error_description', $responseBody);
+
+        foreach ([
+            'Jane',
+            'Doe',
+            'jane@example.test',
+            '10 Private Road',
+            'ultimate_beneficial_owner',
+            $fileId,
+            $apiKey,
+            'external-reference-secret',
+            'must-not-be-persisted',
+        ] as $sensitiveValue) {
+            $this->assertStringNotContainsString($sensitiveValue, $serializedLog);
+        }
+
+        $this->assertArrayNotHasKey('errors', $responseBody);
+        $this->assertArrayNotHasKey('rawResponse', $responseBody);
+        $this->assertArrayNotHasKey('authorization', $responseBody);
+    }
+
+    public function test_nium_error_code_uses_errors_first_code(): void
+    {
+        $this->assertNiumErrorCodeLogged([
+            'errors' => [[
+                'code' => 'errors_code',
+                'errorCode' => 'errors_error_code',
+            ]],
+            'errorCode' => 'root_error_code',
+            'code' => 'root_code',
+        ], 'errors_code');
+    }
+
+    public function test_nium_error_code_uses_errors_first_error_code_when_code_is_missing(): void
+    {
+        $this->assertNiumErrorCodeLogged([
+            'errors' => [['errorCode' => 'errors_error_code']],
+            'errorCode' => 'root_error_code',
+            'code' => 'root_code',
+        ], 'errors_error_code');
+    }
+
+    public function test_nium_error_code_uses_root_error_code_when_nested_codes_are_missing(): void
+    {
+        $this->assertNiumErrorCodeLogged([
+            'errorCode' => 'root_error_code',
+            'code' => 'root_code',
+        ], 'root_error_code');
+    }
+
+    public function test_nium_error_code_uses_root_code_as_final_fallback(): void
+    {
+        $this->assertNiumErrorCodeLogged([
+            'code' => 'root_code',
+        ], 'root_code');
+    }
+
+    public function test_nium_invalid_error_code_is_not_persisted(): void
+    {
+        $this->assertNiumErrorCodeLogged([
+            'errors' => [['code' => 'invalid code with spaces']],
+        ], null);
+    }
+
+    private function assertNiumErrorCodeLogged(array $responseBody, ?string $expectedCode): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.timeout', 30);
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => 'sandbox-secret-api-key',
+        ]);
+        Http::fake(['*' => Http::response($responseBody, 400)]);
+
+        (new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'nium',
+        ))->post('/api/v5/client/client-id/customers', [
+            'type' => 'corporate',
+            'region' => 'SG',
+        ]);
+
+        $loggedResponse = ApiRequestLog::query()->sole()->response_body;
+
+        if ($expectedCode === null) {
+            $this->assertArrayNotHasKey('error_code', $loggedResponse);
+
+            return;
+        }
+
+        $this->assertSame($expectedCode, $loggedResponse['error_code']);
     }
 }

@@ -14,6 +14,7 @@ class NiumCustomerPayloadFactory
 {
     public function __construct(
         private readonly NiumCustomerDocumentResolver $documentResolver,
+        private readonly NiumSgCorporateClientPolicy $sgCorporateClientPolicy,
     ) {}
 
     /**
@@ -122,10 +123,20 @@ class NiumCustomerPayloadFactory
                 'registeredAddress' => $this->address($profile),
                 'businessAddress' => $this->address($profile),
             ],
-            'applicant' => $this->person($applicant, $user->email, (string) $user->phone, ['director']),
-            'stakeholders' => $this->stakeholders($profile, $applicant),
+            'applicant' => $this->person(
+                $applicant,
+                $user->email,
+                (string) $user->phone,
+                ['director'],
+                normalizeNiumPositions: $region === 'SG',
+            ),
+            'stakeholders' => $this->stakeholders($profile, $applicant, $region === 'SG'),
             'documents' => $this->documents($this->documentResolver->profileDocuments($profile)),
         ]));
+
+        if ($region === 'SG') {
+            $payload = $this->normalizeSgCorporateCountryLists($payload);
+        }
 
         if (in_array($region, ['UK', 'EU'], true) && $kycType === 'minimum') {
             $this->requireFields($payload, [
@@ -138,8 +149,13 @@ class NiumCustomerPayloadFactory
         return $payload;
     }
 
-    private function person(KycRelatedPerson $person, ?string $fallbackEmail, string $fallbackPhone, array $fallbackPositions): array
-    {
+    private function person(
+        KycRelatedPerson $person,
+        ?string $fallbackEmail,
+        string $fallbackPhone,
+        array $fallbackPositions,
+        bool $normalizeNiumPositions = false,
+    ): array {
         [$firstName, $lastName] = $this->splitName($person->legal_name);
         $metadata = (array) ($person->metadata ?? []);
         [$mobileCountryCode, $mobile] = $this->mobileParts(
@@ -157,11 +173,10 @@ class NiumCustomerPayloadFactory
             'mobile' => $mobile,
             'nationality' => strtoupper((string) ($person->nationality_country_code ?: $person->country_code)),
             'address' => $this->address($person),
-            'positions' => collect((array) ($metadata['positions'] ?? $fallbackPositions))
-                ->filter()
-                ->map(fn (string $title) => ['title' => $title])
-                ->values()
-                ->all(),
+            'positions' => $this->positions(
+                (array) ($metadata['positions'] ?? $fallbackPositions),
+                $normalizeNiumPositions,
+            ),
             'sharePercentage' => $person->ownership_percentage !== null
                 ? (float) $person->ownership_percentage
                 : null,
@@ -169,17 +184,21 @@ class NiumCustomerPayloadFactory
         ]);
     }
 
-    private function stakeholders(KycProfile $profile, KycRelatedPerson $applicant): array
-    {
+    private function stakeholders(
+        KycProfile $profile,
+        KycRelatedPerson $applicant,
+        bool $normalizeNiumPositions = false,
+    ): array {
         $individuals = $profile->relatedPersons
             ->reject(fn (KycRelatedPerson $person) => $person->is($applicant))
-            ->map(function (KycRelatedPerson $person): array {
-                $relationship = strtolower((string) $person->relationship_type);
-                $position = str_contains($relationship, 'beneficial') || str_contains($relationship, 'ubo')
-                    ? 'ultimate_beneficial_owner'
-                    : 'director';
-
-                return $this->person($person, null, '', [$position]);
+            ->map(function (KycRelatedPerson $person) use ($normalizeNiumPositions): array {
+                return $this->person(
+                    $person,
+                    null,
+                    '',
+                    [$this->stakeholderFallbackPosition($person)],
+                    $normalizeNiumPositions,
+                );
             })
             ->values()
             ->all();
@@ -318,46 +337,93 @@ class NiumCustomerPayloadFactory
 
     private function validateRequiredSourceDataFor(KycProfile $profile, string $region, string $kycType): void
     {
-        if ($profile->applicant_type !== 'business' || $region !== 'SG' || $kycType !== 'minimum') {
+        if ($profile->applicant_type !== 'business' || $region !== 'SG') {
             return;
         }
 
+        if ($kycType !== 'full') {
+            throw new RuntimeException(
+                'Nium SG corporate onboarding requires approved KYC metadata field nium_kyc_type to be full.',
+            );
+        }
+
+        $fields = Arr::get((array) $profile->metadata, 'nium_v5_fields', []);
+
+        if (! is_array($fields) || array_is_list($fields)) {
+            throw new RuntimeException('Approved KYC metadata nium_v5_fields must be an object.');
+        }
+
+        if (($fields['applicantDeclaration'] ?? null) !== true) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.applicantDeclaration as boolean true.',
+            );
+        }
+
+        if (! $this->isNiumDateTime($fields['applicantDeclarationTimeStamp'] ?? null)) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.applicantDeclarationTimeStamp in YYYY-MM-DD HH:MM:SS format.',
+            );
+        }
+
+        if (! is_bool($fields['isMultiLayeredCompany'] ?? null)) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.isMultiLayeredCompany as a boolean.',
+            );
+        }
+
+        $clientRequirements = $this->sgCorporateClientPolicy->requirements();
         $natureOfBusiness = $this->requiredSgCorporateObject($profile, 'natureOfBusiness');
         $industryCodes = $natureOfBusiness['industryCodes'] ?? null;
 
         if (! $this->isNonEmptyStringList($industryCodes)) {
             throw new RuntimeException(
-                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                'Nium SG corporate full KYC requires approved KYC metadata field '
                 .'nium_v5_fields.natureOfBusiness.industryCodes as a non-empty array of Nium Corporate Constants.',
             );
         }
+
+        $this->normalizeIsoCountryList(
+            $natureOfBusiness['operatingCountries'] ?? null,
+            'nium_v5_fields.natureOfBusiness.operatingCountries',
+        );
 
         $expectedAccountUsage = $this->requiredSgCorporateObject($profile, 'expectedAccountUsage');
         $intendedUses = $expectedAccountUsage['intendedUses'] ?? null;
 
         if (! $this->isNonEmptyStringList($intendedUses)) {
             throw new RuntimeException(
-                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                'Nium SG corporate full KYC requires approved KYC metadata field '
                 .'nium_v5_fields.expectedAccountUsage.intendedUses as a non-empty array of Nium Corporate Constants.',
             );
         }
 
-        $credit = $expectedAccountUsage['credit'] ?? null;
+        foreach (['credit', 'debit'] as $direction) {
+            $usage = $expectedAccountUsage[$direction] ?? null;
 
-        if (! is_array($credit) || $credit === [] || array_is_list($credit)) {
-            throw new RuntimeException(
-                'Nium SG corporate minimum KYC requires approved KYC metadata field '
-                .'nium_v5_fields.expectedAccountUsage.credit as an object.',
-            );
-        }
-
-        foreach (['averageTransactionValue', 'monthlyTransactionVolume', 'monthlyTransactions'] as $field) {
-            if (! is_string($credit[$field] ?? null) || trim($credit[$field]) === '') {
+            if (! is_array($usage) || $usage === [] || array_is_list($usage)) {
                 throw new RuntimeException(
-                    'Nium SG corporate minimum KYC requires approved KYC metadata field '
-                    ."nium_v5_fields.expectedAccountUsage.credit.{$field} as a Nium Corporate Constant.",
+                    'Nium SG corporate full KYC requires approved KYC metadata field '
+                    ."nium_v5_fields.expectedAccountUsage.{$direction} as an object.",
                 );
             }
+
+            foreach (['averageTransactionValue', 'monthlyTransactionVolume', 'monthlyTransactions'] as $field) {
+                if (! is_string($usage[$field] ?? null) || trim($usage[$field]) === '') {
+                    throw new RuntimeException(
+                        'Nium SG corporate full KYC requires approved KYC metadata field '
+                        ."nium_v5_fields.expectedAccountUsage.{$direction}.{$field} "
+                        .'as a Nium Corporate Constant.',
+                    );
+                }
+            }
+
+            $this->normalizeIsoCountryList(
+                $usage['topTransactionCountries'] ?? null,
+                "nium_v5_fields.expectedAccountUsage.{$direction}.topTransactionCountries",
+            );
         }
 
         $sizeOfBusiness = $this->requiredSgCorporateObject($profile, 'sizeOfBusiness');
@@ -367,8 +433,40 @@ class NiumCustomerPayloadFactory
             || trim($sizeOfBusiness['annualTurnover']) === ''
         ) {
             throw new RuntimeException(
-                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                'Nium SG corporate full KYC requires approved KYC metadata field '
                 .'nium_v5_fields.sizeOfBusiness.annualTurnover as a Nium Corporate Constant.',
+            );
+        }
+
+        if (
+            ! is_string($sizeOfBusiness['totalEmployees'] ?? null)
+            || trim($sizeOfBusiness['totalEmployees']) === ''
+        ) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.sizeOfBusiness.totalEmployees as a Nium Corporate Constant.',
+            );
+        }
+
+        $bankAccountDetailsSupplied = array_key_exists('bankAccountDetails', $fields);
+
+        if (
+            $clientRequirements->requireBankAccountDetails
+            || $clientRequirements->requireRoutingCodes
+            || $bankAccountDetailsSupplied
+        ) {
+            $this->validateBankAccountDetails(
+                $this->requiredSgCorporateObject($profile, 'bankAccountDetails'),
+                $clientRequirements->requireRoutingCodes,
+            );
+        }
+
+        if (
+            $clientRequirements->requireDeviceDetails
+            || array_key_exists('deviceDetails', $fields)
+        ) {
+            $this->validateDeviceDetails(
+                $this->requiredSgCorporateObject($profile, 'deviceDetails'),
             );
         }
 
@@ -377,11 +475,22 @@ class NiumCustomerPayloadFactory
 
         $applicant = $this->corporateApplicant($profile);
         $this->requireAddressState($applicant, 'applicant.address.state');
+        $this->positions(
+            (array) (((array) $applicant->metadata)['positions'] ?? ['director']),
+            true,
+        );
 
         foreach ($profile->relatedPersons->reject(fn (KycRelatedPerson $person) => $person->is($applicant)) as $stakeholder) {
             if ($this->address($stakeholder) !== []) {
                 $this->requireAddressState($stakeholder, 'stakeholders.individual[*].address.state');
             }
+
+            $this->positions(
+                (array) (((array) $stakeholder->metadata)['positions'] ?? [
+                    $this->stakeholderFallbackPosition($stakeholder),
+                ]),
+                true,
+            );
         }
     }
 
@@ -404,7 +513,7 @@ class NiumCustomerPayloadFactory
     {
         if (! is_string($subject->state) || trim($subject->state) === '') {
             throw new RuntimeException(
-                "Nium SG corporate minimum KYC requires approved internal address field {$path} as a string.",
+                "Nium SG corporate full KYC requires approved internal address field {$path} as a string.",
             );
         }
     }
@@ -415,7 +524,7 @@ class NiumCustomerPayloadFactory
 
         if (! is_array($value) || $value === [] || array_is_list($value)) {
             throw new RuntimeException(
-                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                'Nium SG corporate full KYC requires approved KYC metadata field '
                 ."nium_v5_fields.{$field} as an object.",
             );
         }
@@ -431,6 +540,243 @@ class NiumCustomerPayloadFactory
             && ! collect($value)->contains(
                 fn ($item): bool => ! is_string($item) || trim($item) === '',
             );
+    }
+
+    private function isNiumDateTime(mixed $value): bool
+    {
+        if (! is_string($value)) {
+            return false;
+        }
+
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $value);
+        $errors = \DateTimeImmutable::getLastErrors();
+
+        return $date !== false
+            && ($errors === false || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))
+            && $date->format('Y-m-d H:i:s') === $value;
+    }
+
+    private function normalizeIsoCountryList(mixed $value, string $path): array
+    {
+        if (! is_array($value) || $value === [] || ! array_is_list($value)) {
+            throw new RuntimeException(
+                "Nium SG corporate full KYC requires approved KYC metadata field {$path} "
+                .'as a non-empty array of ISO alpha-2 country codes.',
+            );
+        }
+
+        $normalized = [];
+
+        foreach ($value as $country) {
+            if (! is_string($country)) {
+                throw new RuntimeException(
+                    "Nium SG corporate full KYC requires approved KYC metadata field {$path} "
+                    .'as a non-empty array of ISO alpha-2 country codes.',
+                );
+            }
+
+            $country = strtoupper(trim($country));
+
+            if (preg_match('/^[A-Z]{2}$/', $country) !== 1) {
+                throw new RuntimeException(
+                    "Nium SG corporate full KYC requires approved KYC metadata field {$path} "
+                    .'as a non-empty array of ISO alpha-2 country codes.',
+                );
+            }
+
+            if (! in_array($country, $normalized, true)) {
+                $normalized[] = $country;
+            }
+        }
+
+        if ($normalized === []) {
+            throw new RuntimeException(
+                "Nium SG corporate full KYC requires approved KYC metadata field {$path} "
+                .'as a non-empty array of ISO alpha-2 country codes.',
+            );
+        }
+
+        return $normalized;
+    }
+
+    private function validateBankAccountDetails(array $details, bool $requireRoutingCodes): void
+    {
+        foreach (['accountName', 'accountNumber', 'bankCountry', 'currency'] as $field) {
+            if (! is_string($details[$field] ?? null) || trim($details[$field]) === '') {
+                throw new RuntimeException(
+                    'Nium SG corporate full KYC requires approved KYC metadata field '
+                    ."nium_v5_fields.bankAccountDetails.{$field} as a non-empty string.",
+                );
+            }
+        }
+
+        if (preg_match('/^[A-Z]{2}$/', $details['bankCountry']) !== 1) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.bankAccountDetails.bankCountry as an ISO alpha-2 country code.',
+            );
+        }
+
+        if (preg_match('/^[A-Z]{3}$/', $details['currency']) !== 1) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.bankAccountDetails.currency as an ISO 4217 currency code.',
+            );
+        }
+
+        foreach (['bankAccountType', 'bankName'] as $optionalField) {
+            if (
+                array_key_exists($optionalField, $details)
+                && (! is_string($details[$optionalField]) || trim($details[$optionalField]) === '')
+            ) {
+                throw new RuntimeException(
+                    'Nium SG corporate full KYC requires approved KYC metadata field '
+                    ."nium_v5_fields.bankAccountDetails.{$optionalField} as a non-empty string when supplied.",
+                );
+            }
+        }
+
+        $routingCodes = $details['routingCodes'] ?? null;
+
+        if ($routingCodes === null && ! $requireRoutingCodes) {
+            return;
+        }
+
+        if (! is_array($routingCodes) || $routingCodes === [] || ! array_is_list($routingCodes)) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.bankAccountDetails.routingCodes as a non-empty array.',
+            );
+        }
+
+        foreach ($routingCodes as $routingCode) {
+            if (
+                ! is_array($routingCode)
+                || array_is_list($routingCode)
+                || ! is_string($routingCode['type'] ?? null)
+                || trim($routingCode['type']) === ''
+                || ! is_string($routingCode['value'] ?? null)
+                || trim($routingCode['value']) === ''
+            ) {
+                throw new RuntimeException(
+                    'Nium SG corporate full KYC requires each approved '
+                    .'nium_v5_fields.bankAccountDetails.routingCodes entry to contain type and value strings.',
+                );
+            }
+        }
+    }
+
+    private function normalizeSgCorporateCountryLists(array $payload): array
+    {
+        Arr::set(
+            $payload,
+            'natureOfBusiness.operatingCountries',
+            $this->normalizeIsoCountryList(
+                Arr::get($payload, 'natureOfBusiness.operatingCountries'),
+                'nium_v5_fields.natureOfBusiness.operatingCountries',
+            ),
+        );
+
+        foreach (['credit', 'debit'] as $direction) {
+            $path = "expectedAccountUsage.{$direction}.topTransactionCountries";
+            Arr::set(
+                $payload,
+                $path,
+                $this->normalizeIsoCountryList(
+                    Arr::get($payload, $path),
+                    "nium_v5_fields.{$path}",
+                ),
+            );
+        }
+
+        return $payload;
+    }
+
+    private function validateDeviceDetails(array $details): void
+    {
+        foreach (['ipCountryCode', 'deviceInfo', 'ipAddress', 'sessionId'] as $field) {
+            if (! is_string($details[$field] ?? null) || trim($details[$field]) === '') {
+                throw new RuntimeException(
+                    'Nium SG corporate full KYC requires approved KYC metadata field '
+                    ."nium_v5_fields.deviceDetails.{$field} as a non-empty string.",
+                );
+            }
+        }
+
+        if (preg_match('/^[A-Z]{2}$/', $details['ipCountryCode']) !== 1) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.deviceDetails.ipCountryCode as an ISO alpha-2 country code.',
+            );
+        }
+
+        if (filter_var($details['ipAddress'], FILTER_VALIDATE_IP) === false) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.deviceDetails.ipAddress as a valid IP address.',
+            );
+        }
+    }
+
+    private function positions(array $positions, bool $normalizeNiumPositions): array
+    {
+        if (
+            $normalizeNiumPositions
+            && (
+                $positions === []
+                || collect($positions)->contains(
+                    fn ($title): bool => ! is_string($title) || trim($title) === '',
+                )
+            )
+        ) {
+            throw new RuntimeException(
+                'Nium SG corporate positions must be a non-empty array of supported role strings.',
+            );
+        }
+
+        $mapped = collect($positions)
+            ->filter(fn ($title): bool => is_string($title) && trim($title) !== '')
+            ->map(function (string $title) use ($normalizeNiumPositions): array {
+                if (! $normalizeNiumPositions) {
+                    return ['title' => $title];
+                }
+
+                $sourceRole = strtolower(trim($title));
+                $sourceRole = str_replace(['-', ' '], '_', $sourceRole);
+                $niumRole = match ($sourceRole) {
+                    'director' => 'DIRECTOR',
+                    'beneficial_owner', 'ultimate_beneficial_owner', 'ubo' => 'UBO',
+                    'shareholder' => 'SHAREHOLDER',
+                    'signatory' => 'SIGNATORY',
+                    default => null,
+                };
+
+                if ($niumRole === null) {
+                    throw new RuntimeException(
+                        'Unsupported Nium SG corporate stakeholder position.',
+                    );
+                }
+
+                return ['title' => $niumRole];
+            });
+
+        return ($normalizeNiumPositions ? $mapped->unique('title') : $mapped)
+            ->values()
+            ->all();
+    }
+
+    private function stakeholderFallbackPosition(KycRelatedPerson $person): string
+    {
+        $relationship = strtolower(trim((string) $person->relationship_type));
+        $relationship = str_replace(['-', ' '], '_', $relationship);
+
+        return match (true) {
+            str_contains($relationship, 'beneficial'), str_contains($relationship, 'ubo') => 'beneficial_owner',
+            str_contains($relationship, 'shareholder') => 'shareholder',
+            str_contains($relationship, 'signatory') => 'signatory',
+            str_contains($relationship, 'director') => 'director',
+            default => $relationship,
+        };
     }
 
     private function regionFields(KycProfile $profile): array

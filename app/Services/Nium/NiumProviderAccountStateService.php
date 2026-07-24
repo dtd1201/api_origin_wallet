@@ -385,7 +385,7 @@ class NiumProviderAccountStateService
         return [
             'external_customer_id_fingerprint' => $this->fingerprint($providerAccount->external_customer_id),
             'external_account_id_fingerprint' => $this->fingerprint($providerAccount->external_account_id),
-            'external_reference' => $providerAccount->external_reference,
+            'external_reference_fingerprint' => $this->fingerprint($providerAccount->external_reference),
             'status' => $providerAccount->status,
             'provider_status' => $providerAccount->provider_status,
             'provider_sub_status' => $providerAccount->provider_sub_status,

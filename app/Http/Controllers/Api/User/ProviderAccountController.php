@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Models\UserIntegrationRequest;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use App\Services\Integrations\ProviderOnboardingManager;
+use App\Services\Nium\NiumProviderRequestException;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -183,6 +184,8 @@ class ProviderAccountController extends Controller
                 user: $user->load('profile', 'providerAccounts.provider'),
                 force: (bool) $request->boolean('force', false),
             );
+        } catch (NiumProviderRequestException $exception) {
+            return $this->safeNiumErrorResponse($exception);
         } catch (RuntimeException $exception) {
             return response()->json([
                 'message' => $exception->getMessage(),
@@ -213,6 +216,8 @@ class ProviderAccountController extends Controller
                 user: $user->load('profile', 'providerAccounts.provider'),
                 payload: $request->all(),
             );
+        } catch (NiumProviderRequestException $exception) {
+            return $this->safeNiumErrorResponse($exception);
         } catch (RuntimeException $exception) {
             return response()->json([
                 'message' => $exception->getMessage(),
@@ -225,5 +230,15 @@ class ProviderAccountController extends Controller
             'provider_account' => $onboarding->providerAccount,
             'onboarding' => $onboarding->toArray(),
         ]);
+    }
+
+    private function safeNiumErrorResponse(NiumProviderRequestException $exception): JsonResponse
+    {
+        return response()->json(array_filter([
+            'message' => $exception->getMessage(),
+            'code' => $exception->providerCode,
+            'field' => $exception->providerField,
+            'path' => $exception->providerPath,
+        ], static fn ($value): bool => $value !== null), 422);
     }
 }

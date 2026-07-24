@@ -14,8 +14,10 @@ use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumCustomerPayloadFactory;
 use App\Services\Nium\NiumProviderAccountStateService;
+use App\Services\Nium\NiumProviderRequestException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -45,6 +47,12 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
     private const MULTI_DOCUMENT_FILE_ID = '88888888-8888-4888-8888-888888888888';
 
+    private const BUSINESS_DOCUMENT_BYTES = 'synthetic-business-registration-bytes';
+
+    private const APPLICANT_DOCUMENT_BYTES = 'synthetic-applicant-passport-bytes';
+
+    private const STAKEHOLDER_DOCUMENT_BYTES = 'synthetic-stakeholder-passport-bytes';
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -59,6 +67,11 @@ class NiumCustomerOnboardingV5Test extends TestCase
         config()->set('services.nium.file_base_url', 'https://document-storage-sandbox.nium.test');
         config()->set('services.nium.file_create_endpoint', '/api/v1/client/{clientHashId}/files');
         config()->set('services.nium.file_details_endpoint', '/api/v1/client/{clientHashId}/files/{fileId}');
+        config()->set('services.nium.sg_corporate_client_schema', [
+            'require_bank_account_details' => true,
+            'require_device_details' => true,
+            'require_routing_codes' => true,
+        ]);
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'verified-partner-key');
     }
@@ -481,6 +494,101 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'safe-individual-file-bytes', "kyc/{$user->id}/passport-front.jpg", 'storagePath', 'is112',
         ] as $secret) {
             $this->assertStringNotContainsString($secret, $serialized);
+        }
+    }
+
+    public function test_nium_provider_exception_contains_only_safe_code_and_schema_path(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $rawDescription = 'RAW NIUM description for Alice Applicant at '
+            .$user->email.' phone '.$user->phone.' DOB 1988-04-12 address 2 Applicant Street '
+            .'file '.self::APPLICANT_FILE_ID.' account 1234567890 Bearer sandbox-api-key.';
+
+        Http::fake(function (Request $request) use ($rawDescription) {
+            if ($request->method() === 'GET') {
+                return Http::response(['customers' => []]);
+            }
+
+            return Http::response([
+                'errors' => [[
+                    'errorCode' => 'invalid_input',
+                    'field' => 'applicant.documents[0].fileIds',
+                    'path' => 'applicant.documents[0].fileIds',
+                    'description' => $rawDescription,
+                ]],
+            ], 400);
+        });
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected the fake Nium rejection to throw a safe provider exception.');
+        } catch (NiumProviderRequestException $exception) {
+            $this->assertSame('Nium V5 customer creation failed.', $exception->getMessage());
+            $this->assertSame('invalid_input', $exception->providerCode);
+            $this->assertSame('applicant.documents[0].fileIds', $exception->providerField);
+            $this->assertSame('applicant.documents[0].fileIds', $exception->providerPath);
+
+            $serializedException = json_encode([
+                'message' => $exception->getMessage(),
+                'code' => $exception->providerCode,
+                'field' => $exception->providerField,
+                'path' => $exception->providerPath,
+            ], JSON_THROW_ON_ERROR);
+
+            foreach ($this->rawNiumErrorSecrets($user, $rawDescription) as $sensitiveValue) {
+                $this->assertStringNotContainsString($sensitiveValue, $serializedException);
+            }
+        }
+    }
+
+    public function test_link_route_never_returns_or_persists_raw_nium_error_description(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $rawDescription = 'RAW NIUM description for Alice Applicant at '
+            .$user->email.' phone '.$user->phone.' DOB 1988-04-12 address 2 Applicant Street '
+            .'file '.self::APPLICANT_FILE_ID.' account 1234567890 Bearer sandbox-api-key.';
+
+        Http::fake(function (Request $request) use ($rawDescription) {
+            if ($request->method() === 'GET') {
+                return Http::response(['customers' => []]);
+            }
+
+            return Http::response([
+                'errors' => [[
+                    'errorCode' => 'invalid_input',
+                    'field' => 'applicant.documents[0].fileIds',
+                    'path' => 'applicant.documents[0].fileIds',
+                    'description' => $rawDescription,
+                ]],
+            ], 400);
+        });
+
+        $response = $this->withToken($this->issueTokenFor($user))
+            ->postJson("/api/user/users/{$user->id}/provider-accounts/nium/link");
+
+        $response->assertUnprocessable()
+            ->assertExactJson([
+                'message' => 'Nium V5 customer creation failed.',
+                'code' => 'invalid_input',
+                'field' => 'applicant.documents[0].fileIds',
+                'path' => 'applicant.documents[0].fileIds',
+            ]);
+
+        $externalReference = (string) $user->providerAccounts()->firstOrFail()->external_reference;
+        $serializedResponse = $response->getContent();
+        $serializedLogs = json_encode([
+            'api_request_logs' => ApiRequestLog::query()->get()->toArray(),
+            'audit_logs' => AuditLog::query()->get()->toArray(),
+        ], JSON_THROW_ON_ERROR);
+
+        foreach ([
+            ...$this->rawNiumErrorSecrets($user, $rawDescription),
+            $externalReference,
+        ] as $sensitiveValue) {
+            $this->assertStringNotContainsString($sensitiveValue, $serializedResponse);
+            $this->assertStringNotContainsString($sensitiveValue, $serializedLogs);
         }
     }
 
@@ -1131,9 +1239,21 @@ class NiumCustomerOnboardingV5Test extends TestCase
             }
 
             $payload = $request->data();
+            $allFileIds = [
+                ...$payload['documents'][0]['fileIds'],
+                ...$payload['applicant']['documents'][0]['fileIds'],
+                ...$payload['stakeholders']['individual'][0]['documents'][0]['fileIds'],
+            ];
+            $serializedPayload = json_encode($payload, JSON_THROW_ON_ERROR);
 
             return $payload['type'] === 'corporate'
+                && $payload['region'] === 'SG'
+                && $payload['kycType'] === 'full'
+                && $payload['applicantDeclaration'] === true
+                && $payload['applicantDeclarationTimeStamp'] === '2026-07-23 05:00:00'
+                && $payload['isMultiLayeredCompany'] === false
                 && is_array($payload['natureOfBusiness'])
+                && $payload['natureOfBusiness']['operatingCountries'] === ['SG', 'HK']
                 && is_array($payload['natureOfBusiness']['industryCodes'])
                 && $payload['natureOfBusiness']['industryCodes'] === ['IS144']
                 && is_array($payload['expectedAccountUsage'])
@@ -1141,14 +1261,57 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 && is_string($payload['expectedAccountUsage']['credit']['averageTransactionValue'])
                 && is_string($payload['expectedAccountUsage']['credit']['monthlyTransactionVolume'])
                 && is_string($payload['expectedAccountUsage']['credit']['monthlyTransactions'])
+                && $payload['expectedAccountUsage']['credit']['topTransactionCountries'] === ['SG', 'HK']
+                && is_array($payload['expectedAccountUsage']['debit'])
+                && is_string($payload['expectedAccountUsage']['debit']['averageTransactionValue'])
+                && is_string($payload['expectedAccountUsage']['debit']['monthlyTransactionVolume'])
+                && is_string($payload['expectedAccountUsage']['debit']['monthlyTransactions'])
+                && $payload['expectedAccountUsage']['debit']['topTransactionCountries'] === ['IN', 'SG']
                 && is_array($payload['expectedAccountUsage']['intendedUses'])
                 && $payload['expectedAccountUsage']['intendedUses'] === ['IU003']
                 && is_array($payload['sizeOfBusiness'])
                 && is_string($payload['sizeOfBusiness']['annualTurnover'])
                 && $payload['sizeOfBusiness']['annualTurnover'] === 'SG011'
+                && $payload['sizeOfBusiness']['totalEmployees'] === 'EM009'
+                && $payload['applicant']['positions'] === [['title' => 'DIRECTOR']]
+                && $payload['stakeholders']['individual'][0]['positions'] === [['title' => 'UBO']]
+                && $payload['bankAccountDetails'] === [
+                    'accountName' => 'Acme Holdings Limited',
+                    'accountNumber' => '1234567890',
+                    'bankCountry' => 'SG',
+                    'currency' => 'SGD',
+                    'bankAccountType' => 'current',
+                    'bankName' => 'DBS Bank',
+                    'routingCodes' => [
+                        [
+                            'type' => 'SWIFT',
+                            'value' => 'DBSSSGSG',
+                        ],
+                    ],
+                ]
+                && $payload['deviceDetails'] === [
+                    'ipCountryCode' => 'SG',
+                    'deviceInfo' => 'Synthetic test browser',
+                    'ipAddress' => '192.0.2.10',
+                    'sessionId' => 'synthetic-session-001',
+                ]
                 && $payload['documents'][0]['fileIds'] === [self::BUSINESS_FILE_ID]
                 && $payload['applicant']['documents'][0]['fileIds'] === [self::APPLICANT_FILE_ID]
-                && $payload['stakeholders']['individual'][0]['documents'][0]['fileIds'] === [self::STAKEHOLDER_FILE_ID];
+                && $payload['stakeholders']['individual'][0]['documents'][0]['fileIds'] === [self::STAKEHOLDER_FILE_ID]
+                && count($allFileIds) === 3
+                && count(array_unique($allFileIds)) === 3
+                && collect($allFileIds)->every(
+                    fn (string $fileId): bool => Str::isUuid($fileId),
+                )
+                && ! str_contains($serializedPayload, 'kyc/corporate/')
+                && ! str_contains($serializedPayload, 'storagePath')
+                && ! str_contains($serializedPayload, 'file_path')
+                && ! str_contains($serializedPayload, self::BUSINESS_DOCUMENT_BYTES)
+                && ! str_contains($serializedPayload, self::APPLICANT_DOCUMENT_BYTES)
+                && ! str_contains($serializedPayload, self::STAKEHOLDER_DOCUMENT_BYTES)
+                && ! str_contains($serializedPayload, base64_encode(self::BUSINESS_DOCUMENT_BYTES))
+                && ! str_contains($serializedPayload, base64_encode(self::APPLICANT_DOCUMENT_BYTES))
+                && ! str_contains($serializedPayload, base64_encode(self::STAKEHOLDER_DOCUMENT_BYTES));
         });
         Http::assertNotSent(fn (Request $request): bool => str_contains(
             $request->url(),
@@ -1160,7 +1323,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
     {
         $this->assertMissingSgCorporateAddressStateFailsBeforeHttp(
             'profile',
-            'Nium SG corporate minimum KYC requires approved internal address field '
+            'Nium SG corporate full KYC requires approved internal address field '
             .'addresses.registeredAddress.state as a string.',
         );
     }
@@ -1169,7 +1332,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
     {
         $this->assertMissingSgCorporateAddressStateFailsBeforeHttp(
             'applicant',
-            'Nium SG corporate minimum KYC requires approved internal address field '
+            'Nium SG corporate full KYC requires approved internal address field '
             .'applicant.address.state as a string.',
         );
     }
@@ -1178,7 +1341,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
     {
         $this->assertMissingSgCorporateAddressStateFailsBeforeHttp(
             'stakeholder',
-            'Nium SG corporate minimum KYC requires approved internal address field '
+            'Nium SG corporate full KYC requires approved internal address field '
             .'stakeholders.individual[*].address.state as a string.',
         );
     }
@@ -1256,7 +1419,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             $this->fail('Expected missing corporate natureOfBusiness to block Nium onboarding.');
         } catch (RuntimeException $exception) {
             $this->assertSame(
-                'Nium SG corporate minimum KYC requires approved KYC metadata field '
+                'Nium SG corporate full KYC requires approved KYC metadata field '
                 .'nium_v5_fields.natureOfBusiness as an object.',
                 $exception->getMessage(),
             );
@@ -1277,6 +1440,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         );
 
         $metadata['nium_v5_fields']['natureOfBusiness'] = [
+            'operatingCountries' => ['SG', 'HK'],
             'industryCodes' => ['IS144'],
         ];
         $profile->update(['metadata' => $metadata]);
@@ -1308,7 +1472,15 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'ATVSG02',
             'MVSG10',
             'ATC03',
+            'ATVSG01',
+            'MVSG05',
+            'ATC02',
             'SG011',
+            'EM009',
+            '1234567890',
+            'DBSSSGSG',
+            '192.0.2.10',
+            'synthetic-session-001',
             '1 Corporate Avenue',
             '2 Applicant Street',
             '3 Owner Road',
@@ -1329,7 +1501,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
     {
         $this->assertMissingSgCorporateSourceFieldFailsBeforeHttp(
             'expectedAccountUsage',
-            'Nium SG corporate minimum KYC requires approved KYC metadata field '
+            'Nium SG corporate full KYC requires approved KYC metadata field '
             .'nium_v5_fields.expectedAccountUsage as an object.',
         );
     }
@@ -1338,9 +1510,475 @@ class NiumCustomerOnboardingV5Test extends TestCase
     {
         $this->assertMissingSgCorporateSourceFieldFailsBeforeHttp(
             'sizeOfBusiness',
-            'Nium SG corporate minimum KYC requires approved KYC metadata field '
+            'Nium SG corporate full KYC requires approved KYC metadata field '
             .'nium_v5_fields.sizeOfBusiness as an object.',
         );
+    }
+
+    public function test_sg_corporate_minimum_kyc_type_fails_before_http(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_kyc_type'] = 'minimum';
+        $profile->update(['metadata' => $metadata]);
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected SG corporate minimum KYC to fail before HTTP.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('nium_kyc_type to be full', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_missing_sg_corporate_applicant_declaration_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('applicantDeclaration');
+    }
+
+    public function test_false_sg_corporate_applicant_declaration_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'applicantDeclaration',
+            false,
+        );
+    }
+
+    public function test_missing_sg_corporate_applicant_declaration_timestamp_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('applicantDeclarationTimeStamp');
+    }
+
+    public function test_invalid_sg_corporate_applicant_declaration_timestamp_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'applicantDeclarationTimeStamp',
+            '2026-07-23T05:00:00Z',
+        );
+    }
+
+    public function test_missing_sg_corporate_multi_layered_flag_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('isMultiLayeredCompany');
+    }
+
+    public function test_string_sg_corporate_multi_layered_flag_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'isMultiLayeredCompany',
+            'false',
+        );
+    }
+
+    public function test_missing_sg_corporate_debit_usage_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('expectedAccountUsage.debit');
+    }
+
+    public function test_missing_sg_corporate_credit_usage_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('expectedAccountUsage.credit');
+    }
+
+    public function test_missing_sg_corporate_top_transaction_countries_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp(
+            'expectedAccountUsage.credit.topTransactionCountries',
+        );
+    }
+
+    public function test_missing_sg_corporate_debit_top_transaction_countries_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp(
+            'expectedAccountUsage.debit.topTransactionCountries',
+        );
+    }
+
+    public function test_missing_sg_corporate_total_employees_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('sizeOfBusiness.totalEmployees');
+    }
+
+    public function test_missing_sg_corporate_operating_countries_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp(
+            'natureOfBusiness.operatingCountries',
+        );
+    }
+
+    public function test_missing_sg_corporate_bank_account_details_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('bankAccountDetails');
+    }
+
+    public function test_missing_sg_corporate_device_details_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp('deviceDetails');
+    }
+
+    public function test_sg_corporate_country_lists_are_trimmed_uppercased_and_deduplicated(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        Arr::set($metadata, 'nium_v5_fields.natureOfBusiness.operatingCountries', [
+            'sg',
+            ' hK ',
+            'SG',
+        ]);
+        Arr::set($metadata, 'nium_v5_fields.expectedAccountUsage.credit.topTransactionCountries', [
+            'sG',
+            ' us ',
+            'SG',
+        ]);
+        Arr::set($metadata, 'nium_v5_fields.expectedAccountUsage.debit.topTransactionCountries', [
+            'in',
+            'Sg',
+            'IN',
+        ]);
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build(
+            $user,
+            (string) Str::uuid(),
+        );
+
+        $this->assertSame(['SG', 'HK'], $payload['natureOfBusiness']['operatingCountries']);
+        $this->assertSame(
+            ['SG', 'US'],
+            $payload['expectedAccountUsage']['credit']['topTransactionCountries'],
+        );
+        $this->assertSame(
+            ['IN', 'SG'],
+            $payload['expectedAccountUsage']['debit']['topTransactionCountries'],
+        );
+        Http::assertNothingSent();
+    }
+
+    public function test_invalid_length_sg_corporate_operating_country_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'natureOfBusiness.operatingCountries',
+            ['SGP'],
+        );
+    }
+
+    public function test_numeric_sg_corporate_credit_country_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'expectedAccountUsage.credit.topTransactionCountries',
+            [65],
+        );
+    }
+
+    public function test_empty_sg_corporate_debit_country_list_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'expectedAccountUsage.debit.topTransactionCountries',
+            [],
+        );
+    }
+
+    public function test_sg_corporate_country_list_containing_only_invalid_values_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'natureOfBusiness.operatingCountries',
+            ['', '123'],
+        );
+    }
+
+    public function test_unconfigured_sg_corporate_client_policy_fails_closed_before_http(): void
+    {
+        config()->set('services.nium.sg_corporate_client_schema', [
+            'require_bank_account_details' => null,
+            'require_device_details' => null,
+            'require_routing_codes' => null,
+        ]);
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected an unconfigured client schema policy to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame(
+                'Nium SG corporate client schema requirements are not configured.',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_optional_sg_corporate_bank_and_device_sections_may_be_absent(): void
+    {
+        config()->set('services.nium.sg_corporate_client_schema', [
+            'require_bank_account_details' => false,
+            'require_device_details' => false,
+            'require_routing_codes' => false,
+        ]);
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        Arr::forget($metadata, [
+            'nium_v5_fields.bankAccountDetails',
+            'nium_v5_fields.deviceDetails',
+        ]);
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build(
+            $user,
+            (string) Str::uuid(),
+        );
+
+        $this->assertArrayNotHasKey('bankAccountDetails', $payload);
+        $this->assertArrayNotHasKey('deviceDetails', $payload);
+        Http::assertNothingSent();
+    }
+
+    public function test_optional_sg_corporate_routing_codes_may_be_absent(): void
+    {
+        config()->set('services.nium.sg_corporate_client_schema', [
+            'require_bank_account_details' => true,
+            'require_device_details' => false,
+            'require_routing_codes' => false,
+        ]);
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        Arr::forget($metadata, [
+            'nium_v5_fields.bankAccountDetails.routingCodes',
+            'nium_v5_fields.deviceDetails',
+        ]);
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build(
+            $user,
+            (string) Str::uuid(),
+        );
+
+        $this->assertArrayHasKey('bankAccountDetails', $payload);
+        $this->assertArrayNotHasKey('routingCodes', $payload['bankAccountDetails']);
+        $this->assertArrayNotHasKey('deviceDetails', $payload);
+        Http::assertNothingSent();
+    }
+
+    public function test_supplied_optional_sg_corporate_bank_section_is_still_validated(): void
+    {
+        config()->set('services.nium.sg_corporate_client_schema', [
+            'require_bank_account_details' => false,
+            'require_device_details' => false,
+            'require_routing_codes' => false,
+        ]);
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp(
+            'bankAccountDetails.accountName',
+        );
+    }
+
+    public function test_supplied_optional_sg_corporate_routing_codes_are_still_validated(): void
+    {
+        config()->set('services.nium.sg_corporate_client_schema', [
+            'require_bank_account_details' => true,
+            'require_device_details' => false,
+            'require_routing_codes' => false,
+        ]);
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'bankAccountDetails.routingCodes',
+            'SWIFT:DBSSSGSG',
+        );
+    }
+
+    public function test_supplied_optional_sg_corporate_device_section_is_still_validated(): void
+    {
+        config()->set('services.nium.sg_corporate_client_schema', [
+            'require_bank_account_details' => false,
+            'require_device_details' => false,
+            'require_routing_codes' => false,
+        ]);
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'deviceDetails.ipAddress',
+            'not-an-ip',
+        );
+    }
+
+    public function test_sg_corporate_bank_account_missing_account_name_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp(
+            'bankAccountDetails.accountName',
+        );
+    }
+
+    public function test_sg_corporate_bank_account_invalid_country_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'bankAccountDetails.bankCountry',
+            'SGP',
+        );
+    }
+
+    public function test_sg_corporate_bank_account_invalid_currency_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'bankAccountDetails.currency',
+            'SG',
+        );
+    }
+
+    public function test_sg_corporate_routing_codes_non_array_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'bankAccountDetails.routingCodes',
+            'SWIFT:DBSSSGSG',
+        );
+    }
+
+    public function test_sg_corporate_required_routing_codes_empty_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'bankAccountDetails.routingCodes',
+            [],
+        );
+    }
+
+    public function test_sg_corporate_routing_code_missing_type_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'bankAccountDetails.routingCodes',
+            [['value' => 'DBSSSGSG']],
+        );
+    }
+
+    public function test_sg_corporate_routing_code_missing_value_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'bankAccountDetails.routingCodes',
+            [['type' => 'SWIFT']],
+        );
+    }
+
+    public function test_sg_corporate_device_details_missing_field_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateMetadataPathFailsBeforeHttp(
+            'deviceDetails.sessionId',
+        );
+    }
+
+    public function test_sg_corporate_device_details_invalid_ip_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'deviceDetails.ipAddress',
+            'not-an-ip',
+        );
+    }
+
+    public function test_sg_corporate_device_details_invalid_country_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'deviceDetails.ipCountryCode',
+            'SGP',
+        );
+    }
+
+    public function test_invalid_sg_corporate_stakeholder_role_fails_before_http(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $stakeholder = $user->kycProfile()
+            ->firstOrFail()
+            ->relatedPersons()
+            ->where('relationship_type', 'beneficial_owner')
+            ->firstOrFail();
+        $metadata = (array) $stakeholder->metadata;
+        $metadata['positions'] = ['unsupported_role'];
+        $stakeholder->update(['metadata' => $metadata]);
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected an unsupported stakeholder role to fail before HTTP.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'Unsupported Nium SG corporate stakeholder position',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_sg_corporate_position_aliases_map_to_supported_nium_constants(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $stakeholder = $user->kycProfile()
+            ->firstOrFail()
+            ->relatedPersons()
+            ->where('relationship_type', 'beneficial_owner')
+            ->firstOrFail();
+        $metadata = (array) $stakeholder->metadata;
+        $metadata['positions'] = [
+            'director',
+            'beneficial_owner',
+            'ultimate_beneficial_owner',
+            'shareholder',
+            'signatory',
+        ];
+        $stakeholder->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build(
+            $user,
+            (string) Str::uuid(),
+        );
+
+        $this->assertSame([
+            ['title' => 'DIRECTOR'],
+            ['title' => 'UBO'],
+            ['title' => 'SHAREHOLDER'],
+            ['title' => 'SIGNATORY'],
+        ], $payload['stakeholders']['individual'][0]['positions']);
+        Http::assertNothingSent();
+    }
+
+    public function test_non_sg_corporate_payload_is_not_forced_to_full_kyc(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_region'] = 'EU';
+        $metadata['nium_kyc_type'] = 'minimum';
+        $profile->update([
+            'registered_country_code' => 'DE',
+            'country_code' => 'DE',
+            'metadata' => $metadata,
+        ]);
+        $user->unsetRelation('kycProfile');
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build(
+            $user,
+            (string) Str::uuid(),
+        );
+
+        $this->assertSame('EU', $payload['region']);
+        $this->assertSame('minimum', $payload['kycType']);
+        Http::assertNothingSent();
     }
 
     public function test_shared_document_selection_ignores_rejected_superseded_and_older_duplicate_documents(): void
@@ -1863,6 +2501,56 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
     }
 
+    private function assertMissingSgCorporateMetadataPathFailsBeforeHttp(string $path): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        Arr::forget($metadata, 'nium_v5_fields.'.$path);
+        $profile->update(['metadata' => $metadata]);
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail("Expected missing {$path} to block Nium onboarding.");
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'nium_v5_fields.'.$path,
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+    }
+
+    private function assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+        string $path,
+        mixed $value,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        Arr::set($metadata, 'nium_v5_fields.'.$path, $value);
+        $profile->update(['metadata' => $metadata]);
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail("Expected invalid {$path} to block Nium onboarding.");
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'nium_v5_fields.'.$path,
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+    }
+
     private function assertMissingSgCorporateAddressStateFailsBeforeHttp(
         string $subject,
         string $expectedMessage,
@@ -2034,11 +2722,15 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'country_code' => 'SG',
             'metadata' => [
                 'nium_region' => 'SG',
-                'nium_kyc_type' => 'minimum',
+                'nium_kyc_type' => 'full',
                 'registered_date' => '2020-01-15',
                 'nium_business_type' => 'private_company',
                 'nium_v5_fields' => [
+                    'applicantDeclaration' => true,
+                    'applicantDeclarationTimeStamp' => '2026-07-23 05:00:00',
+                    'isMultiLayeredCompany' => false,
                     'natureOfBusiness' => [
+                        'operatingCountries' => ['SG', 'HK'],
                         'industryCodes' => ['IS144'],
                     ],
                     'expectedAccountUsage' => [
@@ -2046,11 +2738,39 @@ class NiumCustomerOnboardingV5Test extends TestCase
                             'averageTransactionValue' => 'ATVSG02',
                             'monthlyTransactionVolume' => 'MVSG10',
                             'monthlyTransactions' => 'ATC03',
+                            'topTransactionCountries' => ['SG', 'HK'],
+                        ],
+                        'debit' => [
+                            'averageTransactionValue' => 'ATVSG01',
+                            'monthlyTransactionVolume' => 'MVSG05',
+                            'monthlyTransactions' => 'ATC02',
+                            'topTransactionCountries' => ['IN', 'SG'],
                         ],
                         'intendedUses' => ['IU003'],
                     ],
                     'sizeOfBusiness' => [
                         'annualTurnover' => 'SG011',
+                        'totalEmployees' => 'EM009',
+                    ],
+                    'bankAccountDetails' => [
+                        'accountName' => 'Acme Holdings Limited',
+                        'accountNumber' => '1234567890',
+                        'bankCountry' => 'SG',
+                        'currency' => 'SGD',
+                        'bankAccountType' => 'current',
+                        'bankName' => 'DBS Bank',
+                        'routingCodes' => [
+                            [
+                                'type' => 'SWIFT',
+                                'value' => 'DBSSSGSG',
+                            ],
+                        ],
+                    ],
+                    'deviceDetails' => [
+                        'ipCountryCode' => 'SG',
+                        'deviceInfo' => 'Synthetic test browser',
+                        'ipAddress' => '192.0.2.10',
+                        'sessionId' => 'synthetic-session-001',
                     ],
                 ],
             ],
@@ -2070,6 +2790,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'metadata' => [
                 'email' => $user->email,
                 'phone' => $user->phone,
+                'positions' => ['director'],
             ],
         ]);
         $stakeholder = $kycProfile->relatedPersons()->create([
@@ -2088,13 +2809,29 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'metadata' => [
                 'email' => "uma.owner.{$suffix}@example.com",
                 'phone' => '+6598765432',
+                'positions' => ['ultimate_beneficial_owner'],
             ],
         ]);
+
+        Storage::disk('kyc_private')->put(
+            'kyc/corporate/business-registration.png',
+            self::BUSINESS_DOCUMENT_BYTES,
+        );
+        Storage::disk('kyc_private')->put(
+            'kyc/corporate/applicant-passport.png',
+            self::APPLICANT_DOCUMENT_BYTES,
+        );
+        Storage::disk('kyc_private')->put(
+            'kyc/corporate/stakeholder-passport.png',
+            self::STAKEHOLDER_DOCUMENT_BYTES,
+        );
 
         $kycProfile->documents()->create([
             'type' => 'business_registration',
             'status' => 'approved',
             'file_url' => 'https://files.example.test/business-registration.pdf',
+            'storage_disk' => 'kyc_private',
+            'file_path' => 'kyc/corporate/business-registration.png',
             'document_number' => 'ACME-2026-001',
             'issuing_country_code' => 'SG',
             'metadata' => $this->availableFileMetadata(self::BUSINESS_FILE_ID),
@@ -2104,6 +2841,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'type' => 'passport_front',
             'status' => 'approved',
             'file_url' => 'https://files.example.test/applicant-passport.jpg',
+            'storage_disk' => 'kyc_private',
+            'file_path' => 'kyc/corporate/applicant-passport.png',
             'document_number' => 'APPLICANT-PASSPORT',
             'issuing_country_code' => 'SG',
             'metadata' => $this->availableFileMetadata(self::APPLICANT_FILE_ID),
@@ -2113,6 +2852,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'type' => 'passport_front',
             'status' => 'approved',
             'file_url' => 'https://files.example.test/stakeholder-passport.jpg',
+            'storage_disk' => 'kyc_private',
+            'file_path' => 'kyc/corporate/stakeholder-passport.png',
             'document_number' => 'STAKEHOLDER-PASSPORT',
             'issuing_country_code' => 'SG',
             'metadata' => $this->availableFileMetadata(self::STAKEHOLDER_FILE_ID),
@@ -2139,6 +2880,21 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'nium_file_state' => 'AVAILABLE',
             'nium_uploaded_at' => '2026-07-23T05:00:00.000000Z',
             'nium_available_at' => '2026-07-23T05:01:00.000000Z',
+        ];
+    }
+
+    private function rawNiumErrorSecrets(User $user, string $rawDescription): array
+    {
+        return [
+            $rawDescription,
+            'Alice Applicant',
+            (string) $user->email,
+            (string) $user->phone,
+            '1988-04-12',
+            '2 Applicant Street',
+            self::APPLICANT_FILE_ID,
+            '1234567890',
+            'sandbox-api-key',
         ];
     }
 

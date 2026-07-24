@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderOnboardingManager;
+use App\Services\Nium\NiumProviderRequestException;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use RuntimeException;
@@ -22,6 +23,13 @@ class ProviderSyncController extends Controller
         try {
             $provider->assertSupportsCapability('onboarding');
             $providerAccount = $manager->syncUser($provider, $user->load('profile'));
+        } catch (NiumProviderRequestException $exception) {
+            return response()->json(array_filter([
+                'message' => $exception->getMessage(),
+                'code' => $exception->providerCode,
+                'field' => $exception->providerField,
+                'path' => $exception->providerPath,
+            ], static fn ($value): bool => $value !== null), 422);
         } catch (RuntimeException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }

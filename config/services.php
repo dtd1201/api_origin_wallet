@@ -77,6 +77,11 @@ return [
         'file_base_url' => env('NIUM_FILE_BASE_URL'),
         'file_create_endpoint' => env('NIUM_FILE_CREATE_ENDPOINT', '/api/v1/client/{clientHashId}/files'),
         'file_details_endpoint' => env('NIUM_FILE_DETAILS_ENDPOINT', '/api/v1/client/{clientHashId}/files/{fileId}'),
+        'sg_corporate_client_schema' => [
+            'require_bank_account_details' => env('NIUM_SG_CORPORATE_REQUIRE_BANK_ACCOUNT_DETAILS'),
+            'require_device_details' => env('NIUM_SG_CORPORATE_REQUIRE_DEVICE_DETAILS'),
+            'require_routing_codes' => env('NIUM_SG_CORPORATE_REQUIRE_ROUTING_CODES'),
+        ],
         'auth' => [
             'mode' => env('NIUM_AUTH_MODE', 'header'),
             'header_name' => env('NIUM_AUTH_HEADER_NAME', 'x-api-key'),

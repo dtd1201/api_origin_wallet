@@ -400,6 +400,8 @@ class ProviderHttpClient implements ProviderClient
         $requestId = collect($this->headers)
             ->first(fn ($value, $key) => strtolower((string) $key) === 'x-request-id');
         $responseData = is_array($responseBody) ? $responseBody : [];
+        $error = Arr::get($responseData, 'errors.0');
+        $error = is_array($error) ? $error : [];
 
         ApiRequestLog::create([
             'provider_id' => $this->provider->id,
@@ -423,9 +425,15 @@ class ProviderHttpClient implements ProviderClient
             'response_body' => array_filter([
                 'status' => is_string($responseData['status'] ?? null) ? $responseData['status'] : null,
                 'sub_status' => is_string($responseData['subStatus'] ?? null) ? $responseData['subStatus'] : null,
-                'error_code' => Arr::get($responseData, 'errors.0.code')
-                    ?? Arr::get($responseData, 'errorCode')
-                    ?? Arr::get($responseData, 'code'),
+                'error_code' => $this->safeNiumErrorCode(
+                    Arr::get($responseData, 'errors.0.code')
+                        ?? Arr::get($responseData, 'errors.0.errorCode')
+                        ?? Arr::get($responseData, 'errorCode')
+                        ?? Arr::get($responseData, 'code'),
+                ),
+                'error_field' => $this->safeNiumErrorPath($error['field'] ?? null),
+                'error_path' => $this->safeNiumErrorPath($error['path'] ?? null),
+                'error_parameter' => $this->safeNiumErrorPath($error['parameter'] ?? null),
                 'customer_id_fingerprint' => $this->fingerprint($responseData['customerHashId'] ?? null),
                 'wallet_id_fingerprint' => $this->fingerprint(
                     $responseData['walletHashId'] ?? Arr::get($responseData, 'wallets.0.walletHashId'),
@@ -447,6 +455,43 @@ class ProviderHttpClient implements ProviderClient
         ) ?: '/';
 
         return ($parts['scheme'] ?? 'https').'://'.($parts['host'] ?? 'configured-nium-host').$path;
+    }
+
+    private function safeNiumErrorPath(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        if (
+            $value === ''
+            || strlen($value) > 180
+            || preg_match(
+                '/^[A-Za-z][A-Za-z0-9_]*(?:(?:\[(?:\d+|\*)\])|(?:\.(?:[A-Za-z][A-Za-z0-9_]*|\d+)))*$/',
+                $value,
+            ) !== 1
+        ) {
+            return null;
+        }
+
+        return $value;
+    }
+
+    private function safeNiumErrorCode(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value !== ''
+            && strlen($value) <= 80
+            && preg_match('/^[A-Za-z0-9_.-]+$/', $value) === 1
+                ? $value
+                : null;
     }
 
     private function fingerprint(mixed $value): ?string
