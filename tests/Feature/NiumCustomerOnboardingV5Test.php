@@ -12,6 +12,7 @@ use App\Models\UserProviderAccount;
 use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Services\Nium\NiumCustomerPayloadFactory;
 use App\Services\Nium\NiumProviderAccountStateService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
@@ -1045,21 +1046,85 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $provider = $this->provider();
         $user = $this->approvedCorporate($provider);
         $createResponse = $this->fixture('customer-v5-create-response.json');
+        $addressDiagnostic = [];
 
-        Http::fake(function (Request $request) use ($createResponse) {
+        Http::fake(function (Request $request) use ($createResponse, &$addressDiagnostic) {
             if ($request->method() === 'GET') {
                 return Http::response(['customers' => []]);
             }
 
+            $payload = $request->data();
+            $addressDiagnostic = collect([
+                'addresses.registeredAddress',
+                'addresses.businessAddress',
+                'applicant.address',
+                'stakeholders.individual.0.address',
+            ])->map(function (string $path) use ($payload): array {
+                $address = data_get($payload, $path);
+
+                return [
+                    'payload_path' => $path,
+                    'country_code' => is_array($address) ? ($address['country'] ?? null) : null,
+                    'state_present' => is_array($address) && array_key_exists('state', $address),
+                    'state_type' => is_array($address) && array_key_exists('state', $address)
+                        ? get_debug_type($address['state'])
+                        : 'missing',
+                    'postal_code_present' => is_array($address) && array_key_exists('postcode', $address),
+                    'city_present' => is_array($address) && array_key_exists('city', $address),
+                ];
+            })->all();
+
             return Http::response([
                 ...$createResponse,
-                'externalId' => $request->data()['externalId'],
+                'externalId' => $payload['externalId'],
             ]);
         });
 
         $account = app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
 
         $this->assertSame('active', $account->status);
+        $this->assertSame([
+            [
+                'payload_path' => 'addresses.registeredAddress',
+                'country_code' => 'SG',
+                'state_present' => true,
+                'state_type' => 'string',
+                'postal_code_present' => true,
+                'city_present' => true,
+            ],
+            [
+                'payload_path' => 'addresses.businessAddress',
+                'country_code' => 'SG',
+                'state_present' => true,
+                'state_type' => 'string',
+                'postal_code_present' => true,
+                'city_present' => true,
+            ],
+            [
+                'payload_path' => 'applicant.address',
+                'country_code' => 'SG',
+                'state_present' => true,
+                'state_type' => 'string',
+                'postal_code_present' => true,
+                'city_present' => true,
+            ],
+            [
+                'payload_path' => 'stakeholders.individual.0.address',
+                'country_code' => 'SG',
+                'state_present' => true,
+                'state_type' => 'string',
+                'postal_code_present' => true,
+                'city_present' => true,
+            ],
+        ], $addressDiagnostic);
+        $this->assertSame('SG', $user->kycProfile()->firstOrFail()->registered_country_code);
+        $this->assertNotContains(
+            true,
+            collect($addressDiagnostic)
+                ->pluck('country_code')
+                ->map(fn ($country): bool => in_array($country, ['US', 'AU', 'NZ'], true))
+                ->all(),
+        );
         Http::assertSent(function (Request $request): bool {
             if ($request->method() !== 'POST' || ! str_contains($request->url(), 'gateway.nium.test')) {
                 return false;
@@ -1089,6 +1154,45 @@ class NiumCustomerOnboardingV5Test extends TestCase
             $request->url(),
             'document-storage-sandbox.nium.test',
         ));
+    }
+
+    public function test_missing_sg_corporate_registered_and_business_address_state_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateAddressStateFailsBeforeHttp(
+            'profile',
+            'Nium SG corporate minimum KYC requires approved internal address field '
+            .'addresses.registeredAddress.state as a string.',
+        );
+    }
+
+    public function test_missing_sg_corporate_applicant_address_state_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateAddressStateFailsBeforeHttp(
+            'applicant',
+            'Nium SG corporate minimum KYC requires approved internal address field '
+            .'applicant.address.state as a string.',
+        );
+    }
+
+    public function test_missing_sg_corporate_stakeholder_address_state_fails_before_http(): void
+    {
+        $this->assertMissingSgCorporateAddressStateFailsBeforeHttp(
+            'stakeholder',
+            'Nium SG corporate minimum KYC requires approved internal address field '
+            .'stakeholders.individual[*].address.state as a string.',
+        );
+    }
+
+    public function test_sg_corporate_address_state_validation_does_not_affect_individual_source_data(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $user->kycProfile()->firstOrFail()->update(['state' => null]);
+        Http::fake();
+
+        app(NiumCustomerPayloadFactory::class)->validateRequiredSourceData($user);
+
+        Http::assertNothingSent();
     }
 
     public function test_missing_sg_corporate_nature_of_business_fails_before_http_and_retry_reuses_available_files(): void
@@ -1198,7 +1302,20 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 ])
                 ->all(),
         );
-        foreach (['IS144', 'IU003', 'ATVSG02', 'MVSG10', 'ATC03', 'SG011'] as $rawFieldValue) {
+        foreach ([
+            'IS144',
+            'IU003',
+            'ATVSG02',
+            'MVSG10',
+            'ATC03',
+            'SG011',
+            '1 Corporate Avenue',
+            '2 Applicant Street',
+            '3 Owner Road',
+            'SG-01',
+            'SG-02',
+            'SG-03',
+        ] as $rawFieldValue) {
             $this->assertStringNotContainsString($rawFieldValue, $serializedLogs);
         }
         Http::assertSentCount(2);
@@ -1746,6 +1863,58 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
     }
 
+    private function assertMissingSgCorporateAddressStateFailsBeforeHttp(
+        string $subject,
+        string $expectedMessage,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+
+        match ($subject) {
+            'profile' => $profile->update(['state' => null]),
+            'applicant' => $profile->relatedPersons()
+                ->where('relationship_type', 'applicant')
+                ->firstOrFail()
+                ->update(['state' => null]),
+            'stakeholder' => $profile->relatedPersons()
+                ->where('relationship_type', 'beneficial_owner')
+                ->firstOrFail()
+                ->update(['state' => null]),
+        };
+
+        $fileIdsBefore = KycDocument::query()
+            ->where('kyc_profile_id', $profile->id)
+            ->orderBy('id')
+            ->get()
+            ->mapWithKeys(fn (KycDocument $document): array => [
+                $document->id => $document->metadata['nium_file_id'],
+            ])
+            ->all();
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail("Expected missing {$subject} address state to block Nium onboarding.");
+        } catch (RuntimeException $exception) {
+            $this->assertSame($expectedMessage, $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+        $this->assertSame(
+            $fileIdsBefore,
+            KycDocument::query()
+                ->where('kyc_profile_id', $profile->id)
+                ->orderBy('id')
+                ->get()
+                ->mapWithKeys(fn (KycDocument $document): array => [
+                    $document->id => $document->metadata['nium_file_id'],
+                ])
+                ->all(),
+        );
+    }
+
     private function provider(): IntegrationProvider
     {
         return IntegrationProvider::query()->firstOrCreate([
@@ -1860,6 +2029,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'registered_country_code' => 'SG',
             'address_line1' => '1 Corporate Avenue',
             'city' => 'Singapore',
+            'state' => 'SG-01',
             'postal_code' => '018989',
             'country_code' => 'SG',
             'metadata' => [
@@ -1894,6 +2064,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'residence_country_code' => 'SG',
             'address_line1' => '2 Applicant Street',
             'city' => 'Singapore',
+            'state' => 'SG-02',
             'postal_code' => '018990',
             'country_code' => 'SG',
             'metadata' => [
@@ -1911,6 +2082,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'ownership_percentage' => 60,
             'address_line1' => '3 Owner Road',
             'city' => 'Singapore',
+            'state' => 'SG-03',
             'postal_code' => '018991',
             'country_code' => 'SG',
             'metadata' => [

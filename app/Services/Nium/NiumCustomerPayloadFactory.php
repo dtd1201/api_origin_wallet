@@ -42,7 +42,7 @@ class NiumCustomerPayloadFactory
      */
     public function validateRequiredSourceData(User $user): void
     {
-        $user->loadMissing('kycProfile');
+        $user->loadMissing('kycProfile.relatedPersons');
         $profile = $this->approvedProfile($user);
         $metadata = (array) ($profile->metadata ?? []);
         $region = strtoupper((string) ($metadata['nium_region'] ?? $this->regionFor($profile)));
@@ -98,15 +98,7 @@ class NiumCustomerPayloadFactory
         string $kycType,
     ): array {
         $metadata = (array) ($profile->metadata ?? []);
-        $applicant = $profile->relatedPersons->first(
-            fn (KycRelatedPerson $person) => in_array(strtolower((string) $person->relationship_type), [
-                'applicant', 'authorized_representative', 'authorised_representative',
-            ], true)
-        );
-
-        if ($applicant === null) {
-            throw new RuntimeException('A corporate Nium onboarding request requires an approved applicant or authorized representative.');
-        }
+        $applicant = $this->corporateApplicant($profile);
 
         $registeredDate = $metadata['registered_date'] ?? $metadata['business_registered_date'] ?? null;
         $businessType = $metadata['nium_business_type'] ?? $metadata['business_type'] ?? null;
@@ -377,6 +369,42 @@ class NiumCustomerPayloadFactory
             throw new RuntimeException(
                 'Nium SG corporate minimum KYC requires approved KYC metadata field '
                 .'nium_v5_fields.sizeOfBusiness.annualTurnover as a Nium Corporate Constant.',
+            );
+        }
+
+        $this->requireAddressState($profile, 'addresses.registeredAddress.state');
+        $this->requireAddressState($profile, 'addresses.businessAddress.state');
+
+        $applicant = $this->corporateApplicant($profile);
+        $this->requireAddressState($applicant, 'applicant.address.state');
+
+        foreach ($profile->relatedPersons->reject(fn (KycRelatedPerson $person) => $person->is($applicant)) as $stakeholder) {
+            if ($this->address($stakeholder) !== []) {
+                $this->requireAddressState($stakeholder, 'stakeholders.individual[*].address.state');
+            }
+        }
+    }
+
+    private function corporateApplicant(KycProfile $profile): KycRelatedPerson
+    {
+        $applicant = $profile->relatedPersons->first(
+            fn (KycRelatedPerson $person) => in_array(strtolower((string) $person->relationship_type), [
+                'applicant', 'authorized_representative', 'authorised_representative',
+            ], true)
+        );
+
+        if ($applicant === null) {
+            throw new RuntimeException('A corporate Nium onboarding request requires an approved applicant or authorized representative.');
+        }
+
+        return $applicant;
+    }
+
+    private function requireAddressState(object $subject, string $path): void
+    {
+        if (! is_string($subject->state) || trim($subject->state) === '') {
+            throw new RuntimeException(
+                "Nium SG corporate minimum KYC requires approved internal address field {$path} as a string.",
             );
         }
     }
