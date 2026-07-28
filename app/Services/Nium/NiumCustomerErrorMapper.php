@@ -39,7 +39,15 @@ class NiumCustomerErrorMapper
 
         $message = strtolower($exception->getMessage());
 
-        foreach (['customer_exists', 'duplicate_external_id', 'timeout', 'connection'] as $code) {
+        foreach ([
+            'sg_corporate_address_relationship_invalid',
+            'sg_corporate_business_address_invalid',
+            'sg_corporate_business_address_conflict',
+            'customer_exists',
+            'duplicate_external_id',
+            'timeout',
+            'connection',
+        ] as $code) {
             if (str_contains($message, $code)) {
                 return $code;
             }

@@ -9,6 +9,8 @@ use App\Models\KycRequirement;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
 use App\Services\Kyc\BusinessRegistryVerificationService;
+use App\Services\Nium\NiumRegionResolver;
+use Closure;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -21,6 +23,15 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class KycSubmissionController extends Controller
 {
+    private const SG_CORPORATE_BUSINESS_ADDRESS_KEYS = [
+        'address_line1',
+        'address_line2',
+        'city',
+        'state',
+        'postal_code',
+        'country_code',
+    ];
+
     public function show(User $user): JsonResponse
     {
         $user->load(
@@ -145,8 +156,33 @@ class KycSubmissionController extends Controller
         User $user,
         AmlScreeningService $amlScreeningService,
         BusinessRegistryVerificationService $businessRegistryVerificationService,
+        NiumRegionResolver $regionResolver,
     ): JsonResponse {
-        $validated = $request->validate($this->rules());
+        $this->validateNiumRegionInput($request, $regionResolver);
+        $validated = $request->validate($this->rules($request, $user, $regionResolver));
+
+        if ($request->exists('metadata')) {
+            $validated['metadata'] = (array) $request->input('metadata');
+
+            if (
+                array_key_exists('nium_region', $validated['metadata'])
+                && $validated['metadata']['nium_region'] !== null
+            ) {
+                $validated['metadata']['nium_region'] = $regionResolver->resolve(
+                    $validated['metadata']['nium_region'],
+                    null,
+                    null,
+                    null,
+                );
+            }
+        } else {
+            $existingMetadata = $user->kycProfile()->first()?->metadata;
+
+            if ($existingMetadata !== null) {
+                $validated['metadata'] = (array) $existingMetadata;
+            }
+        }
+
         $validated = $this->attachBusinessRegistryVerification($validated, $businessRegistryVerificationService);
 
         $kycProfile = DB::transaction(function () use ($user, $validated, $amlScreeningService): KycProfile {
@@ -434,8 +470,36 @@ class KycSubmissionController extends Controller
     /**
      * @return array<string, mixed>
      */
-    private function rules(): array
+    private function rules(
+        Request $request,
+        User $user,
+        NiumRegionResolver $regionResolver,
+    ): array
     {
+        $submittedMetadata = $request->input('metadata');
+        $effectiveMetadata = $request->exists('metadata')
+            ? (is_array($submittedMetadata) ? $submittedMetadata : [])
+            : (array) ($user->kycProfile()->first()?->metadata ?? []);
+        $requestedRegion = $regionResolver->resolveForValidation(
+            $effectiveMetadata['nium_region'] ?? null,
+            $request->input('registered_country_code'),
+            $request->input('residence_country_code'),
+            $request->input('country_code'),
+        );
+        $isSgCorporate = $request->input('applicant_type') === 'business'
+            && $requestedRegion === 'SG';
+        $relationship = $request->input(
+            'metadata.nium_v5_fields.addresses.isBusinessAddressSameAsRegisteredAddress',
+        );
+        $businessAddressRule = match ($relationship) {
+            true => ['sometimes', $this->sgCorporateBusinessAddressRule(true)],
+            false => ['required', $this->sgCorporateBusinessAddressRule(false)],
+            default => ['sometimes'],
+        };
+        $businessAddressFieldRule = static fn (array $rules): array => $relationship === false
+            ? ['required', ...$rules]
+            : ['sometimes', 'nullable', ...$rules];
+
         return [
             'applicant_type' => ['required', 'string', Rule::in(['individual', 'business'])],
             'legal_name' => ['required', 'string', 'max:255'],
@@ -497,7 +561,150 @@ class KycSubmissionController extends Controller
             'related_persons.*.documents.*.expires_at' => ['nullable', 'date', 'after:today'],
             'related_persons.*.documents.*.metadata' => ['sometimes', 'array'],
             'metadata' => ['sometimes', 'array'],
+            ...($isSgCorporate ? [
+                'metadata.nium_v5_fields' => ['required', 'array'],
+                'metadata.nium_v5_fields.addresses' => ['required', 'array', 'min:1'],
+                'metadata.nium_v5_fields.addresses.isBusinessAddressSameAsRegisteredAddress' => [
+                    'required',
+                    'boolean:strict',
+                ],
+                'metadata.nium_v5_fields.addresses.businessAddress' => $businessAddressRule,
+                'metadata.nium_v5_fields.addresses.businessAddress.address_line1' => $businessAddressFieldRule([
+                    'string',
+                    'max:255',
+                ]),
+                'metadata.nium_v5_fields.addresses.businessAddress.address_line2' => [
+                    'sometimes',
+                    'nullable',
+                    'string',
+                    'max:255',
+                ],
+                'metadata.nium_v5_fields.addresses.businessAddress.city' => $businessAddressFieldRule([
+                    'string',
+                    'max:100',
+                ]),
+                'metadata.nium_v5_fields.addresses.businessAddress.state' => $businessAddressFieldRule([
+                    'string',
+                    'max:100',
+                ]),
+                'metadata.nium_v5_fields.addresses.businessAddress.postal_code' => $businessAddressFieldRule([
+                    'string',
+                    'max:30',
+                ]),
+                'metadata.nium_v5_fields.addresses.businessAddress.country_code' => $businessAddressFieldRule([
+                    'string',
+                    'size:2',
+                    'regex:/^[A-Za-z]{2}$/',
+                ]),
+            ] : []),
         ];
+    }
+
+    private function validateNiumRegionInput(
+        Request $request,
+        NiumRegionResolver $regionResolver,
+    ): void {
+        [$supplied, $value] = $this->submittedNiumRegion($request);
+
+        if (
+            $supplied
+            && $value !== null
+            && ! $regionResolver->isSupportedExplicitRegion($value)
+        ) {
+            throw ValidationException::withMessages([
+                'metadata.nium_region' => 'The selected Nium region is invalid.',
+            ]);
+        }
+    }
+
+    /**
+     * @return array{0: bool, 1: mixed}
+     */
+    private function submittedNiumRegion(Request $request): array
+    {
+        $decoded = json_decode($request->getContent(), true);
+        $metadata = is_array($decoded) ? ($decoded['metadata'] ?? null) : null;
+
+        if (is_array($metadata) && array_key_exists('nium_region', $metadata)) {
+            return [true, $metadata['nium_region']];
+        }
+
+        $metadata = $request->input('metadata');
+
+        return is_array($metadata) && array_key_exists('nium_region', $metadata)
+            ? [true, $metadata['nium_region']]
+            : [false, null];
+    }
+
+    private function sgCorporateBusinessAddressRule(bool $relationship): Closure
+    {
+        return static function (string $attribute, mixed $value, Closure $fail) use ($relationship): void {
+            if ($relationship) {
+                if ($value === null || $value === []) {
+                    return;
+                }
+
+                if (
+                    ! is_array($value)
+                    || array_is_list($value)
+                    || array_diff(array_keys($value), self::SG_CORPORATE_BUSINESS_ADDRESS_KEYS) !== []
+                ) {
+                    $fail('The SG corporate business address conflicts with the declared address relationship.');
+
+                    return;
+                }
+
+                if (
+                    array_keys($value) === ['address_line2']
+                    && (
+                        $value['address_line2'] === null
+                        || (
+                            is_string($value['address_line2'])
+                            && trim($value['address_line2']) === ''
+                        )
+                    )
+                ) {
+                    return;
+                }
+
+                $fail('The SG corporate business address conflicts with the declared address relationship.');
+
+                return;
+            }
+
+            if (
+                ! is_array($value)
+                || $value === []
+                || array_is_list($value)
+                || array_diff(array_keys($value), self::SG_CORPORATE_BUSINESS_ADDRESS_KEYS) !== []
+            ) {
+                $fail('The SG corporate business address is invalid.');
+
+                return;
+            }
+
+            foreach (['address_line1', 'city', 'state', 'postal_code', 'country_code'] as $field) {
+                if (! is_string($value[$field] ?? null) || trim($value[$field]) === '') {
+                    $fail('The SG corporate business address is invalid.');
+
+                    return;
+                }
+            }
+
+            if (
+                array_key_exists('address_line2', $value)
+                && $value['address_line2'] !== null
+                && ! is_string($value['address_line2'])
+            ) {
+                $fail('The SG corporate business address is invalid.');
+
+                return;
+            }
+
+            if (preg_match('/^[A-Za-z]{2}$/', $value['country_code']) !== 1) {
+                $fail('The SG corporate business address is invalid.');
+            }
+        };
     }
 
     /**

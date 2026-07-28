@@ -12,9 +12,25 @@ use RuntimeException;
 
 class NiumCustomerPayloadFactory
 {
+    private const SG_CORPORATE_ADDRESS_RELATIONSHIP_INVALID = 'sg_corporate_address_relationship_invalid';
+
+    private const SG_CORPORATE_BUSINESS_ADDRESS_INVALID = 'sg_corporate_business_address_invalid';
+
+    private const SG_CORPORATE_BUSINESS_ADDRESS_CONFLICT = 'sg_corporate_business_address_conflict';
+
+    private const SG_CORPORATE_BUSINESS_ADDRESS_KEYS = [
+        'address_line1',
+        'address_line2',
+        'city',
+        'state',
+        'postal_code',
+        'country_code',
+    ];
+
     public function __construct(
         private readonly NiumCustomerDocumentResolver $documentResolver,
         private readonly NiumSgCorporateClientPolicy $sgCorporateClientPolicy,
+        private readonly NiumRegionResolver $regionResolver,
     ) {}
 
     /**
@@ -27,7 +43,12 @@ class NiumCustomerPayloadFactory
         $profile = $this->approvedProfile($user);
 
         $metadata = (array) ($profile->metadata ?? []);
-        $region = strtoupper((string) ($metadata['nium_region'] ?? $this->regionFor($profile)));
+        $region = $this->regionResolver->resolve(
+            $metadata['nium_region'] ?? null,
+            $profile->registered_country_code,
+            $profile->residence_country_code,
+            $profile->country_code,
+        );
         $kycType = strtolower((string) ($metadata['nium_kyc_type'] ?? 'minimum'));
         $this->validateRequiredSourceDataFor($profile, $region, $kycType);
 
@@ -46,7 +67,12 @@ class NiumCustomerPayloadFactory
         $user->loadMissing('kycProfile.relatedPersons');
         $profile = $this->approvedProfile($user);
         $metadata = (array) ($profile->metadata ?? []);
-        $region = strtoupper((string) ($metadata['nium_region'] ?? $this->regionFor($profile)));
+        $region = $this->regionResolver->resolve(
+            $metadata['nium_region'] ?? null,
+            $profile->registered_country_code,
+            $profile->residence_country_code,
+            $profile->country_code,
+        );
         $kycType = strtolower((string) ($metadata['nium_kyc_type'] ?? 'minimum'));
 
         $this->validateRequiredSourceDataFor($profile, $region, $kycType);
@@ -108,6 +134,14 @@ class NiumCustomerPayloadFactory
             throw new RuntimeException('Corporate Nium onboarding requires registered_date and nium_business_type in the approved KYC metadata.');
         }
 
+        $registeredAddress = $this->address($profile);
+        $businessAddress = $registeredAddress;
+        $addressRelationship = null;
+
+        if ($region === 'SG') {
+            [$addressRelationship, $businessAddress] = $this->sgCorporateAddressSources($profile);
+        }
+
         $payload = $this->filter(array_merge($this->regionFields($profile), [
             'type' => 'corporate',
             'region' => $region,
@@ -119,10 +153,11 @@ class NiumCustomerPayloadFactory
             'registeredCountry' => strtoupper((string) $profile->registered_country_code),
             'registeredDate' => $registeredDate,
             'website' => $metadata['business_website'] ?? null,
-            'addresses' => [
-                'registeredAddress' => $this->address($profile),
-                'businessAddress' => $this->address($profile),
-            ],
+            'addresses' => $this->filter([
+                'isBusinessAddressSameAsRegisteredAddress' => $addressRelationship,
+                'registeredAddress' => $registeredAddress,
+                'businessAddress' => $businessAddress,
+            ]),
             'applicant' => $this->person(
                 $applicant,
                 $user->email,
@@ -247,35 +282,146 @@ class NiumCustomerPayloadFactory
 
     private function address(object $subject): array
     {
-        return $this->filter([
-            'addressLine1' => $subject->address_line1,
-            'addressLine2' => $subject->address_line2,
+        return $this->providerAddress([
+            'address_line1' => $subject->address_line1,
+            'address_line2' => $subject->address_line2,
             'city' => $subject->city,
             'state' => $subject->state,
-            'postcode' => $subject->postal_code,
-            'country' => strtoupper((string) $subject->country_code),
+            'postal_code' => $subject->postal_code,
+            'country_code' => $subject->country_code,
         ]);
     }
 
-    private function regionFor(KycProfile $profile): string
+    /**
+     * @return array{0: bool, 1: array<string, mixed>}
+     */
+    private function sgCorporateAddressSources(KycProfile $profile): array
     {
-        $country = strtoupper((string) ($profile->registered_country_code ?: $profile->residence_country_code ?: $profile->country_code));
+        $fields = Arr::get((array) $profile->metadata, 'nium_v5_fields');
+        $addresses = is_array($fields) ? ($fields['addresses'] ?? null) : null;
 
-        if ($country === 'GB') {
-            return 'UK';
+        if (
+            ! is_array($addresses)
+            || array_is_list($addresses)
+            || ! array_key_exists('isBusinessAddressSameAsRegisteredAddress', $addresses)
+            || ! is_bool($addresses['isBusinessAddressSameAsRegisteredAddress'])
+        ) {
+            throw new RuntimeException(self::SG_CORPORATE_ADDRESS_RELATIONSHIP_INVALID);
         }
 
-        if ($country === 'NL') {
-            return 'NL';
+        $relationship = $addresses['isBusinessAddressSameAsRegisteredAddress'];
+
+        if ($relationship) {
+            if (array_key_exists('businessAddress', $addresses)) {
+                $this->validateEmptySgCorporateBusinessAddress($addresses['businessAddress']);
+            }
+
+            return [$relationship, $this->address($profile)];
         }
 
-        if (in_array($country, ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HU', 'IE', 'IS', 'IT', 'LI', 'LT', 'LU', 'LV', 'MT', 'NO', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK'], true)) {
-            return 'EU';
+        if (! array_key_exists('businessAddress', $addresses)) {
+            throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_INVALID);
         }
 
-        return in_array($country, ['SG', 'US', 'AU', 'NZ', 'CA', 'HK', 'JP', 'MX', 'BR', 'ID'], true)
-            ? $country
-            : 'SG';
+        return [$relationship, $this->businessAddress($addresses['businessAddress'])];
+    }
+
+    private function validateEmptySgCorporateBusinessAddress(mixed $source): void
+    {
+        if ($source === null || $source === []) {
+            return;
+        }
+
+        if (! is_array($source) || array_is_list($source)) {
+            throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_CONFLICT);
+        }
+
+        if (array_diff(array_keys($source), self::SG_CORPORATE_BUSINESS_ADDRESS_KEYS) !== []) {
+            throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_CONFLICT);
+        }
+
+        if (
+            array_keys($source) === ['address_line2']
+            && (
+                $source['address_line2'] === null
+                || (
+                    is_string($source['address_line2'])
+                    && trim($source['address_line2']) === ''
+                )
+            )
+        ) {
+            return;
+        }
+
+        throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_CONFLICT);
+    }
+
+    private function businessAddress(mixed $source): array
+    {
+        if (! is_array($source) || $source === [] || array_is_list($source)) {
+            throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_INVALID);
+        }
+
+        if (array_diff(array_keys($source), self::SG_CORPORATE_BUSINESS_ADDRESS_KEYS) !== []) {
+            throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_INVALID);
+        }
+
+        $selected = Arr::only($source, self::SG_CORPORATE_BUSINESS_ADDRESS_KEYS);
+
+        foreach (['address_line1', 'city', 'state', 'postal_code', 'country_code'] as $field) {
+            if (! is_string($selected[$field] ?? null) || trim($selected[$field]) === '') {
+                throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_INVALID);
+            }
+        }
+
+        if (
+            array_key_exists('address_line2', $selected)
+            && $selected['address_line2'] !== null
+            && ! is_string($selected['address_line2'])
+        ) {
+            throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_INVALID);
+        }
+
+        $maximumLengths = [
+            'address_line1' => 255,
+            'address_line2' => 255,
+            'city' => 100,
+            'state' => 100,
+            'postal_code' => 30,
+        ];
+
+        foreach ($maximumLengths as $field => $maximumLength) {
+            if (
+                is_string($selected[$field] ?? null)
+                && mb_strlen(trim($selected[$field])) > $maximumLength
+            ) {
+                throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_INVALID);
+            }
+        }
+
+        $selected = array_map(
+            static fn (mixed $value): mixed => is_string($value) ? trim($value) : $value,
+            $selected,
+        );
+        $selected['country_code'] = strtoupper($selected['country_code']);
+
+        if (preg_match('/^[A-Z]{2}$/', $selected['country_code']) !== 1) {
+            throw new RuntimeException(self::SG_CORPORATE_BUSINESS_ADDRESS_INVALID);
+        }
+
+        return $this->providerAddress($selected);
+    }
+
+    private function providerAddress(array $source): array
+    {
+        return $this->filter([
+            'addressLine1' => $source['address_line1'] ?? null,
+            'addressLine2' => $source['address_line2'] ?? null,
+            'city' => $source['city'] ?? null,
+            'state' => $source['state'] ?? null,
+            'postcode' => $source['postal_code'] ?? null,
+            'country' => strtoupper((string) ($source['country_code'] ?? '')),
+        ]);
     }
 
     private function mobileParts(string $phone, object $subject): array
@@ -352,6 +498,8 @@ class NiumCustomerPayloadFactory
         if (! is_array($fields) || array_is_list($fields)) {
             throw new RuntimeException('Approved KYC metadata nium_v5_fields must be an object.');
         }
+
+        $this->sgCorporateAddressSources($profile);
 
         if (($fields['applicantDeclaration'] ?? null) !== true) {
             throw new RuntimeException(
@@ -471,7 +619,6 @@ class NiumCustomerPayloadFactory
         }
 
         $this->requireAddressState($profile, 'addresses.registeredAddress.state');
-        $this->requireAddressState($profile, 'addresses.businessAddress.state');
 
         $applicant = $this->corporateApplicant($profile);
         $this->requireAddressState($applicant, 'applicant.address.state');

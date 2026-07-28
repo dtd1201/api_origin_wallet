@@ -64,4 +64,17 @@ class SensitiveDataSanitizerTest extends TestCase
         $this->assertSame('[REDACTED]', $sanitized['customer']['documents']);
         $this->assertSame('[REDACTED]', $sanitized['stakeholders']);
     }
+
+    public function test_redacts_complete_nium_address_objects_and_relationship_declaration(): void
+    {
+        $sanitized = app(SensitiveDataSanitizer::class)->sanitize([
+            'addresses' => [
+                'isBusinessAddressSameAsRegisteredAddress' => false,
+                'registeredAddress' => ['addressLine1' => '1 Registered Road'],
+                'businessAddress' => ['addressLine1' => '2 Business Road'],
+            ],
+        ]);
+
+        $this->assertSame('[REDACTED]', $sanitized['addresses']);
+    }
 }

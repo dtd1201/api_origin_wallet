@@ -15,6 +15,7 @@ use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumCustomerPayloadFactory;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Arr;
@@ -23,6 +24,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\Fixtures\RedirectOnboardingProvider;
 use Tests\TestCase;
@@ -1233,6 +1235,32 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 ->map(fn ($country): bool => in_array($country, ['US', 'AU', 'NZ'], true))
                 ->all(),
         );
+        $requestLogs = ApiRequestLog::query()->get();
+        $this->assertCount(2, $requestLogs);
+
+        foreach ($requestLogs as $requestLog) {
+            $this->assertSame(
+                [],
+                array_diff(
+                    array_keys($requestLog->request_body),
+                    ['external_id_fingerprint', 'customer_type', 'region'],
+                ),
+            );
+        }
+
+        $serializedRequestLogs = $requestLogs
+            ->map(fn (ApiRequestLog $requestLog): string => json_encode(
+                $requestLog->request_body,
+                JSON_THROW_ON_ERROR,
+            ))
+            ->implode("\n");
+        $this->assertStringNotContainsString('registeredAddress', $serializedRequestLogs);
+        $this->assertStringNotContainsString('businessAddress', $serializedRequestLogs);
+        $this->assertStringNotContainsString(
+            'isBusinessAddressSameAsRegisteredAddress',
+            $serializedRequestLogs,
+        );
+        $this->assertStringNotContainsString('nium_v5_fields', $serializedRequestLogs);
         Http::assertSent(function (Request $request): bool {
             if ($request->method() !== 'POST' || ! str_contains($request->url(), 'gateway.nium.test')) {
                 return false;
@@ -1317,6 +1345,663 @@ class NiumCustomerOnboardingV5Test extends TestCase
             $request->url(),
             'document-storage-sandbox.nium.test',
         ));
+    }
+
+    public function test_sg_corporate_true_address_relationship_uses_registered_source_for_both_addresses(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+        $addresses = $payload['addresses'];
+
+        $this->assertSame([
+            'isBusinessAddressSameAsRegisteredAddress',
+            'registeredAddress',
+            'businessAddress',
+        ], array_keys($addresses));
+        $this->assertTrue($addresses['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertIsBool($addresses['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertSame([
+            'addressLine1' => '1 Corporate Avenue',
+            'city' => 'Singapore',
+            'state' => 'SG-01',
+            'postcode' => '018989',
+            'country' => 'SG',
+        ], $addresses['registeredAddress']);
+        $this->assertSame($addresses['registeredAddress'], $addresses['businessAddress']);
+        Http::assertNothingSent();
+    }
+
+    public function test_sg_corporate_false_address_relationship_uses_only_distinct_metadata_source(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $this->setSgCorporateAddresses($user, false, [
+            'address_line1' => '  88 Trading Road  ',
+            'address_line2' => '',
+            'city' => ' Singapore ',
+            'state' => ' SG-04 ',
+            'postal_code' => ' 049321 ',
+            'country_code' => ' sg ',
+        ]);
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+        $addresses = $payload['addresses'];
+
+        $this->assertFalse($addresses['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertIsBool($addresses['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertSame('1 Corporate Avenue', $addresses['registeredAddress']['addressLine1']);
+        $this->assertSame([
+            'addressLine1' => '88 Trading Road',
+            'city' => 'Singapore',
+            'state' => 'SG-04',
+            'postcode' => '049321',
+            'country' => 'SG',
+        ], $addresses['businessAddress']);
+        $this->assertFalse(
+            json_decode(json_encode($addresses, JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR)
+                ['isBusinessAddressSameAsRegisteredAddress'],
+        );
+        Http::assertNothingSent();
+    }
+
+    public function test_sg_corporate_identical_addresses_do_not_override_explicit_false(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $this->setSgCorporateAddresses($user, false, [
+            'address_line1' => '1 Corporate Avenue',
+            'city' => 'Singapore',
+            'state' => 'SG-01',
+            'postal_code' => '018989',
+            'country_code' => 'SG',
+        ]);
+        Http::fake();
+
+        $addresses = app(NiumCustomerPayloadFactory::class)
+            ->build($user, (string) Str::uuid())['addresses'];
+
+        $this->assertFalse($addresses['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertSame($addresses['registeredAddress'], $addresses['businessAddress']);
+        Http::assertNothingSent();
+    }
+
+    #[DataProvider('niumRegionResolutionProvider')]
+    public function test_nium_region_resolution_uses_the_shared_region_contract(
+        bool $includeExplicitRegion,
+        ?string $explicitRegion,
+        string $registeredCountry,
+        string $expectedRegion,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+
+        if ($includeExplicitRegion) {
+            $metadata['nium_region'] = $explicitRegion;
+        } else {
+            unset($metadata['nium_region']);
+        }
+
+        $profile->update([
+            'registered_country_code' => $registeredCountry,
+            'residence_country_code' => null,
+            'country_code' => $registeredCountry,
+            'metadata' => $metadata,
+        ]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $payload = app(NiumCustomerPayloadFactory::class)
+            ->build($user, (string) Str::uuid());
+
+        $this->assertSame($expectedRegion, $payload['region']);
+        Http::assertNothingSent();
+    }
+
+    public static function niumRegionResolutionProvider(): array
+    {
+        return [
+            'explicit SG' => [true, 'SG', 'US', 'SG'],
+            'explicit lowercase sg' => [true, 'sg', 'US', 'SG'],
+            'explicit trimmed lowercase sg' => [true, ' sg ', 'US', 'SG'],
+            'explicit US' => [true, 'US', 'US', 'US'],
+            'explicit EU' => [true, 'EU', 'DE', 'EU'],
+            'explicit region overrides unsupported-country SG fallback' => [true, 'US', 'ZZ', 'US'],
+            'registered SG fallback' => [false, null, 'SG', 'SG'],
+            'registered GB fallback' => [false, null, 'GB', 'UK'],
+            'registered NL fallback' => [false, null, 'NL', 'NL'],
+            'listed European country fallback' => [false, null, 'DE', 'EU'],
+            'directly supported non-SG country fallback' => [false, null, 'US', 'US'],
+            'unsupported country defaults to SG' => [false, null, 'ZZ', 'SG'],
+            'explicit null uses registered-country fallback' => [true, null, 'GB', 'UK'],
+        ];
+    }
+
+    #[DataProvider('invalidNiumRegionProvider')]
+    public function test_invalid_nium_region_fails_before_dml_documents_or_http(
+        mixed $invalidRegion,
+        array $forbiddenErrorFragments,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_region'] = $invalidRegion;
+        $profile->update(['metadata' => $metadata]);
+        $submission = $user->kycProviderSubmissions()->firstOrFail();
+        $submissionFingerprint = $this->modelFingerprint($submission);
+        $providerAccountCount = UserProviderAccount::query()->count();
+        $auditCount = AuditLog::query()->count();
+        $apiRequestLogCount = ApiRequestLog::query()->count();
+        $storageFingerprint = $this->storageFingerprint();
+        $observedOperations = [];
+        $this->mock(NiumCustomerDocumentPreparationService::class)
+            ->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+        $this->activateDmlGuard($observedOperations);
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected invalid Nium region validation to fail.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('nium_region_invalid', $exception->getMessage());
+            $this->assertStringNotContainsString('metadata.', $exception->getMessage());
+
+            foreach ($forbiddenErrorFragments as $fragment) {
+                $this->assertStringNotContainsString($fragment, $exception->getMessage());
+            }
+        }
+
+        $operationsDuringInvocation = array_values(array_unique($observedOperations));
+        $this->assertSame(['SELECT'], $operationsDuringInvocation);
+        $this->assertSame($providerAccountCount, UserProviderAccount::query()->count());
+        $this->assertSame($auditCount, AuditLog::query()->count());
+        $this->assertSame($apiRequestLogCount, ApiRequestLog::query()->count());
+        $this->assertSame($submissionFingerprint, $this->modelFingerprint($submission->fresh()));
+        $this->assertSame($storageFingerprint, $this->storageFingerprint());
+        Http::assertNothingSent();
+    }
+
+    public static function invalidNiumRegionProvider(): array
+    {
+        return [
+            'empty string' => ['', []],
+            'whitespace string' => ['   ', []],
+            'unsupported string' => ['synthetic_unknown_region', ['synthetic_unknown_region']],
+            'empty array' => [[], []],
+            'list array' => [['synthetic_list_region'], ['synthetic_list_region']],
+            'associative array' => [
+                ['region' => 'synthetic_associative_region'],
+                ['synthetic_associative_region'],
+            ],
+            'decoded object equivalent' => [
+                ['region' => ['value' => 'synthetic_object_region']],
+                ['synthetic_object_region'],
+            ],
+        ];
+    }
+
+    #[DataProvider('emptyBusinessAddressForTrueProvider')]
+    public function test_true_sg_corporate_relationship_accepts_only_approved_empty_business_address_shapes(
+        bool $includeBusinessAddress,
+        mixed $businessAddress,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $this->setSgCorporateAddresses($user, true, $businessAddress, $includeBusinessAddress);
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $addresses = app(NiumCustomerPayloadFactory::class)
+            ->build($user, (string) Str::uuid())['addresses'];
+
+        $this->assertTrue($addresses['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertSame($addresses['registeredAddress'], $addresses['businessAddress']);
+        Http::assertNothingSent();
+    }
+
+    public static function emptyBusinessAddressForTrueProvider(): array
+    {
+        return [
+            'absent' => [false, null],
+            'null' => [true, null],
+            'empty array' => [true, []],
+            'null optional line two' => [true, ['address_line2' => null]],
+            'empty optional line two' => [true, ['address_line2' => '']],
+            'whitespace optional line two' => [true, ['address_line2' => '   ']],
+        ];
+    }
+
+    #[DataProvider('conflictingBusinessAddressForTrueProvider')]
+    public function test_true_sg_corporate_relationship_rejects_every_populated_or_malformed_business_address(
+        mixed $businessAddress,
+        array $forbiddenErrorFragments = [],
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $this->setSgCorporateAddresses($user, true, $businessAddress);
+
+        $this->assertSgCorporateAddressFailureHasNoSideEffects(
+            $provider,
+            $user,
+            'sg_corporate_business_address_conflict',
+            $forbiddenErrorFragments,
+        );
+    }
+
+    public static function conflictingBusinessAddressForTrueProvider(): array
+    {
+        return [
+            'non-empty required field' => [['city' => 'populated']],
+            'non-empty optional line two' => [['address_line2' => 'populated']],
+            'unknown key only' => [['unknown' => 'populated']],
+            'numeric list' => [['populated']],
+            'scalar' => ['populated'],
+            'nested array value' => [['address_line2' => ['nested']]],
+            'nested object value' => [['address_line2' => (object) ['nested' => true]]],
+            'approved_empty_child_plus_unknown_child' => [
+                [
+                    'address_line2' => '',
+                    'synthetic_unknown_child' => 'synthetic_nonempty_value',
+                ],
+                ['address_line2', 'synthetic_unknown_child', 'synthetic_nonempty_value'],
+            ],
+        ];
+    }
+
+    #[DataProvider('invalidBusinessAddressForFalseProvider')]
+    public function test_false_sg_corporate_relationship_rejects_every_incomplete_or_malformed_business_address(
+        bool $includeBusinessAddress,
+        mixed $businessAddress,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $this->setSgCorporateAddresses($user, false, $businessAddress, $includeBusinessAddress);
+
+        $this->assertSgCorporateAddressFailureHasNoSideEffects(
+            $provider,
+            $user,
+            'sg_corporate_business_address_invalid',
+        );
+    }
+
+    public static function invalidBusinessAddressForFalseProvider(): array
+    {
+        $valid = self::validBusinessAddressSource();
+        $cases = [
+            'absent' => [false, null],
+            'null' => [true, null],
+            'empty array' => [true, []],
+            'numeric list' => [true, ['invalid']],
+            'scalar' => [true, 'invalid'],
+            'unknown key only' => [true, ['unknown' => 'invalid']],
+            'valid fields plus unknown key' => [true, [...$valid, 'unknown' => 'invalid']],
+            'malformed country code' => [true, [...$valid, 'country_code' => 'SGP']],
+        ];
+
+        foreach (['address_line1', 'city', 'state', 'postal_code', 'country_code'] as $field) {
+            $missing = $valid;
+            unset($missing[$field]);
+            $cases["missing {$field}"] = [true, $missing];
+            $cases["empty {$field}"] = [true, [...$valid, $field => '']];
+            $cases["whitespace {$field}"] = [true, [...$valid, $field => '   ']];
+        }
+
+        foreach ([
+            'address_line1',
+            'address_line2',
+            'city',
+            'state',
+            'postal_code',
+            'country_code',
+        ] as $field) {
+            $cases["non-string {$field}"] = [true, [...$valid, $field => ['nested']]];
+        }
+
+        $cases['nested object component'] = [
+            true,
+            [...$valid, 'address_line2' => (object) ['nested' => true]],
+        ];
+
+        return $cases;
+    }
+
+    #[DataProvider('validBusinessAddressForFalseProvider')]
+    public function test_false_sg_corporate_relationship_accepts_all_approved_optional_line_two_shapes(
+        bool $includeAddressLine2,
+        mixed $addressLine2,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $source = self::validBusinessAddressSource();
+
+        if ($includeAddressLine2) {
+            $source['address_line2'] = $addressLine2;
+        }
+
+        $this->setSgCorporateAddresses($user, false, $source);
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $addresses = app(NiumCustomerPayloadFactory::class)
+            ->build($user, (string) Str::uuid())['addresses'];
+
+        $this->assertFalse($addresses['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertSame('88 Trading Road', $addresses['businessAddress']['addressLine1']);
+
+        if (is_string($addressLine2) && trim($addressLine2) !== '') {
+            $this->assertSame(trim($addressLine2), $addresses['businessAddress']['addressLine2']);
+        } else {
+            $this->assertArrayNotHasKey('addressLine2', $addresses['businessAddress']);
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public static function validBusinessAddressForFalseProvider(): array
+    {
+        return [
+            'line two absent' => [false, null],
+            'line two null' => [true, null],
+            'line two empty' => [true, ''],
+            'complete distinct address' => [true, 'Unit 2'],
+        ];
+    }
+
+    public function test_invalid_sg_corporate_source_without_existing_account_executes_no_dml_or_side_effect(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['addresses']['isBusinessAddressSameAsRegisteredAddress'] = 'invalid';
+        $profile->update(['metadata' => $metadata]);
+        $submission = $user->kycProviderSubmissions()->firstOrFail();
+        $submissionFingerprint = $this->modelFingerprint($submission);
+        $auditCount = AuditLog::query()->count();
+        $storageFingerprint = $this->storageFingerprint();
+        $observedOperations = [];
+        $this->mock(NiumCustomerDocumentPreparationService::class)
+            ->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+        $this->activateDmlGuard($observedOperations);
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected invalid SG corporate source validation to fail.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('sg_corporate_address_relationship_invalid', $exception->getMessage());
+        }
+
+        $operationsDuringInvocation = array_values(array_unique($observedOperations));
+        $this->assertSame(['SELECT'], $operationsDuringInvocation);
+        $this->assertDatabaseCount('user_provider_accounts', 0);
+        $this->assertSame($auditCount, AuditLog::query()->count());
+        $this->assertSame($submissionFingerprint, $this->modelFingerprint($submission->fresh()));
+        $this->assertSame($storageFingerprint, $this->storageFingerprint());
+        Http::assertNothingSent();
+    }
+
+    public function test_invalid_sg_corporate_source_leaves_existing_account_and_submission_byte_equivalent(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $account = $this->pendingAccount($user, $provider)->fresh();
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['addresses']['isBusinessAddressSameAsRegisteredAddress'] = 'invalid';
+        $profile->update(['metadata' => $metadata]);
+        $submission = $user->kycProviderSubmissions()->firstOrFail();
+        $accountFingerprint = $this->modelFingerprint($account);
+        $submissionFingerprint = $this->modelFingerprint($submission);
+        $externalReferenceFingerprint = hash('sha256', (string) $account->external_reference);
+        $accountStatus = $account->status;
+        $customerIdPresent = filled($account->external_customer_id);
+        $accountUpdatedAt = $account->getRawOriginal('updated_at');
+        $auditCount = AuditLog::query()->count();
+        $storageFingerprint = $this->storageFingerprint();
+        $observedOperations = [];
+        $this->mock(NiumCustomerDocumentPreparationService::class)
+            ->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+        $this->activateDmlGuard($observedOperations);
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected invalid SG corporate source validation to fail.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('sg_corporate_address_relationship_invalid', $exception->getMessage());
+        }
+
+        $operationsDuringInvocation = array_values(array_unique($observedOperations));
+        $accountAfter = $account->fresh();
+        $this->assertSame(['SELECT'], $operationsDuringInvocation);
+        $this->assertSame($accountFingerprint, $this->modelFingerprint($accountAfter));
+        $this->assertSame($accountStatus, $accountAfter->status);
+        $this->assertSame(
+            $externalReferenceFingerprint,
+            hash('sha256', (string) $accountAfter->external_reference),
+        );
+        $this->assertSame($customerIdPresent, filled($accountAfter->external_customer_id));
+        $this->assertSame($accountUpdatedAt, $accountAfter->getRawOriginal('updated_at'));
+        $this->assertSame($submissionFingerprint, $this->modelFingerprint($submission->fresh()));
+        $this->assertSame($auditCount, AuditLog::query()->count());
+        $this->assertNull($accountAfter->reconciliation_error);
+        $this->assertSame($storageFingerprint, $this->storageFingerprint());
+        Http::assertNothingSent();
+    }
+
+    public function test_valid_sg_corporate_source_preserves_successful_provisioning_lookup_and_post(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $lookupCalls = 0;
+        $postCalls = 0;
+        $createResponse = $this->fixture('customer-v5-create-response.json');
+
+        Http::fake(function (Request $request) use (&$lookupCalls, &$postCalls, $createResponse) {
+            if ($request->method() === 'GET') {
+                $lookupCalls++;
+
+                return Http::response(['customers' => []]);
+            }
+
+            $postCalls++;
+
+            return Http::response([
+                ...$createResponse,
+                'externalId' => $request->data()['externalId'],
+            ]);
+        });
+
+        $account = app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+
+        $this->assertSame('active', $account->status);
+        $this->assertSame(1, $lookupCalls);
+        $this->assertSame(1, $postCalls);
+        $this->assertDatabaseCount('user_provider_accounts', 1);
+        Http::assertSentCount(2);
+        Http::assertNotSent(fn (Request $request): bool => str_contains(
+            $request->url(),
+            'document-storage-sandbox.nium.test',
+        ));
+    }
+
+    public function test_missing_or_non_boolean_sg_corporate_address_relationship_fails_closed_before_http(): void
+    {
+        $invalidValues = [
+            'missing' => new \stdClass,
+            'string true' => 'true',
+            'string false' => 'false',
+            'string one' => '1',
+            'string zero' => '0',
+            'integer one' => 1,
+            'integer zero' => 0,
+            'null' => null,
+            'array' => ['invalid'],
+            'object' => (object) ['invalid' => true],
+        ];
+
+        foreach ($invalidValues as $label => $value) {
+            $provider = $this->provider();
+            $user = $this->approvedCorporate($provider);
+            $profile = $user->kycProfile()->firstOrFail();
+            $metadata = (array) $profile->metadata;
+
+            if ($label === 'missing') {
+                unset($metadata['nium_v5_fields']['addresses']['isBusinessAddressSameAsRegisteredAddress']);
+            } else {
+                $metadata['nium_v5_fields']['addresses']['isBusinessAddressSameAsRegisteredAddress'] = $value;
+            }
+
+            $profile->update(['metadata' => $metadata]);
+            $user->unsetRelation('kycProfile');
+            Http::fake();
+
+            try {
+                app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+                $this->fail("Expected {$label} relationship declaration to fail closed.");
+            } catch (RuntimeException $exception) {
+                $this->assertSame('sg_corporate_address_relationship_invalid', $exception->getMessage());
+            }
+
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_false_sg_corporate_relationship_requires_complete_typed_business_address(): void
+    {
+        $valid = [
+            'address_line1' => '88 Trading Road',
+            'city' => 'Singapore',
+            'state' => 'SG-04',
+            'postal_code' => '049321',
+            'country_code' => 'SG',
+        ];
+        $invalidSources = ['missing object' => null];
+
+        foreach (array_keys($valid) as $field) {
+            $source = $valid;
+            unset($source[$field]);
+            $invalidSources["missing {$field}"] = $source;
+        }
+
+        $invalidSources['malformed country'] = [...$valid, 'country_code' => 'SGP'];
+        $invalidSources['non-string component'] = [...$valid, 'city' => 123];
+
+        foreach ($invalidSources as $label => $source) {
+            $provider = $this->provider();
+            $user = $this->approvedCorporate($provider);
+            $this->setSgCorporateAddresses($user, false, $source);
+            Http::fake();
+
+            try {
+                app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+                $this->fail("Expected {$label} business address to fail closed.");
+            } catch (RuntimeException $exception) {
+                $this->assertSame('sg_corporate_business_address_invalid', $exception->getMessage());
+            }
+
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_true_sg_corporate_relationship_rejects_separate_non_empty_business_address(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $fileIdsBefore = $profile->documents()
+            ->orderBy('id')
+            ->get()
+            ->mapWithKeys(fn (KycDocument $document): array => [
+                $document->id => $document->metadata['nium_file_id'],
+            ])
+            ->all();
+        $this->setSgCorporateAddresses($user, true, [
+            'address_line1' => '88 Conflicting Road',
+        ]);
+        $auditCount = AuditLog::query()->count();
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected a separate business address to conflict with an explicit true declaration.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('sg_corporate_business_address_conflict', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('user_provider_accounts', 0);
+        $this->assertSame($auditCount, AuditLog::query()->count());
+        $this->assertSame(
+            $fileIdsBefore,
+            $profile->documents()
+                ->orderBy('id')
+                ->get()
+                ->mapWithKeys(fn (KycDocument $document): array => [
+                    $document->id => $document->metadata['nium_file_id'],
+                ])
+                ->all(),
+        );
+    }
+
+    public function test_both_address_sources_without_relationship_declaration_are_ambiguous(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['addresses'] = [
+            'businessAddress' => [
+                'address_line1' => '88 Trading Road',
+                'city' => 'Singapore',
+                'state' => 'SG-04',
+                'postal_code' => '049321',
+                'country_code' => 'SG',
+            ],
+        ];
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake();
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected ambiguous address sources to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('sg_corporate_address_relationship_invalid', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_sg_individual_and_non_sg_individual_ignore_corporate_address_relationship_contract(): void
+    {
+        $provider = $this->provider();
+
+        foreach (['SG', 'UK'] as $region) {
+            $user = $this->approvedIndividual($provider);
+            $profile = $user->kycProfile()->firstOrFail();
+            $metadata = (array) $profile->metadata;
+            $metadata['nium_region'] = $region;
+            $metadata['nium_v5_fields']['addresses'] = [
+                'isBusinessAddressSameAsRegisteredAddress' => 'not-a-boolean',
+            ];
+            $profile->update(['metadata' => $metadata]);
+            $user->unsetRelation('kycProfile');
+            Http::fake();
+
+            app(NiumCustomerPayloadFactory::class)->validateRequiredSourceData($user);
+
+            Http::assertNothingSent();
+        }
     }
 
     public function test_missing_sg_corporate_registered_and_business_address_state_fails_before_http(): void
@@ -1426,7 +2111,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         }
 
         Http::assertNothingSent();
-        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+        $this->assertDatabaseCount('user_provider_accounts', 0);
         $this->assertSame(
             $fileIdsBefore,
             KycDocument::query()
@@ -1963,6 +2648,10 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $metadata = (array) $profile->metadata;
         $metadata['nium_region'] = 'EU';
         $metadata['nium_kyc_type'] = 'minimum';
+        $metadata['nium_v5_fields']['addresses'] = [
+            'isBusinessAddressSameAsRegisteredAddress' => 'not-a-boolean',
+            'businessAddress' => 'not-an-object',
+        ];
         $profile->update([
             'registered_country_code' => 'DE',
             'country_code' => 'DE',
@@ -2498,7 +3187,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         }
 
         Http::assertNothingSent();
-        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+        $this->assertDatabaseCount('user_provider_accounts', 0);
     }
 
     private function assertMissingSgCorporateMetadataPathFailsBeforeHttp(string $path): void
@@ -2522,7 +3211,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         }
 
         Http::assertNothingSent();
-        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+        $this->assertDatabaseCount('user_provider_accounts', 0);
     }
 
     private function assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
@@ -2548,7 +3237,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         }
 
         Http::assertNothingSent();
-        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+        $this->assertDatabaseCount('user_provider_accounts', 0);
     }
 
     private function assertMissingSgCorporateAddressStateFailsBeforeHttp(
@@ -2589,7 +3278,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         }
 
         Http::assertNothingSent();
-        $this->assertNull($user->providerAccounts()->firstOrFail()->external_customer_id);
+        $this->assertDatabaseCount('user_provider_accounts', 0);
         $this->assertSame(
             $fileIdsBefore,
             KycDocument::query()
@@ -2726,6 +3415,9 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 'registered_date' => '2020-01-15',
                 'nium_business_type' => 'private_company',
                 'nium_v5_fields' => [
+                    'addresses' => [
+                        'isBusinessAddressSameAsRegisteredAddress' => true,
+                    ],
                     'applicantDeclaration' => true,
                     'applicantDeclarationTimeStamp' => '2026-07-23 05:00:00',
                     'isMultiLayeredCompany' => false,
@@ -2881,6 +3573,135 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'nium_uploaded_at' => '2026-07-23T05:00:00.000000Z',
             'nium_available_at' => '2026-07-23T05:01:00.000000Z',
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function validBusinessAddressSource(): array
+    {
+        return [
+            'address_line1' => '88 Trading Road',
+            'city' => 'Singapore',
+            'state' => 'SG-04',
+            'postal_code' => '049321',
+            'country_code' => 'SG',
+        ];
+    }
+
+    private function setSgCorporateAddresses(
+        User $user,
+        bool $relationship,
+        mixed $businessAddress = null,
+        bool $includeBusinessAddress = true,
+    ): void
+    {
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['addresses'] = [
+            'isBusinessAddressSameAsRegisteredAddress' => $relationship,
+        ];
+
+        if ($includeBusinessAddress) {
+            $metadata['nium_v5_fields']['addresses']['businessAddress'] = $businessAddress;
+        }
+
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+    }
+
+    private function assertSgCorporateAddressFailureHasNoSideEffects(
+        IntegrationProvider $provider,
+        User $user,
+        string $expectedCode,
+        array $forbiddenErrorFragments = [],
+    ): void {
+        $profile = $user->kycProfile()->firstOrFail();
+        $submission = $user->kycProviderSubmissions()->firstOrFail();
+        $submissionFingerprint = $this->modelFingerprint($submission);
+        $providerAccountCount = UserProviderAccount::query()->count();
+        $auditCount = AuditLog::query()->count();
+        $apiRequestLogCount = ApiRequestLog::query()->count();
+        $documentFingerprints = $profile->documents()
+            ->orderBy('id')
+            ->get()
+            ->mapWithKeys(fn (KycDocument $document): array => [
+                $document->id => $this->modelFingerprint($document),
+            ])
+            ->all();
+        $storageFingerprint = $this->storageFingerprint();
+        $this->mock(NiumCustomerDocumentPreparationService::class)
+            ->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected SG corporate business-address validation to fail.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame($expectedCode, $exception->getMessage());
+            $this->assertStringNotContainsString('metadata.', $exception->getMessage());
+            $this->assertStringNotContainsString('businessAddress', $exception->getMessage());
+
+            foreach ($forbiddenErrorFragments as $fragment) {
+                $this->assertStringNotContainsString($fragment, $exception->getMessage());
+            }
+        }
+
+        $this->assertSame($providerAccountCount, UserProviderAccount::query()->count());
+        $this->assertSame($auditCount, AuditLog::query()->count());
+        $this->assertSame($apiRequestLogCount, ApiRequestLog::query()->count());
+        $this->assertSame($submissionFingerprint, $this->modelFingerprint($submission->fresh()));
+        $this->assertSame(
+            $documentFingerprints,
+            $profile->documents()
+                ->orderBy('id')
+                ->get()
+                ->mapWithKeys(fn (KycDocument $document): array => [
+                    $document->id => $this->modelFingerprint($document),
+                ])
+                ->all(),
+        );
+        $this->assertSame($storageFingerprint, $this->storageFingerprint());
+        Http::assertNothingSent();
+    }
+
+    private function modelFingerprint(Model $model): string
+    {
+        $attributes = $model->getRawOriginal();
+        ksort($attributes);
+
+        return hash('sha256', json_encode($attributes, JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function storageFingerprint(): array
+    {
+        $disk = Storage::disk('kyc_private');
+
+        return collect($disk->allFiles())
+            ->sort()
+            ->mapWithKeys(fn (string $path): array => [
+                $path => hash('sha256', $disk->get($path)),
+            ])
+            ->all();
+    }
+
+    /**
+     * @param  array<int, string>  $observedOperations
+     */
+    private function activateDmlGuard(array &$observedOperations): void
+    {
+        DB::connection()->beforeExecuting(function (string $query) use (&$observedOperations): void {
+            $operation = strtoupper((string) strtok(ltrim($query), " \t\n\r"));
+            $observedOperations[] = $operation;
+
+            if (in_array($operation, ['INSERT', 'UPDATE', 'DELETE', 'REPLACE'], true)) {
+                throw new \LogicException("Unexpected {$operation} during guarded validation.");
+            }
+        });
     }
 
     private function rawNiumErrorSecrets(User $user, string $rawDescription): array

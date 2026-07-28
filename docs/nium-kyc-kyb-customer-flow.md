@@ -1,6 +1,6 @@
 # Nium KYC/KYB Customer Flow
 
-Last reviewed: 2026-05-20
+Last reviewed: 2026-07-27
 
 This document defines the customer-facing KYC/KYB flow for Origin Wallet, based on Nium's onboarding model and the current wallet backend structure.
 
@@ -118,6 +118,40 @@ Important Nium behavior:
 ## Business KYB Flow
 
 For a business customer, KYB includes company verification and KYC for the people connected to the company.
+
+### SG Corporate V5 Address Sources
+
+For SG corporate Customer Onboarding V5 only, the flat `kyc_profiles` fields
+`address_line1`, `address_line2`, `city`, `state`, `postal_code`, and
+`country_code` are the registered address. The relationship declaration must be
+a real JSON boolean at
+`metadata.nium_v5_fields.addresses.isBusinessAddressSameAsRegisteredAddress`;
+strings and numbers are not coerced.
+
+When the declaration is `true`, both provider address objects are built from the
+flat registered-address fields, and a separately populated metadata business
+address is rejected as conflicting input. When it is `false`, the provider
+business address is selected only from
+`metadata.nium_v5_fields.addresses.businessAddress`, whose approved keys are
+`address_line1`, `address_line2`, `city`, `state`, `postal_code`, and
+`country_code`. No sibling metadata is forwarded.
+
+For `true`, an absent key, `null`, an empty object/array, or an object containing
+only an empty optional `address_line2` is treated as no separate declaration.
+Any other child, unknown key, list/scalar shape, nested value, or non-empty
+address component fails closed. For `false`, unknown keys and malformed,
+incomplete, list, scalar, or nested sources fail closed.
+
+The declaration is authoritative: address text is never compared to infer or
+override it. This source contract does not apply to individuals or non-SG
+corporates. Existing SG corporate fixtures require a separately approved Repair
+WRITE to add the new metadata; deployments must preflight that metadata before
+enabling submission. Source deployments do not repair fixture data.
+
+The complete SG corporate source contract is validated before Provider Account
+provisioning, document preparation, provider lookup, or any operational
+persistence. Invalid source data therefore creates no Provider Account, changes
+no provider submission or reconciliation state, and creates no audit record.
 
 ### Customer Screens
 
@@ -283,4 +317,3 @@ Build this in two phases:
 - Save Nium IDs and redirects.
 - Process Nium webhooks.
 - Support RFI and ODD.
-

@@ -34,6 +34,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
      */
     private function synchronizeUser(IntegrationProvider $provider, User $user): array
     {
+        $this->payloadFactory->validateRequiredSourceData($user);
         $providerAccount = $this->provisionProviderAccount($provider, $user);
 
         try {
@@ -46,7 +47,6 @@ class NiumCustomerOnboardingService implements OnboardingProvider
                 ];
             }
 
-            $this->payloadFactory->validateRequiredSourceData($user);
             $preparation = $this->documentPreparationService->prepare($user);
 
             if (! $preparation['ready']) {
