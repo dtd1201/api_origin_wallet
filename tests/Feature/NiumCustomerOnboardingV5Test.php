@@ -295,9 +295,14 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
         $account->refresh();
         $this->assertSame('submitted', $account->status);
+        $entityReferenceFingerprint = substr(
+            hash('sha256', 'b80612ea-1822-4788-aa3d-f0b4585f6015'),
+            0,
+            16,
+        );
         $this->assertSame(
             'submitted',
-            $account->metadata['nium_entity_kyc_states']['b80612ea-1822-4788-aa3d-f0b4585f6015']['kycStatus'],
+            $account->metadata['nium_entity_kyc_states']['ref_'.$entityReferenceFingerprint]['kyc_status'],
         );
     }
 

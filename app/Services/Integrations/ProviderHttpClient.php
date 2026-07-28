@@ -6,6 +6,7 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
+use App\Services\Nium\NiumSafeValueProjector;
 use App\Support\SensitiveDataSanitizer;
 use Carbon\Carbon;
 use Illuminate\Http\Client\PendingRequest;
@@ -22,6 +23,7 @@ class ProviderHttpClient implements ProviderClient
         private readonly string $serviceConfigKey,
         private readonly array $headers = [],
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer = new SensitiveDataSanitizer,
+        private readonly ?NiumSafeValueProjector $niumSafeValueProjector = null,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -400,8 +402,12 @@ class ProviderHttpClient implements ProviderClient
         $requestId = collect($this->headers)
             ->first(fn ($value, $key) => strtolower((string) $key) === 'x-request-id');
         $responseData = is_array($responseBody) ? $responseBody : [];
-        $error = Arr::get($responseData, 'errors.0');
-        $error = is_array($error) ? $error : [];
+        $projector = $this->niumSafeValueProjector
+            ?? new NiumSafeValueProjector($this->sensitiveDataSanitizer);
+        $requestHeaders = $projector->apiRequestHeaders($requestId);
+        $requestBody = $projector->apiRequestBody($payload);
+        $responseHeaders = $projector->apiResponseHeaders($response->header('x-request-id'));
+        $safeResponseBody = $projector->apiResponseBody($responseData, $response->status());
 
         ApiRequestLog::create([
             'provider_id' => $this->provider->id,
@@ -409,36 +415,11 @@ class ProviderHttpClient implements ProviderClient
             'related_transfer_id' => $relatedTransferId,
             'request_method' => $method,
             'request_url' => $this->safeNiumUrl($url),
-            'request_headers' => array_filter([
-                'x-request-id' => is_string($requestId) ? $requestId : null,
-            ]),
-            'request_body' => array_filter([
-                'external_id_fingerprint' => $this->fingerprint($payload['externalId'] ?? null),
-                'customer_type' => is_string($payload['type'] ?? null) ? $payload['type'] : null,
-                'region' => is_string($payload['region'] ?? null) ? $payload['region'] : null,
-            ]),
-            'response_status' => $response->status(),
-            'response_headers' => array_filter([
-                'x-request-id' => $response->header('x-request-id'),
-                'content-type' => $response->header('content-type'),
-            ]),
-            'response_body' => array_filter([
-                'status' => is_string($responseData['status'] ?? null) ? $responseData['status'] : null,
-                'sub_status' => is_string($responseData['subStatus'] ?? null) ? $responseData['subStatus'] : null,
-                'error_code' => $this->safeNiumErrorCode(
-                    Arr::get($responseData, 'errors.0.code')
-                        ?? Arr::get($responseData, 'errors.0.errorCode')
-                        ?? Arr::get($responseData, 'errorCode')
-                        ?? Arr::get($responseData, 'code'),
-                ),
-                'error_field' => $this->safeNiumErrorPath($error['field'] ?? null),
-                'error_path' => $this->safeNiumErrorPath($error['path'] ?? null),
-                'error_parameter' => $this->safeNiumErrorPath($error['parameter'] ?? null),
-                'customer_id_fingerprint' => $this->fingerprint($responseData['customerHashId'] ?? null),
-                'wallet_id_fingerprint' => $this->fingerprint(
-                    $responseData['walletHashId'] ?? Arr::get($responseData, 'wallets.0.walletHashId'),
-                ),
-            ]),
+            'request_headers' => $requestHeaders,
+            'request_body' => $requestBody,
+            'response_status' => $projector->safeHttpStatus($response->status()),
+            'response_headers' => $responseHeaders,
+            'response_body' => $safeResponseBody,
             'duration_ms' => $durationMs,
             'is_success' => $response->successful(),
         ]);
@@ -446,58 +427,77 @@ class ProviderHttpClient implements ProviderClient
 
     private function safeNiumUrl(string $url): string
     {
+        $fallback = 'https://configured-nium-host/[REDACTED]';
+        $configuredParts = parse_url((string) config('services.nium.base_url'));
+
+        if (! is_array($configuredParts)) {
+            return $fallback;
+        }
+
+        $scheme = strtolower((string) ($configuredParts['scheme'] ?? ''));
+        $host = strtolower((string) ($configuredParts['host'] ?? ''));
+        $validHost = filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) !== false
+            || filter_var($host, FILTER_VALIDATE_IP) !== false;
+
+        if (! in_array($scheme, ['http', 'https'], true) || ! $validHost) {
+            return $fallback;
+        }
+
         $parts = parse_url($url);
-        $path = (string) ($parts['path'] ?? '/');
-        $path = preg_replace(
-            '#/(client|customer|wallet)/[^/]+#i',
-            '/$1/[REDACTED]',
-            $path,
-        ) ?: '/';
 
-        return ($parts['scheme'] ?? 'https').'://'.($parts['host'] ?? 'configured-nium-host').$path;
-    }
-
-    private function safeNiumErrorPath(mixed $value): ?string
-    {
-        if (! is_string($value)) {
-            return null;
+        if (! is_array($parts)) {
+            return $fallback;
         }
 
-        $value = trim($value);
+        $segments = explode('/', (string) ($parts['path'] ?? '/'));
+        $redactNext = false;
 
-        if (
-            $value === ''
-            || strlen($value) > 180
-            || preg_match(
-                '/^[A-Za-z][A-Za-z0-9_]*(?:(?:\[(?:\d+|\*)\])|(?:\.(?:[A-Za-z][A-Za-z0-9_]*|\d+)))*$/',
-                $value,
-            ) !== 1
-        ) {
-            return null;
+        foreach ($segments as $index => $segment) {
+            $decoded = rawurldecode($segment);
+            $normalized = strtolower($decoded);
+
+            if (preg_match('/[[:cntrl:]]/', $decoded) === 1) {
+                return $fallback;
+            }
+
+            if ($redactNext) {
+                $segments[$index] = '[REDACTED]';
+                $redactNext = false;
+
+                continue;
+            }
+
+            if (in_array($normalized, ['client', 'clients', 'customer', 'customers', 'wallet', 'wallets'], true)) {
+                $redactNext = true;
+
+                continue;
+            }
+
+            if (in_array($normalized, ['api', 'v5'], true)) {
+                continue;
+            }
+
+            if (
+                preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $decoded) === 1
+                || preg_match('/^[a-z0-9_-]{16,}$/i', $decoded) === 1
+            ) {
+                $segments[$index] = '[REDACTED]';
+            }
         }
 
-        return $value;
-    }
+        $path = implode('/', $segments);
+        $path = str_starts_with($path, '/') ? $path : '/'.$path;
+        $candidate = $scheme.'://'.$host.($path !== '' ? $path : '/');
 
-    private function safeNiumErrorCode(mixed $value): ?string
-    {
-        if (! is_string($value)) {
-            return null;
+        if (strlen($candidate) > 512) {
+            return $fallback;
         }
 
-        $value = trim($value);
+        $sanitized = $this->sensitiveDataSanitizer->sanitize($candidate);
 
-        return $value !== ''
-            && strlen($value) <= 80
-            && preg_match('/^[A-Za-z0-9_.-]+$/', $value) === 1
-                ? $value
-                : null;
+        return is_string($sanitized) && $sanitized === $candidate
+            ? $candidate
+            : $fallback;
     }
 
-    private function fingerprint(mixed $value): ?string
-    {
-        return is_scalar($value) && trim((string) $value) !== ''
-            ? substr(hash('sha256', (string) $value), 0, 16)
-            : null;
-    }
 }

@@ -6,7 +6,11 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
+use App\Support\SensitiveDataSanitizer;
+use GuzzleHttp\Psr7\Request as Psr7Request;
+use GuzzleHttp\Psr7\Utils as Psr7Utils;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -405,7 +409,7 @@ class ProviderHttpClientTest extends TestCase
         });
     }
 
-    public function test_nium_error_log_keeps_only_safe_schema_diagnostics(): void
+    public function test_nium_completed_error_response_persists_one_allowlisted_sanitizer_stable_projection(): void
     {
         $provider = IntegrationProvider::query()->create([
             'code' => 'nium',
@@ -415,7 +419,10 @@ class ProviderHttpClientTest extends TestCase
         $user = User::factory()->create();
         $apiKey = 'sandbox-secret-api-key';
         $fileId = '55555555-5555-4555-8555-555555555555';
-        $longSuffix = str_repeat(' safe diagnostic context', 30);
+        $requestId = '11111111-1111-4111-8111-111111111111';
+        $responseRequestId = '22222222-2222-4222-8222-222222222222';
+        $customerId = '33333333-3333-4333-8333-333333333333';
+        $walletId = '44444444-4444-4444-8444-444444444444';
 
         config()->set('services.nium.base_url', 'https://gateway.nium.test');
         config()->set('services.nium.timeout', 30);
@@ -427,25 +434,31 @@ class ProviderHttpClientTest extends TestCase
 
         Http::fake([
             '*' => Http::response([
+                'status' => 'CLEAR',
+                'subStatus' => 'RFI_REQUESTED',
+                'customerHashId' => $customerId,
+                'walletHashId' => $walletId,
                 'errors' => [[
                     'code' => 'invalid_input',
-                    'field' => 'stakeholders.individual[0].positions[0].title',
-                    'path' => 'stakeholders.individual[0].positions[0].title',
-                    'parameter' => 'positions[0].title',
+                    'field' => 'jane@example.test',
+                    'path' => '+65 8123 4567',
+                    'parameter' => 'jane@example.test',
                     'description' => 'Invalid role for Jane Doe at jane@example.test. '
                         ."Value: ultimate_beneficial_owner. Bearer {$apiKey}. "
-                        ."File {$fileId}. Address 10 Private Road.{$longSuffix}",
+                        ."File {$fileId}. Address 10 Private Road.",
                 ]],
                 'rawResponse' => 'must-not-be-persisted',
                 'authorization' => 'must-not-be-persisted',
-            ], 400),
+            ], 400, ['x-request-id' => $responseRequestId]),
         ]);
 
         $client = new ProviderHttpClient(
             provider: $provider,
             serviceConfigKey: 'nium',
             headers: [
-                'x-request-id' => 'safe-request-id',
+                'x-request-id' => $requestId,
+                'Authorization' => 'Bearer must-not-be-persisted',
+                'x-api-key' => $apiKey,
             ],
         );
 
@@ -469,16 +482,26 @@ class ProviderHttpClientTest extends TestCase
         $responseBody = $log->response_body;
         $serializedLog = json_encode($log->toArray(), JSON_THROW_ON_ERROR);
 
+        $this->assertDatabaseCount('api_request_logs', 1);
+        $this->assertSame(['x-request-id' => $requestId], $log->request_headers);
+        $this->assertSame(['x-request-id' => $responseRequestId], $log->response_headers);
+        $this->assertSame([
+            'external_id_fingerprint' => substr(hash('sha256', 'external-reference-secret'), 0, 16),
+            'customer_type' => 'corporate',
+            'region' => 'SG',
+        ], $log->request_body);
+        $this->assertSame(400, $responseBody['http_status']);
+        $this->assertSame('clear', $responseBody['status']);
+        $this->assertSame('rfi_requested', $responseBody['sub_status']);
         $this->assertSame('invalid_input', $responseBody['error_code']);
-        $this->assertSame(
-            'stakeholders.individual[0].positions[0].title',
-            $responseBody['error_field'],
-        );
-        $this->assertSame(
-            'stakeholders.individual[0].positions[0].title',
-            $responseBody['error_path'],
-        );
-        $this->assertSame('positions[0].title', $responseBody['error_parameter']);
+        $this->assertSame(substr(hash('sha256', 'jane@example.test'), 0, 16), $responseBody['error_field_fingerprint']);
+        $this->assertSame(substr(hash('sha256', '+65 8123 4567'), 0, 16), $responseBody['error_path_fingerprint']);
+        $this->assertSame(substr(hash('sha256', 'jane@example.test'), 0, 16), $responseBody['error_parameter_fingerprint']);
+        $this->assertTrue($responseBody['customer_id_present']);
+        $this->assertTrue($responseBody['wallet_id_present']);
+        $this->assertSame(substr(hash('sha256', $customerId), 0, 16), $responseBody['customer_id_fingerprint']);
+        $this->assertSame(substr(hash('sha256', $walletId), 0, 16), $responseBody['wallet_id_fingerprint']);
+        $this->assertSame($responseBody, app(SensitiveDataSanitizer::class)->sanitize($responseBody));
         $this->assertArrayNotHasKey('error_description', $responseBody);
 
         foreach ([
@@ -491,6 +514,9 @@ class ProviderHttpClientTest extends TestCase
             $apiKey,
             'external-reference-secret',
             'must-not-be-persisted',
+            $customerId,
+            $walletId,
+            '+65 8123 4567',
         ] as $sensitiveValue) {
             $this->assertStringNotContainsString($sensitiveValue, $serializedLog);
         }
@@ -500,82 +526,247 @@ class ProviderHttpClientTest extends TestCase
         $this->assertArrayNotHasKey('authorization', $responseBody);
     }
 
-    public function test_nium_error_code_uses_errors_first_code(): void
-    {
-        $this->assertNiumErrorCodeLogged([
-            'errors' => [[
-                'code' => 'errors_code',
-                'errorCode' => 'errors_error_code',
-            ]],
-            'errorCode' => 'root_error_code',
-            'code' => 'root_code',
-        ], 'errors_code');
-    }
-
-    public function test_nium_error_code_uses_errors_first_error_code_when_code_is_missing(): void
-    {
-        $this->assertNiumErrorCodeLogged([
-            'errors' => [['errorCode' => 'errors_error_code']],
-            'errorCode' => 'root_error_code',
-            'code' => 'root_code',
-        ], 'errors_error_code');
-    }
-
-    public function test_nium_error_code_uses_root_error_code_when_nested_codes_are_missing(): void
-    {
-        $this->assertNiumErrorCodeLogged([
-            'errorCode' => 'root_error_code',
-            'code' => 'root_code',
-        ], 'root_error_code');
-    }
-
-    public function test_nium_error_code_uses_root_code_as_final_fallback(): void
-    {
-        $this->assertNiumErrorCodeLogged([
-            'code' => 'root_code',
-        ], 'root_code');
-    }
-
-    public function test_nium_invalid_error_code_is_not_persisted(): void
-    {
-        $this->assertNiumErrorCodeLogged([
-            'errors' => [['code' => 'invalid code with spaces']],
-        ], null);
-    }
-
-    private function assertNiumErrorCodeLogged(array $responseBody, ?string $expectedCode): void
+    public function test_nium_unknown_and_configured_secret_values_fail_closed_without_losing_completed_500_log(): void
     {
         $provider = IntegrationProvider::query()->create([
             'code' => 'nium',
             'name' => 'Nium',
             'status' => 'active',
         ]);
+        $statusSecret = 'provider-status-secret';
+        $subStatusSecret = 'provider-substatus-secret';
+        $errorSecret = 'provider-error-secret';
+        $requestIdSecret = 'provider-request-id-secret';
 
         config()->set('services.nium.base_url', 'https://gateway.nium.test');
         config()->set('services.nium.timeout', 30);
         config()->set('services.nium.auth', [
             'mode' => 'header',
             'header_name' => 'x-api-key',
-            'header_value' => 'sandbox-secret-api-key',
+            'header_value' => $statusSecret,
+            'client_secret' => $subStatusSecret,
+            'x_api_key' => $errorSecret,
+            'webhook_secret' => $requestIdSecret,
         ]);
-        Http::fake(['*' => Http::response($responseBody, 400)]);
+        Http::fake(['*' => Http::response([
+            'status' => $statusSecret,
+            'subStatus' => $subStatusSecret,
+            'errors' => [['code' => $errorSecret]],
+            'customerHashId' => null,
+            'walletHashId' => null,
+        ], 500, ['x-request-id' => $requestIdSecret])]);
 
         (new ProviderHttpClient(
             provider: $provider,
             serviceConfigKey: 'nium',
+            headers: ['x-request-id' => $requestIdSecret],
         ))->post('/api/v5/client/client-id/customers', [
-            'type' => 'corporate',
-            'region' => 'SG',
+            'type' => 'person@example.test',
+            'region' => 'https://unsafe.example.test',
         ]);
 
-        $loggedResponse = ApiRequestLog::query()->sole()->response_body;
+        $log = ApiRequestLog::query()->sole();
+        $serialized = json_encode($log->toArray(), JSON_THROW_ON_ERROR);
 
-        if ($expectedCode === null) {
-            $this->assertArrayNotHasKey('error_code', $loggedResponse);
+        $this->assertSame([], $log->request_headers);
+        $this->assertSame('unknown', $log->request_body['customer_type']);
+        $this->assertSame('unknown', $log->request_body['region']);
+        $this->assertSame([], $log->response_headers);
+        $this->assertSame('unknown', $log->response_body['status']);
+        $this->assertSame('unknown', $log->response_body['sub_status']);
+        $this->assertSame('unclassified', $log->response_body['error_category']);
+        $this->assertArrayNotHasKey('error_code', $log->response_body);
+        $this->assertFalse($log->response_body['customer_id_present']);
+        $this->assertFalse($log->response_body['wallet_id_present']);
+        $this->assertFalse($log->is_success);
+        $this->assertDatabaseCount('api_request_logs', 1);
 
-            return;
+        foreach ([$statusSecret, $subStatusSecret, $errorSecret, $requestIdSecret] as $secret) {
+            $this->assertStringNotContainsString($secret, $serialized);
+        }
+    }
+
+    public function test_nium_ambiguous_200_response_creates_exactly_one_minimal_safe_log(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.auth.mode', 'none');
+        Http::fake(['*' => Http::response(['message' => 'ambiguous free text'], 200)]);
+
+        (new ProviderHttpClient($provider, 'nium'))->get('/api/v5/client/client-id/customers');
+
+        $log = ApiRequestLog::query()->sole();
+        $this->assertSame([
+            'http_status' => 200,
+            'customer_id_present' => false,
+            'wallet_id_present' => false,
+        ], $log->response_body);
+        $this->assertTrue($log->is_success);
+        $this->assertDatabaseCount('api_request_logs', 1);
+        $this->assertStringNotContainsString('ambiguous free text', json_encode($log->toArray(), JSON_THROW_ON_ERROR));
+    }
+
+    public function test_nium_url_log_uses_configured_host_and_redacts_all_identifier_forms_without_changing_dispatch(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+        $uuid = '11111111-1111-4111-8111-111111111111';
+        $standaloneToken = 'abcdef0123456789abcdef';
+        $querySecret = 'query-secret-value';
+        $fragmentSecret = 'fragment-secret-value';
+        $inputUrl = 'https://attacker.example.test/api/v5'
+            .'/client/singular-client-id/customer/singular-customer-id/wallet/singular-wallet-id'
+            .'/clients/plural-client-id/customers/plural-customer-id/wallets/plural-wallet-id'
+            .'/status/'.$uuid.'/'.$standaloneToken
+            .'?credential='.$querySecret.'#'.$fragmentSecret;
+        $dispatchedUrl = null;
+        $dispatchedMethod = null;
+        $dispatchedBody = null;
+        $providerRequests = 0;
+
+        config()->set('services.nium.base_url', 'https://configured-user:configured-password@gateway.nium.test:8443/base');
+        config()->set('services.nium.auth.mode', 'none');
+        Http::fake(function ($request) use (&$dispatchedUrl, &$dispatchedMethod, &$dispatchedBody, &$providerRequests) {
+            $providerRequests++;
+            $dispatchedUrl = $request->url();
+            $dispatchedMethod = $request->method();
+            $dispatchedBody = $request->body();
+
+            return Http::response(['status' => 'CLEAR'], 200);
+        });
+
+        $client = new ProviderHttpClient($provider, 'nium');
+        $client->get($inputUrl);
+
+        $log = ApiRequestLog::query()->sole();
+        $serialized = json_encode($log->toArray(), JSON_THROW_ON_ERROR);
+        $frameworkNormalizedUrl = (string) Psr7Utils::modifyRequest(
+            new Psr7Request('GET', $inputUrl),
+            ['query' => http_build_query([], '', '&', PHP_QUERY_RFC3986)],
+        )->getUri();
+
+        $this->assertSame($frameworkNormalizedUrl, $dispatchedUrl);
+        $this->assertSame('GET', $dispatchedMethod);
+        $this->assertSame('', $dispatchedBody);
+        $this->assertStringContainsString('attacker.example.test', $dispatchedUrl);
+        $this->assertNotSame($log->request_url, $dispatchedUrl);
+        $this->assertSame(1, $providerRequests);
+        Http::assertSentCount(1);
+        $this->assertDatabaseCount('api_request_logs', 1);
+        $this->assertSame(
+            'https://gateway.nium.test/api/v5'
+                .'/client/[REDACTED]/customer/[REDACTED]/wallet/[REDACTED]'
+                .'/clients/[REDACTED]/customers/[REDACTED]/wallets/[REDACTED]'
+                .'/status/[REDACTED]/[REDACTED]',
+            $log->request_url,
+        );
+        $this->assertStringContainsString('/api/v5/', $log->request_url);
+        foreach ([
+            'attacker.example.test',
+            'configured-user',
+            'configured-password',
+            ':8443',
+            $querySecret,
+            $fragmentSecret,
+            'singular-client-id',
+            'singular-customer-id',
+            'singular-wallet-id',
+            'plural-client-id',
+            'plural-customer-id',
+            'plural-wallet-id',
+            $uuid,
+            $standaloneToken,
+        ] as $unsafe) {
+            $this->assertStringNotContainsString($unsafe, $serialized);
+        }
+    }
+
+    public function test_nium_url_log_uses_fixed_fallback_for_invalid_config_without_changing_dispatch(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+        $inputUrl = 'https://dispatch-user:dispatch-password@operational-provider.test:9443/api/v5'
+            .'/customers/fallback-customer-id/clients/fallback-client-id/wallets/fallback-wallet-id'
+            .'?credential=fallback-query-value#fallback-fragment-value';
+        $dispatchedUrl = null;
+        $dispatchedMethod = null;
+        $dispatchedBody = null;
+        $providerRequests = 0;
+
+        config()->set('services.nium.base_url', 'not-a-valid-absolute-url');
+        config()->set('services.nium.auth.mode', 'none');
+        Http::fake(function ($request) use (&$dispatchedUrl, &$dispatchedMethod, &$dispatchedBody, &$providerRequests) {
+            $providerRequests++;
+            $dispatchedUrl = $request->url();
+            $dispatchedMethod = $request->method();
+            $dispatchedBody = $request->body();
+
+            return Http::response(['status' => 'CLEAR'], 200);
+        });
+
+        (new ProviderHttpClient($provider, 'nium'))->get($inputUrl);
+
+        $log = ApiRequestLog::query()->sole();
+        $serialized = json_encode($log->toArray(), JSON_THROW_ON_ERROR);
+        $frameworkNormalizedUrl = (string) Psr7Utils::modifyRequest(
+            new Psr7Request('GET', $inputUrl),
+            ['query' => http_build_query([], '', '&', PHP_QUERY_RFC3986)],
+        )->getUri();
+
+        $this->assertSame($frameworkNormalizedUrl, $dispatchedUrl);
+        $this->assertStringContainsString('operational-provider.test:9443', $dispatchedUrl);
+        $this->assertStringNotContainsString('not-a-valid-absolute-url', $dispatchedUrl);
+        $this->assertSame('GET', $dispatchedMethod);
+        $this->assertSame('', $dispatchedBody);
+        $this->assertSame(1, $providerRequests);
+        Http::assertSentCount(1);
+        $this->assertDatabaseCount('api_request_logs', 1);
+        $this->assertSame('https://configured-nium-host/[REDACTED]', $log->request_url);
+
+        foreach ([
+            'not-a-valid-absolute-url',
+            'operational-provider.test',
+            'dispatch-user',
+            'dispatch-password',
+            ':9443',
+            'fallback-query-value',
+            'fallback-fragment-value',
+            'fallback-customer-id',
+            'fallback-client-id',
+            'fallback-wallet-id',
+        ] as $unsafe) {
+            $this->assertStringNotContainsString($unsafe, $serialized);
+        }
+    }
+
+    public function test_nium_network_exception_creates_no_completed_response_log(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.auth.mode', 'none');
+        Http::fake(['*' => Http::failedConnection('synthetic network failure')]);
+
+        try {
+            (new ProviderHttpClient($provider, 'nium'))->get('/api/v5/client/client-id/customers');
+            $this->fail('Expected the synthetic connection failure.');
+        } catch (ConnectionException $exception) {
+            $this->assertStringContainsString('synthetic network failure', $exception->getMessage());
         }
 
-        $this->assertSame($expectedCode, $loggedResponse['error_code']);
+        $this->assertDatabaseCount('api_request_logs', 0);
     }
 }
