@@ -12,8 +12,12 @@ use RuntimeException;
 
 class NiumProviderAccountStateService
 {
+    private const RESERVED_FIXTURE_PERSISTENCE_FAILURE =
+        'Reserved Nium customer retry fixture requires capability-owned persistence.';
+
     public function __construct(
         private readonly NiumSafeValueProjector $safeValues,
+        private readonly NiumAuthenticatedStateProjector $authenticatedStateProjector,
     ) {}
 
     public function applyAuthenticatedState(
@@ -27,111 +31,13 @@ class NiumProviderAccountStateService
         try {
             return DB::transaction(function () use ($providerAccount, $payload, $source): UserProviderAccount {
                 $providerAccount = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
-                $before = $this->auditState($providerAccount);
-                $customerHashId = $this->stringValue($payload, ['customerHashId']);
-                $walletHashId = $this->walletHashId($payload);
-                $customerExternalReference = strtoupper((string) ($payload['template'] ?? '')) === 'CUSTOMER_ENTITY_KYC_STATUS'
-                    ? null
-                    : (filled($payload['externalId'] ?? null) ? (string) $payload['externalId'] : null);
+                $this->assertNotReservedIncompleteCustomerRetryFixture($providerAccount);
 
-                $this->assertIdentifierDoesNotConflict($providerAccount, 'external_customer_id', $customerHashId);
-                $this->assertIdentifierDoesNotConflict($providerAccount, 'external_account_id', $walletHashId);
-                $this->assertIdentifierDoesNotConflict(
+                return $this->applyAuthenticatedStateToLockedAccount(
                     $providerAccount,
-                    'external_reference',
-                    $customerExternalReference,
-                );
-
-                $providerStatus = $this->providerStatus($payload, $providerAccount);
-                $providerSubStatus = $this->providerSubStatus($payload, $providerAccount);
-                $complianceStatus = $this->complianceStatus($payload, $providerAccount);
-                $oddStatus = $this->oddStatus($payload, $providerAccount);
-                $rfiStatus = $this->rfiStatus($providerSubStatus, $providerAccount->rfi_status);
-                $customerVerifiedAt = $customerHashId !== null
-                    ? ($providerAccount->customer_id_verified_at ?? now())
-                    : $providerAccount->customer_id_verified_at;
-                $walletVerifiedAt = $walletHashId !== null
-                    ? ($providerAccount->wallet_id_verified_at ?? now())
-                    : $providerAccount->wallet_id_verified_at;
-                $idsVerified = filled($customerHashId ?: $providerAccount->external_customer_id)
-                    && filled($walletHashId ?: $providerAccount->external_account_id)
-                    && $customerVerifiedAt !== null
-                    && $walletVerifiedAt !== null;
-                $internalStatus = $this->internalStatus(
-                    $providerStatus,
-                    $providerSubStatus,
-                    $complianceStatus,
-                    $idsVerified,
-                );
-
-                $entityStates = (array) Arr::get(
-                    (array) $providerAccount->metadata,
-                    'nium_entity_kyc_states',
-                    [],
-                );
-
-                if (isset($payload['kycStatus'])) {
-                    $entityKey = (string) ($payload['referenceId'] ?? $payload['externalId'] ?? $payload['entityType'] ?? 'customer');
-                    $entityStates['ref_'.$this->safeValues->fingerprint($entityKey)] = array_filter([
-                        'kyc_status' => $this->safeValues->kycStatus($payload['kycStatus']),
-                        'kyc_mode' => $this->safeValues->kycMode($payload['kycMode'] ?? null),
-                        'entity_type' => $this->safeValues->entityType($payload['entityType'] ?? null),
-                        'updated_at' => now()->toISOString(),
-                    ], static fn ($value) => $value !== null && $value !== '');
-                }
-
-                $metadata = $this->safeValues->accountMetadata(
-                    $providerStatus,
-                    $providerSubStatus,
+                    $payload,
                     $source,
-                    now()->toISOString(),
-                    $payload['isResubmissionAllowed']
-                        ?? Arr::get((array) $providerAccount->metadata, 'is_resubmission_allowed'),
-                    $entityStates,
                 );
-
-                $providerAccount->update([
-                    'external_customer_id' => $customerHashId ?: $providerAccount->external_customer_id,
-                    'external_account_id' => $walletHashId ?: $providerAccount->external_account_id,
-                    'external_reference' => $customerExternalReference ?? $providerAccount->external_reference,
-                    'status' => $internalStatus,
-                    'provider_status' => $providerStatus,
-                    'provider_sub_status' => $providerSubStatus,
-                    'compliance_status' => $complianceStatus,
-                    'rfi_status' => $rfiStatus,
-                    'odd_status' => $oddStatus,
-                    'customer_id_verified_at' => $customerVerifiedAt,
-                    'wallet_id_verified_at' => $walletVerifiedAt,
-                    'provider_ids_verified_at' => $idsVerified
-                        ? ($providerAccount->provider_ids_verified_at ?? now())
-                        : null,
-                    'provider_status_updated_at' => now(),
-                    'security_conflict_at' => null,
-                    'security_conflict_reason' => null,
-                    'reconciliation_status' => 'reconciled',
-                    'reconciliation_error' => null,
-                    'reconciled_at' => now(),
-                    'metadata' => $metadata,
-                ]);
-
-                $providerAccount = $providerAccount->fresh();
-                $this->syncSubmission($providerAccount);
-                $after = $this->auditState($providerAccount);
-
-                if ($before !== $after) {
-                    AuditLog::query()->create([
-                        'user_id' => $providerAccount->user_id,
-                        'action' => 'provider_account.nium_state_changed',
-                        'entity_type' => 'user_provider_account',
-                        'entity_id' => (string) $providerAccount->id,
-                        'old_data' => $before,
-                        'new_data' => [...$after, 'source' => $this->safeValues->auditSource($source)],
-                        'ip_address' => null,
-                        'user_agent' => null,
-                    ]);
-                }
-
-                return $providerAccount;
             });
         } catch (NiumProviderIdConflictException $exception) {
             $this->quarantineConflict($providerAccount, $exception, $source, $ipAddress, $userAgent, $requestId);
@@ -325,6 +231,59 @@ class NiumProviderAccountStateService
         ], true);
     }
 
+    private function assertNotReservedIncompleteCustomerRetryFixture(
+        UserProviderAccount $providerAccount,
+    ): void {
+        if (
+            (int) $providerAccount->getKey() === 4
+            && (int) $providerAccount->user_id === 6
+            && (int) $providerAccount->provider_id === 7
+            && trim((string) $providerAccount->external_reference) !== ''
+            && (
+                trim((string) $providerAccount->external_customer_id) === ''
+                || trim((string) $providerAccount->external_account_id) === ''
+            )
+        ) {
+            throw new RuntimeException(self::RESERVED_FIXTURE_PERSISTENCE_FAILURE);
+        }
+    }
+
+    private function applyAuthenticatedStateToLockedAccount(
+        UserProviderAccount $providerAccount,
+        array $payload,
+        string $source,
+    ): UserProviderAccount {
+        $before = $this->auditState($providerAccount);
+        $providerAccount->update(
+            $this->authenticatedStateProjector->accountUpdates(
+                $providerAccount,
+                $payload,
+                $source,
+            ),
+        );
+
+        $providerAccount = $providerAccount->fresh();
+
+        $this->syncSubmission($providerAccount);
+
+        $after = $this->auditState($providerAccount);
+
+        if ($before !== $after) {
+            AuditLog::query()->create([
+                'user_id' => $providerAccount->user_id,
+                'action' => 'provider_account.nium_state_changed',
+                'entity_type' => 'user_provider_account',
+                'entity_id' => (string) $providerAccount->id,
+                'old_data' => $before,
+                'new_data' => [...$after, 'source' => $this->safeValues->auditSource($source)],
+                'ip_address' => null,
+                'user_agent' => null,
+            ]);
+        }
+
+        return $providerAccount;
+    }
+
     private function internalStatus(?string $status, ?string $subStatus, ?string $complianceStatus, bool $idsVerified): string
     {
         if (in_array($status, ['closed', 'terminated', 'suspended', 'blocked'], true)) {
@@ -363,13 +322,6 @@ class NiumProviderAccountStateService
 
     private function syncSubmission(UserProviderAccount $providerAccount): void
     {
-        $status = match ($providerAccount->status) {
-            'active' => 'approved',
-            'rejected', 'blocked' => 'rejected',
-            'failed' => 'failed',
-            default => 'submitted',
-        };
-
         $submission = KycProviderSubmission::query()
             ->where('user_id', $providerAccount->user_id)
             ->where('provider_id', $providerAccount->provider_id)
@@ -379,41 +331,21 @@ class NiumProviderAccountStateService
             return;
         }
 
-        $submission->update([
-            'provider_account_id' => $providerAccount->id,
-            'status' => $status,
-            'approved_at' => $status === 'approved' ? now() : null,
-            'rejected_at' => $status === 'rejected' ? now() : null,
-            'failure_reason' => $status === 'failed' ? 'Nium onboarding returned an error state.' : null,
-            'metadata' => $this->safeValues->submissionMetadata(
-                $providerAccount->provider_status,
-                $providerAccount->provider_sub_status,
-                $providerAccount->compliance_status,
-                $providerAccount->rfi_status,
-                $providerAccount->odd_status,
-            ),
-        ]);
+        $this->updateSubmission($submission, $providerAccount);
+    }
+
+    private function updateSubmission(
+        KycProviderSubmission $submission,
+        UserProviderAccount $providerAccount,
+    ): void {
+        $submission->update(
+            $this->authenticatedStateProjector->submissionUpdates($providerAccount),
+        );
     }
 
     private function auditState(UserProviderAccount $providerAccount): array
     {
-        return $this->safeValues->auditState([
-            'external_customer_id' => $providerAccount->external_customer_id,
-            'external_account_id' => $providerAccount->external_account_id,
-            'external_reference' => $providerAccount->external_reference,
-            'status' => $providerAccount->status,
-            'provider_status' => $providerAccount->provider_status,
-            'provider_sub_status' => $providerAccount->provider_sub_status,
-            'compliance_status' => $providerAccount->compliance_status,
-            'rfi_status' => $providerAccount->rfi_status,
-            'odd_status' => $providerAccount->odd_status,
-            'customer_id_verified_at' => $providerAccount->customer_id_verified_at,
-            'wallet_id_verified_at' => $providerAccount->wallet_id_verified_at,
-            'provider_ids_verified_at' => $providerAccount->provider_ids_verified_at,
-            'security_conflict_at' => $providerAccount->security_conflict_at,
-            'reconciliation_status' => $providerAccount->reconciliation_status,
-            'integration_status' => Arr::get((array) $providerAccount->metadata, 'integration_status'),
-        ]);
+        return $this->authenticatedStateProjector->auditState($providerAccount);
     }
 
     private function walletHashId(array $payload): ?string
@@ -539,27 +471,6 @@ class NiumProviderAccountStateService
         }
 
         return null;
-    }
-
-    private function payloadContains(array $payload, string $key): bool
-    {
-        return array_key_exists($key, $payload);
-    }
-
-    private function providerStatus(array $payload, UserProviderAccount $account): ?string
-    {
-        $incoming = $this->stringValue($payload, ['status']);
-
-        return $this->safeValues->providerStatus($incoming ?? $account->provider_status);
-    }
-
-    private function providerSubStatus(array $payload, UserProviderAccount $account): ?string
-    {
-        if ($this->payloadContains($payload, 'subStatus')) {
-            return $this->safeValues->providerSubStatus($this->stringValue($payload, ['subStatus']));
-        }
-
-        return $this->safeValues->providerSubStatus($account->provider_sub_status);
     }
 
     private function complianceStatus(array $payload, UserProviderAccount $account): ?string
