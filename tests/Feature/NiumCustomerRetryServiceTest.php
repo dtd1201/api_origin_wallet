@@ -407,6 +407,88 @@ final class NiumCustomerRetryServiceTest extends TestCase
         $this->assertFixtureLookupRejected($service, $user, $account, $provider);
     }
 
+    #[DataProvider('safeFixtureReconciliationStatuses')]
+    public function test_fixture_context_accepts_only_safe_reconciliation_statuses(
+        ?string $reconciliationStatus,
+    ): void {
+        [, , $expectedAccount] = $this->fixture($reconciliationStatus);
+        Http::fake();
+
+        [, $resolvedAccount] = app(NiumCustomerRetryService::class)->resolveFixtureContext();
+
+        $this->assertSame($expectedAccount->getKey(), $resolvedAccount->getKey());
+        $this->assertSame($reconciliationStatus, $resolvedAccount->reconciliation_status);
+        Http::assertNothingSent();
+    }
+
+    public static function safeFixtureReconciliationStatuses(): array
+    {
+        return [
+            'legacy uninitialized null' => [null],
+            'explicit pending' => ['pending'],
+        ];
+    }
+
+    #[DataProvider('unsafeFixtureReconciliationStatuses')]
+    public function test_fixture_context_rejects_unsafe_reconciliation_statuses(
+        string $reconciliationStatus,
+    ): void {
+        $this->fixture($reconciliationStatus);
+        Http::fake();
+        $this->assertFixtureContextRejected();
+    }
+
+    public static function unsafeFixtureReconciliationStatuses(): array
+    {
+        return [
+            'failed' => ['failed'],
+            'conflicted' => ['quarantined'],
+            'completed' => ['reconciled'],
+            'unknown arbitrary value' => ['unknown-arbitrary-state'],
+        ];
+    }
+
+    public function test_fixture_context_rejects_reconciliation_error_for_legacy_null_state(): void
+    {
+        $this->fixture(null, 'reconciliation_failed');
+        Http::fake();
+        $this->assertFixtureContextRejected();
+    }
+
+    #[DataProvider('unsafeFixtureExternalIdentifiers')]
+    public function test_fixture_context_rejects_existing_external_identifiers(
+        string $field,
+    ): void {
+        $this->fixture(null, null, [$field => 'existing-provider-identifier']);
+        Http::fake();
+        $this->assertFixtureContextRejected();
+    }
+
+    public static function unsafeFixtureExternalIdentifiers(): array
+    {
+        return [
+            'customer identifier' => ['external_customer_id'],
+            'account identifier' => ['external_account_id'],
+        ];
+    }
+
+    #[DataProvider('unsafeFixtureProviderStates')]
+    public function test_fixture_context_rejects_unsafe_provider_states(
+        string $providerStatus,
+    ): void {
+        $this->fixture(null, null, ['provider_status' => $providerStatus]);
+        Http::fake();
+        $this->assertFixtureContextRejected();
+    }
+
+    public static function unsafeFixtureProviderStates(): array
+    {
+        return [
+            'failed' => ['failed'],
+            'clear' => ['clear'],
+        ];
+    }
+
     #[DataProvider('mutatedFixtureRelationships')]
     public function test_account_relationship_mutated_after_resolution_is_rejected_before_http(
         string $field,
@@ -2579,7 +2661,11 @@ final class NiumCustomerRetryServiceTest extends TestCase
         ]);
     }
 
-    private function fixture(): array
+    private function fixture(
+        ?string $reconciliationStatus = 'pending',
+        ?string $reconciliationError = null,
+        array $accountOverrides = [],
+    ): array
     {
         $provider = $this->provider();
         $user = User::factory()->create([
@@ -2589,16 +2675,17 @@ final class NiumCustomerRetryServiceTest extends TestCase
             'full_name' => 'Fixture V2 Synthetic',
             'kyc_status' => 'verified',
         ]);
-        $account = UserProviderAccount::query()->forceCreate([
+        $account = UserProviderAccount::query()->forceCreate(array_replace([
             'id' => 4,
             'user_id' => 6,
             'provider_id' => 7,
             'external_reference' => self::EXTERNAL_REFERENCE,
             'status' => 'submitted',
             'provider_status' => 'pending',
-            'reconciliation_status' => 'pending',
+            'reconciliation_status' => $reconciliationStatus,
+            'reconciliation_error' => $reconciliationError,
             'metadata' => ['integration_status' => 'nium_pending'],
-        ]);
+        ], $accountOverrides));
         $submission = KycProviderSubmission::query()->forceCreate([
             'id' => 2,
             'user_id' => 6,
@@ -2671,6 +2758,22 @@ final class NiumCustomerRetryServiceTest extends TestCase
                 ->all(),
             'audits' => DB::table('audit_logs')->orderBy('id')->get()->all(),
         ];
+    }
+
+    private function assertFixtureContextRejected(): void
+    {
+        try {
+            app(NiumCustomerRetryService::class)->resolveFixtureContext();
+            $this->fail('Unsafe fixture reconciliation state must be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame(
+                'Nium customer retry fixture context is unavailable.',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('api_request_logs', 0);
     }
 
     private function assertFixtureLookupRejected(

@@ -1068,7 +1068,7 @@ final class NiumCustomerRetryService
             && $providerAccount->provider_sub_status === null
             && $providerAccount->security_conflict_at === null
             && trim((string) $providerAccount->security_conflict_reason) === ''
-            && $providerAccount->reconciliation_status === 'pending'
+            && in_array($providerAccount->reconciliation_status, [null, 'pending'], true)
             && trim((string) $providerAccount->reconciliation_error) === '';
     }
 
