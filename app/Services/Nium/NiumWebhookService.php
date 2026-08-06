@@ -3,6 +3,7 @@
 namespace App\Services\Nium;
 
 use App\Models\IntegrationProvider;
+use App\Models\NiumVirtualAccount;
 use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\UserProviderAccount;
@@ -11,6 +12,7 @@ use App\Services\Integrations\Contracts\ReprocessesWebhookEvent;
 use App\Services\Integrations\Contracts\WebhookProvider;
 use App\Services\Integrations\Support\StaticWebhookHeaderVerifier;
 use App\Services\Wallet\LedgerService;
+use App\Support\NiumOperationalData;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -76,7 +78,9 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     'event_id' => $eventId,
                     'event_type' => $eventType,
                     'external_resource_id' => $this->externalResourceId($payload, $resource),
-                    'payload' => $this->sensitiveDataSanitizer->sanitize($payload),
+                    'payload' => $this->isVaAssigned($payload)
+                        ? NiumOperationalData::project($payload)
+                        : $this->sensitiveDataSanitizer->sanitize($payload),
                     'signature' => '[REDACTED]',
                     'processing_status' => 'received',
                 ]);
@@ -183,6 +187,12 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
     ): void {
         $template = strtoupper((string) ($payload['template'] ?? ''));
 
+        if ($this->isVaAssigned($payload)) {
+            $this->processVaAssigned($provider, $payload);
+
+            return;
+        }
+
         if ($this->providerAccountStateService->isCustomerLifecycleTemplate($template)) {
             $this->processCustomerLifecyclePayload($provider, $payload, $request);
 
@@ -276,6 +286,40 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
             throw new RuntimeException('Nium customer reconciliation failed; access remains restricted.', previous: $exception);
         }
+    }
+
+    private function processVaAssigned(IntegrationProvider $provider, array $payload): void
+    {
+        $account = $this->findCustomerProviderAccount($provider, $payload);
+        $paymentId = $this->value($payload, ['uniquePaymentId', 'paymentId', 'virtualAccountNumber']);
+        $currency = strtoupper((string) $this->value($payload, ['currencyCode', 'currency']));
+
+        if ($account === null || ! filled($paymentId) || strlen($currency) !== 3) {
+            throw new RuntimeException('Nium VA Assigned webhook is missing a mapped customer, payment ID, or currency.');
+        }
+
+        NiumVirtualAccount::query()->updateOrCreate(
+            [
+                'user_provider_account_id' => $account->id,
+                'provider_payment_id' => (string) $paymentId,
+            ],
+            [
+                'virtual_account_reference' => (string) $paymentId,
+                'currency' => $currency,
+                'account_category' => $this->value($payload, ['accountCategory']),
+                'account_type' => $this->value($payload, ['accountType']),
+                'status' => 'assigned',
+                'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
+            ],
+        );
+    }
+
+    private function isVaAssigned(array $payload): bool
+    {
+        return in_array(strtoupper((string) ($payload['template'] ?? $payload['eventType'] ?? '')), [
+            'VA_ASSIGNED',
+            'VIRTUAL_ACCOUNT_ASSIGNED',
+        ], true);
     }
 
     private function verifyCustomerLifecycleEnvelope(array $payload, Request $request): void

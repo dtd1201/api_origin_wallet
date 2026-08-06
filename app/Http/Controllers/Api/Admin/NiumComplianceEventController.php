@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\NiumComplianceEvent;
+use App\Support\NiumOperationalData;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -158,7 +159,7 @@ class NiumComplianceEventController extends Controller
             'reviewed_by' => $event->reviewed_by,
             'resolution_note' => $event->resolution_note,
             'error_message' => $event->error_message,
-            'payload' => $this->sensitiveDataSanitizer->sanitize($event->payload),
+            'payload' => NiumOperationalData::project($event->payload),
         ];
     }
 }

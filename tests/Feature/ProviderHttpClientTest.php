@@ -6,6 +6,8 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
+use App\Services\Nium\NiumEvidencePersistenceException;
+use App\Services\Nium\NiumSupportEvidenceFormatter;
 use App\Support\SensitiveDataSanitizer;
 use GuzzleHttp\Psr7\Request as Psr7Request;
 use GuzzleHttp\Psr7\Utils as Psr7Utils;
@@ -604,6 +606,8 @@ class ProviderHttpClientTest extends TestCase
             'http_status' => 200,
             'customer_id_present' => false,
             'wallet_id_present' => false,
+            'response_received' => true,
+            'no_response_received' => false,
         ], $log->response_body);
         $this->assertTrue($log->is_success);
         $this->assertDatabaseCount('api_request_logs', 1);
@@ -749,7 +753,7 @@ class ProviderHttpClientTest extends TestCase
         }
     }
 
-    public function test_nium_network_exception_creates_no_completed_response_log(): void
+    public function test_nium_network_exception_captures_explicit_no_response_outcome(): void
     {
         $provider = IntegrationProvider::query()->create([
             'code' => 'nium',
@@ -767,6 +771,194 @@ class ProviderHttpClientTest extends TestCase
             $this->assertStringContainsString('synthetic network failure', $exception->getMessage());
         }
 
+        $log = ApiRequestLog::query()->sole();
+        $this->assertNull($log->response_status);
+        $this->assertSame('connection_failure', $log->transport_outcome);
+        $this->assertFalse($log->response_body['response_received']);
+        $this->assertTrue($log->response_body['no_response_received']);
+        $this->assertDatabaseCount('api_request_logs', 1);
+    }
+
+    public function test_nium_customer_create_captures_safe_support_evidence_before_business_parsing(): void
+    {
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        $user = User::factory()->create();
+        $apiKey = 'never-log-this-nium-api-key';
+        $requestId = '11111111-1111-4111-8111-111111111111';
+
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.client_id', 'client-hash-support-001');
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => $apiKey,
+        ]);
+        Http::fake(['*' => Http::response([
+            'customerHashId' => 'customer-hash-001',
+            'walletHashId' => 'wallet-hash-001',
+            'status' => 'CLEAR',
+        ], 201, ['Content-Type' => 'application/json'])]);
+
+        $response = (new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'nium',
+            headers: ['x-request-id' => $requestId],
+            operationalContext: [
+                'operation' => 'customer_create',
+                'client_hash_id' => 'client-hash-support-001',
+                'external_reference' => 'customer-create-reference-001',
+            ],
+        ))->post('/api/v5/client/client-hash-support-001/customers', [
+            'externalId' => 'customer-create-reference-001',
+            'firstName' => 'Sensitive Customer',
+            'email' => 'customer@example.test',
+            'x-api-key' => $apiKey,
+        ], $user);
+
+        $this->assertSame(201, $response->status());
+        $log = ApiRequestLog::query()->sole();
+        $evidence = app(NiumSupportEvidenceFormatter::class)->format($log);
+
+        $this->assertSame('customer_create', $log->operation);
+        $this->assertSame('client-hash-support-001', $log->client_hash_id);
+        $this->assertSame('customer-create-reference-001', $log->external_reference);
+        $this->assertSame(201, $log->response_status);
+        $this->assertSame('response_received', $log->transport_outcome);
+        $this->assertSame('application/json', $log->content_type);
+        $this->assertSame('customer-hash-001', $log->response_body['customer_hash_id']);
+        $this->assertSame('wallet-hash-001', $log->response_body['wallet_hash_id']);
+        $this->assertNotNull($log->request_started_at);
+        $this->assertNotNull($log->request_finished_at);
+        $this->assertSame($requestId, $evidence['x_request_id']);
+        $this->assertSame(201, $evidence['http_status']);
+
+        $serialized = json_encode($log->toArray(), JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString($apiKey, $serialized);
+        $this->assertStringNotContainsString('Sensitive Customer', $serialized);
+        $this->assertStringNotContainsString('customer@example.test', $serialized);
+    }
+
+    public function test_nium_customer_create_captures_validation_server_and_malformed_responses(): void
+    {
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.client_id', 'client-hash-support-002');
+        config()->set('services.nium.auth.mode', 'none');
+
+        $responses = [
+            Http::response(['code' => 'invalid_input', 'message' => 'Invalid request'], 400),
+            Http::response(['code' => 'validation_error', 'message' => 'Request validation failed'], 422),
+            Http::response(['code' => 'internal_server_error', 'message' => 'Provider service unavailable'], 500),
+            Http::response('{not-json', 400, ['Content-Type' => 'application/json']),
+        ];
+        Http::fake(function () use (&$responses) {
+            return array_shift($responses);
+        });
+        $client = new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'nium',
+            operationalContext: ['operation' => 'customer_create', 'external_reference' => 'safe-reference-002'],
+        );
+
+        foreach ([400, 422, 500, 400] as $status) {
+            $response = $client->post('/api/v5/client/client-hash-support-002/customers', ['externalId' => 'safe-reference-002']);
+            $this->assertSame($status, $response->status());
+        }
+
+        $logs = ApiRequestLog::query()->orderBy('id')->get();
+        $this->assertSame('invalid_input', $logs[0]->response_body['error_code']);
+        $this->assertSame('Invalid request', $logs[0]->response_body['message']);
+        $this->assertSame('validation_error', $logs[1]->response_body['error_code']);
+        $this->assertSame('Request validation failed', $logs[1]->response_body['message']);
+        $this->assertSame('internal_server_error', $logs[2]->response_body['error_code']);
+        $this->assertSame('Provider service unavailable', $logs[2]->response_body['message']);
+        $this->assertSame(400, $logs[3]->response_status);
+        $this->assertSame('malformed_response', $logs[3]->transport_outcome);
+        $this->assertTrue($logs[3]->response_body['response_received']);
+    }
+
+    public function test_nium_customer_create_timeout_is_logged_once_and_not_retried(): void
+    {
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.client_id', 'client-hash-support-003');
+        config()->set('services.nium.auth.mode', 'none');
+        Http::fake(['*' => Http::failedConnection('cURL error 28: Operation timed out')]);
+
+        try {
+            (new ProviderHttpClient(
+                provider: $provider,
+                serviceConfigKey: 'nium',
+                operationalContext: ['operation' => 'customer_create', 'external_reference' => 'safe-reference-003'],
+            ))->post('/api/v5/client/client-hash-support-003/customers', ['externalId' => 'safe-reference-003']);
+            $this->fail('Expected timeout.');
+        } catch (ConnectionException) {
+            // The caller receives the timeout and cannot parse it as a successful create.
+        }
+
+        $log = ApiRequestLog::query()->sole();
+        $this->assertNull($log->response_status);
+        $this->assertSame('timeout_before_response', $log->transport_outcome);
+        $this->assertSame('unknown_external_outcome', $log->response_body['external_outcome']);
+        $this->assertTrue($log->response_body['no_response_received']);
+        Http::assertSentCount(1);
+    }
+
+    public function test_nium_response_is_captured_before_later_business_parsing_fails(): void
+    {
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.client_id', 'client-hash-support-004');
+        config()->set('services.nium.auth.mode', 'none');
+        Http::fake(['*' => Http::response('{malformed-json', 201, ['Content-Type' => 'application/json'])]);
+
+        $response = (new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'nium',
+            operationalContext: ['operation' => 'customer_create', 'external_reference' => 'safe-reference-004'],
+        ))->post('/api/v5/client/client-hash-support-004/customers', ['externalId' => 'safe-reference-004']);
+
+        try {
+            if (! is_array($response->json())) {
+                throw new \RuntimeException('Business parser rejected the provider response.');
+            }
+        } catch (\RuntimeException) {
+            // Evidence must already exist when higher-level parsing rejects the response.
+        }
+
+        $log = ApiRequestLog::query()->sole();
+        $this->assertSame(201, $log->response_status);
+        $this->assertSame('malformed_response', $log->transport_outcome);
+        $this->assertTrue($log->response_body['response_received']);
+    }
+
+    public function test_nium_evidence_persistence_failure_stops_business_response_processing_with_safe_context(): void
+    {
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        config()->set('services.nium.base_url', 'https://gateway.nium.test');
+        config()->set('services.nium.client_id', 'client-hash-support-005');
+        config()->set('services.nium.auth.mode', 'none');
+        Http::fake(['*' => Http::response(['customerHashId' => 'customer-hash-005'], 200)]);
+        ApiRequestLog::creating(static function (): void {
+            throw new \RuntimeException('Synthetic persistence failure with raw details.');
+        });
+
+        try {
+            (new ProviderHttpClient(
+                provider: $provider,
+                serviceConfigKey: 'nium',
+                operationalContext: ['operation' => 'customer_create', 'external_reference' => 'safe-reference-005'],
+            ))->post('/api/v5/client/client-hash-support-005/customers', ['externalId' => 'safe-reference-005']);
+            $this->fail('Evidence persistence failure must stop response processing.');
+        } catch (NiumEvidencePersistenceException $exception) {
+            $this->assertSame('persistence_failure', $exception->safeEvidence['transport_outcome']);
+            $this->assertSame(200, $exception->safeEvidence['http_status']);
+            $this->assertSame('client-hash-support-005', $exception->safeEvidence['client_hash_id']);
+            $this->assertSame('safe-reference-005', $exception->safeEvidence['external_reference']);
+            $this->assertStringNotContainsString('raw details', $exception->getMessage());
+        }
+
         $this->assertDatabaseCount('api_request_logs', 0);
+        Http::assertSentCount(1);
     }
 }

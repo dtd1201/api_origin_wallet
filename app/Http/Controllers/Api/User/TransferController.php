@@ -14,6 +14,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -67,8 +68,8 @@ class TransferController extends Controller
         try {
             $provider->assertSupportsCapability('transfer');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
-        } catch (RuntimeException|\Illuminate\Validation\ValidationException $exception) {
-            if ($exception instanceof \Illuminate\Validation\ValidationException) {
+        } catch (RuntimeException|ValidationException $exception) {
+            if ($exception instanceof ValidationException) {
                 throw $exception;
             }
 
@@ -83,12 +84,37 @@ class TransferController extends Controller
             $fxQuote = $user->fxQuotes()
                 ->where('provider_id', $provider->id)
                 ->findOrFail($validated['fx_quote_id']);
+
+            if ($fxQuote->expires_at === null || $fxQuote->expires_at->isPast()) {
+                return response()->json(['message' => 'The selected FX quote has expired.'], 422);
+            }
+
+            if (strtoupper($fxQuote->source_currency) !== strtoupper($validated['source_currency'])
+                || strtoupper($fxQuote->target_currency) !== strtoupper($validated['target_currency'])
+                || $this->decimal($fxQuote->source_amount) !== $this->decimal($validated['source_amount'])) {
+                return response()->json(['message' => 'The selected FX quote does not match the transfer corridor or amount.'], 422);
+            }
+
+            $validated['fx_quote_id'] = $fxQuote->id;
+            $validated['source_currency'] = $fxQuote->source_currency;
+            $validated['target_currency'] = $fxQuote->target_currency;
+            $validated['source_amount'] = $fxQuote->source_amount;
+            $validated['target_amount'] = null;
+            $validated['fx_rate'] = $fxQuote->net_rate;
+            $validated['fee_amount'] = 0;
+            $validated['fee_currency'] = $fxQuote->source_currency;
+        } elseif (strtolower((string) $provider->code) === 'nium') {
+            $validated['target_amount'] = null;
+            $validated['fx_rate'] = null;
+            $validated['fee_amount'] = 0;
+            $validated['fee_currency'] = $validated['source_currency'];
         }
 
         $transfer = DB::transaction(function () use ($approvalService, $user, $validated): Transfer {
             $transfer = $user->transfers()->create([
                 ...$validated,
                 'transfer_no' => 'TRF-'.Str::upper(Str::random(12)),
+                'client_reference' => $validated['client_reference'] ?? 'OW-'.Str::uuid()->toString(),
                 'status' => 'draft',
             ]);
 
@@ -101,18 +127,23 @@ class TransferController extends Controller
 
         if ($fxQuote !== null) {
             $transfer->update([
-                'target_amount' => $fxQuote->target_amount,
+                'target_amount' => null,
                 'fx_rate' => $fxQuote->net_rate,
-                'fee_amount' => $fxQuote->fee_amount,
-                'raw_data' => array_merge($transfer->raw_data ?? [], [
+                'fee_amount' => 0,
+                'raw_data' => [
                     'fx_quote_id' => $fxQuote->id,
                     'quote_ref' => $fxQuote->quote_ref,
-                ]),
+                ],
             ]);
             $transfer = $transfer->fresh();
         }
 
         return response()->json($transfer, 201);
+    }
+
+    private function decimal(mixed $value): string
+    {
+        return number_format((float) $value, 8, '.', '');
     }
 
     public function submit(
@@ -137,7 +168,9 @@ class TransferController extends Controller
         }
 
         return response()->json([
-            'message' => 'Transfer submitted successfully.',
+            'message' => $transfer->status === 'submission_unknown'
+                ? 'Transfer submission outcome is unknown. Do not resubmit; reconcile or request human review.'
+                : 'Transfer submitted successfully.',
             'transfer' => $transfer,
         ]);
     }

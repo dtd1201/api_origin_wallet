@@ -7,6 +7,7 @@ use App\Models\AuditLog;
 use App\Models\WebhookEvent;
 use App\Services\Integrations\Contracts\ReprocessesWebhookEvent;
 use App\Services\Integrations\ProviderRegistry;
+use App\Support\NiumOperationalData;
 use App\Support\PrimaryProvider;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Http\JsonResponse;
@@ -21,8 +22,7 @@ class ProviderWebhookEventController extends Controller
 {
     public function __construct(
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer,
-    ) {
-    }
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -151,7 +151,9 @@ class ProviderWebhookEventController extends Controller
             'processed_at' => $event->processed_at,
             'next_retry_at' => null,
             'error_message' => $event->error_message,
-            'payload' => $this->sensitiveDataSanitizer->sanitize($event->payload),
+            'payload' => strtolower((string) $event->provider?->code) === 'nium'
+                ? NiumOperationalData::project($event->payload)
+                : $this->sensitiveDataSanitizer->sanitize($event->payload),
         ];
     }
 }

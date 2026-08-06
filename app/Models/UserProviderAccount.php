@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class UserProviderAccount extends Model
 {
@@ -26,6 +27,7 @@ class UserProviderAccount extends Model
         'customer_id_verified_at',
         'wallet_id_verified_at',
         'provider_ids_verified_at',
+        'transactions_last_synced_at',
         'provider_status_updated_at',
         'security_conflict_at',
         'security_conflict_reason',
@@ -43,6 +45,7 @@ class UserProviderAccount extends Model
             'customer_id_verified_at' => 'datetime',
             'wallet_id_verified_at' => 'datetime',
             'provider_ids_verified_at' => 'datetime',
+            'transactions_last_synced_at' => 'datetime',
             'provider_status_updated_at' => 'datetime',
             'security_conflict_at' => 'datetime',
             'reconciliation_requested_at' => 'datetime',
@@ -58,5 +61,10 @@ class UserProviderAccount extends Model
     public function provider(): BelongsTo
     {
         return $this->belongsTo(IntegrationProvider::class, 'provider_id');
+    }
+
+    public function niumVirtualAccounts(): HasMany
+    {
+        return $this->hasMany(NiumVirtualAccount::class);
     }
 }

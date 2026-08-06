@@ -11,14 +11,14 @@ use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumAuthenticatedStateProjector;
 use App\Services\Nium\NiumCustomerCreateResult;
 use App\Services\Nium\NiumCustomerCreateState;
+use App\Services\Nium\NiumCustomerErrorMapper;
 use App\Services\Nium\NiumCustomerLookupResult;
 use App\Services\Nium\NiumCustomerLookupState;
 use App\Services\Nium\NiumCustomerPayloadHashVerifier;
-use App\Services\Nium\NiumCustomerErrorMapper;
+use App\Services\Nium\NiumCustomerRetryService;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderHttpClientFactory;
 use App\Services\Nium\NiumSafeValueProjector;
-use App\Services\Nium\NiumCustomerRetryService;
 use App\Services\Nium\NiumService;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -315,7 +315,7 @@ final class NiumCustomerRetryServiceTest extends TestCase
         $this->assertSame($before, $this->persistenceSnapshot($account, $submission));
     }
 
-    public function test_lookup_network_exception_is_failed_without_completed_response_log(): void
+    public function test_lookup_network_exception_is_failed_with_no_response_evidence(): void
     {
         [$provider, $user, $account, $submission] = $this->fixture();
         $before = $this->persistenceSnapshot($account, $submission);
@@ -330,7 +330,11 @@ final class NiumCustomerRetryServiceTest extends TestCase
         $this->assertNull($result->httpStatus);
         $this->assertSame('lookup_transport_failed', $result->failureCategory);
         $this->assertSingleRequest('GET');
-        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('api_request_logs', 1);
+        $log = ApiRequestLog::query()->sole();
+        $this->assertNull($log->response_status);
+        $this->assertSame('connection_failure', $log->transport_outcome);
+        $this->assertTrue($log->response_body['no_response_received']);
         $this->assertSame($before, $this->persistenceSnapshot($account, $submission));
     }
 
@@ -819,10 +823,11 @@ final class NiumCustomerRetryServiceTest extends TestCase
         $this->assertRequestCounts(1, 1);
         $this->assertSafeCompletedResponseLog([
             self::EXTERNAL_REFERENCE,
-            self::CUSTOMER_ID,
-            self::WALLET_ID,
             'approved-payload',
         ], 2);
+        $createLog = ApiRequestLog::query()->where('request_method', 'POST')->sole();
+        $this->assertSame(self::CUSTOMER_ID, $createLog->response_body['customer_hash_id']);
+        $this->assertSame(self::WALLET_ID, $createLog->response_body['wallet_hash_id']);
         $this->assertSame($before, $this->persistenceSnapshot($account, $submission));
         $this->assertFakeStorageEmpty();
     }
@@ -941,7 +946,7 @@ final class NiumCustomerRetryServiceTest extends TestCase
         ];
     }
 
-    public function test_create_network_exception_is_failed_without_completed_response_log(): void
+    public function test_create_network_exception_is_failed_with_no_response_evidence(): void
     {
         [$provider, $user, $account, $submission] = $this->fixture();
         $before = $this->persistenceSnapshot($account, $submission);
@@ -962,7 +967,11 @@ final class NiumCustomerRetryServiceTest extends TestCase
         $this->assertSame(NiumCustomerCreateState::Failed, $result->state);
         $this->assertSame('create_transport_failed', $result->failureCategory);
         $this->assertRequestCounts(1, 1);
-        $this->assertDatabaseCount('api_request_logs', 1);
+        $this->assertDatabaseCount('api_request_logs', 2);
+        $createLog = ApiRequestLog::query()->where('request_method', 'POST')->sole();
+        $this->assertNull($createLog->response_status);
+        $this->assertSame('connection_failure', $createLog->transport_outcome);
+        $this->assertSame('unknown_external_outcome', $createLog->response_body['external_outcome']);
         $this->assertSame($before, $this->persistenceSnapshot($account, $submission));
     }
 
@@ -1129,7 +1138,7 @@ final class NiumCustomerRetryServiceTest extends TestCase
         $this->assertSame('create_transport_failed', $first->failureCategory);
         $this->assertSame('create_lookup_provenance_invalid', $second->failureCategory);
         $this->assertRequestCounts(1, 1);
-        $this->assertDatabaseCount('api_request_logs', 1);
+        $this->assertDatabaseCount('api_request_logs', 2);
         $this->assertSame($before, $this->persistenceSnapshot($account, $submission));
     }
 
@@ -2665,8 +2674,7 @@ final class NiumCustomerRetryServiceTest extends TestCase
         ?string $reconciliationStatus = 'pending',
         ?string $reconciliationError = null,
         array $accountOverrides = [],
-    ): array
-    {
+    ): array {
         $provider = $this->provider();
         $user = User::factory()->create([
             'id' => 6,

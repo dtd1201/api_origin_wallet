@@ -6,15 +6,19 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
+use App\Services\Nium\NiumEvidencePersistenceException;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Support\SensitiveDataSanitizer;
 use Carbon\Carbon;
+use Carbon\CarbonImmutable;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
+use Throwable;
 
 class ProviderHttpClient implements ProviderClient
 {
@@ -24,6 +28,7 @@ class ProviderHttpClient implements ProviderClient
         private readonly array $headers = [],
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer = new SensitiveDataSanitizer,
         private readonly ?NiumSafeValueProjector $niumSafeValueProjector = null,
+        private readonly array $operationalContext = [],
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -79,19 +84,51 @@ class ProviderHttpClient implements ProviderClient
         $request = $this->baseRequest();
         $url = $this->buildUrl($path);
         $startedAt = microtime(true);
+        $startedAtUtc = CarbonImmutable::now('UTC');
 
-        $response = match ($method) {
-            'GET' => $request->get($url, $payload),
-            'POST' => $request->asJson()->post($url, $payload),
-            'PUT' => $request->asJson()->put($url, $payload),
-            'PATCH' => $request->asJson()->patch($url, $payload),
-            'DELETE' => empty($payload) ? $request->delete($url) : $request->asJson()->delete($url, $payload),
-            default => throw new \InvalidArgumentException("Unsupported HTTP method [{$method}]."),
-        };
+        try {
+            $response = match ($method) {
+                'GET' => $request->get($url, $payload),
+                'POST' => $request->asJson()->post($url, $payload),
+                'PUT' => $request->asJson()->put($url, $payload),
+                'PATCH' => $request->asJson()->patch($url, $payload),
+                'DELETE' => empty($payload) ? $request->delete($url) : $request->asJson()->delete($url, $payload),
+                default => throw new \InvalidArgumentException("Unsupported HTTP method [{$method}]."),
+            };
+        } catch (ConnectionException $exception) {
+            if ($this->serviceConfigKey === 'nium') {
+                $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
+                $this->logNiumRequest(
+                    $user,
+                    $relatedTransferId,
+                    $method,
+                    $url,
+                    $payload,
+                    null,
+                    [],
+                    $durationMs,
+                    $startedAtUtc,
+                    CarbonImmutable::now('UTC'),
+                    $this->connectionOutcome($exception),
+                );
+            }
+
+            throw $exception;
+        }
 
         $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
 
-        $this->logRequest($user, $relatedTransferId, $method, $url, $payload, $response, $durationMs);
+        $this->logRequest(
+            $user,
+            $relatedTransferId,
+            $method,
+            $url,
+            $payload,
+            $response,
+            $durationMs,
+            $startedAtUtc,
+            CarbonImmutable::now('UTC'),
+        );
 
         return $response;
     }
@@ -196,7 +233,7 @@ class ProviderHttpClient implements ProviderClient
         if (is_string($expiresAt) && $expiresAt !== '') {
             try {
                 $ttl = max(60, now()->diffInSeconds(Carbon::parse($expiresAt), false) - $bufferSeconds);
-            } catch (\Throwable) {
+            } catch (Throwable) {
                 $ttl = 300;
             }
         }
@@ -362,14 +399,29 @@ class ProviderHttpClient implements ProviderClient
         array $payload,
         Response $response,
         int $durationMs,
+        CarbonImmutable $startedAt,
+        CarbonImmutable $finishedAt,
     ): void {
-        $responseBody = $response->json() ?? ['raw' => $response->body()];
-
         if ($this->serviceConfigKey === 'nium') {
-            $this->logNiumRequest($user, $relatedTransferId, $method, $url, $payload, $response, $responseBody, $durationMs);
+            [$responseBody, $malformedJson] = $this->decodedResponse($response);
+            $this->logNiumRequest(
+                $user,
+                $relatedTransferId,
+                $method,
+                $url,
+                $payload,
+                $response,
+                $responseBody,
+                $durationMs,
+                $startedAt,
+                $finishedAt,
+                $malformedJson ? 'malformed_response' : 'response_received',
+            );
 
             return;
         }
+
+        $responseBody = $response->json() ?? ['raw' => $response->body()];
 
         ApiRequestLog::create([
             'provider_id' => $this->provider->id,
@@ -395,9 +447,12 @@ class ProviderHttpClient implements ProviderClient
         string $method,
         string $url,
         array $payload,
-        Response $response,
+        ?Response $response,
         mixed $responseBody,
         int $durationMs,
+        CarbonImmutable $startedAt,
+        CarbonImmutable $finishedAt,
+        string $transportOutcome,
     ): void {
         $requestId = collect($this->headers)
             ->first(fn ($value, $key) => strtolower((string) $key) === 'x-request-id');
@@ -406,23 +461,99 @@ class ProviderHttpClient implements ProviderClient
             ?? new NiumSafeValueProjector($this->sensitiveDataSanitizer);
         $requestHeaders = $projector->apiRequestHeaders($requestId);
         $requestBody = $projector->apiRequestBody($payload);
-        $responseHeaders = $projector->apiResponseHeaders($response->header('x-request-id'));
-        $safeResponseBody = $projector->apiResponseBody($responseData, $response->status());
+        $responseHeaders = $projector->apiResponseHeaders($response?->header('x-request-id'));
+        $safeResponseBody = $projector->apiResponseBody($responseData, $response?->status());
+        $safeResponseBody = array_filter([
+            ...$safeResponseBody,
+            'response_received' => $response !== null,
+            'no_response_received' => $response === null,
+            'external_outcome' => $response === null && $method !== 'GET' ? 'unknown_external_outcome' : null,
+        ], static fn ($value): bool => $value !== null);
 
-        ApiRequestLog::create([
+        $attributes = [
             'provider_id' => $this->provider->id,
             'user_id' => $user?->id,
             'related_transfer_id' => $relatedTransferId,
+            'operation' => $projector->providerIdentifier($this->operationalContext['operation'] ?? $this->inferOperation($method, $url)),
+            'client_hash_id' => $projector->clientHashId($this->operationalContext['client_hash_id'] ?? config('services.nium.client_id')),
+            'external_reference' => $projector->providerIdentifier($this->operationalContext['external_reference'] ?? null),
             'request_method' => $method,
             'request_url' => $this->safeNiumUrl($url),
+            'endpoint_path' => $this->safeNiumEndpointPath($url),
             'request_headers' => $requestHeaders,
             'request_body' => $requestBody,
-            'response_status' => $projector->safeHttpStatus($response->status()),
+            'response_status' => $projector->safeHttpStatus($response?->status()),
             'response_headers' => $responseHeaders,
             'response_body' => $safeResponseBody,
+            'request_started_at' => $startedAt,
+            'request_finished_at' => $finishedAt,
+            'content_type' => $projector->contentType($response?->header('Content-Type')),
+            'transport_outcome' => $transportOutcome,
             'duration_ms' => $durationMs,
-            'is_success' => $response->successful(),
-        ]);
+            'is_success' => $response?->successful(),
+        ];
+
+        try {
+            ApiRequestLog::create($attributes);
+        } catch (Throwable $exception) {
+            throw new NiumEvidencePersistenceException([
+                'client_hash_id' => $attributes['client_hash_id'],
+                'operation' => $attributes['operation'],
+                'endpoint' => $attributes['endpoint_path'],
+                'external_reference' => $attributes['external_reference'],
+                'x_request_id' => $requestHeaders['x-request-id'] ?? null,
+                'request_started_at_utc' => $startedAt->toIso8601String(),
+                'request_finished_at_utc' => $finishedAt->toIso8601String(),
+                'http_status' => $attributes['response_status'],
+                'transport_outcome' => 'persistence_failure',
+            ], $exception);
+        }
+    }
+
+    private function decodedResponse(Response $response): array
+    {
+        $body = $response->body();
+
+        if ($body === '') {
+            return [[], false];
+        }
+
+        try {
+            $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+
+            return [is_array($decoded) ? $decoded : [], ! is_array($decoded)];
+        } catch (\JsonException) {
+            return [[], true];
+        }
+    }
+
+    private function connectionOutcome(ConnectionException $exception): string
+    {
+        $message = strtolower($exception->getMessage());
+
+        return str_contains($message, 'timed out') || str_contains($message, 'curl error 28')
+            ? 'timeout_before_response'
+            : 'connection_failure';
+    }
+
+    private function inferOperation(string $method, string $url): string
+    {
+        $path = strtolower((string) parse_url($url, PHP_URL_PATH));
+
+        return match (true) {
+            $method === 'POST' && str_ends_with($path, '/customers') => 'customer_create',
+            $method === 'POST' && str_ends_with($path, '/remittance') => 'transfer_money',
+            $method === 'POST' && str_ends_with($path, '/paymentid') => 'assign_payment_id',
+            default => strtolower($method).'_nium_api',
+        };
+    }
+
+    private function safeNiumEndpointPath(string $url): string
+    {
+        $safeUrl = $this->safeNiumUrl($url);
+        $path = (string) parse_url($safeUrl, PHP_URL_PATH);
+
+        return $path !== '' ? $path : '/[REDACTED]';
     }
 
     private function safeNiumUrl(string $url): string
@@ -499,5 +630,4 @@ class ProviderHttpClient implements ProviderClient
             ? $candidate
             : $fallback;
     }
-
 }

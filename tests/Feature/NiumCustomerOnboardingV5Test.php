@@ -13,10 +13,12 @@ use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumCustomerPayloadFactory;
+use App\Services\Nium\NiumEvidencePersistenceException;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
@@ -592,11 +594,13 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
         foreach ([
             ...$this->rawNiumErrorSecrets($user, $rawDescription),
-            $externalReference,
         ] as $sensitiveValue) {
             $this->assertStringNotContainsString($sensitiveValue, $serializedResponse);
             $this->assertStringNotContainsString($sensitiveValue, $serializedLogs);
         }
+
+        $this->assertStringNotContainsString($externalReference, $serializedResponse);
+        $this->assertStringContainsString($externalReference, $serializedLogs);
     }
 
     public function test_webhook_cannot_activate_when_authoritative_get_customer_is_restrictive(): void
@@ -1115,7 +1119,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertArrayNotHasKey('nium_file_id', (array) $document->fresh()->metadata);
     }
 
-    public function test_customer_creation_retry_after_timeout_reuses_available_document_without_file_api_calls(): void
+    public function test_customer_creation_gateway_timeout_blocks_replay_and_reuses_available_document_state(): void
     {
         $provider = $this->provider();
         $user = $this->approvedIndividual($provider);
@@ -1128,14 +1132,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
             $customerCreateCalls++;
 
-            if ($customerCreateCalls === 1) {
-                return Http::response(['message' => 'gateway timeout'], 504);
-            }
-
-            return Http::response([
-                ...$this->fixture('customer-v5-create-response.json'),
-                'externalId' => $request->data()['externalId'],
-            ]);
+            return Http::response(['message' => 'gateway timeout'], 504);
         });
 
         try {
@@ -1147,8 +1144,9 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
         $account = app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
 
-        $this->assertSame('active', $account->status);
-        $this->assertSame(2, $customerCreateCalls);
+        $this->assertSame('submitted', $account->status);
+        $this->assertSame(NiumProviderAccountStateService::CUSTOMER_CREATE_UNKNOWN, $account->reconciliation_error);
+        $this->assertSame(1, $customerCreateCalls);
         $this->assertSame(self::INDIVIDUAL_FILE_ID, $this->individualDocument($user)->metadata['nium_file_id']);
         Http::assertNotSent(fn (Request $request): bool => str_contains(
             $request->url(),
@@ -1407,8 +1405,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'country' => 'SG',
         ], $addresses['businessAddress']);
         $this->assertFalse(
-            json_decode(json_encode($addresses, JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR)
-                ['isBusinessAddressSameAsRegisteredAddress'],
+            json_decode(json_encode($addresses, JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR)['isBusinessAddressSameAsRegisteredAddress'],
         );
         Http::assertNothingSent();
     }
@@ -3297,6 +3294,166 @@ class NiumCustomerOnboardingV5Test extends TestCase
         );
     }
 
+    public function test_customer_create_timeout_is_not_automatically_resubmitted_after_authoritative_lookup_finds_nothing(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $postCount = 0;
+
+        Http::fake(function (Request $request) use (&$postCount) {
+            if ($request->method() === 'POST') {
+                $postCount++;
+
+                throw new ConnectionException('cURL error 28: Operation timed out');
+            }
+
+            return Http::response(['customers' => []]);
+        });
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected the Customer Create timeout.');
+        } catch (ConnectionException) {
+            // The outcome is unknown and the write is quarantined from automatic retry.
+        }
+
+        $account = $user->providerAccounts()->where('provider_id', $provider->id)->sole();
+        $this->assertFalse(Arr::get((array) $account->metadata, 'is_resubmission_allowed'));
+
+        app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+
+        $this->assertSame(1, $postCount);
+        $this->assertSame('customer_create_unknown', $account->fresh()->reconciliation_error);
+        $this->assertSame('unknown_external_outcome', ApiRequestLog::query()
+            ->where('operation', 'customer_create')
+            ->sole()
+            ->response_body['external_outcome']);
+    }
+
+    public function test_customer_lookup_connection_failure_is_not_quarantined_as_unknown_write_outcome(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        Http::fake(['*' => Http::failedConnection('synthetic customer lookup connection failure')]);
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected the Customer lookup connection failure.');
+        } catch (ConnectionException) {
+            // A failed GET has no external write outcome to quarantine.
+        }
+
+        $account = $user->providerAccounts()->where('provider_id', $provider->id)->sole();
+        $this->assertNotSame(false, Arr::get((array) $account->metadata, 'is_resubmission_allowed'));
+        $this->assertNotSame('customer_create_unknown', $account->reconciliation_error);
+
+        $log = ApiRequestLog::query()->sole();
+        $this->assertSame('GET', $log->request_method);
+        $this->assertSame('connection_failure', $log->transport_outcome);
+        $this->assertArrayNotHasKey('external_outcome', $log->response_body);
+        Http::assertSentCount(1);
+    }
+
+    public function test_customer_create_submitting_and_unknown_states_never_issue_a_create_post(): void
+    {
+        foreach ([
+            NiumProviderAccountStateService::CUSTOMER_CREATE_SUBMITTING,
+            NiumProviderAccountStateService::CUSTOMER_CREATE_UNKNOWN,
+        ] as $state) {
+            $provider = $this->provider();
+            $user = $this->approvedIndividual($provider);
+            $account = $this->pendingAccount($user, $provider);
+            $account->update([
+                'reconciliation_status' => $state === NiumProviderAccountStateService::CUSTOMER_CREATE_UNKNOWN
+                    ? 'failed'
+                    : 'pending',
+                'reconciliation_error' => $state,
+                'metadata' => $state === NiumProviderAccountStateService::CUSTOMER_CREATE_UNKNOWN
+                    ? ['is_resubmission_allowed' => false]
+                    : [],
+            ]);
+
+            Http::fake(['*' => Http::response(['customers' => []])]);
+            $result = app(NiumCustomerOnboardingService::class)->beginOnboarding($provider, $user);
+
+            Http::assertSent(fn (Request $request): bool => $request->method() === 'GET');
+            Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+            $this->assertSame($state, $account->fresh()->reconciliation_error);
+
+            if ($state === NiumProviderAccountStateService::CUSTOMER_CREATE_SUBMITTING) {
+                $this->assertSame('wait_for_customer_creation', $result->nextAction);
+            }
+
+            $account->delete();
+            $user->delete();
+        }
+    }
+
+    public function test_authoritative_customer_create_rejection_is_retry_eligible(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+
+        Http::fake(function (Request $request) {
+            return $request->method() === 'POST'
+                ? Http::response(['code' => 'validation_error'], 422)
+                : Http::response(['customers' => []]);
+        });
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected authoritative Customer Create rejection.');
+        } catch (NiumProviderRequestException) {
+            // A completed 4xx proves that this create attempt was rejected.
+        }
+
+        $account = $user->providerAccounts()->where('provider_id', $provider->id)->sole();
+        $this->assertSame(NiumProviderAccountStateService::CUSTOMER_CREATE_FAILED, $account->reconciliation_error);
+        $this->assertTrue(Arr::get((array) $account->metadata, 'is_resubmission_allowed'));
+        Http::assertSentCount(2);
+    }
+
+    public function test_customer_create_evidence_failure_enters_unknown_and_blocks_replay(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $postCount = 0;
+
+        DB::statement(<<<'SQL'
+            CREATE TRIGGER fail_nium_create_evidence
+            BEFORE INSERT ON api_request_logs
+            WHEN NEW.request_method = 'POST'
+            BEGIN
+                SELECT RAISE(ABORT, 'synthetic evidence persistence failure');
+            END
+        SQL);
+        Http::fake(function (Request $request) use (&$postCount) {
+            if ($request->method() === 'POST') {
+                $postCount++;
+
+                return Http::response($this->fixture('customer-v5-create-response.json'));
+            }
+
+            return Http::response(['customers' => []]);
+        });
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+            $this->fail('Expected evidence persistence failure.');
+        } catch (NiumEvidencePersistenceException) {
+            // The provider outcome is unknown because its response could not be durably captured.
+        } finally {
+            DB::statement('DROP TRIGGER IF EXISTS fail_nium_create_evidence');
+        }
+
+        app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+
+        $account = $user->providerAccounts()->where('provider_id', $provider->id)->sole();
+        $this->assertSame(NiumProviderAccountStateService::CUSTOMER_CREATE_UNKNOWN, $account->reconciliation_error);
+        $this->assertFalse(Arr::get((array) $account->metadata, 'is_resubmission_allowed'));
+        $this->assertSame(1, $postCount);
+    }
+
     private function provider(): IntegrationProvider
     {
         return IntegrationProvider::query()->firstOrCreate([
@@ -3599,8 +3756,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         bool $relationship,
         mixed $businessAddress = null,
         bool $includeBusinessAddress = true,
-    ): void
-    {
+    ): void {
         $profile = $user->kycProfile()->firstOrFail();
         $metadata = (array) $profile->metadata;
         $metadata['nium_v5_fields']['addresses'] = [

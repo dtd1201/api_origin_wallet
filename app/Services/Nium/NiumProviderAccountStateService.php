@@ -12,6 +12,12 @@ use RuntimeException;
 
 class NiumProviderAccountStateService
 {
+    public const CUSTOMER_CREATE_SUBMITTING = 'customer_create_submitting';
+
+    public const CUSTOMER_CREATE_UNKNOWN = 'customer_create_unknown';
+
+    public const CUSTOMER_CREATE_FAILED = 'customer_create_failed';
+
     private const RESERVED_FIXTURE_PERSISTENCE_FAILURE =
         'Reserved Nium customer retry fixture requires capability-owned persistence.';
 
@@ -61,14 +67,22 @@ class NiumProviderAccountStateService
             }
 
             $before = $this->auditState($account);
+            $customerCreateInFlight = in_array($account->reconciliation_error, [
+                self::CUSTOMER_CREATE_SUBMITTING,
+                self::CUSTOMER_CREATE_UNKNOWN,
+            ], true);
             $account->update([
                 'status' => $this->internalStatus($status, $subStatus, $account->compliance_status, false),
                 'provider_status' => $status ?? $account->provider_status,
                 'provider_sub_status' => $subStatus ?? $account->provider_sub_status,
                 'rfi_status' => $this->rfiStatus($subStatus, $account->rfi_status),
                 'provider_status_updated_at' => now(),
-                'reconciliation_status' => 'pending',
-                'reconciliation_error' => null,
+                'reconciliation_status' => $customerCreateInFlight
+                    ? $account->reconciliation_status
+                    : 'pending',
+                'reconciliation_error' => $customerCreateInFlight
+                    ? $account->reconciliation_error
+                    : null,
                 'reconciliation_requested_at' => now(),
                 'metadata' => $this->safeValues->accountMetadata(
                     $status,
@@ -112,13 +126,76 @@ class NiumProviderAccountStateService
                 'new_data' => [
                     ...$this->auditState($account),
                     'source' => $this->safeValues->auditSource($source),
-                    'request_id' => $this->safeValues->requestId($requestId),
+                    'request_id' => $this->safeValues->requestEvidenceId($requestId),
                     'reason_category' => 'reconciliation_failed',
                     'reason_fingerprint' => $this->safeValues->safeOpaqueFingerprint($reason),
                 ],
             ]);
 
             return $account;
+        });
+    }
+
+    public function markWriteOutcomeUnknown(UserProviderAccount $providerAccount): UserProviderAccount
+    {
+        return DB::transaction(function () use ($providerAccount): UserProviderAccount {
+            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
+            $metadata = (array) ($account->metadata ?? []);
+            $metadata['is_resubmission_allowed'] = false;
+
+            $account->update([
+                'reconciliation_status' => 'failed',
+                'reconciliation_error' => self::CUSTOMER_CREATE_UNKNOWN,
+                'reconciliation_requested_at' => now(),
+                'metadata' => $metadata,
+            ]);
+
+            return $account->fresh();
+        });
+    }
+
+    public function claimCustomerCreate(UserProviderAccount $providerAccount): ?UserProviderAccount
+    {
+        return DB::transaction(function () use ($providerAccount): ?UserProviderAccount {
+            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
+
+            if (
+                filled($account->external_customer_id)
+                || $account->customer_id_verified_at !== null
+                || in_array($account->reconciliation_error, [
+                    self::CUSTOMER_CREATE_SUBMITTING,
+                    self::CUSTOMER_CREATE_UNKNOWN,
+                ], true)
+                || Arr::get((array) $account->metadata, 'is_resubmission_allowed') === false
+            ) {
+                return null;
+            }
+
+            $account->update([
+                'reconciliation_status' => 'pending',
+                'reconciliation_error' => self::CUSTOMER_CREATE_SUBMITTING,
+                'reconciliation_requested_at' => now(),
+            ]);
+
+            return $account->fresh();
+        }, 3);
+    }
+
+    public function markCustomerCreateRejected(UserProviderAccount $providerAccount): UserProviderAccount
+    {
+        return DB::transaction(function () use ($providerAccount): UserProviderAccount {
+            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
+            $metadata = (array) ($account->metadata ?? []);
+            $metadata['is_resubmission_allowed'] = true;
+
+            $account->update([
+                'reconciliation_status' => 'failed',
+                'reconciliation_error' => self::CUSTOMER_CREATE_FAILED,
+                'reconciliation_requested_at' => now(),
+                'metadata' => $metadata,
+            ]);
+
+            return $account->fresh();
         });
     }
 
@@ -425,7 +502,7 @@ class NiumProviderAccountStateService
                 'new_data' => [
                     ...$this->auditState($account->fresh()),
                     'source' => $this->safeValues->auditSource($source),
-                    'request_id' => $this->safeValues->requestId($requestId),
+                    'request_id' => $this->safeValues->requestEvidenceId($requestId),
                     'conflicting_field' => $safeField,
                     'current_fingerprint' => $exception->currentFingerprint,
                     'incoming_fingerprint' => $exception->incomingFingerprint,

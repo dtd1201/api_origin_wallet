@@ -20,9 +20,15 @@ class NiumService
         return $this->client()->get($path, $query, $user);
     }
 
-    public function post(string $path, array $payload = [], ?User $user = null, ?int $relatedTransferId = null): Response
-    {
-        return $this->client()->post($path, $payload, $user, $relatedTransferId);
+    public function post(
+        string $path,
+        array $payload = [],
+        ?User $user = null,
+        ?int $relatedTransferId = null,
+        ?string $operation = null,
+        ?string $externalReference = null,
+    ): Response {
+        return $this->client($operation, $externalReference)->post($path, $payload, $user, $relatedTransferId);
     }
 
     public function put(string $path, array $payload = [], ?User $user = null): Response
@@ -117,7 +123,7 @@ class NiumService
         return $replacements;
     }
 
-    private function client(): ProviderHttpClient
+    private function client(?string $operation = null, ?string $externalReference = null): ProviderHttpClient
     {
         $provider = $this->provider();
 
@@ -131,6 +137,11 @@ class NiumService
             headers: [
                 'x-request-id' => (string) Str::uuid(),
             ],
+            operationalContext: array_filter([
+                'operation' => $operation,
+                'client_hash_id' => config('services.nium.client_id'),
+                'external_reference' => $externalReference,
+            ], static fn ($value): bool => $value !== null && $value !== ''),
         );
     }
 

@@ -2,14 +2,18 @@
 
 namespace Tests\Feature;
 
+use App\Models\ApiRequestLog;
 use App\Models\Balance;
 use App\Models\Beneficiary;
+use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Nium\NiumTransferService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
+use RuntimeException;
 use Tests\TestCase;
 
 class NiumTransferServiceTest extends TestCase
@@ -85,6 +89,21 @@ class NiumTransferServiceTest extends TestCase
             ],
         ]);
 
+        $quote = FxQuote::query()->create([
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'quote_ref' => '112',
+            'source_currency' => 'USD',
+            'target_currency' => 'INR',
+            'source_amount' => 100,
+            'target_amount' => 8300,
+            'net_rate' => 83,
+            'fee_amount' => 1,
+            'expires_at' => now()->addMinutes(5),
+            'raw_data' => ['provider_fx_type' => 'lock_and_hold', 'audit_id' => '112'],
+        ]);
+        $transfer->update(['fx_quote_id' => $quote->id, 'target_amount' => 8300, 'fx_rate' => 83, 'fee_amount' => 1]);
+
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');
         config()->set('services.nium.client_id', 'client_hash_123');
         config()->set('services.nium.auth', [
@@ -118,8 +137,19 @@ class NiumTransferServiceTest extends TestCase
                 && $data['beneficiary']['id'] === 'bnf_hash_123'
                 && $data['payout']['sourceCurrency'] === 'USD'
                 && $data['payout']['sourceAmount'] === 100.0
+                && $data['payout']['auditId'] === 112
                 && $data['purposeCode'] === 'IR001';
         });
+
+        $this->assertNotEmpty($updated->provider_operation_key);
+
+        $log = ApiRequestLog::query()->where('related_transfer_id', $transfer->id)->sole();
+        $this->assertSame('transfer_money', $log->operation);
+        $this->assertSame($updated->provider_operation_key, $log->external_reference);
+        $this->assertSame(200, $log->response_status);
+        $this->assertSame('response_received', $log->transport_outcome);
+        $this->assertSame('RT6431795378', $log->response_body['system_reference_number']);
+        $this->assertSame('pay_123', $log->response_body['payment_id']);
     }
 
     public function test_sync_transfer_status_queries_nium_audit_and_updates_transfer(): void
@@ -195,5 +225,178 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('completed', $updated->status);
         $this->assertSame('pay_123', $updated->external_payment_id);
         $this->assertNotNull($updated->completed_at);
+    }
+
+    public function test_same_transfer_submitted_twice_sends_one_provider_post(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-ONCE', 'paymentId' => 'PAY-ONCE'])]);
+
+        app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $transfer->fresh());
+            $this->fail('A second provider submission should be rejected.');
+        } catch (RuntimeException) {
+            $this->assertTrue(true);
+        }
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_same_currency_transfer_does_not_require_fx_lock(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'USD',
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-SAME-CURRENCY'])]);
+
+        $updated = app(NiumTransferService::class)->submitTransfer(
+            $provider,
+            $transfer->fresh(['provider', 'user', 'beneficiary'])
+        );
+
+        $this->assertSame('pending', $updated->status);
+        Http::assertSent(fn ($request): bool => ! array_key_exists('auditId', $request->data()['payout']));
+    }
+
+    public function test_cross_currency_transfer_without_fx_lock_uses_live_transfer_money_contract(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-LIVE-FX'])]);
+
+        $updated = app(NiumTransferService::class)->submitTransfer(
+            $provider,
+            $transfer->fresh(['provider', 'user', 'beneficiary'])
+        );
+
+        $this->assertSame('pending', $updated->status);
+        Http::assertSent(fn ($request): bool => ! array_key_exists('auditId', $request->data()['payout']));
+    }
+
+    public function test_timeout_after_provider_acceptance_marks_unknown_and_never_posts_again(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        $attempts = 0;
+        Http::fake(function () use (&$attempts) {
+            $attempts++;
+
+            throw new ConnectionException('Timed out after provider acceptance.');
+        });
+
+        $unknown = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+        $this->assertSame('submission_unknown', $unknown->status);
+
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $unknown->fresh());
+            $this->fail('An unknown submission must not retry the provider POST.');
+        } catch (RuntimeException) {
+            $this->assertTrue(true);
+        }
+
+        $this->assertSame(1, $attempts);
+    }
+
+    public function test_evidence_persistence_failure_marks_unknown_and_never_posts_again(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-EVIDENCE-UNKNOWN'])]);
+        ApiRequestLog::creating(static function (): void {
+            throw new RuntimeException('Synthetic evidence persistence failure.');
+        });
+
+        $unknown = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+
+        $this->assertSame('submission_unknown', $unknown->status);
+
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $unknown->fresh());
+            $this->fail('An evidence persistence failure must not retry the provider POST.');
+        } catch (RuntimeException) {
+            // State validation rejects before provider HTTP.
+        }
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_invalid_state_sends_zero_http_requests(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer(['status' => 'pending']);
+        Http::fake();
+
+        $this->expectException(RuntimeException::class);
+
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_audit_sorts_by_timestamp_and_does_not_regress_terminal_state(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'status' => 'completed',
+            'external_transfer_id' => 'RT-ORDERED',
+            'provider_status_at' => now(),
+            'completed_at' => now(),
+        ]);
+        Http::fake(['*' => Http::response([
+            ['status' => 'COMPLETED', 'lastUpdatedAt' => now()->toISOString()],
+            ['status' => 'PENDING', 'lastUpdatedAt' => now()->subMinute()->toISOString()],
+        ])]);
+
+        $updated = app(NiumTransferService::class)->syncTransferStatus($provider, $transfer);
+
+        $this->assertSame('completed', $updated->status);
+    }
+
+    private function makeSubmittableTransfer(array $overrides = []): array
+    {
+        config()->set('wallet.transfer_controls.require_admin_approval', false);
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
+        config()->set('services.nium.client_id', 'client_hash_test');
+        config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-key']);
+
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        $user = User::factory()->create(['kyc_status' => 'verified']);
+        $user->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'external_customer_id' => 'customer-test',
+            'external_account_id' => 'wallet-test',
+            'status' => 'active',
+            'provider_status' => 'clear',
+            'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(),
+            'provider_ids_verified_at' => now(),
+        ]);
+        Balance::query()->create([
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'currency' => 'USD',
+            'available_balance' => 1000, 'ledger_balance' => 1000, 'as_of' => now(),
+        ]);
+        $beneficiary = Beneficiary::query()->create([
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'beneficiary-test',
+            'beneficiary_type' => 'personal', 'full_name' => 'Test Payee', 'country_code' => 'IN',
+            'currency' => 'INR', 'status' => 'active',
+        ]);
+        $quote = FxQuote::query()->create([
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'quote_ref' => (string) random_int(1000, 9999),
+            'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
+            'target_amount' => 830, 'net_rate' => 83, 'fee_amount' => 1, 'expires_at' => now()->addMinutes(5),
+            'raw_data' => ['provider_fx_type' => 'lock_and_hold'],
+        ]);
+        $transfer = Transfer::query()->create(array_merge([
+            'transfer_no' => 'TRF-'.strtoupper(uniqid()), 'user_id' => $user->id, 'provider_id' => $provider->id,
+            'beneficiary_id' => $beneficiary->id, 'fx_quote_id' => $quote->id, 'transfer_type' => 'bank',
+            'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
+            'target_amount' => 830, 'fx_rate' => 83, 'fee_amount' => 1, 'status' => 'draft',
+        ], $overrides));
+
+        return [$provider, $transfer->fresh(['provider', 'user', 'beneficiary', 'fxQuote'])];
     }
 }

@@ -12,6 +12,8 @@ class FxQuote extends Model
 
     public const UPDATED_AT = null;
 
+    protected $hidden = ['raw_data'];
+
     protected $fillable = [
         'user_id',
         'provider_id',

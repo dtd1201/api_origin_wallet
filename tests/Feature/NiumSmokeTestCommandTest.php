@@ -125,7 +125,7 @@ class NiumSmokeTestCommandTest extends TestCase
         $requestLog = ApiRequestLog::query()->firstOrFail();
         $serializedLog = json_encode($requestLog->toArray());
         $this->assertIsString($serializedLog);
-        $this->assertStringNotContainsString('sandbox-client-id', $serializedLog);
+        $this->assertSame('sandbox-client-id', $requestLog->client_hash_id);
         $this->assertStringNotContainsString('sandbox-api-key-secret', $serializedLog);
         $this->assertStringContainsString('[REDACTED]', $requestLog->request_url);
 

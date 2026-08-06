@@ -10,6 +10,8 @@ class Transaction extends Model
 {
     use HasFactory;
 
+    protected $hidden = ['raw_data'];
+
     protected $fillable = [
         'user_id',
         'provider_id',

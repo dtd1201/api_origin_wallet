@@ -11,12 +11,15 @@ class Transfer extends Model
 {
     use HasFactory;
 
+    protected $hidden = ['raw_data'];
+
     protected $fillable = [
         'transfer_no',
         'user_id',
         'provider_id',
         'source_bank_account_id',
         'beneficiary_id',
+        'fx_quote_id',
         'external_transfer_id',
         'external_payment_id',
         'transfer_type',
@@ -30,10 +33,12 @@ class Transfer extends Model
         'purpose_code',
         'reference_text',
         'client_reference',
+        'provider_operation_key',
         'status',
         'failure_code',
         'failure_reason',
         'submitted_at',
+        'provider_status_at',
         'completed_at',
         'compliance_review_required',
         'compliance_status',
@@ -49,6 +54,7 @@ class Transfer extends Model
             'fx_rate' => 'decimal:10',
             'fee_amount' => 'decimal:8',
             'submitted_at' => 'datetime',
+            'provider_status_at' => 'datetime',
             'completed_at' => 'datetime',
             'compliance_review_required' => 'boolean',
             'compliance_reviewed_at' => 'datetime',
@@ -74,6 +80,11 @@ class Transfer extends Model
     public function beneficiary(): BelongsTo
     {
         return $this->belongsTo(Beneficiary::class);
+    }
+
+    public function fxQuote(): BelongsTo
+    {
+        return $this->belongsTo(FxQuote::class);
     }
 
     public function transactions(): HasMany

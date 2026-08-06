@@ -52,15 +52,14 @@ class NiumQuoteServiceTest extends TestCase
         ]);
 
         Http::fake([
-            'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/quotes' => Http::response([
-                'quotes' => [[
-                    'quoteId' => 'qte_123',
-                    'sourceAmount' => 100,
-                    'destinationAmount' => 7800,
-                    'fxRate' => 78,
-                    'feeAmount' => 1.5,
-                    'expiresAt' => now()->addMinutes(15)->toISOString(),
-                ]],
+            'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/wallet/wallet_hash_123/lockExchangeRate*' => Http::response([
+                'audit_id' => 112,
+                'fx_hold_id' => 'hold-123',
+                'source_currency' => 'USD',
+                'destination_currency' => 'INR',
+                'fx_rate' => '78',
+                'hold_expiry_at' => now()->addMinutes(15)->toISOString(),
+                'status' => 'ACTIVE',
             ], 200),
         ]);
 
@@ -71,20 +70,17 @@ class NiumQuoteServiceTest extends TestCase
             'target_amount' => 7800,
         ]);
 
-        $this->assertSame('qte_123', $quote->quote_ref);
+        $this->assertSame('112', $quote->quote_ref);
         $this->assertSame('USD', $quote->source_currency);
         $this->assertSame('INR', $quote->target_currency);
 
         Http::assertSent(function ($request): bool {
             $data = $request->data();
 
-            return $request->url() === 'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/quotes'
+            return str_starts_with($request->url(), 'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/wallet/wallet_hash_123/lockExchangeRate?')
                 && $request->hasHeader('x-api-key', 'nium-api-key')
-                && $data['sourceCurrencyCode'] === 'USD'
-                && $data['destinationCurrencyCode'] === 'INR'
-                && $data['sourceAmount'] === 100.0
-                && $data['customerHashId'] === 'cust_hash_123'
-                && $data['quoteType'] === 'payout';
+                && $data['sourceCurrency'] === 'USD'
+                && $data['destinationCurrency'] === 'INR';
         });
     }
 }

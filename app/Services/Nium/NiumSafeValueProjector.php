@@ -235,6 +235,76 @@ final class NiumSafeValueProjector
                 : null;
     }
 
+    public function requestEvidenceId(mixed $value): ?string
+    {
+        $value = $this->sanitizedString($value, 96);
+
+        return $value !== null && preg_match('/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/', $value) === 1
+            ? $value
+            : null;
+    }
+
+    public function providerIdentifier(mixed $value): ?string
+    {
+        $value = $this->sanitizedString($value, 255);
+
+        return $value !== null && preg_match('/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/', $value) === 1
+            ? $value
+            : null;
+    }
+
+    public function clientHashId(mixed $value): ?string
+    {
+        if (! is_scalar($value)) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+        $auth = (array) config('services.nium.auth', []);
+        $credentials = array_filter([
+            $auth['header_value'] ?? null,
+            $auth['token'] ?? null,
+            $auth['client_secret'] ?? null,
+            config('services.nium.x_api_key'),
+        ], 'is_string');
+
+        return $value !== ''
+            && strlen($value) <= 255
+            && preg_match('/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/', $value) === 1
+            && ! in_array($value, $credentials, true)
+                ? $value
+                : null;
+    }
+
+    public function providerMessage(mixed $value): ?string
+    {
+        $value = $this->sanitizedString($value, 240);
+
+        if ($value === null
+            || str_contains($value, '[REDACTED]')
+            || preg_match('/[\r\n\t]/', $value) === 1
+            || preg_match('/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i', $value) === 1
+            || preg_match('/\+?\d[\d ()-]{6,}\d/', $value) === 1
+            || preg_match('/\b(validation|request|provider|service|unavailable|unauthorized|forbidden|rate|limit|failed|error|invalid|timeout|duplicate|authentication|entitlement)\b/i', $value) !== 1) {
+            return null;
+        }
+
+        return $value;
+    }
+
+    public function contentType(mixed $value): ?string
+    {
+        if (! is_scalar($value)) {
+            return null;
+        }
+
+        $value = strtolower(trim(explode(';', (string) $value, 2)[0]));
+
+        return preg_match('#^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,63}$#', $value) === 1
+            ? $value
+            : null;
+    }
+
     public function fingerprint(mixed $value): ?string
     {
         if (! is_scalar($value)) {
@@ -322,6 +392,10 @@ final class NiumSafeValueProjector
         $errorProjection = $this->errorProjection($errorValue);
         $customerId = $response['customerHashId'] ?? null;
         $walletId = $response['walletHashId'] ?? ($response['wallets'][0]['walletHashId'] ?? null);
+        $transferId = $response['systemReferenceNumber'] ?? $response['system_reference_number'] ?? null;
+        $paymentId = $response['paymentId'] ?? $response['payment_id'] ?? $response['uniquePaymentId'] ?? null;
+        $successful = ($this->safeHttpStatus($httpStatus) ?? 0) >= 200
+            && ($this->safeHttpStatus($httpStatus) ?? 0) < 300;
 
         return $this->finalizeFlatProjection(array_filter([
             'http_status' => $this->safeHttpStatus($httpStatus),
@@ -331,8 +405,13 @@ final class NiumSafeValueProjector
             'error_field_fingerprint' => $this->fingerprint($error['field'] ?? null),
             'error_path_fingerprint' => $this->fingerprint($error['path'] ?? null),
             'error_parameter_fingerprint' => $this->fingerprint($error['parameter'] ?? null),
+            'message' => $this->providerMessage($error['message'] ?? $error['description'] ?? $response['message'] ?? null),
             'customer_id_present' => $this->isPresent($customerId),
             'wallet_id_present' => $this->isPresent($walletId),
+            'customer_hash_id' => $successful ? $this->providerIdentifier($customerId) : null,
+            'wallet_hash_id' => $successful ? $this->providerIdentifier($walletId) : null,
+            'system_reference_number' => $successful ? $this->providerIdentifier($transferId) : null,
+            'payment_id' => $successful ? $this->providerIdentifier($paymentId) : null,
             'customer_id_fingerprint' => $this->fingerprint($customerId),
             'wallet_id_fingerprint' => $this->fingerprint($walletId),
         ], static fn ($value): bool => $value !== null), [
@@ -345,8 +424,13 @@ final class NiumSafeValueProjector
             'error_field_fingerprint' => 'fingerprint',
             'error_path_fingerprint' => 'fingerprint',
             'error_parameter_fingerprint' => 'fingerprint',
+            'message' => 'string',
             'customer_id_present' => 'bool',
             'wallet_id_present' => 'bool',
+            'customer_hash_id' => 'string',
+            'wallet_hash_id' => 'string',
+            'system_reference_number' => 'string',
+            'payment_id' => 'string',
             'customer_id_fingerprint' => 'fingerprint',
             'wallet_id_fingerprint' => 'fingerprint',
         ]);

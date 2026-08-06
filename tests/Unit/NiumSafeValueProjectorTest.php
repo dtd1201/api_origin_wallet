@@ -70,6 +70,8 @@ class NiumSafeValueProjectorTest extends TestCase
         $this->assertSame(16, strlen($response['wallet_id_fingerprint']));
         $this->assertSame(['x-request-id' => $requestId], $projector->apiRequestHeaders($requestId));
         $this->assertSame([], $projector->apiRequestHeaders('not-a-uuid'));
+        $this->assertSame('wallet-conflict-001', $projector->requestEvidenceId('wallet-conflict-001'));
+        $this->assertNull($projector->requestEvidenceId('unsafe request id with spaces'));
         $this->assertSame($request, app(SensitiveDataSanitizer::class)->sanitize($request));
         $this->assertSame($response, app(SensitiveDataSanitizer::class)->sanitize($response));
 

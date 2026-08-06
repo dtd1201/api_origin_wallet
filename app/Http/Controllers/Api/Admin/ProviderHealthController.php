@@ -53,7 +53,7 @@ class ProviderHealthController extends Controller
         } catch (Throwable $exception) {
             return response()->json([
                 'message' => "{$provider->name} health check failed.",
-                'error' => $exception->getMessage(),
+                'error' => 'provider_health_check_failed',
             ], 422);
         }
 

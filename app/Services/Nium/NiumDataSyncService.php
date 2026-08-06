@@ -116,7 +116,11 @@ class NiumDataSyncService implements DataSyncProvider
                         'ledger_balance' => $ledger,
                         'reserved_balance' => $reserved ?? ($existing?->reserved_balance ?? 0),
                         'as_of' => $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']) ?? now(),
-                        'raw_data' => $item,
+                        'raw_data' => array_filter([
+                            'wallet_id' => $externalAccountId,
+                            'currency' => $currency,
+                            'provider_status' => $this->value($item, ['status']),
+                        ], static fn ($value) => $value !== null && $value !== ''),
                     ],
                 );
 
@@ -135,30 +139,39 @@ class NiumDataSyncService implements DataSyncProvider
             throw new RuntimeException('NIUM_WALLET_TRANSACTIONS_ENDPOINT is not configured.');
         }
 
-        $response = $this->niumService->get(
-            path: $this->niumService->path($endpoint, [
-                'client' => $this->niumService->clientId(),
-                'customer' => $this->niumService->customerId($user),
-                'wallet' => $this->niumService->walletId($user),
-            ]),
-            query: [
-                'startDate' => now()->subDays((int) config('services.nium.transaction_sync_days', 30))->toDateString(),
-                'endDate' => now()->toDateString(),
-                'page' => 0,
-                'size' => 20,
-                'order' => 'DESC',
-            ],
-            user: $user,
-        );
+        $account = $user->providerAccounts()->where('provider_id', $provider->id)->firstOrFail();
+        $startAt = $account->transactions_last_synced_at?->copy()->subDay()
+            ?? now()->subDays((int) config('services.nium.transaction_sync_days', 30));
+        $pageSize = min(max((int) config('services.nium.transaction_sync_page_size', 100), 1), 200);
+        $maxPages = min(max((int) config('services.nium.transaction_sync_max_pages', 20), 1), 100);
+        $items = [];
 
-        $data = $this->successfulJson($response, 'Nium transaction sync failed.');
-        $items = $this->items($data, [
-            'transactions',
-            'data.transactions',
-            'wallet.transactions',
-            'content',
-            'data',
-        ]);
+        for ($page = 0; $page < $maxPages; $page++) {
+            $response = $this->niumService->get(
+                path: $this->niumService->path($endpoint, [
+                    'client' => $this->niumService->clientId(),
+                    'customer' => $this->niumService->customerId($user),
+                    'wallet' => $this->niumService->walletId($user),
+                ]),
+                query: [
+                    'startDate' => $startAt->toDateString(),
+                    'endDate' => now()->toDateString(),
+                    'page' => $page,
+                    'size' => $pageSize,
+                    'order' => 'DESC',
+                ],
+                user: $user,
+            );
+
+            $data = $this->successfulJson($response, 'Nium transaction sync failed.');
+            $pageItems = $this->items($data, ['transactions', 'data.transactions', 'wallet.transactions', 'content', 'data']);
+            $items = [...$items, ...$pageItems];
+
+            $totalPages = (int) (Arr::get($data, 'totalPages') ?? Arr::get($data, 'data.totalPages') ?? 0);
+            if ($pageItems === [] || count($pageItems) < $pageSize || ($totalPages > 0 && $page + 1 >= $totalPages)) {
+                break;
+            }
+        }
         $count = 0;
 
         DB::transaction(function () use ($items, $provider, $user, &$count): void {
@@ -206,13 +219,20 @@ class NiumDataSyncService implements DataSyncProvider
                         'status' => $this->normalizeTransactionStatus($this->value($item, ['status'])),
                         'booked_at' => $this->value($item, ['dateTime', 'createdAt', 'transactionDate']) ?? now(),
                         'value_date' => $this->value($item, ['valueDate', 'date']) ?? now(),
-                        'raw_data' => $item,
+                        'raw_data' => array_filter([
+                            'external_transaction_id' => (string) $externalTransactionId,
+                            'provider_request_id' => $this->value($item, ['requestId', 'request_id']),
+                            'provider_status' => $this->value($item, ['status']),
+                            'system_reference_number' => $this->value($item, ['systemReferenceNumber', 'system_reference_number']),
+                        ], static fn ($value) => $value !== null && $value !== ''),
                     ],
                 );
 
                 $count++;
             }
         });
+
+        $account->update(['transactions_last_synced_at' => now()]);
 
         return ['synced_transactions' => $count];
     }

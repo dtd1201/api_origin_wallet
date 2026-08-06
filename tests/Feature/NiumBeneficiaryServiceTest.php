@@ -7,6 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Nium\NiumBeneficiaryService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -20,6 +21,17 @@ class NiumBeneficiaryServiceTest extends TestCase
 
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
+        config()->set('services.nium.account_verification_enabled', true);
+        config()->set('services.nium.beneficiary_update_enabled', true);
+        config()->set('services.nium.beneficiary_delete_enabled', true);
+        config()->set('services.nium.supported_corridors', [[
+            'destinationCountry' => 'IN',
+            'destinationCurrency' => 'INR',
+            'payoutMethod' => 'LOCAL',
+            'beneficiaryAccountType' => 'INDIVIDUAL',
+            'customerType' => 'INDIVIDUAL',
+            'routingCodeType' => ['IFSC', 'SWIFT'],
+        ]]);
     }
 
     public function test_create_beneficiary_maps_model_to_nium_payload(): void
@@ -53,6 +65,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             'currency' => 'INR',
             'bank_name' => 'HDFC',
             'bank_code' => 'HDFC0001234',
+            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC']],
             'account_number' => '1234567890',
             'swift_bic' => 'HDFCINBB',
             'address_line1' => '1 Main St',
@@ -134,6 +147,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             'status' => 'pending',
             'raw_data' => [
                 'nium' => [
+                    'bankCodeType' => 'IFSC',
                     'verify_before_create' => true,
                     'account_verification' => [
                         'routingInfo' => [
@@ -163,7 +177,8 @@ class NiumBeneficiaryServiceTest extends TestCase
         $updated = app(NiumBeneficiaryService::class)->createBeneficiary($provider, $beneficiary->fresh('user'));
 
         $this->assertSame('bnf_hash_456', $updated->external_beneficiary_id);
-        $this->assertArrayHasKey('verification_response', $updated->raw_data);
+        $this->assertArrayNotHasKey('verification_response', $updated->raw_data ?? []);
+        $this->assertArrayNotHasKey('verification_request', $updated->raw_data ?? []);
 
         Http::assertSent(function ($request): bool {
             $data = $request->data();
@@ -172,6 +187,97 @@ class NiumBeneficiaryServiceTest extends TestCase
                 && $request->hasHeader('x-api-key', 'nium-api-key')
                 && $data['payoutMethod'] === 'LOCAL'
                 && $data['routingInfo'][0]['type'] === 'IFSC';
+        });
+    }
+
+    public function test_supported_corridor_v3_is_queried_with_exact_dimensions_and_cached(): void
+    {
+        Cache::flush();
+        config()->set('services.nium.supported_corridors', []);
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');
+        config()->set('services.nium.client_id', 'client_hash_123');
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => 'nium-api-key',
+        ]);
+
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+        $user = User::factory()->create();
+        $user->profile()->create(['user_type' => 'individual']);
+        $user->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'external_customer_id' => 'cust_hash_123',
+            'external_account_id' => 'wallet_hash_123',
+            'status' => 'active',
+            'provider_status' => 'clear',
+            'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(),
+            'provider_ids_verified_at' => now(),
+        ]);
+
+        $beneficiaries = collect(['Jane One', 'Jane Two'])->map(fn (string $name): Beneficiary => Beneficiary::query()->create([
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'beneficiary_type' => 'personal',
+            'full_name' => $name,
+            'country_code' => 'IN',
+            'currency' => 'INR',
+            'account_number' => '1234567890',
+            'bank_code' => 'HDFC0001234',
+            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC']],
+            'status' => 'pending',
+        ]));
+
+        $corridorRequests = 0;
+        Http::fake(function ($request) use (&$corridorRequests) {
+            if (str_contains($request->url(), '/api/v3/client/client_hash_123/supportedCorridors')) {
+                $corridorRequests++;
+
+                return Http::response([
+                    'content' => [[
+                        'destinationCountry' => 'IN',
+                        'destinationCurrency' => 'INR',
+                        'payoutMethod' => 'LOCAL',
+                        'beneficiaryAccountType' => 'INDIVIDUAL',
+                        'customerType' => 'INDIVIDUAL',
+                        'routingCodeType' => 'IFSC',
+                        'accountVerification' => 'SUPPORTED',
+                        'mandatoryDataRequirement' => ['Beneficiary Account Number', 'Routing Code Type 1 - IFSC'],
+                    ]],
+                    'totalElements' => 1,
+                    'totalPages' => 1,
+                ]);
+            }
+
+            return Http::response([
+                'beneficiaryHashId' => 'bnf_'.substr(md5($request->data()['beneficiaryName']), 0, 8),
+                'status' => 'ACTIVE',
+            ]);
+        });
+
+        foreach ($beneficiaries as $beneficiary) {
+            app(NiumBeneficiaryService::class)->createBeneficiary($provider, $beneficiary->fresh('user'));
+        }
+
+        $this->assertSame(1, $corridorRequests);
+        Http::assertSent(function ($request): bool {
+            if (! str_contains($request->url(), '/api/v3/client/client_hash_123/supportedCorridors')) {
+                return false;
+            }
+
+            return $request['destinationCountry'] === 'IN'
+                && $request['destinationCurrency'] === 'INR'
+                && $request['payoutMethod'] === 'LOCAL'
+                && $request['beneficiaryAccountType'] === 'INDIVIDUAL'
+                && $request['customerType'] === 'INDIVIDUAL'
+                && (int) $request['page'] === 0
+                && (int) $request['size'] === 500
+                && $request['order'] === 'ASC';
         });
     }
 

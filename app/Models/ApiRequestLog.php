@@ -16,13 +16,21 @@ class ApiRequestLog extends Model
         'provider_id',
         'user_id',
         'related_transfer_id',
+        'operation',
+        'client_hash_id',
+        'external_reference',
         'request_method',
         'request_url',
+        'endpoint_path',
         'request_headers',
         'request_body',
         'response_status',
         'response_headers',
         'response_body',
+        'request_started_at',
+        'request_finished_at',
+        'content_type',
+        'transport_outcome',
         'duration_ms',
         'is_success',
     ];
@@ -36,6 +44,8 @@ class ApiRequestLog extends Model
             'response_body' => 'array',
             'is_success' => 'boolean',
             'created_at' => 'datetime',
+            'request_started_at' => 'datetime',
+            'request_finished_at' => 'datetime',
         ];
     }
 
