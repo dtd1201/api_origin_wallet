@@ -51,6 +51,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
     private const MULTI_DOCUMENT_FILE_ID = '88888888-8888-4888-8888-888888888888';
 
+    private const DEVICE_SESSION_ID = '99999999-9999-4999-8999-999999999999';
+
     private const BUSINESS_DOCUMENT_BYTES = 'synthetic-business-registration-bytes';
 
     private const APPLICANT_DOCUMENT_BYTES = 'synthetic-applicant-passport-bytes';
@@ -1324,7 +1326,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
                     'ipCountryCode' => 'SG',
                     'deviceInfo' => 'Synthetic test browser',
                     'ipAddress' => '192.0.2.10',
-                    'sessionId' => 'synthetic-session-001',
+                    'sessionId' => self::DEVICE_SESSION_ID,
                 ]
                 && $payload['documents'][0]['fileIds'] === [self::BUSINESS_FILE_ID]
                 && $payload['applicant']['documents'][0]['fileIds'] === [self::APPLICANT_FILE_ID]
@@ -2167,7 +2169,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             '1234567890',
             'DBSSSGSG',
             '192.0.2.10',
-            'synthetic-session-001',
+            self::DEVICE_SESSION_ID,
             '1 Corporate Avenue',
             '2 Applicant Street',
             '3 Owner Road',
@@ -2578,6 +2580,39 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'deviceDetails.ipCountryCode',
             'SGP',
         );
+    }
+
+    public function test_sg_corporate_device_details_valid_session_uuid_is_preserved(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        Http::fake();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build(
+            $user,
+            (string) Str::uuid(),
+        );
+
+        $this->assertSame(self::DEVICE_SESSION_ID, $payload['deviceDetails']['sessionId']);
+        Http::assertNothingSent();
+    }
+
+    public function test_sg_corporate_device_details_non_uuid_session_fails_before_http(): void
+    {
+        $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+            'deviceDetails.sessionId',
+            'synthetic-v3-eadfc7651aa42c6c',
+        );
+    }
+
+    public function test_sg_corporate_device_details_empty_session_values_fail_before_http(): void
+    {
+        foreach ([null, '', '   '] as $value) {
+            $this->assertInvalidSgCorporateMetadataValueFailsBeforeHttp(
+                'deviceDetails.sessionId',
+                $value,
+            );
+        }
     }
 
     public function test_invalid_sg_corporate_stakeholder_role_fails_before_http(): void
@@ -3190,6 +3225,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
         Http::assertNothingSent();
         $this->assertDatabaseCount('user_provider_accounts', 0);
+        $this->assertDatabaseCount('api_request_logs', 0);
     }
 
     private function assertMissingSgCorporateMetadataPathFailsBeforeHttp(string $path): void
@@ -3240,6 +3276,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
         Http::assertNothingSent();
         $this->assertDatabaseCount('user_provider_accounts', 0);
+        $this->assertDatabaseCount('api_request_logs', 0);
     }
 
     private function assertMissingSgCorporateAddressStateFailsBeforeHttp(
@@ -3624,7 +3661,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
                         'ipCountryCode' => 'SG',
                         'deviceInfo' => 'Synthetic test browser',
                         'ipAddress' => '192.0.2.10',
-                        'sessionId' => 'synthetic-session-001',
+                        'sessionId' => self::DEVICE_SESSION_ID,
                     ],
                 ],
             ],

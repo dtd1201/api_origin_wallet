@@ -863,6 +863,13 @@ class NiumCustomerPayloadFactory
                 .'nium_v5_fields.deviceDetails.ipAddress as a valid IP address.',
             );
         }
+
+        if (! Str::isUuid($details['sessionId'])) {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                .'nium_v5_fields.deviceDetails.sessionId as a valid UUID.',
+            );
+        }
     }
 
     private function positions(array $positions, bool $normalizeNiumPositions): array
