@@ -1678,6 +1678,13 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $profile->documents()
             ->where('type', 'business_registration')
             ->update(['issuing_country_code' => 'HK']);
+        $applicant = $profile->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
+        $stakeholder = $profile->relatedPersons()->where('relationship_type', 'beneficial_owner')->firstOrFail();
+        $historical = collect([
+            $profile->documents()->create(['type' => 'business_registration', 'status' => 'superseded', 'file_url' => 'private://historical/company']),
+            $applicant->documents()->create(['kyc_profile_id' => $profile->id, 'type' => 'passport_front', 'status' => 'superseded', 'file_url' => 'private://historical/applicant']),
+            $stakeholder->documents()->create(['kyc_profile_id' => $profile->id, 'type' => 'passport_front', 'status' => 'superseded', 'file_url' => 'private://historical/stakeholder']),
+        ]);
         $user->unsetRelation('kycProfile');
         Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
 
@@ -1705,6 +1712,9 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame(3, $fileIds->count());
         $this->assertSame(3, $fileIds->unique()->count());
         $this->assertTrue($fileIds->every(fn (string $fileId): bool => Str::isUuid($fileId)));
+        $this->assertTrue($historical->every(fn (KycDocument $document): bool => $document->fresh()->status === 'superseded'));
+        $this->assertSame('SG', $payload['applicant']['nationality']);
+        $this->assertSame('SG', $payload['stakeholders']['individual'][0]['nationality']);
         Http::assertNothingSent();
     }
 

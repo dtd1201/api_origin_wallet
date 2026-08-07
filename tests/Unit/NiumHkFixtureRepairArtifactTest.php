@@ -49,4 +49,30 @@ class NiumHkFixtureRepairArtifactTest extends TestCase
         $this->assertStringNotContainsString('Beneficiary', $runner);
         $this->assertStringNotContainsString('Transfer', $runner);
     }
+
+    public function test_current_hk_customer_transition_replaces_the_stale_repair_contract(): void
+    {
+        $stale = file_get_contents(base_path('scripts/nium/fixture_v4_hk_repair_proposed.sql'));
+        $transition = file_get_contents(base_path('scripts/nium/fixture_v4_hk_customer_transition_proposed.sql'));
+        $gate = file_get_contents(base_path('scripts/nium/gate_fixture_v4_hk_customer_payload.php'));
+
+        $this->assertIsString($stale);
+        $this->assertIsString($transition);
+        $this->assertIsString($gate);
+        $this->assertStringContainsString('locked value 56', $stale);
+        $this->assertStringContainsString('request_count_before', $transition);
+        $this->assertStringContainsString('<> 65', $transition);
+        $this->assertStringContainsString("SET status = 'superseded'", $transition);
+        $this->assertStringNotContainsString('DELETE FROM kyc_documents', $transition);
+        $this->assertStringContainsString('id IN (18, 19, 20)', $transition);
+        $this->assertStringContainsString('id IN (21, 22, 23)', $transition);
+        $this->assertStringContainsString('account_4_before', $transition);
+        $this->assertStringContainsString('account_7_before', $transition);
+        $this->assertStringContainsString("ip.code = 'nium'", $transition);
+        $this->assertStringContainsString("'HKD'", $transition);
+        $this->assertStringContainsString('NiumCustomerPayloadFactory', $gate);
+        $this->assertStringContainsString('Http::preventStrayRequests()', $gate);
+        $this->assertStringContainsString('$selected !== [21, 22, 23]', $gate);
+        $this->assertStringNotContainsString('NiumCustomerOnboardingService', $gate);
+    }
 }
