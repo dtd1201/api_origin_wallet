@@ -9,6 +9,30 @@ final class NiumSafeValueProjector
 {
     public const UNKNOWN = 'unknown';
 
+    private const CLIENT_CAPABILITY_ARRAY_LIMIT = 8;
+
+    private const CLIENT_CAPABILITY_DEPTH_LIMIT = 6;
+
+    private const CLIENT_CAPABILITY_ENTRY_LIMIT = 64;
+
+    private const CLIENT_CAPABILITY_KEYS = [
+        'region' => 'region',
+        'regions' => 'regions',
+        'country' => 'country',
+        'countries' => 'countries',
+        'market' => 'market',
+        'markets' => 'markets',
+        'program' => 'program',
+        'programs' => 'programs',
+        'status' => 'status',
+        'clientstatus' => 'clientStatus',
+        'kyctype' => 'kycType',
+        'kyctypes' => 'kycTypes',
+        'supportedkyctypes' => 'supportedKycTypes',
+        'currency' => 'currency',
+        'currencies' => 'currencies',
+    ];
+
     private const PROVIDER_STATUSES = [
         'pending',
         'clear',
@@ -436,6 +460,21 @@ final class NiumSafeValueProjector
         ]);
     }
 
+    /**
+     * Flatten only explicitly allowlisted client capability values for local diagnostics.
+     */
+    public function clientCapabilityProjection(array $response): array
+    {
+        $projection = [];
+        $visited = 0;
+        $this->collectClientCapabilities($response, [], 0, $visited, $projection);
+        ksort($projection);
+
+        $sanitized = $this->sensitiveDataSanitizer->sanitize($projection);
+
+        return is_array($sanitized) && $sanitized === $projection ? $projection : [];
+    }
+
     public function accountMetadata(
         mixed $providerStatus,
         mixed $providerSubStatus,
@@ -533,6 +572,129 @@ final class NiumSafeValueProjector
         return $sanitized !== null && in_array($sanitized, $allowed, true)
             ? $sanitized
             : self::UNKNOWN;
+    }
+
+    private function collectClientCapabilities(
+        mixed $value,
+        array $path,
+        int $depth,
+        int &$visited,
+        array &$projection,
+    ): void {
+        if (
+            ! is_array($value)
+            || $depth > self::CLIENT_CAPABILITY_DEPTH_LIMIT
+            || $visited >= self::CLIENT_CAPABILITY_ENTRY_LIMIT
+        ) {
+            return;
+        }
+
+        foreach (array_slice($value, 0, self::CLIENT_CAPABILITY_ENTRY_LIMIT, true) as $key => $nestedValue) {
+            if ($visited >= self::CLIENT_CAPABILITY_ENTRY_LIMIT) {
+                return;
+            }
+
+            $visited++;
+            $nextPath = $path;
+
+            if (is_string($key)) {
+                $normalizedKey = strtolower((string) preg_replace('/[^a-z0-9]/i', '', $key));
+                $canonicalKey = self::CLIENT_CAPABILITY_KEYS[$normalizedKey] ?? null;
+
+                if ($canonicalKey !== null) {
+                    $nextPath[] = $canonicalKey;
+                    $safeValue = $this->clientCapabilityValue($nestedValue);
+
+                    if ($safeValue !== null) {
+                        $projection[implode('.', $nextPath)] = $safeValue;
+
+                        continue;
+                    }
+                } elseif ($this->isBlockedClientCapabilityBranch($normalizedKey)) {
+                    continue;
+                }
+            } elseif ($path !== []) {
+                $nextPath[] = (string) $key;
+            }
+
+            $this->collectClientCapabilities($nestedValue, $nextPath, $depth + 1, $visited, $projection);
+        }
+    }
+
+    private function clientCapabilityValue(mixed $value): string|int|bool|array|null
+    {
+        if (is_string($value)) {
+            return $this->clientCapabilityString($value);
+        }
+
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value) && abs($value) <= 1_000_000) {
+            return $value;
+        }
+
+        if (! is_array($value) || ! array_is_list($value) || count($value) > self::CLIENT_CAPABILITY_ARRAY_LIMIT) {
+            return null;
+        }
+
+        $safe = [];
+
+        foreach ($value as $item) {
+            if (is_string($item)) {
+                $item = $this->clientCapabilityString($item);
+            } elseif (! is_bool($item) && (! is_int($item) || abs($item) > 1_000_000)) {
+                return null;
+            }
+
+            if ($item === null) {
+                return null;
+            }
+
+            $safe[] = $item;
+        }
+
+        return $safe;
+    }
+
+    private function clientCapabilityString(string $value): ?string
+    {
+        $value = trim($value);
+        $sanitized = $this->sanitizedString($value, 96);
+
+        if (
+            $sanitized === null
+            || preg_match('/^[A-Za-z][A-Za-z0-9 _.-]{0,95}$/', $sanitized) !== 1
+            || preg_match('/^[A-Za-z0-9]{32,}$/', $sanitized) === 1
+            || preg_match('/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i', $sanitized) === 1
+        ) {
+            return null;
+        }
+
+        return $sanitized;
+    }
+
+    private function isBlockedClientCapabilityBranch(string $key): bool
+    {
+        return $key === ''
+            || str_contains($key, 'hashid')
+            || str_contains($key, 'externalid')
+            || str_contains($key, 'paymentid')
+            || str_contains($key, 'reference')
+            || str_contains($key, 'authorization')
+            || str_contains($key, 'apikey')
+            || str_contains($key, 'secret')
+            || str_contains($key, 'token')
+            || str_contains($key, 'email')
+            || str_contains($key, 'phone')
+            || str_contains($key, 'mobile')
+            || str_contains($key, 'name')
+            || str_contains($key, 'address')
+            || str_contains($key, 'bank')
+            || str_contains($key, 'routing')
+            || str_contains($key, 'document')
+            || str_contains($key, 'fileid');
     }
 
     private function knownIntegrationStatus(mixed $value): ?string

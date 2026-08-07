@@ -7,6 +7,7 @@ use App\Services\BankRates\BankRateSyncService;
 use App\Services\Nium\NiumDataSyncService;
 use App\Services\Nium\NiumFileService;
 use App\Services\Nium\NiumQuoteService;
+use App\Services\Nium\NiumSafeValueProjector;
 use App\Services\Nium\NiumService;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Foundation\Inspiring;
@@ -22,6 +23,7 @@ Artisan::command(
     'nium:smoke-test
     {userId? : User ID used for customer, wallet, sync, or quote checks}
     {--live : Perform the authenticated Get Client request}
+    {--client-capabilities : Print only the safe Get Client capability projection}
     {--compliance-callback : Also validate the separate transaction compliance callback configuration}
     {--sync : Run account, balance, and transaction sync for the user}
     {--quote : Create a test quote for the user}
@@ -119,6 +121,18 @@ Artisan::command(
             return Command::FAILURE;
         }
 
+        if ($this->option('client-capabilities') && ! $this->option('live')) {
+            $this->error('--client-capabilities requires the explicit --live flag.');
+
+            return Command::FAILURE;
+        }
+
+        if ($this->option('client-capabilities') && ($this->option('sync') || $this->option('quote'))) {
+            $this->error('--client-capabilities cannot be combined with --sync or --quote.');
+
+            return Command::FAILURE;
+        }
+
         $provider = IntegrationProvider::query()->where('code', 'nium')->first();
 
         if ($provider === null) {
@@ -190,15 +204,31 @@ Artisan::command(
 
             if (! $response->successful()) {
                 $this->error('Nium connectivity check failed.');
-                $this->line(json_encode(
-                    app(SensitiveDataSanitizer::class)->sanitize($response->json() ?? ['raw' => $response->body()]),
-                    JSON_PRETTY_PRINT
-                ));
+
+                if (! $this->option('client-capabilities')) {
+                    $this->line(json_encode(
+                        app(SensitiveDataSanitizer::class)->sanitize($response->json() ?? ['raw' => $response->body()]),
+                        JSON_PRETTY_PRINT
+                    ));
+                }
 
                 return Command::FAILURE;
             }
 
             $this->info('Connectivity OK.');
+
+            if ($this->option('client-capabilities')) {
+                $body = $response->json();
+                $projection = app(NiumSafeValueProjector::class)->clientCapabilityProjection(
+                    is_array($body) ? $body : [],
+                );
+
+                $this->line('Client capability projection:');
+                $this->line(json_encode($projection, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
+                $this->info('Nium client capability diagnostic completed.');
+
+                return Command::SUCCESS;
+            }
 
             if ($this->option('sync')) {
                 $syncService = app(NiumDataSyncService::class);

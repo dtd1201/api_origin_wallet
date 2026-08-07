@@ -66,6 +66,18 @@ class NiumSmokeTestCommandTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_client_capabilities_requires_live_before_http(): void
+    {
+        $this->configurePhaseOne();
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test', ['--client-capabilities' => true]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('--client-capabilities requires', Artisan::output());
+        Http::assertNothingSent();
+    }
+
     public function test_compliance_callback_validation_remains_available_as_a_separate_option(): void
     {
         $this->configurePhaseOne();
@@ -131,6 +143,80 @@ class NiumSmokeTestCommandTest extends TestCase
 
         Http::assertSent(fn ($request) => $request->url() === 'https://gateway.sandbox.nium.test/api/v1/client/sandbox-client-id'
             && $request->hasHeader('x-api-key', 'sandbox-api-key-secret'));
+    }
+
+    public function test_live_client_capabilities_prints_only_safe_projection_from_exactly_one_get(): void
+    {
+        $this->configurePhaseOne();
+        $rawSecret = 'raw-provider-token-value';
+        $email = 'person@example.test';
+
+        Http::fake([
+            'https://gateway.sandbox.nium.test/api/v1/client/sandbox-client-id' => Http::response([
+                'region' => 'SG',
+                'country' => 'Singapore',
+                'program' => 'CORPORATE',
+                'status' => 'ACTIVE',
+                'nested' => ['supportedKycTypes' => ['FULL']],
+                'clientHashId' => 'sandbox-client-id',
+                'token' => $rawSecret,
+                'email' => $email,
+                'unknown' => ['raw' => 'complete-object'],
+            ]),
+        ]);
+
+        $exitCode = Artisan::call('nium:smoke-test', [
+            '--live' => true,
+            '--client-capabilities' => true,
+        ]);
+        $output = Artisan::output();
+
+        $this->assertSame(0, $exitCode);
+        $this->assertStringContainsString('Connectivity check status: 200', $output);
+        $this->assertStringContainsString('Client capability projection:', $output);
+        $this->assertStringContainsString('"region": "SG"', $output);
+        $this->assertStringContainsString('"supportedKycTypes"', $output);
+        $this->assertStringNotContainsString('sandbox-client-id', $output);
+        $this->assertStringNotContainsString($rawSecret, $output);
+        $this->assertStringNotContainsString($email, $output);
+        $this->assertStringNotContainsString('complete-object', $output);
+
+        $requestLog = ApiRequestLog::query()->sole();
+        $serializedResponseLog = json_encode($requestLog->response_body, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('Singapore', $serializedResponseLog);
+        $this->assertStringNotContainsString('CORPORATE', $serializedResponseLog);
+        $this->assertStringNotContainsString('supportedKycTypes', $serializedResponseLog);
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+            && $request->url() === 'https://gateway.sandbox.nium.test/api/v1/client/sandbox-client-id');
+        Http::assertNotSent(fn ($request): bool => in_array($request->method(), ['POST', 'PUT', 'PATCH', 'DELETE'], true));
+    }
+
+    public function test_live_client_capability_failure_never_prints_raw_response(): void
+    {
+        $this->configurePhaseOne();
+        $rawResponseValue = 'raw-provider-failure-value';
+        Http::fake([
+            'https://gateway.sandbox.nium.test/api/v1/client/sandbox-client-id' => Http::response([
+                'message' => $rawResponseValue,
+                'token' => 'raw-provider-failure-token',
+            ], 403),
+        ]);
+
+        $exitCode = Artisan::call('nium:smoke-test', [
+            '--live' => true,
+            '--client-capabilities' => true,
+        ]);
+        $output = Artisan::output();
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('Connectivity check status: 403', $output);
+        $this->assertStringContainsString('Nium connectivity check failed.', $output);
+        $this->assertStringNotContainsString($rawResponseValue, $output);
+        $this->assertStringNotContainsString('raw-provider-failure-token', $output);
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request): bool => $request->method() === 'GET');
     }
 
     private function configurePhaseOne(): void

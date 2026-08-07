@@ -157,4 +157,51 @@ class NiumSafeValueProjectorTest extends TestCase
             $this->assertNull($projector->identifierConflictField($field));
         }
     }
+
+    public function test_client_capability_projection_is_recursive_allowlisted_and_bounded(): void
+    {
+        config()->set('services.nium.auth.header_value', 'configured-capability-secret');
+        $projection = app(NiumSafeValueProjector::class)->clientCapabilityProjection([
+            'region' => 'SG',
+            'country' => 'Singapore',
+            'clientStatus' => 'ACTIVE',
+            'configuration' => [
+                'programs' => [
+                    ['program' => 'CORPORATE', 'status' => 'ENABLED'],
+                    ['program' => 'INDIVIDUAL', 'region' => 'UK'],
+                ],
+                'supportedKycTypes' => ['FULL', 'MINIMUM'],
+            ],
+            'currencies' => ['SGD', 'USD', 'EUR'],
+            'clientHashId' => 'sensitive-client-id',
+            'customerHashId' => 'sensitive-customer-id',
+            'email' => 'person@example.test',
+            'address' => ['country' => 'must-not-survive'],
+            'bankAccountDetails' => ['currency' => 'must-not-survive'],
+            'token' => 'configured-capability-secret',
+            'unknown' => 'arbitrary-value',
+            'market' => str_repeat('x', 97),
+            'markets' => range(1, 9),
+            'kycTypes' => ['FULL', ['unsafe' => true]],
+            'program' => '12345678901234567890123456789012',
+        ]);
+
+        $this->assertSame([
+            'clientStatus' => 'ACTIVE',
+            'country' => 'Singapore',
+            'currencies' => ['SGD', 'USD', 'EUR'],
+            'programs.0.program' => 'CORPORATE',
+            'programs.0.status' => 'ENABLED',
+            'programs.1.program' => 'INDIVIDUAL',
+            'programs.1.region' => 'UK',
+            'region' => 'SG',
+            'supportedKycTypes' => ['FULL', 'MINIMUM'],
+        ], $projection);
+
+        $serialized = json_encode($projection, JSON_THROW_ON_ERROR);
+
+        foreach (['sensitive-', 'person@example.test', 'must-not-survive', 'configured-capability-secret', 'arbitrary-value'] as $unsafe) {
+            $this->assertStringNotContainsString($unsafe, $serialized);
+        }
+    }
 }
