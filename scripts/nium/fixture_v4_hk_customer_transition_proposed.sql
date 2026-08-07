@@ -4,9 +4,57 @@
 \set expected_fixture_marker '__REPLACE_WITH_EXACT_FIXTURE_V4_MARKER__'
 \set expected_historical_snapshot_b64 '__REPLACE_WITH_DOCS_18_19_20_JSON_BASE64__'
 
+DO $$
+DECLARE
+    missing_contract text;
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM (VALUES
+            ('users'), ('user_profiles'), ('kyc_profiles'), ('kyc_related_persons'),
+            ('kyc_documents'), ('integration_providers'), ('user_provider_accounts'), ('api_request_logs')
+        ) AS required_tables(table_name)
+        WHERE to_regclass(required_tables.table_name) IS NULL
+    ) THEN
+        RAISE EXCEPTION 'Required HK transition table is missing.';
+    END IF;
+
+    SELECT string_agg(required.table_name || '.' || required.column_name, ', ' ORDER BY required.table_name, required.column_name)
+    INTO missing_contract
+    FROM (VALUES
+        ('users', 'id'),
+        ('user_profiles', 'user_id'), ('user_profiles', 'country_code'), ('user_profiles', 'updated_at'),
+        ('kyc_profiles', 'id'), ('kyc_profiles', 'user_id'), ('kyc_profiles', 'applicant_type'),
+        ('kyc_profiles', 'registered_country_code'), ('kyc_profiles', 'country_code'),
+        ('kyc_profiles', 'address_line1'), ('kyc_profiles', 'address_line2'),
+        ('kyc_profiles', 'city'), ('kyc_profiles', 'state'), ('kyc_profiles', 'postal_code'),
+        ('kyc_profiles', 'metadata'), ('kyc_profiles', 'updated_at'),
+        ('kyc_related_persons', 'id'), ('kyc_related_persons', 'kyc_profile_id'), ('kyc_related_persons', 'relationship_type'),
+        ('kyc_documents', 'id'), ('kyc_documents', 'status'), ('kyc_documents', 'metadata'),
+        ('kyc_documents', 'file_hash'), ('kyc_documents', 'kyc_profile_id'),
+        ('kyc_documents', 'kyc_related_person_id'), ('kyc_documents', 'updated_at'),
+        ('integration_providers', 'id'), ('integration_providers', 'code'),
+        ('user_provider_accounts', 'id'), ('user_provider_accounts', 'user_id'),
+        ('user_provider_accounts', 'provider_id'), ('user_provider_accounts', 'external_customer_id'),
+        ('user_provider_accounts', 'external_account_id'),
+        ('api_request_logs', 'provider_id'), ('api_request_logs', 'user_id'),
+        ('api_request_logs', 'operation'), ('api_request_logs', 'request_method')
+    ) AS required(table_name, column_name)
+    WHERE NOT EXISTS (
+        SELECT 1 FROM information_schema.columns c
+        WHERE c.table_schema = current_schema()
+          AND c.table_name = required.table_name
+          AND c.column_name = required.column_name
+    );
+
+    IF missing_contract IS NOT NULL THEN
+        RAISE EXCEPTION 'Required HK transition columns are missing: %', missing_contract;
+    END IF;
+END
+$$;
+
 BEGIN;
 
-LOCK TABLE profiles, kyc_profiles, kyc_related_persons, kyc_documents,
+LOCK TABLE user_profiles, kyc_profiles, kyc_related_persons, kyc_documents,
     integration_providers, user_provider_accounts, api_request_logs
     IN SHARE ROW EXCLUSIVE MODE;
 
@@ -112,7 +160,7 @@ UPDATE kyc_documents
 SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
 WHERE id IN (18, 19, 20);
 
-UPDATE profiles
+UPDATE user_profiles
 SET country_code = 'HK', updated_at = CURRENT_TIMESTAMP
 WHERE user_id = 9;
 

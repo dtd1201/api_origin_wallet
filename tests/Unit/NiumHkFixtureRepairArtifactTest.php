@@ -82,4 +82,40 @@ class NiumHkFixtureRepairArtifactTest extends TestCase
         $this->assertStringContainsString('$selected !== [21, 22, 23]', $gate);
         $this->assertStringNotContainsString('NiumCustomerOnboardingService', $gate);
     }
+
+    public function test_hk_transition_uses_the_real_schema_and_preflights_every_reference(): void
+    {
+        $transition = file_get_contents(base_path('scripts/nium/fixture_v4_hk_customer_transition_proposed.sql'));
+        $this->assertIsString($transition);
+        $this->assertStringContainsString('LOCK TABLE user_profiles,', $transition);
+        $this->assertStringContainsString('UPDATE user_profiles', $transition);
+        $this->assertDoesNotMatchRegularExpression('/(?:LOCK TABLE|UPDATE)\s+profiles\b/', $transition);
+        $this->assertStringContainsString('to_regclass(required_tables.table_name)', $transition);
+        $this->assertStringContainsString('information_schema.columns', $transition);
+        $this->assertStringContainsString("('user_profiles', 'user_id')", $transition);
+        $this->assertStringContainsString("('user_profiles', 'country_code')", $transition);
+        $this->assertStringContainsString("('user_profiles', 'updated_at')", $transition);
+        $this->assertStringContainsString("('api_request_logs', 'operation')", $transition);
+        $this->assertStringContainsString('<> 65', $transition);
+        $this->assertStringContainsString('<> 3', $transition);
+        $this->assertStringContainsString('expected_historical_snapshot_b64', $transition);
+        $this->assertStringContainsString("SET status = 'superseded'", $transition);
+
+        $migrationContracts = [
+            'users' => 'database/migrations/0001_01_01_000000_create_users_table.php',
+            'user_profiles' => 'database/migrations/2026_03_12_000004_create_user_profiles_table.php',
+            'kyc_profiles' => 'database/migrations/2026_04_29_000027_create_kyc_platform_tables.php',
+            'kyc_related_persons' => 'database/migrations/2026_04_29_000027_create_kyc_platform_tables.php',
+            'kyc_documents' => 'database/migrations/2026_04_29_000027_create_kyc_platform_tables.php',
+            'integration_providers' => 'database/migrations/2026_03_12_000007_create_integration_providers_table.php',
+            'user_provider_accounts' => 'database/migrations/2026_03_12_000008_create_user_provider_accounts_table.php',
+            'api_request_logs' => 'database/migrations/2026_03_12_000017_create_api_request_logs_table.php',
+        ];
+
+        foreach ($migrationContracts as $table => $path) {
+            $migration = file_get_contents(base_path($path));
+            $this->assertIsString($migration);
+            $this->assertStringContainsString("Schema::create('{$table}'", $migration);
+        }
+    }
 }
