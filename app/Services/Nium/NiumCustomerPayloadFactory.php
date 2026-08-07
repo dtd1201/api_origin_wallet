@@ -50,7 +50,7 @@ class NiumCustomerPayloadFactory
             $profile->country_code,
         );
         $kycType = strtolower((string) ($metadata['nium_kyc_type'] ?? 'minimum'));
-        $this->validateRequiredSourceDataFor($profile, $region, $kycType);
+        $this->validateRequiredSourceDataFor($user, $profile, $region, $kycType);
 
         $payload = $profile->applicant_type === 'business'
             ? $this->corporatePayload($user, $profile, $externalReference, $region, $kycType)
@@ -75,7 +75,7 @@ class NiumCustomerPayloadFactory
         );
         $kycType = strtolower((string) ($metadata['nium_kyc_type'] ?? 'minimum'));
 
-        $this->validateRequiredSourceDataFor($profile, $region, $kycType);
+        $this->validateRequiredSourceDataFor($user, $profile, $region, $kycType);
     }
 
     private function individualPayload(
@@ -97,7 +97,7 @@ class NiumCustomerPayloadFactory
             'firstName' => $firstName,
             'lastName' => $lastName,
             'dateOfBirth' => $profile->date_of_birth?->toDateString(),
-            'email' => $user->email,
+            'email' => $this->email($user->email, 'nium_v5_fields.customer.email'),
             'mobileCountryCode' => $mobileCountryCode,
             'mobile' => $mobile,
             'nationality' => strtoupper((string) ($profile->nationality_country_code ?: $profile->country_code)),
@@ -163,6 +163,8 @@ class NiumCustomerPayloadFactory
                 $user->email,
                 (string) $user->phone,
                 ['director'],
+                'nium_v5_fields.applicant.email',
+                true,
                 normalizeNiumPositions: $region === 'SG',
             ),
             'stakeholders' => $this->stakeholders($profile, $applicant, $region === 'SG'),
@@ -189,6 +191,8 @@ class NiumCustomerPayloadFactory
         ?string $fallbackEmail,
         string $fallbackPhone,
         array $fallbackPositions,
+        string $emailPath,
+        bool $emailRequired,
         bool $normalizeNiumPositions = false,
     ): array {
         [$firstName, $lastName] = $this->splitName($person->legal_name);
@@ -203,7 +207,7 @@ class NiumCustomerPayloadFactory
             'firstName' => $firstName,
             'lastName' => $lastName,
             'dateOfBirth' => $person->date_of_birth?->toDateString(),
-            'email' => $metadata['email'] ?? $fallbackEmail,
+            'email' => $this->email($metadata['email'] ?? $fallbackEmail, $emailPath, $emailRequired),
             'mobileCountryCode' => $mobileCountryCode,
             'mobile' => $mobile,
             'nationality' => strtoupper((string) ($person->nationality_country_code ?: $person->country_code)),
@@ -232,6 +236,8 @@ class NiumCustomerPayloadFactory
                     null,
                     '',
                     [$this->stakeholderFallbackPosition($person)],
+                    'nium_v5_fields.stakeholders.individual[*].email',
+                    false,
                     $normalizeNiumPositions,
                 );
             })
@@ -481,8 +487,32 @@ class NiumCustomerPayloadFactory
         return $profile;
     }
 
-    private function validateRequiredSourceDataFor(KycProfile $profile, string $region, string $kycType): void
-    {
+    private function validateRequiredSourceDataFor(
+        User $user,
+        KycProfile $profile,
+        string $region,
+        string $kycType,
+    ): void {
+        if ($profile->applicant_type === 'business') {
+            $applicant = $this->corporateApplicant($profile);
+            $applicantMetadata = (array) ($applicant->metadata ?? []);
+            $this->email(
+                $applicantMetadata['email'] ?? $user->email,
+                'nium_v5_fields.applicant.email',
+            );
+
+            foreach ($profile->relatedPersons->reject(fn (KycRelatedPerson $person) => $person->is($applicant)) as $stakeholder) {
+                $stakeholderMetadata = (array) ($stakeholder->metadata ?? []);
+                $this->email(
+                    $stakeholderMetadata['email'] ?? null,
+                    'nium_v5_fields.stakeholders.individual[*].email',
+                    false,
+                );
+            }
+        } else {
+            $this->email($user->email, 'nium_v5_fields.customer.email');
+        }
+
         if ($profile->applicant_type !== 'business' || $region !== 'SG') {
             return;
         }
@@ -639,6 +669,32 @@ class NiumCustomerPayloadFactory
                 true,
             );
         }
+    }
+
+    private function email(mixed $value, string $path, bool $required = true): ?string
+    {
+        $email = is_string($value) ? trim($value) : '';
+
+        if ($email === '' && ! $required) {
+            return null;
+        }
+
+        $separator = strrpos($email, '@');
+        $localPart = $separator === false ? '' : substr($email, 0, $separator);
+        $domain = $separator === false ? '' : strtolower(substr($email, $separator + 1));
+
+        if (
+            $email === ''
+            || strlen($email) > 254
+            || strlen($localPart) > 64
+            || filter_var($email, FILTER_VALIDATE_EMAIL) === false
+            || $domain === 'example.invalid'
+            || str_ends_with($domain, '.invalid')
+        ) {
+            throw new RuntimeException("Invalid Nium V5 email at {$path}.");
+        }
+
+        return $email;
     }
 
     private function corporateApplicant(KycProfile $profile): KycRelatedPerson

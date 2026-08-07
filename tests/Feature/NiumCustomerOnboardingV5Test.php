@@ -179,6 +179,89 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('submitted', $account->status);
     }
 
+    public function test_fixture_v4_style_applicant_email_is_rejected_before_any_nium_http(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $applicant = $user->kycProfile->relatedPersons->firstWhere('relationship_type', 'applicant');
+        $metadata = (array) $applicant->metadata;
+        $metadata['email'] = str_repeat('a', 77).'@example.invalid';
+        $applicant->update(['metadata' => $metadata]);
+        $this->mock(NiumCustomerDocumentPreparationService::class)->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Invalid Nium V5 email at nium_v5_fields.applicant.email.');
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_valid_v5_emails_are_trimmed_only_and_otherwise_unchanged(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $applicant = $user->kycProfile->relatedPersons->firstWhere('relationship_type', 'applicant');
+        $stakeholder = $user->kycProfile->relatedPersons->firstWhere('relationship_type', 'beneficial_owner');
+        $applicantMetadata = (array) $applicant->metadata;
+        $applicantMetadata['email'] = '  Applicant.Tag+Case@controlled.example  ';
+        $applicant->update(['metadata' => $applicantMetadata]);
+        $stakeholderMetadata = (array) $stakeholder->metadata;
+        $stakeholderMetadata['email'] = 'Stakeholder.Tag+Case@controlled.example';
+        $stakeholder->update(['metadata' => $stakeholderMetadata]);
+        $user->unsetRelation('kycProfile');
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('Applicant.Tag+Case@controlled.example', $payload['applicant']['email']);
+        $this->assertSame('Stakeholder.Tag+Case@controlled.example', $payload['stakeholders']['individual'][0]['email']);
+        Http::assertNothingSent();
+    }
+
+    public function test_invalid_individual_email_reports_customer_path_before_any_nium_http(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $user->update(['email' => 'customer@example.invalid']);
+        $this->mock(NiumCustomerDocumentPreparationService::class)->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Invalid Nium V5 email at nium_v5_fields.customer.email.');
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_invalid_stakeholder_email_reports_stakeholder_path_before_any_nium_http(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $stakeholder = $user->kycProfile->relatedPersons->firstWhere('relationship_type', 'beneficial_owner');
+        $metadata = (array) $stakeholder->metadata;
+        $metadata['email'] = 'stakeholder@sub.invalid';
+        $stakeholder->update(['metadata' => $metadata]);
+        $this->mock(NiumCustomerDocumentPreparationService::class)->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Invalid Nium V5 email at nium_v5_fields.stakeholders.individual[*].email.');
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
     public function test_v5_customer_retrieval_refreshes_backend_controlled_state(): void
     {
         $provider = $this->provider();
