@@ -7,12 +7,16 @@ use App\Models\Balance;
 use App\Models\Beneficiary;
 use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
+use App\Models\KycDocument;
+use App\Models\KycProfile;
 use App\Models\KycProviderSubmission;
+use App\Models\KycRelatedPerson;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Services\Nium\NiumHkSandboxFileStageRunner;
 use App\Services\Nium\NiumTransferService;
 use App\Services\Nium\NiumWebhookService;
 use Illuminate\Database\QueryException;
@@ -21,13 +25,115 @@ use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
+
+require_once __DIR__.'/../../scripts/nium/generate_hk_sandbox_documents.php';
 
 class NiumPostgresConcurrencyTest extends TestCase
 {
     use DatabaseTruncation;
 
     protected array $connectionsToTransact = [];
+
+    public function test_hk_file_stage_atomic_claim_allows_only_one_runner_to_post(): void
+    {
+        if (DB::getDriverName() !== 'pgsql' || ! function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Requires PostgreSQL and pcntl.');
+        }
+
+        $this->configureNium();
+        config()->set('services.nium.file_base_url', 'https://document-storage-sandbox.nium.test');
+        config()->set('services.nium.file_create_endpoint', '/api/v1/client/{clientHashId}/files');
+        config()->set('services.nium.file_details_endpoint', '/api/v1/client/{clientHashId}/files/{fileId}');
+        $storageRoot = sys_get_temp_dir().'/nium-hk-concurrency-'.bin2hex(random_bytes(8));
+        config()->set('filesystems.disks.kyc_private.root', $storageRoot);
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        $protectedUser = User::factory()->create(['id' => 4]);
+        $fixtureUser = User::factory()->create(['id' => 9]);
+        $profile = KycProfile::query()->forceCreate([
+            'id' => 9, 'user_id' => 9, 'status' => 'approved', 'applicant_type' => 'business',
+            'legal_name' => 'Synthetic Fixture', 'address_line1' => 'Synthetic', 'city' => 'Hong Kong', 'country_code' => 'HK',
+        ]);
+        $applicant = KycRelatedPerson::query()->forceCreate([
+            'id' => 31, 'kyc_profile_id' => 9, 'relationship_type' => 'applicant',
+            'status' => 'approved', 'legal_name' => 'Synthetic Applicant',
+        ]);
+        $stakeholder = KycRelatedPerson::query()->forceCreate([
+            'id' => 32, 'kyc_profile_id' => 9, 'relationship_type' => 'beneficial_owner',
+            'status' => 'approved', 'legal_name' => 'Synthetic Stakeholder',
+        ]);
+        UserProviderAccount::query()->forceCreate(['id' => 4, 'user_id' => $protectedUser->id, 'provider_id' => $provider->id]);
+        UserProviderAccount::query()->forceCreate(['id' => 7, 'user_id' => $fixtureUser->id, 'provider_id' => $provider->id]);
+
+        for ($index = 0; $index < 56; $index++) {
+            ApiRequestLog::query()->create([
+                'provider_id' => $provider->id, 'user_id' => 9,
+                'operation' => $index < 3 ? 'customer_create' : 'safe_diagnostic',
+                'request_method' => $index < 3 ? 'POST' : 'GET',
+                'request_url' => '/safe',
+            ]);
+        }
+
+        $manifest = generateNiumHkSandboxDocuments($storageRoot.'/kyc/9/nium-v5-hk');
+        $personIds = [null, $applicant->id, $stakeholder->id];
+
+        foreach ($manifest['runtime_artifacts'] as $index => $artifact) {
+            $path = 'kyc/9/nium-v5-hk/'.$artifact['artifact_filename'];
+            chmod(Storage::disk('kyc_private')->path($path), 0600);
+            KycDocument::query()->forceCreate([
+                'id' => 21 + $index, 'kyc_profile_id' => $profile->id,
+                'kyc_related_person_id' => $personIds[$index],
+                'type' => $index === 0 ? 'business_registration' : 'passport_front',
+                'status' => 'approved', 'file_url' => 'private://'.$path,
+                'storage_disk' => 'kyc_private', 'file_path' => $path,
+                'original_name' => $artifact['artifact_filename'], 'mime_type' => 'application/pdf',
+                'file_size' => $artifact['byte_size'], 'file_hash' => $artifact['sha256'],
+                'issuing_country_code' => 'HK',
+                'metadata' => [
+                    'fixture_marker' => NiumHkSandboxFileStageRunner::FIXTURE_MARKER,
+                    'logical_role' => $artifact['logical_role'],
+                    'expected_sha256' => $artifact['sha256'],
+                    'synthetic_test' => true,
+                ],
+            ]);
+        }
+
+        $this->runConcurrent(2, function (): void {
+            $postCount = 0;
+            Http::fake(function (HttpRequest $request) use (&$postCount) {
+                if ($request->method() === 'POST') {
+                    usleep(300_000);
+                    $postCount++;
+
+                    return Http::response([
+                        'id' => sprintf('30000000-0000-4000-8000-%012d', $postCount),
+                        'state' => 'PROCESSING',
+                    ], 201);
+                }
+
+                $fileId = basename((string) parse_url($request->url(), PHP_URL_PATH));
+
+                return Http::response(['id' => $fileId, 'state' => 'AVAILABLE']);
+            });
+
+            try {
+                app(NiumHkSandboxFileStageRunner::class)->run();
+            } catch (\RuntimeException) {
+                // The losing process must fail after observing the committed claim and before HTTP.
+            }
+        });
+
+        $newLogs = ApiRequestLog::query()->where('id', '>', 56)->get();
+        $this->assertCount(6, $newLogs);
+        $this->assertCount(3, $newLogs->where('request_method', 'POST'));
+        $this->assertCount(3, $newLogs->where('request_method', 'GET'));
+        $this->assertSame(3, ApiRequestLog::query()->where('operation', 'customer_create')->count());
+        $this->assertSame(3, KycDocument::query()->whereIn('id', [21, 22, 23])->get()
+            ->pluck('metadata')->pluck('nium_file_id')->unique()->count());
+
+        Storage::disk('kyc_private')->deleteDirectory('kyc/9/nium-v5-hk');
+    }
 
     public function test_concurrent_onboarding_and_webhooks_are_serialized_on_postgres(): void
     {
