@@ -8,6 +8,8 @@ final class NiumRegionResolver
 {
     public const INVALID_REGION = 'nium_region_invalid';
 
+    public const REGION_MISMATCH = 'nium_regulatory_region_mismatch';
+
     private const EUROPEAN_COUNTRIES = [
         'AT',
         'BE',
@@ -75,18 +77,28 @@ final class NiumRegionResolver
         mixed $residenceCountry,
         mixed $country,
     ): string {
+        $configuredRegion = config('services.nium.regulatory_region');
+        $normalizedConfiguredRegion = null;
+
+        if ($configuredRegion !== null) {
+            $normalizedConfiguredRegion = $this->supportedRegion($configuredRegion);
+        }
+
         if ($explicitRegion !== null) {
-            $normalizedRegion = $this->normalizeString($explicitRegion);
+            $normalizedRegion = $this->supportedRegion($explicitRegion);
 
             if (
-                $normalizedRegion === null
-                || $normalizedRegion === ''
-                || ! in_array($normalizedRegion, self::SUPPORTED_EXPLICIT_REGIONS, true)
+                $normalizedConfiguredRegion !== null
+                && $normalizedRegion !== $normalizedConfiguredRegion
             ) {
-                throw new RuntimeException(self::INVALID_REGION);
+                throw new RuntimeException(self::REGION_MISMATCH);
             }
 
             return $normalizedRegion;
+        }
+
+        if ($normalizedConfiguredRegion !== null) {
+            return $normalizedConfiguredRegion;
         }
 
         $resolvedCountry = $this->firstCountry(
@@ -107,9 +119,11 @@ final class NiumRegionResolver
             return 'EU';
         }
 
-        return in_array($resolvedCountry, self::DIRECTLY_SUPPORTED_COUNTRIES, true)
-            ? $resolvedCountry
-            : 'SG';
+        if (in_array($resolvedCountry, self::DIRECTLY_SUPPORTED_COUNTRIES, true)) {
+            return $resolvedCountry;
+        }
+
+        throw new RuntimeException(self::INVALID_REGION);
     }
 
     public function resolveForValidation(
@@ -122,12 +136,18 @@ final class NiumRegionResolver
             return 'SG';
         }
 
-        return $this->resolve(
-            $explicitRegion,
-            $registeredCountry,
-            $residenceCountry,
-            $country,
-        );
+        try {
+            return $this->resolve(
+                $explicitRegion,
+                $registeredCountry,
+                $residenceCountry,
+                $country,
+            );
+        } catch (RuntimeException $exception) {
+            return $exception->getMessage() === self::INVALID_REGION
+                ? 'SG'
+                : self::INVALID_REGION;
+        }
     }
 
     public function isSupportedExplicitRegion(mixed $value): bool
@@ -157,5 +177,20 @@ final class NiumRegionResolver
         return is_string($value)
             ? strtoupper(trim($value))
             : null;
+    }
+
+    private function supportedRegion(mixed $value): string
+    {
+        $normalized = $this->normalizeString($value);
+
+        if (
+            $normalized === null
+            || $normalized === ''
+            || ! in_array($normalized, self::SUPPORTED_EXPLICIT_REGIONS, true)
+        ) {
+            throw new RuntimeException(self::INVALID_REGION);
+        }
+
+        return $normalized;
     }
 }

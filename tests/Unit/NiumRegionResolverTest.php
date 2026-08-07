@@ -51,8 +51,20 @@ class NiumRegionResolverTest extends TestCase
             'NL country fallback' => [null, 'NL', null, null, 'NL'],
             'European country fallback' => [null, 'DE', null, null, 'EU'],
             'directly supported country fallback' => [null, 'US', null, null, 'US'],
-            'unsupported country fallback' => [null, 'ZZ', null, null, 'SG'],
         ];
+    }
+
+    public function test_configured_regulatory_region_is_authoritative_and_rejects_profile_mismatch(): void
+    {
+        config()->set('services.nium.regulatory_region', ' hk ');
+        $resolver = app(NiumRegionResolver::class);
+
+        $this->assertSame('HK', $resolver->resolve(null, 'SG', null, 'SG'));
+        $this->assertSame('HK', $resolver->resolve('hk', 'SG', null, 'SG'));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(NiumRegionResolver::REGION_MISMATCH);
+        $resolver->resolve('SG', 'SG', null, 'SG');
     }
 
     #[DataProvider('invalidExplicitRegionProvider')]
@@ -101,7 +113,7 @@ class NiumRegionResolverTest extends TestCase
     }
 
     #[DataProvider('invalidCountryProvider')]
-    public function test_invalid_country_input_defaults_to_sg_without_runtime_diagnostic(
+    public function test_invalid_country_input_fails_without_implicit_sg_fallback_or_runtime_diagnostic(
         mixed $country,
     ): void {
         $diagnostics = [];
@@ -115,10 +127,10 @@ class NiumRegionResolverTest extends TestCase
         });
 
         try {
-            $this->assertSame(
-                'SG',
-                app(NiumRegionResolver::class)->resolve(null, $country, null, null),
-            );
+            app(NiumRegionResolver::class)->resolve(null, $country, null, null);
+            $this->fail('Expected invalid country input to fail without an SG fallback.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame(NiumRegionResolver::INVALID_REGION, $exception->getMessage());
         } finally {
             restore_error_handler();
         }
@@ -133,6 +145,8 @@ class NiumRegionResolverTest extends TestCase
             'boolean' => [true],
             'array' => [['SG']],
             'object' => [(object) ['country' => 'SG']],
+            'unsupported string' => ['ZZ'],
+            'missing' => [null],
         ];
     }
 }

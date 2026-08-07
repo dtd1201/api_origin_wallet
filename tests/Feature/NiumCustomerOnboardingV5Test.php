@@ -16,6 +16,7 @@ use App\Services\Nium\NiumCustomerPayloadFactory;
 use App\Services\Nium\NiumEvidencePersistenceException;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
+use App\Services\Nium\NiumRegionResolver;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
@@ -1644,9 +1645,111 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'registered NL fallback' => [false, null, 'NL', 'NL'],
             'listed European country fallback' => [false, null, 'DE', 'EU'],
             'directly supported non-SG country fallback' => [false, null, 'US', 'US'],
-            'unsupported country defaults to SG' => [false, null, 'ZZ', 'SG'],
             'explicit null uses registered-country fallback' => [true, null, 'GB', 'UK'],
         ];
+    }
+
+    public function test_hk_corporate_full_payload_is_country_consistent_and_reuses_available_files(): void
+    {
+        config()->set('services.nium.regulatory_region', 'HK');
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_region'] = 'HK';
+        unset($metadata['nium_v5_fields']['addresses']);
+        $metadata['nium_v5_fields']['natureOfBusiness']['operatingCountries'] = ['HK'];
+        $metadata['nium_v5_fields']['expectedAccountUsage']['credit']['topTransactionCountries'] = ['HK'];
+        $metadata['nium_v5_fields']['expectedAccountUsage']['debit']['topTransactionCountries'] = ['HK'];
+        $metadata['nium_v5_fields']['bankAccountDetails']['bankCountry'] = 'HK';
+        $metadata['nium_v5_fields']['bankAccountDetails']['currency'] = 'HKD';
+        $metadata['nium_v5_fields']['deviceDetails']['ipCountryCode'] = 'HK';
+        $profile->update([
+            'registered_country_code' => 'HK',
+            'address_line1' => '1 Synthetic Harbour Road',
+            'address_line2' => null,
+            'city' => 'Hong Kong',
+            'state' => 'Hong Kong',
+            'postal_code' => null,
+            'country_code' => 'HK',
+            'metadata' => $metadata,
+        ]);
+        $user->profile()->update(['country_code' => 'HK']);
+        $profile->documents()
+            ->where('type', 'business_registration')
+            ->update(['issuing_country_code' => 'HK']);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build(
+            $user,
+            (string) Str::uuid(),
+        );
+        $fileIds = collect([
+            ...$payload['documents'][0]['fileIds'],
+            ...$payload['applicant']['documents'][0]['fileIds'],
+            ...$payload['stakeholders']['individual'][0]['documents'][0]['fileIds'],
+        ]);
+
+        $this->assertSame('corporate', $payload['type']);
+        $this->assertSame('HK', $payload['region']);
+        $this->assertSame('full', $payload['kycType']);
+        $this->assertSame('HK', $payload['registeredCountry']);
+        $this->assertSame('HK', $payload['addresses']['registeredAddress']['country']);
+        $this->assertSame('HK', $payload['addresses']['businessAddress']['country']);
+        $this->assertSame(['HK'], $payload['natureOfBusiness']['operatingCountries']);
+        $this->assertSame('HK', $payload['bankAccountDetails']['bankCountry']);
+        $this->assertSame('HKD', $payload['bankAccountDetails']['currency']);
+        $this->assertSame('HK', $payload['deviceDetails']['ipCountryCode']);
+        $this->assertSame(self::DEVICE_SESSION_ID, $payload['deviceDetails']['sessionId']);
+        $this->assertSame(3, $fileIds->count());
+        $this->assertSame(3, $fileIds->unique()->count());
+        $this->assertTrue($fileIds->every(fn (string $fileId): bool => Str::isUuid($fileId)));
+        Http::assertNothingSent();
+    }
+
+    public function test_configured_regulatory_region_mismatch_fails_before_documents_or_http(): void
+    {
+        config()->set('services.nium.regulatory_region', 'HK');
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $this->mock(NiumCustomerDocumentPreparationService::class)->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(NiumRegionResolver::REGION_MISMATCH);
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_unsupported_country_without_explicit_or_configured_region_fails_locally(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        unset($metadata['nium_region']);
+        $profile->update([
+            'registered_country_code' => 'ZZ',
+            'country_code' => 'ZZ',
+            'metadata' => $metadata,
+        ]);
+        $this->mock(NiumCustomerDocumentPreparationService::class)->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(NiumRegionResolver::INVALID_REGION);
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+        } finally {
+            Http::assertNothingSent();
+        }
     }
 
     #[DataProvider('invalidNiumRegionProvider')]

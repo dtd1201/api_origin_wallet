@@ -74,6 +74,7 @@ return [
         'allow_insecure_local' => env('NIUM_ALLOW_INSECURE_LOCAL', false),
         'timeout' => env('NIUM_TIMEOUT', 30),
         'client_id' => env('NIUM_CLIENT_ID'),
+        'regulatory_region' => env('NIUM_REGULATORY_REGION'),
         'file_base_url' => env('NIUM_FILE_BASE_URL'),
         'file_create_endpoint' => env('NIUM_FILE_CREATE_ENDPOINT', '/api/v1/client/{clientHashId}/files'),
         'file_details_endpoint' => env('NIUM_FILE_DETAILS_ENDPOINT', '/api/v1/client/{clientHashId}/files/{fileId}'),
