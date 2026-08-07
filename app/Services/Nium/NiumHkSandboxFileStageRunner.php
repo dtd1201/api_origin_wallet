@@ -289,8 +289,8 @@ final class NiumHkSandboxFileStageRunner
             }
         }
 
-        if (ApiRequestLog::query()->count() !== 62) {
-            throw new RuntimeException('ApiRequestLog count is not the expected successful value 62.');
+        if (ApiRequestLog::query()->count() !== $requestLogMaxId + 6) {
+            throw new RuntimeException('ApiRequestLog count does not match the exact file-stage requests.');
         }
     }
 

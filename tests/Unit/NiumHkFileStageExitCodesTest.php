@@ -26,6 +26,9 @@ class NiumHkFileStageExitCodesTest extends TestCase
             'scripts/nium/run_hk_sandbox_file_stage.php',
             'scripts/nium/continue_hk_sandbox_file_details.php',
             'scripts/nium/resume_hk_sandbox_file_stage.php',
+            'scripts/nium/continue_hk_sandbox_file_details_22.php',
+            'scripts/nium/resume_hk_sandbox_file_stage_23.php',
+            'scripts/nium/continue_hk_sandbox_file_details_23.php',
         ] as $path) {
             $script = file_get_contents(base_path($path));
             $this->assertIsString($script);
