@@ -1649,7 +1649,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         ];
     }
 
-    public function test_hk_corporate_full_payload_is_country_consistent_and_reuses_available_files(): void
+    public function test_hk_corporate_full_payload_is_country_consistent_and_uses_controlled_fixture_files(): void
     {
         config()->set('services.nium.regulatory_region', 'HK');
         $provider = $this->provider();
@@ -1713,6 +1713,11 @@ class NiumCustomerOnboardingV5Test extends TestCase
         config()->set('services.nium.regulatory_region', 'HK');
         $provider = $this->provider();
         $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        unset($metadata['nium_region']);
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
         $this->mock(NiumCustomerDocumentPreparationService::class)->shouldNotReceive('prepare');
         Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
 

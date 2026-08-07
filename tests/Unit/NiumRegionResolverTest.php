@@ -54,17 +54,60 @@ class NiumRegionResolverTest extends TestCase
         ];
     }
 
-    public function test_configured_regulatory_region_is_authoritative_and_rejects_profile_mismatch(): void
+    public function test_configured_regulatory_region_requires_consistent_factual_country(): void
     {
         config()->set('services.nium.regulatory_region', ' hk ');
         $resolver = app(NiumRegionResolver::class);
 
-        $this->assertSame('HK', $resolver->resolve(null, 'SG', null, 'SG'));
-        $this->assertSame('HK', $resolver->resolve('hk', 'SG', null, 'SG'));
+        $this->assertSame('HK', $resolver->resolve(null, 'HK', null, 'HK'));
+        $this->assertSame('HK', $resolver->resolve('hk', 'HK', null, 'HK'));
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage(NiumRegionResolver::REGION_MISMATCH);
-        $resolver->resolve('SG', 'SG', null, 'SG');
+        $resolver->resolve(null, 'SG', null, 'SG');
+    }
+
+    #[DataProvider('configuredRegionCountryProvider')]
+    public function test_configured_region_accepts_its_canonical_factual_country(
+        string $configuredRegion,
+        string $factualCountry,
+        string $expectedRegion,
+    ): void {
+        config()->set('services.nium.regulatory_region', $configuredRegion);
+
+        $this->assertSame(
+            $expectedRegion,
+            app(NiumRegionResolver::class)->resolve(null, $factualCountry, null, null),
+        );
+    }
+
+    public static function configuredRegionCountryProvider(): array
+    {
+        return [
+            'HK company' => ['HK', 'HK', 'HK'],
+            'SG company' => ['SG', 'SG', 'SG'],
+            'UK company' => ['UK', 'GB', 'UK'],
+        ];
+    }
+
+    public function test_explicit_region_conflicting_with_configured_region_fails(): void
+    {
+        config()->set('services.nium.regulatory_region', 'HK');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(NiumRegionResolver::REGION_MISMATCH);
+
+        app(NiumRegionResolver::class)->resolve('SG', 'HK', null, null);
+    }
+
+    public function test_validation_classifier_cannot_turn_configured_country_mismatch_into_sg(): void
+    {
+        config()->set('services.nium.regulatory_region', 'HK');
+
+        $this->assertSame(
+            NiumRegionResolver::INVALID_REGION,
+            app(NiumRegionResolver::class)->resolveForValidation(null, 'SG', null, null),
+        );
     }
 
     #[DataProvider('invalidExplicitRegionProvider')]

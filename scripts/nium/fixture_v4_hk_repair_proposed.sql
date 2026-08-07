@@ -3,6 +3,7 @@
 -- Do not run until fixture_v4_hk_diagnostic.sql has been reviewed.
 -- Replace this placeholder with the exact existing marker shown by the diagnostic.
 \set expected_fixture_marker '__REPLACE_WITH_EXACT_FIXTURE_V4_MARKER__'
+\set document_semantic_preflight 'UNPROVEN'
 
 BEGIN;
 
@@ -12,8 +13,15 @@ LOCK TABLE kyc_profiles, profiles, user_provider_accounts, kyc_documents, api_re
 CREATE TEMP TABLE fixture_v4_hk_guard AS
 SELECT
     :'expected_fixture_marker'::text AS expected_fixture_marker,
+    :'document_semantic_preflight'::text AS document_semantic_preflight,
+    'HK'::text AS target_regulatory_region,
     (SELECT to_jsonb(upa) FROM user_provider_accounts upa WHERE upa.id = 4) AS account_4_before,
     (SELECT to_jsonb(upa) FROM user_provider_accounts upa WHERE upa.id = 7) AS account_7_before,
+    (
+        SELECT jsonb_agg(to_jsonb(kd) ORDER BY kd.id)
+        FROM kyc_documents kd
+        WHERE kd.id IN (18, 19, 20)
+    ) AS documents_before,
     (SELECT count(*) FROM api_request_logs) AS request_count_before,
     (
         SELECT count(*)
@@ -30,6 +38,15 @@ DECLARE
 BEGIN
     IF expected_marker = '__REPLACE_WITH_EXACT_FIXTURE_V4_MARKER__' THEN
         RAISE EXCEPTION 'Replace expected_fixture_marker with the diagnostic value before running.';
+    END IF;
+
+    IF (SELECT target_regulatory_region FROM fixture_v4_hk_guard) <> 'HK' THEN
+        RAISE EXCEPTION 'Unexpected target regulatory region.';
+    END IF;
+
+    IF (SELECT document_semantic_preflight FROM fixture_v4_hk_guard)
+        <> 'PROVEN_AND_METADATA_ALREADY_ACCURATE' THEN
+        RAISE EXCEPTION 'Document semantic compatibility is unproven; do not repair the HK fixture yet.';
     END IF;
 
     IF NOT EXISTS (
@@ -79,6 +96,16 @@ BEGIN
         )
     ) <> 3 THEN
         RAISE EXCEPTION 'Fixture V4 Nium file identity or AVAILABLE state mismatch.';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM kyc_documents kd
+        WHERE kd.id = 18
+          AND kd.kyc_profile_id = 9
+          AND kd.issuing_country_code = 'HK'
+    ) THEN
+        RAISE EXCEPTION 'Business document metadata is not already HK-accurate; use a separately reviewed document replacement plan.';
     END IF;
 END
 $$;
@@ -142,13 +169,6 @@ SET metadata = jsonb_set(
 WHERE id = 9
   AND user_id = 9;
 
-UPDATE kyc_documents
-SET issuing_country_code = 'HK',
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = 18
-  AND kyc_profile_id = 9
-  AND metadata->>'nium_file_id' = '5dde122a-c143-4358-8b1c-ffaeb397c27c';
-
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -166,16 +186,12 @@ BEGIN
         RAISE EXCEPTION 'Fixture V4 HK profile update did not reach the expected state.';
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1
+    IF (
+        SELECT jsonb_agg(to_jsonb(kd) ORDER BY kd.id)
         FROM kyc_documents kd
-        WHERE kd.id = 18
-          AND kd.kyc_profile_id = 9
-          AND kd.issuing_country_code = 'HK'
-          AND kd.metadata->>'nium_file_id' = '5dde122a-c143-4358-8b1c-ffaeb397c27c'
-          AND kd.metadata->>'nium_file_state' = 'AVAILABLE'
-    ) THEN
-        RAISE EXCEPTION 'Fixture V4 business document update did not reach the expected state.';
+        WHERE kd.id IN (18, 19, 20)
+    ) IS DISTINCT FROM (SELECT documents_before FROM fixture_v4_hk_guard) THEN
+        RAISE EXCEPTION 'Documents 18, 19, or 20 changed before semantic HK compatibility was proven.';
     END IF;
 
     IF (SELECT to_jsonb(upa) FROM user_provider_accounts upa WHERE upa.id = 4)

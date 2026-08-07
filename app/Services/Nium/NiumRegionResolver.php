@@ -94,18 +94,39 @@ final class NiumRegionResolver
                 throw new RuntimeException(self::REGION_MISMATCH);
             }
 
-            return $normalizedRegion;
+            if ($normalizedConfiguredRegion === null) {
+                return $normalizedRegion;
+            }
         }
 
-        if ($normalizedConfiguredRegion !== null) {
-            return $normalizedConfiguredRegion;
-        }
-
-        $resolvedCountry = $this->firstCountry(
+        $factualRegion = $this->regionForCountry(
             $registeredCountry,
             $residenceCountry,
             $country,
         );
+
+        if ($normalizedConfiguredRegion !== null) {
+            if ($factualRegion !== null && $factualRegion !== $normalizedConfiguredRegion) {
+                throw new RuntimeException(self::REGION_MISMATCH);
+            }
+
+            return $normalizedConfiguredRegion;
+        }
+
+        if ($factualRegion !== null) {
+            return $factualRegion;
+        }
+
+        throw new RuntimeException(self::INVALID_REGION);
+    }
+
+    private function regionForCountry(mixed ...$countries): ?string
+    {
+        $resolvedCountry = $this->firstCountry(...$countries);
+
+        if ($resolvedCountry === '') {
+            return null;
+        }
 
         if ($resolvedCountry === 'GB') {
             return 'UK';

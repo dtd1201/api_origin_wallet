@@ -42,9 +42,24 @@ SELECT
     kd.type,
     kd.status,
     kd.issuing_country_code,
+    kd.storage_disk,
+    kd.file_path IS NOT NULL AS has_local_storage_path,
+    kd.original_name IS NOT NULL AS has_original_filename,
+    lower(substring(kd.original_name FROM '\.([^.]+)$')) AS original_extension,
+    kd.mime_type,
+    kd.file_size,
+    kd.file_hash AS safe_content_hash_if_retained,
+    CASE
+        WHEN kd.kyc_related_person_id IS NULL THEN 'documents[*].fileIds'
+        WHEN krp.relationship_type = 'authorized_person' THEN 'applicant.documents[*].fileIds'
+        ELSE 'stakeholders.individual[*].documents[*].fileIds'
+    END AS customer_payload_reference,
     kd.metadata->>'nium_file_id' AS nium_file_id,
-    kd.metadata->>'nium_file_state' AS nium_file_state
+    kd.metadata->>'nium_file_state' AS nium_file_state,
+    kd.metadata ? 'sha256' AS has_metadata_sha256,
+    kd.metadata ? 'content_sha256' AS has_metadata_content_sha256
 FROM kyc_documents kd
+LEFT JOIN kyc_related_persons krp ON krp.id = kd.kyc_related_person_id
 WHERE kd.id IN (18, 19, 20)
 ORDER BY kd.id;
 
