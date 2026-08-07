@@ -8,6 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Nium\NiumCustomerDocumentResolver;
 use App\Services\Nium\NiumCustomerPayloadFactory;
+use App\Services\Nium\NiumHkCustomerPayloadGate;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -25,6 +26,15 @@ try {
     $before = ApiRequestLog::query()->count();
     $user = User::query()->whereKey(9)->firstOrFail();
     $payload = $app->make(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    $profile = $user->kycProfile;
+    NiumHkCustomerPayloadGate::assertRegions(
+        config('services.nium.regulatory_region'),
+        $profile->registered_country_code,
+        $profile->country_code,
+        data_get($profile->metadata, 'nium_region'),
+        $payload['region'] ?? null,
+        $payload['registeredCountry'] ?? null,
+    );
     $selected = $app->make(NiumCustomerDocumentResolver::class)->forProfile($user->kycProfile)->pluck('id')->sort()->values()->all();
     $fileIds = collect([$payload['documents'], $payload['applicant']['documents'], $payload['stakeholders']['individual'][0]['documents']])
         ->flatten(1)->flatMap(fn (array $document): array => $document['fileIds'] ?? [])->all();
@@ -45,6 +55,9 @@ try {
 
     fwrite(STDOUT, json_encode([
         'status' => 'PASS_LOCAL_CUSTOMER_V5_GATE',
+        'configured_regulatory_region' => 'HK',
+        'factual_region' => 'HK',
+        'payload_region' => 'HK',
         'selected_document_ids' => $selected,
         'historical_documents_selected' => false,
         'file_id_count' => 3,

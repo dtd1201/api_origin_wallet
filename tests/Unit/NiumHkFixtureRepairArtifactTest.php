@@ -72,6 +72,13 @@ class NiumHkFixtureRepairArtifactTest extends TestCase
         $this->assertStringContainsString("'HKD'", $transition);
         $this->assertStringContainsString('NiumCustomerPayloadFactory', $gate);
         $this->assertStringContainsString('Http::preventStrayRequests()', $gate);
+        $this->assertStringContainsString('NiumHkCustomerPayloadGate::assertRegions', $gate);
+        $this->assertStringContainsString('expected_historical_snapshot_b64', $transition);
+        $this->assertStringContainsString('decode((SELECT expected_historical_snapshot_b64', $transition);
+        $this->assertStringContainsString("'base64'", $transition);
+        $this->assertStringContainsString("'UTF8'", $transition);
+        $this->assertStringContainsString('Historical snapshot base64 or decoded JSON is invalid.', $transition);
+        $this->assertStringContainsString('IS DISTINCT FROM expected_snapshot', $transition);
         $this->assertStringContainsString('$selected !== [21, 22, 23]', $gate);
         $this->assertStringNotContainsString('NiumCustomerOnboardingService', $gate);
     }

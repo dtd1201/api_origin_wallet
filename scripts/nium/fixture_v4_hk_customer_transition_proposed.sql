@@ -2,7 +2,7 @@
 
 -- Review-only artifact. Replace the historical snapshot fingerprint from the current diagnostic.
 \set expected_fixture_marker '__REPLACE_WITH_EXACT_FIXTURE_V4_MARKER__'
-\set expected_historical_snapshot_json 'null'
+\set expected_historical_snapshot_b64 '__REPLACE_WITH_DOCS_18_19_20_JSON_BASE64__'
 
 BEGIN;
 
@@ -13,7 +13,7 @@ LOCK TABLE profiles, kyc_profiles, kyc_related_persons, kyc_documents,
 CREATE TEMP TABLE fixture_v4_hk_transition_guard AS
 SELECT
     :'expected_fixture_marker'::text AS expected_fixture_marker,
-    :'expected_historical_snapshot_json'::jsonb AS expected_historical_snapshot,
+    :'expected_historical_snapshot_b64'::text AS expected_historical_snapshot_b64,
     (SELECT to_jsonb(upa) FROM user_provider_accounts upa WHERE upa.id = 4) AS account_4_before,
     (SELECT to_jsonb(upa) FROM user_provider_accounts upa WHERE upa.id = 7) AS account_7_before,
     (SELECT jsonb_agg(to_jsonb(kd) ORDER BY kd.id) FROM kyc_documents kd WHERE kd.id IN (18, 19, 20)) AS historical_before,
@@ -27,14 +27,24 @@ SELECT
 
 DO $$
 DECLARE
+    expected_snapshot jsonb;
 BEGIN
     IF (SELECT expected_fixture_marker FROM fixture_v4_hk_transition_guard) = '__REPLACE_WITH_EXACT_FIXTURE_V4_MARKER__'
-       OR (SELECT expected_historical_snapshot FROM fixture_v4_hk_transition_guard) IS NULL THEN
+       OR (SELECT expected_historical_snapshot_b64 FROM fixture_v4_hk_transition_guard) = '__REPLACE_WITH_DOCS_18_19_20_JSON_BASE64__' THEN
         RAISE EXCEPTION 'Replace all reviewed current-checkpoint placeholders before execution.';
     END IF;
 
+    BEGIN
+        expected_snapshot := convert_from(
+            decode((SELECT expected_historical_snapshot_b64 FROM fixture_v4_hk_transition_guard), 'base64'),
+            'UTF8'
+        )::jsonb;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION 'Historical snapshot base64 or decoded JSON is invalid.';
+    END;
+
     IF (SELECT historical_before FROM fixture_v4_hk_transition_guard)
-        IS DISTINCT FROM (SELECT expected_historical_snapshot FROM fixture_v4_hk_transition_guard) THEN
+        IS DISTINCT FROM expected_snapshot THEN
         RAISE EXCEPTION 'Historical documents 18/19/20 snapshot mismatch.';
     END IF;
 
