@@ -3,6 +3,7 @@
 namespace App\Services\Nium;
 
 use App\Models\ApiRequestLog;
+use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
 use App\Models\UserProviderAccount;
@@ -322,8 +323,15 @@ final class NiumHkSandboxFileStageRunner
 
     private function assertCustomerPostCount(): void
     {
-        if (ApiRequestLog::query()->where('operation', 'customer_create')->where('request_method', 'POST')->count() !== 3) {
-            throw new RuntimeException('Customer Create POST count is not the locked value 3.');
+        $niumProviderId = IntegrationProvider::query()->where('code', 'nium')->sole()->getKey();
+
+        if (ApiRequestLog::query()
+            ->where('provider_id', $niumProviderId)
+            ->where('user_id', 9)
+            ->where('operation', 'customer_create')
+            ->where('request_method', 'POST')
+            ->count() !== 3) {
+            throw new RuntimeException('Fixture V4 Nium Customer Create POST count is not the locked value 3.');
         }
     }
 

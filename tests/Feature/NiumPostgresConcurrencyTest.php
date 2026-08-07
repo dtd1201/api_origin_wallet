@@ -50,6 +50,7 @@ class NiumPostgresConcurrencyTest extends TestCase
         config()->set('filesystems.disks.kyc_private.root', $storageRoot);
         $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
         $protectedUser = User::factory()->create(['id' => 4]);
+        $historicalUser = User::factory()->create(['id' => 8]);
         $fixtureUser = User::factory()->create(['id' => 9]);
         $profile = KycProfile::query()->forceCreate([
             'id' => 9, 'user_id' => 9, 'status' => 'approved', 'applicant_type' => 'business',
@@ -67,10 +68,13 @@ class NiumPostgresConcurrencyTest extends TestCase
         UserProviderAccount::query()->forceCreate(['id' => 7, 'user_id' => $fixtureUser->id, 'provider_id' => $provider->id]);
 
         for ($index = 0; $index < 56; $index++) {
+            $isHistoricalCustomerPost = $index < 2;
+            $isFixtureCustomerPost = $index >= 2 && $index < 5;
             ApiRequestLog::query()->create([
-                'provider_id' => $provider->id, 'user_id' => 9,
-                'operation' => $index < 3 ? 'customer_create' : 'safe_diagnostic',
-                'request_method' => $index < 3 ? 'POST' : 'GET',
+                'provider_id' => $provider->id,
+                'user_id' => $isHistoricalCustomerPost ? $historicalUser->id : $fixtureUser->id,
+                'operation' => ($isHistoricalCustomerPost || $isFixtureCustomerPost) ? 'customer_create' : 'safe_diagnostic',
+                'request_method' => ($isHistoricalCustomerPost || $isFixtureCustomerPost) ? 'POST' : 'GET',
                 'request_url' => '/safe',
             ]);
         }
@@ -128,7 +132,13 @@ class NiumPostgresConcurrencyTest extends TestCase
         $this->assertCount(6, $newLogs);
         $this->assertCount(3, $newLogs->where('request_method', 'POST'));
         $this->assertCount(3, $newLogs->where('request_method', 'GET'));
-        $this->assertSame(3, ApiRequestLog::query()->where('operation', 'customer_create')->count());
+        $this->assertSame(5, ApiRequestLog::query()->where('operation', 'customer_create')->count());
+        $this->assertSame(3, ApiRequestLog::query()
+            ->where('provider_id', $provider->id)
+            ->where('user_id', 9)
+            ->where('operation', 'customer_create')
+            ->where('request_method', 'POST')
+            ->count());
         $this->assertSame(3, KycDocument::query()->whereIn('id', [21, 22, 23])->get()
             ->pluck('metadata')->pluck('nium_file_id')->unique()->count());
 

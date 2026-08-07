@@ -5,7 +5,7 @@
 
 BEGIN;
 
-LOCK TABLE kyc_profiles, kyc_related_persons, kyc_documents, user_provider_accounts, api_request_logs
+LOCK TABLE kyc_profiles, kyc_related_persons, kyc_documents, user_provider_accounts, integration_providers, api_request_logs
     IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE TEMP TABLE fixture_v5_hk_document_guard AS
@@ -21,10 +21,22 @@ SELECT
     (SELECT count(*) FROM api_request_logs) AS request_count_before,
     (
         SELECT count(*)
-        FROM api_request_logs
-        WHERE operation = 'customer_create'
-          AND request_method = 'POST'
-    ) AS customer_post_count_before;
+        FROM api_request_logs arl
+        JOIN integration_providers ip ON ip.id = arl.provider_id
+        WHERE ip.code = 'nium'
+          AND arl.user_id = 9
+          AND arl.operation = 'customer_create'
+          AND arl.request_method = 'POST'
+    ) AS fixture_customer_post_count_before,
+    (
+        SELECT jsonb_agg(to_jsonb(arl) ORDER BY arl.id)
+        FROM api_request_logs arl
+        JOIN integration_providers ip ON ip.id = arl.provider_id
+        WHERE ip.code = 'nium'
+          AND arl.user_id = 8
+          AND arl.operation = 'customer_create'
+          AND arl.request_method = 'POST'
+    ) AS user_8_customer_posts_before;
 
 CREATE TEMP TABLE fixture_v5_hk_roles AS
 SELECT
@@ -91,7 +103,7 @@ BEGIN
     END IF;
 
     IF (SELECT request_count_before FROM fixture_v5_hk_document_guard) <> 56
-       OR (SELECT customer_post_count_before FROM fixture_v5_hk_document_guard) <> 3 THEN
+       OR (SELECT fixture_customer_post_count_before FROM fixture_v5_hk_document_guard) <> 3 THEN
         RAISE EXCEPTION 'Locked provider request counts changed.';
     END IF;
 
@@ -186,8 +198,24 @@ BEGIN
     END IF;
 
     IF (SELECT count(*) FROM api_request_logs) <> (SELECT request_count_before FROM fixture_v5_hk_document_guard)
-       OR (SELECT count(*) FROM api_request_logs WHERE operation = 'customer_create' AND request_method = 'POST')
-        <> (SELECT customer_post_count_before FROM fixture_v5_hk_document_guard) THEN
+       OR (
+           SELECT count(*)
+           FROM api_request_logs arl
+           JOIN integration_providers ip ON ip.id = arl.provider_id
+           WHERE ip.code = 'nium'
+             AND arl.user_id = 9
+             AND arl.operation = 'customer_create'
+             AND arl.request_method = 'POST'
+       ) <> (SELECT fixture_customer_post_count_before FROM fixture_v5_hk_document_guard)
+       OR (
+           SELECT jsonb_agg(to_jsonb(arl) ORDER BY arl.id)
+           FROM api_request_logs arl
+           JOIN integration_providers ip ON ip.id = arl.provider_id
+           WHERE ip.code = 'nium'
+             AND arl.user_id = 8
+             AND arl.operation = 'customer_create'
+             AND arl.request_method = 'POST'
+       ) IS DISTINCT FROM (SELECT user_8_customer_posts_before FROM fixture_v5_hk_document_guard) THEN
         RAISE EXCEPTION 'Provider request counts changed.';
     END IF;
 END

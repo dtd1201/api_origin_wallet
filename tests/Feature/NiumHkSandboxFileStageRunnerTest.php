@@ -70,7 +70,8 @@ class NiumHkSandboxFileStageRunnerTest extends TestCase
 
         $this->assertCount(3, $results);
         $this->assertSame(['AVAILABLE', 'AVAILABLE', 'AVAILABLE'], array_column($results, 'file_state'));
-        $this->assertSame(3, ApiRequestLog::query()->where('operation', 'customer_create')->count());
+        $this->assertSame(5, ApiRequestLog::query()->where('operation', 'customer_create')->count());
+        $this->assertSame(3, $this->fixtureCustomerPostCount());
         $this->assertSame(62, ApiRequestLog::query()->count());
         $this->assertSame(3, KycDocument::query()->whereIn('id', [21, 22, 23])->get()
             ->pluck('metadata')->pluck('nium_file_id')->unique()->count());
@@ -116,7 +117,7 @@ class NiumHkSandboxFileStageRunnerTest extends TestCase
         }
 
         $this->assertSame('STOP_CREATE_OUTCOME_UNKNOWN_NO_RETRY', $documents[0]->fresh()->metadata['file_stage_state']);
-        $this->assertSame(3, ApiRequestLog::query()->where('operation', 'customer_create')->count());
+        $this->assertSame(3, $this->fixtureCustomerPostCount());
     }
 
     public function test_definite_provider_rejection_is_classified_without_retry(): void
@@ -139,6 +140,48 @@ class NiumHkSandboxFileStageRunnerTest extends TestCase
         }
 
         $this->assertSame('STOP_CREATE_REJECTED_NO_RETRY', $documents[0]->fresh()->metadata['file_stage_state']);
+    }
+
+    public function test_fourth_fixture_customer_create_fails_preflight_before_http(): void
+    {
+        ApiRequestLog::query()->where('operation', 'safe_diagnostic')->firstOrFail()->delete();
+        ApiRequestLog::query()->create([
+            'provider_id' => IntegrationProvider::query()->where('code', 'nium')->sole()->id,
+            'user_id' => 9,
+            'operation' => 'customer_create',
+            'request_method' => 'POST',
+            'request_url' => 'https://sandbox.example.test/safe',
+        ]);
+        $this->createFixtureDocuments();
+        $service = \Mockery::mock(NiumFileService::class);
+        $service->shouldNotReceive('createFile');
+        $service->shouldNotReceive('refreshDocumentState');
+
+        $this->expectExceptionMessage('Fixture V4 Nium Customer Create POST count is not the locked value 3.');
+
+        (new NiumHkSandboxFileStageRunner($service))->run();
+    }
+
+    public function test_wrong_provider_customer_create_does_not_count_for_fixture_preflight(): void
+    {
+        ApiRequestLog::query()->where('operation', 'safe_diagnostic')->firstOrFail()->delete();
+        ApiRequestLog::query()->create([
+            'provider_id' => IntegrationProvider::query()->where('code', 'other')->sole()->id,
+            'user_id' => 9,
+            'operation' => 'customer_create',
+            'request_method' => 'POST',
+            'request_url' => 'https://sandbox.example.test/safe',
+        ]);
+        $service = \Mockery::mock(NiumFileService::class);
+        $service->shouldNotReceive('createFile');
+        $service->shouldNotReceive('refreshDocumentState');
+
+        try {
+            (new NiumHkSandboxFileStageRunner($service))->run();
+            $this->fail('Expected the missing fixture documents to stop the runner.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Exactly three isolated HK fixture documents are required.', $exception->getMessage());
+        }
     }
 
     public function test_atomic_claim_is_committed_before_http_and_blocks_reentrant_runner(): void
@@ -279,7 +322,9 @@ class NiumHkSandboxFileStageRunnerTest extends TestCase
     private function seedLockedFixture(): void
     {
         $provider = IntegrationProvider::query()->forceCreate(['id' => 1, 'code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        IntegrationProvider::query()->forceCreate(['id' => 2, 'code' => 'other', 'name' => 'Other', 'status' => 'active']);
         $protectedUser = User::factory()->create(['id' => 4]);
+        $historicalUser = User::factory()->create(['id' => 8]);
         $fixtureUser = User::factory()->create(['id' => 9]);
         KycProfile::query()->forceCreate([
             'id' => 9,
@@ -309,11 +354,17 @@ class NiumHkSandboxFileStageRunnerTest extends TestCase
         UserProviderAccount::query()->forceCreate(['id' => 7, 'user_id' => $fixtureUser->id, 'provider_id' => $provider->id]);
 
         for ($index = 0; $index < 56; $index++) {
+            $isHistoricalCustomerPost = $index < 2;
+            $isFixtureCustomerPost = $index >= 2 && $index < 5;
             ApiRequestLog::query()->create([
                 'provider_id' => $provider->id,
-                'user_id' => $fixtureUser->id,
-                'operation' => $index < 3 ? 'customer_create' : 'safe_diagnostic',
-                'request_method' => $index < 3 ? 'POST' : 'GET',
+                'user_id' => $isHistoricalCustomerPost ? $historicalUser->id : $fixtureUser->id,
+                'operation' => ($isHistoricalCustomerPost || $isFixtureCustomerPost)
+                    ? 'customer_create'
+                    : 'safe_diagnostic',
+                'request_method' => ($isHistoricalCustomerPost || $isFixtureCustomerPost)
+                    ? 'POST'
+                    : 'GET',
                 'request_url' => 'https://sandbox.example.test/safe',
             ]);
         }
@@ -403,5 +454,15 @@ class NiumHkSandboxFileStageRunnerTest extends TestCase
             'response_status' => $status,
             'is_success' => $status >= 200 && $status < 300,
         ]);
+    }
+
+    private function fixtureCustomerPostCount(): int
+    {
+        return ApiRequestLog::query()
+            ->where('provider_id', IntegrationProvider::query()->where('code', 'nium')->sole()->id)
+            ->where('user_id', 9)
+            ->where('operation', 'customer_create')
+            ->where('request_method', 'POST')
+            ->count();
     }
 }
