@@ -51,9 +51,14 @@ SELECT
     kd.file_hash AS safe_content_hash_if_retained,
     CASE
         WHEN kd.kyc_related_person_id IS NULL THEN 'documents[*].fileIds'
-        WHEN krp.relationship_type = 'authorized_person' THEN 'applicant.documents[*].fileIds'
+        WHEN lower(krp.relationship_type) IN (
+            'applicant',
+            'authorized_representative',
+            'authorised_representative'
+        ) THEN 'applicant.documents[*].fileIds'
         ELSE 'stakeholders.individual[*].documents[*].fileIds'
     END AS customer_payload_reference,
+    krp.relationship_type AS related_person_relationship_type,
     kd.metadata->>'nium_file_id' AS nium_file_id,
     kd.metadata->>'nium_file_state' AS nium_file_state,
     kd.metadata ? 'sha256' AS has_metadata_sha256,

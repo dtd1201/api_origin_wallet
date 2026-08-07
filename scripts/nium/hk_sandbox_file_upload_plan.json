@@ -1,0 +1,46 @@
+{
+    "schema_version": 1,
+    "fixture_marker": "nium-corporate-synthetic-v5-hk",
+    "execution_mode": "human_approved_one_shot_only",
+    "automatic_retry": false,
+    "customer_create_allowed": false,
+    "historical_document_ids_excluded": [18, 19, 20],
+    "historical_file_ids_must_not_be_reused": true,
+    "preconditions": [
+        "manifest_sha256_matches_reviewed_copy",
+        "artifact_sha256_matches_immediately_before_upload",
+        "document_has_no_nium_file_id",
+        "execution_marker_is_unused",
+        "customer_post_count_is_3"
+    ],
+    "documents": [
+        {
+            "order": 1,
+            "logical_role": "corporate_registration",
+            "intended_nium_document_type": "business_registration_doc",
+            "execution_marker": "nium-v5-hk-file-corporate-create-v1",
+            "operations": ["CREATE_FILE_ONCE", "GET_FILE_DETAILS_ONCE_AFTER_CREATE_EVIDENCE"]
+        },
+        {
+            "order": 2,
+            "logical_role": "applicant_authorized_person_identity",
+            "intended_nium_document_type": "passport",
+            "execution_marker": "nium-v5-hk-file-applicant-create-v1",
+            "operations": ["CREATE_FILE_ONCE", "GET_FILE_DETAILS_ONCE_AFTER_CREATE_EVIDENCE"]
+        },
+        {
+            "order": 3,
+            "logical_role": "beneficial_owner_stakeholder_identity",
+            "intended_nium_document_type": "passport",
+            "execution_marker": "nium-v5-hk-file-stakeholder-create-v1",
+            "operations": ["CREATE_FILE_ONCE", "GET_FILE_DETAILS_ONCE_AFTER_CREATE_EVIDENCE"]
+        }
+    ],
+    "ambiguous_outcome_policy": "STOP_WITHOUT_RETRY",
+    "safe_response_evidence": ["request_id", "http_status", "file_id", "state", "response_received"],
+    "future_fixture_selection": {
+        "required_fixture_marker": "nium-corporate-synthetic-v5-hk",
+        "reject_document_ids": [18, 19, 20],
+        "require_new_available_file_id_per_role": true
+    }
+}

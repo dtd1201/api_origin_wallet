@@ -19,5 +19,7 @@ class NiumHkFixtureRepairArtifactTest extends TestCase
         $this->assertStringNotContainsString('UPDATE kyc_documents', $repair);
         $this->assertStringContainsString('safe_content_hash_if_retained', $diagnostic);
         $this->assertStringContainsString('customer_payload_reference', $diagnostic);
+        $this->assertStringContainsString("'authorized_representative'", $diagnostic);
+        $this->assertStringContainsString("'authorised_representative'", $diagnostic);
     }
 }
