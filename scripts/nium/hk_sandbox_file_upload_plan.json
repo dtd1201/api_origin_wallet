@@ -2,6 +2,7 @@
     "schema_version": 1,
     "fixture_marker": "nium-corporate-synthetic-v5-hk",
     "execution_mode": "human_approved_one_shot_only",
+    "document_records_must_exist_before_upload": true,
     "automatic_retry": false,
     "customer_create_allowed": false,
     "historical_document_ids_excluded": [18, 19, 20],

@@ -68,6 +68,7 @@ function generateNiumHkSandboxDocuments(string $outputDirectory): array
     ];
 
     $artifacts = [];
+    $runtimeArtifacts = [];
 
     foreach ($definitions as $definition) {
         $path = $outputDirectory.DIRECTORY_SEPARATOR.$definition['filename'];
@@ -78,10 +79,10 @@ function generateNiumHkSandboxDocuments(string $outputDirectory): array
         }
 
         chmod($path, 0600);
-        $artifacts[] = [
+        $artifact = [
             'logical_role' => $definition['logical_role'],
+            'artifact_filename' => $definition['filename'],
             'intended_nium_document_type' => $definition['intended_nium_document_type'],
-            'external_local_path' => $path,
             'mime_type' => 'application/pdf',
             'byte_size' => strlen($bytes),
             'page_dimensions_points' => [
@@ -93,6 +94,8 @@ function generateNiumHkSandboxDocuments(string $outputDirectory): array
             'visibly_test_only' => true,
             'target_region' => 'HK',
         ];
+        $artifacts[] = $artifact;
+        $runtimeArtifacts[] = [...$artifact, 'external_local_path' => $path];
     }
 
     $manifest = [
@@ -110,7 +113,11 @@ function generateNiumHkSandboxDocuments(string $outputDirectory): array
 
     chmod($manifestPath, 0600);
 
-    return [...$manifest, 'manifest_path' => $manifestPath];
+    return [
+        ...$manifest,
+        'manifest_path' => $manifestPath,
+        'runtime_artifacts' => $runtimeArtifacts,
+    ];
 }
 
 /**

@@ -15,14 +15,18 @@ class NiumHkSandboxDocumentFixtureTest extends TestCase
         $secondDirectory = sys_get_temp_dir().'/nium-hk-fixture-'.Str::uuid();
         $first = generateNiumHkSandboxDocuments($firstDirectory);
         $second = generateNiumHkSandboxDocuments($secondDirectory);
+        $firstManifest = file_get_contents($first['manifest_path']);
+        $secondManifest = file_get_contents($second['manifest_path']);
 
         $this->assertSame(3, count($first['generated_artifacts']));
+        $this->assertSame($firstManifest, $secondManifest);
+        $this->assertSame(hash('sha256', (string) $firstManifest), hash('sha256', (string) $secondManifest));
         $this->assertSame(
             array_column($first['generated_artifacts'], 'sha256'),
             array_column($second['generated_artifacts'], 'sha256'),
         );
 
-        foreach ($first['generated_artifacts'] as $artifact) {
+        foreach ($first['runtime_artifacts'] as $artifact) {
             $bytes = file_get_contents($artifact['external_local_path']);
 
             $this->assertIsString($bytes);
@@ -36,6 +40,17 @@ class NiumHkSandboxDocumentFixtureTest extends TestCase
             $this->assertSame(hash('sha256', $bytes), $artifact['sha256']);
             $this->assertTrue($artifact['visibly_test_only']);
             $this->assertSame('HK', $artifact['target_region']);
+        }
+
+        $this->assertSame([
+            '68e006d3f97f33b24e5ced1a07aaa4ff970270acba6fcee05e7658814a57822a',
+            '310f7f2716bf6945d4591e459e13449df2f41e044487ff4c3f36b97228f397a2',
+            'd4b5d6945d047f8a892c7cb93694e37c2dd6efb98b8f63e86b18394f0c2ad953',
+        ], array_column($first['generated_artifacts'], 'sha256'));
+
+        foreach ($first['generated_artifacts'] as $artifact) {
+            $this->assertArrayNotHasKey('external_local_path', $artifact);
+            $this->assertArrayHasKey('artifact_filename', $artifact);
         }
     }
 

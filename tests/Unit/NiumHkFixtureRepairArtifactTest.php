@@ -22,4 +22,22 @@ class NiumHkFixtureRepairArtifactTest extends TestCase
         $this->assertStringContainsString("'authorized_representative'", $diagnostic);
         $this->assertStringContainsString("'authorised_representative'", $diagnostic);
     }
+
+    public function test_new_document_record_preparation_is_additive_and_excludes_historical_rows(): void
+    {
+        $preparation = file_get_contents(base_path('scripts/nium/fixture_v5_hk_document_records_prepare_proposed.sql'));
+        $runner = file_get_contents(base_path('scripts/nium/run_hk_sandbox_file_stage.php'));
+
+        $this->assertIsString($preparation);
+        $this->assertIsString($runner);
+        $this->assertStringContainsString('INSERT INTO kyc_documents', $preparation);
+        $this->assertStringNotContainsString('UPDATE kyc_documents', $preparation);
+        $this->assertStringNotContainsString('DELETE FROM kyc_documents', $preparation);
+        $this->assertStringContainsString('kd.id IN (18, 19, 20)', $preparation);
+        $this->assertStringContainsString("metadata ? 'nium_file_id'", $preparation);
+        $this->assertStringNotContainsString('NiumCustomerOnboardingService', $runner);
+        $this->assertStringNotContainsString('PaymentId', $runner);
+        $this->assertStringNotContainsString('Beneficiary', $runner);
+        $this->assertStringNotContainsString('Transfer', $runner);
+    }
 }
