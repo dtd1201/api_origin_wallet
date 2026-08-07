@@ -152,7 +152,9 @@ class NiumCustomerPayloadFactory
             'businessType' => $businessType,
             'registeredCountry' => strtoupper((string) $profile->registered_country_code),
             'registeredDate' => $registeredDate,
-            'website' => $metadata['business_website'] ?? null,
+            'website' => filled($metadata['business_website'] ?? null)
+                ? $metadata['business_website']
+                : Arr::get($metadata, 'nium_v5_fields.website'),
             'addresses' => $this->filter([
                 'isBusinessAddressSameAsRegisteredAddress' => $addressRelationship,
                 'registeredAddress' => $registeredAddress,
@@ -172,6 +174,7 @@ class NiumCustomerPayloadFactory
         ]));
 
         if ($region === 'SG') {
+            $payload['tradeName'] = $this->requiredSgCorporateString($profile, 'tradeName');
             $payload = $this->normalizeSgCorporateCountryLists($payload);
         }
 
@@ -529,6 +532,7 @@ class NiumCustomerPayloadFactory
             throw new RuntimeException('Approved KYC metadata nium_v5_fields must be an object.');
         }
 
+        $this->requiredSgCorporateString($profile, 'tradeName');
         $this->sgCorporateAddressSources($profile);
 
         if (($fields['applicantDeclaration'] ?? null) !== true) {
@@ -733,6 +737,20 @@ class NiumCustomerPayloadFactory
         }
 
         return $value;
+    }
+
+    private function requiredSgCorporateString(KycProfile $profile, string $field): string
+    {
+        $value = Arr::get((array) $profile->metadata, "nium_v5_fields.{$field}");
+
+        if (! is_string($value) || trim($value) === '') {
+            throw new RuntimeException(
+                'Nium SG corporate full KYC requires approved KYC metadata field '
+                ."nium_v5_fields.{$field} as a non-empty string.",
+            );
+        }
+
+        return trim($value);
     }
 
     private function isNonEmptyStringList(mixed $value): bool

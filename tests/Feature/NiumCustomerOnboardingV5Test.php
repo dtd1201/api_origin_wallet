@@ -262,6 +262,86 @@ class NiumCustomerOnboardingV5Test extends TestCase
         }
     }
 
+    #[DataProvider('missingTradeNameProvider')]
+    public function test_sg_corporate_full_requires_approved_trade_name_before_any_nium_http(
+        bool $remove,
+        mixed $value,
+    ): void {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+
+        if ($remove) {
+            unset($metadata['nium_v5_fields']['tradeName']);
+        } else {
+            $metadata['nium_v5_fields']['tradeName'] = $value;
+        }
+
+        $profile->update(['metadata' => $metadata]);
+        $this->mock(NiumCustomerDocumentPreparationService::class)->shouldNotReceive('prepare');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+        $user->unsetRelation('kycProfile');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(
+            'Nium SG corporate full KYC requires approved KYC metadata field '
+            .'nium_v5_fields.tradeName as a non-empty string.',
+        );
+
+        try {
+            app(NiumCustomerOnboardingService::class)->syncUser($provider, $user);
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
+    public static function missingTradeNameProvider(): array
+    {
+        return [
+            'missing' => [true, null],
+            'null' => [false, null],
+            'blank' => [false, '   '],
+        ];
+    }
+
+    public function test_sg_corporate_full_emits_only_explicit_trimmed_trade_name(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['tradeName'] = '  Acme Approved Trade  ';
+        $profile->update([
+            'business_name' => 'Different Legal Business Name',
+            'metadata' => $metadata,
+        ]);
+        $user->unsetRelation('kycProfile');
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('Different Legal Business Name', $payload['businessName']);
+        $this->assertSame('Acme Approved Trade', $payload['tradeName']);
+        Http::assertNothingSent();
+    }
+
+    public function test_approved_v5_website_survives_corporate_payload_merge(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        unset($metadata['business_website']);
+        $metadata['nium_v5_fields']['website'] = 'https://approved.example';
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('https://approved.example', $payload['website']);
+        Http::assertNothingSent();
+    }
+
     public function test_v5_customer_retrieval_refreshes_backend_controlled_state(): void
     {
         $provider = $this->provider();
@@ -3697,6 +3777,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 'registered_date' => '2020-01-15',
                 'nium_business_type' => 'private_company',
                 'nium_v5_fields' => [
+                    'tradeName' => 'Acme Holdings',
                     'addresses' => [
                         'isBusinessAddressSameAsRegisteredAddress' => true,
                     ],
