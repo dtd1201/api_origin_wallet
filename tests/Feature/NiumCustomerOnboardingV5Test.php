@@ -1657,7 +1657,10 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $profile = $user->kycProfile()->firstOrFail();
         $metadata = (array) $profile->metadata;
         $metadata['nium_region'] = 'HK';
-        unset($metadata['nium_v5_fields']['addresses']);
+        $metadata['nium_v5_fields']['addresses'] = [
+            'isBusinessAddressSameAsRegisteredAddress' => true,
+        ];
+        $metadata['nium_v5_fields']['website'] = 'https://business.example.test';
         $metadata['nium_v5_fields']['natureOfBusiness']['operatingCountries'] = ['HK'];
         $metadata['nium_v5_fields']['expectedAccountUsage']['credit']['topTransactionCountries'] = ['HK'];
         $metadata['nium_v5_fields']['expectedAccountUsage']['debit']['topTransactionCountries'] = ['HK'];
@@ -1678,6 +1681,14 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $profile->documents()
             ->where('type', 'business_registration')
             ->update(['issuing_country_code' => 'HK']);
+        $profile->documents()->create([
+            'type' => 'nar1',
+            'status' => 'approved',
+            'file_url' => 'private://fixture/nar1',
+            'document_number' => 'NAR1-SYNTHETIC',
+            'issuing_country_code' => 'HK',
+            'metadata' => $this->availableFileMetadata('40000000-0000-4000-8000-000000000024'),
+        ]);
         $applicant = $profile->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
         $stakeholder = $profile->relatedPersons()->where('relationship_type', 'beneficial_owner')->firstOrFail();
         $historical = collect([
@@ -1692,25 +1703,26 @@ class NiumCustomerOnboardingV5Test extends TestCase
             $user,
             (string) Str::uuid(),
         );
-        $fileIds = collect([
-            ...$payload['documents'][0]['fileIds'],
-            ...$payload['applicant']['documents'][0]['fileIds'],
-            ...$payload['stakeholders']['individual'][0]['documents'][0]['fileIds'],
-        ]);
+        $fileIds = collect($payload['documents'])->flatMap(fn (array $document): array => $document['fileIds'])
+            ->merge([
+                ...$payload['applicant']['documents'][0]['fileIds'],
+                ...$payload['stakeholders']['individual'][0]['documents'][0]['fileIds'],
+            ]);
 
         $this->assertSame('corporate', $payload['type']);
         $this->assertSame('HK', $payload['region']);
         $this->assertSame('full', $payload['kycType']);
         $this->assertSame('HK', $payload['registeredCountry']);
         $this->assertSame('HK', $payload['addresses']['registeredAddress']['country']);
-        $this->assertSame('HK', $payload['addresses']['businessAddress']['country']);
+        $this->assertTrue($payload['addresses']['isBusinessAddressSameAsRegisteredAddress']);
+        $this->assertArrayNotHasKey('businessAddress', $payload['addresses']);
         $this->assertSame(['HK'], $payload['natureOfBusiness']['operatingCountries']);
         $this->assertSame('HK', $payload['bankAccountDetails']['bankCountry']);
         $this->assertSame('HKD', $payload['bankAccountDetails']['currency']);
         $this->assertSame('HK', $payload['deviceDetails']['ipCountryCode']);
         $this->assertSame(self::DEVICE_SESSION_ID, $payload['deviceDetails']['sessionId']);
-        $this->assertSame(3, $fileIds->count());
-        $this->assertSame(3, $fileIds->unique()->count());
+        $this->assertSame(4, $fileIds->count());
+        $this->assertSame(4, $fileIds->unique()->count());
         $this->assertTrue($fileIds->every(fn (string $fileId): bool => Str::isUuid($fileId)));
         $this->assertTrue($historical->every(fn (KycDocument $document): bool => $document->fresh()->status === 'superseded'));
         $this->assertSame('SG', $payload['applicant']['nationality']);

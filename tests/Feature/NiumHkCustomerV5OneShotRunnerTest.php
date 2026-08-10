@@ -224,24 +224,19 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertDatabaseCount('identity_verification_sessions', 0);
     }
 
-    public function test_invalid_payload_device_session_fails_before_http_without_identity_row(): void
+    public function test_empty_payload_device_session_fails_before_http_without_identity_row(): void
     {
-        data_set($this->payload, 'deviceDetails.sessionId', 'not-a-uuid');
+        data_set($this->payload, 'deviceDetails.sessionId', '');
 
         $this->assertPreflightFailureBeforeHttp();
         $this->assertDatabaseCount('identity_verification_sessions', 0);
     }
 
-    public function test_hk_payload_may_omit_optional_device_details_without_identity_row(): void
+    public function test_hk_payload_missing_required_device_details_fails_without_identity_row(): void
     {
         unset($this->payload['deviceDetails']);
         $this->assertDatabaseCount('identity_verification_sessions', 0);
-        $calls = $this->mockGateway(['unexpected' => []]);
-
-        $result = $this->runner()->run($this->executionRoot());
-
-        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
-        $this->assertSame(['GET'], $calls->methods);
+        $this->assertPreflightFailureBeforeHttp();
         $this->assertDatabaseCount('identity_verification_sessions', 0);
     }
 

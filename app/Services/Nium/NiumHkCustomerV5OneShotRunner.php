@@ -338,7 +338,7 @@ final class NiumHkCustomerV5OneShotRunner
     private function assertDeviceDetails(array $payload): void
     {
         if (! array_key_exists('deviceDetails', $payload)) {
-            return;
+            throw new RuntimeException('Customer V5 deviceDetails is required for HK Corporate Full KYC.');
         }
 
         $deviceDetails = $payload['deviceDetails'];
@@ -347,14 +347,18 @@ final class NiumHkCustomerV5OneShotRunner
             throw new RuntimeException('Customer V5 deviceDetails must be an object when supplied.');
         }
 
-        $sessionId = $deviceDetails['sessionId'] ?? null;
-
-        if (! is_string($sessionId) || trim($sessionId) === '' || ! Str::isUuid($sessionId)) {
-            throw new RuntimeException('Customer V5 deviceDetails.sessionId must be a valid UUID when supplied.');
+        foreach (['ipCountryCode', 'deviceInfo', 'ipAddress', 'sessionId'] as $field) {
+            if (! is_string($deviceDetails[$field] ?? null) || trim($deviceDetails[$field]) === '') {
+                throw new RuntimeException("Customer V5 deviceDetails.{$field} must be a non-empty string.");
+            }
         }
 
-        if (array_key_exists('ipCountryCode', $deviceDetails) && $deviceDetails['ipCountryCode'] !== 'HK') {
+        if ($deviceDetails['ipCountryCode'] !== 'HK') {
             throw new RuntimeException('Customer V5 deviceDetails.ipCountryCode must match the locked HK fixture.');
+        }
+
+        if (filter_var($deviceDetails['ipAddress'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            throw new RuntimeException('Customer V5 deviceDetails.ipAddress must be a valid IPv4 address.');
         }
     }
 

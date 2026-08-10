@@ -31,6 +31,7 @@ class NiumCustomerPayloadFactory
         private readonly NiumCustomerDocumentResolver $documentResolver,
         private readonly NiumSgCorporateClientPolicy $sgCorporateClientPolicy,
         private readonly NiumRegionResolver $regionResolver,
+        private readonly NiumHkCorporateV5Validator $hkCorporateV5Validator,
     ) {}
 
     /**
@@ -64,7 +65,7 @@ class NiumCustomerPayloadFactory
      */
     public function validateRequiredSourceData(User $user): void
     {
-        $user->loadMissing('kycProfile.relatedPersons');
+        $user->loadMissing(['kycProfile.documents', 'kycProfile.relatedPersons.documents']);
         $profile = $this->approvedProfile($user);
         $metadata = (array) ($profile->metadata ?? []);
         $region = $this->regionResolver->resolve(
@@ -140,6 +141,8 @@ class NiumCustomerPayloadFactory
 
         if ($region === 'SG') {
             [$addressRelationship, $businessAddress] = $this->sgCorporateAddressSources($profile);
+        } elseif ($region === 'HK' && $kycType === 'full') {
+            [$addressRelationship, $businessAddress] = $this->hkCorporateAddressSources($profile);
         }
 
         $payload = $this->filter(array_merge($this->regionFields($profile), [
@@ -176,6 +179,11 @@ class NiumCustomerPayloadFactory
         if ($region === 'SG') {
             $payload['tradeName'] = $this->requiredSgCorporateString($profile, 'tradeName');
             $payload = $this->normalizeSgCorporateCountryLists($payload);
+        }
+
+        if ($region === 'HK' && $kycType === 'full') {
+            $payload['tradeName'] = $this->requiredHkCorporateTradeName($profile);
+            $this->hkCorporateV5Validator->assert($profile, $payload);
         }
 
         if (in_array($region, ['UK', 'EU'], true) && $kycType === 'minimum') {
@@ -333,6 +341,49 @@ class NiumCustomerPayloadFactory
         }
 
         return [$relationship, $this->businessAddress($addresses['businessAddress'])];
+    }
+
+    /** @return array{0: bool, 1: ?array<string, mixed>} */
+    private function hkCorporateAddressSources(KycProfile $profile): array
+    {
+        $addresses = Arr::get((array) $profile->metadata, 'nium_v5_fields.addresses');
+
+        if (! is_array($addresses) || array_is_list($addresses) || ! is_bool($addresses['isBusinessAddressSameAsRegisteredAddress'] ?? null)) {
+            throw new RuntimeException('hk_corporate_address_relationship_invalid');
+        }
+
+        if ($addresses['isBusinessAddressSameAsRegisteredAddress']) {
+            if (array_key_exists('businessAddress', $addresses) && ! in_array($addresses['businessAddress'], [null, []], true)) {
+                throw new RuntimeException('hk_corporate_business_address_conflict');
+            }
+
+            return [true, null];
+        }
+
+        if (! array_key_exists('businessAddress', $addresses)) {
+            throw new RuntimeException('hk_corporate_business_address_invalid');
+        }
+
+        try {
+            return [false, $this->businessAddress($addresses['businessAddress'])];
+        } catch (RuntimeException) {
+            throw new RuntimeException('hk_corporate_business_address_invalid');
+        }
+    }
+
+    private function requiredHkCorporateTradeName(KycProfile $profile): string
+    {
+        $tradeName = Arr::get((array) $profile->metadata, 'nium_v5_fields.tradeName');
+
+        if ($tradeName === null || (is_string($tradeName) && trim($tradeName) === '')) {
+            $tradeName = $profile->business_name;
+        }
+
+        if (! is_string($tradeName) || trim($tradeName) === '') {
+            throw new RuntimeException('Nium HK Corporate Full requires tradeName or businessName as a non-empty string.');
+        }
+
+        return trim($tradeName);
     }
 
     private function validateEmptySgCorporateBusinessAddress(mixed $source): void
@@ -514,6 +565,18 @@ class NiumCustomerPayloadFactory
             }
         } else {
             $this->email($user->email, 'nium_v5_fields.customer.email');
+        }
+
+        if ($profile->applicant_type === 'business' && $region === 'HK') {
+            if ($kycType !== 'full') {
+                throw new RuntimeException('Nium HK corporate onboarding requires approved KYC metadata field nium_kyc_type to be full.');
+            }
+
+            $this->hkCorporateAddressSources($profile);
+            $this->validateHkCorporateMetadata($profile);
+            $this->validateHkCorporateDocumentSources($profile);
+
+            return;
         }
 
         if ($profile->applicant_type !== 'business' || $region !== 'SG') {
@@ -737,6 +800,91 @@ class NiumCustomerPayloadFactory
         }
 
         return $value;
+    }
+
+    private function validateHkCorporateMetadata(KycProfile $profile): void
+    {
+        $fields = Arr::get((array) $profile->metadata, 'nium_v5_fields');
+
+        if (! is_array($fields) || array_is_list($fields)) {
+            throw new RuntimeException('Approved HK KYC metadata nium_v5_fields must be an object.');
+        }
+
+        $this->requiredHkCorporateTradeName($profile);
+
+        if (($fields['applicantDeclaration'] ?? null) !== true) {
+            throw new RuntimeException('Nium HK Corporate Full requires nium_v5_fields.applicantDeclaration as boolean true.');
+        }
+
+        if (! is_string($fields['applicantDeclarationTimeStamp'] ?? null) || trim($fields['applicantDeclarationTimeStamp']) === '') {
+            throw new RuntimeException('Nium HK Corporate Full requires nium_v5_fields.applicantDeclarationTimeStamp as a non-empty string.');
+        }
+
+        if (! is_bool($fields['isMultiLayeredCompany'] ?? null)) {
+            throw new RuntimeException('Nium HK Corporate Full requires nium_v5_fields.isMultiLayeredCompany as a boolean.');
+        }
+
+        foreach (['natureOfBusiness', 'expectedAccountUsage', 'sizeOfBusiness', 'bankAccountDetails', 'deviceDetails'] as $field) {
+            if (! is_array($fields[$field] ?? null) || $fields[$field] === [] || array_is_list($fields[$field])) {
+                throw new RuntimeException("Nium HK Corporate Full requires nium_v5_fields.{$field} as an object.");
+            }
+        }
+
+        $deviceDetails = $fields['deviceDetails'];
+
+        foreach (['ipCountryCode', 'deviceInfo', 'ipAddress', 'sessionId'] as $field) {
+            if (! is_string($deviceDetails[$field] ?? null) || trim($deviceDetails[$field]) === '') {
+                throw new RuntimeException("Nium HK Corporate Full requires nium_v5_fields.deviceDetails.{$field} as a non-empty string.");
+            }
+        }
+
+        if (filter_var($deviceDetails['ipAddress'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            throw new RuntimeException('Nium HK Corporate Full requires nium_v5_fields.deviceDetails.ipAddress as a valid IPv4 address.');
+        }
+    }
+
+    private function validateHkCorporateDocumentSources(KycProfile $profile): void
+    {
+        $types = $this->documentResolver->profileDocuments($profile)
+            ->map(function (KycDocument $document): string {
+                $metadata = (array) ($document->metadata ?? []);
+
+                return strtolower(trim((string) ($metadata['nium_document_type'] ?? $document->type)));
+            });
+        $missing = [];
+
+        if (! $types->intersect(['business_registration', 'business_registration_doc', 'certificate_of_incorporation'])->count()) {
+            $missing[] = 'business_registration_doc';
+        }
+
+        $businessType = strtolower(trim((string) (Arr::get((array) $profile->metadata, 'nium_business_type') ?? Arr::get((array) $profile->metadata, 'business_type'))));
+
+        if ($businessType === 'private_company' && $types->intersect(['nar1', 'nnc1'])->isEmpty()) {
+            $missing[] = 'nar1_or_nnc1';
+        }
+
+        $website = Arr::get((array) $profile->metadata, 'business_website') ?? Arr::get((array) $profile->metadata, 'nium_v5_fields.website');
+
+        if (! filled($website) && ! $types->contains('proof_of_business')) {
+            $missing[] = 'proof_of_business';
+        }
+
+        if (Arr::get((array) $profile->metadata, 'nium_v5_fields.isMultiLayeredCompany') === true && $types->intersect(['corporate_structure', 'ownership_chart'])->isEmpty()) {
+            $missing[] = 'corporate_structure';
+        }
+
+        $applicant = $this->corporateApplicant($profile);
+        $positions = collect((array) Arr::get((array) $applicant->metadata, 'positions', ['director']))
+            ->filter(fn ($position): bool => is_string($position))
+            ->map(fn (string $position): string => str_replace(['-', ' '], '_', strtolower(trim($position))));
+
+        if ($positions->intersect(['director', 'ubo', 'ultimate_beneficial_owner', 'partner'])->isEmpty() && ! $types->contains('loa')) {
+            $missing[] = 'loa';
+        }
+
+        if ($missing !== []) {
+            throw new RuntimeException(NiumHkCorporateV5Validator::REQUIRED_DOCUMENT_MISSING.':'.implode(',', $missing));
+        }
     }
 
     private function requiredSgCorporateString(KycProfile $profile, string $field): string
