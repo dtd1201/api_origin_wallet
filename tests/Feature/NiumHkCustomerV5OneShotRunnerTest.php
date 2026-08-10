@@ -7,6 +7,7 @@ use App\Models\IdentityVerificationSession;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
+use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumCustomerPayloadFactory;
@@ -26,6 +27,8 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
     /** @var list<string> */
     private array $executionRoots = [];
+
+    private array $payload;
 
     protected function setUp(): void
     {
@@ -209,6 +212,88 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertStringNotContainsString('origin-wallet-user-9', $output);
     }
 
+    #[DataProvider('invalidDocumentBindings')]
+    public function test_invalid_document_relationships_and_logical_roles_fail_before_http(string $case): void
+    {
+        match ($case) {
+            'applicant document attached to stakeholder' => KycDocument::query()->findOrFail(22)->forceFill(['kyc_related_person_id' => 14])->save(),
+            'stakeholder document attached to applicant' => KycDocument::query()->findOrFail(23)->forceFill(['kyc_related_person_id' => 13])->save(),
+            'company document attached to person' => KycDocument::query()->findOrFail(21)->forceFill(['kyc_related_person_id' => 13])->save(),
+            'logical role mismatch' => $this->replaceDocumentMetadata(22, ['logical_role' => 'beneficial_owner_stakeholder_identity']),
+        };
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
+    public static function invalidDocumentBindings(): array
+    {
+        return [
+            'doc22 stakeholder' => ['applicant document attached to stakeholder'],
+            'doc23 applicant' => ['stakeholder document attached to applicant'],
+            'doc21 person' => ['company document attached to person'],
+            'role mismatch' => ['logical role mismatch'],
+        ];
+    }
+
+    #[DataProvider('swappedPayloadRoles')]
+    public function test_swapped_payload_file_ids_fail_before_http(string $leftPath, string $rightPath): void
+    {
+        $left = data_get($this->payload, $leftPath);
+        $right = data_get($this->payload, $rightPath);
+        data_set($this->payload, $leftPath, $right);
+        data_set($this->payload, $rightPath, $left);
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
+    public static function swappedPayloadRoles(): array
+    {
+        return [
+            'company and applicant' => ['documents.0.fileIds', 'applicant.documents.0.fileIds'],
+            'applicant and stakeholder' => ['applicant.documents.0.fileIds', 'stakeholders.individual.0.documents.0.fileIds'],
+            'company and stakeholder' => ['documents.0.fileIds', 'stakeholders.individual.0.documents.0.fileIds'],
+        ];
+    }
+
+    public function test_extra_stakeholder_fails_before_http(): void
+    {
+        KycRelatedPerson::query()->forceCreate([
+            'id' => 15,
+            'kyc_profile_id' => 9,
+            'relationship_type' => 'beneficial_owner',
+            'status' => 'approved',
+            'legal_name' => 'Extra Stakeholder',
+        ]);
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
+    public function test_missing_stakeholder_fails_before_http(): void
+    {
+        KycRelatedPerson::query()->findOrFail(14)->delete();
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
+    public function test_production_resolver_selection_other_than_exact_documents_fails_before_http(): void
+    {
+        KycDocument::query()->forceCreate([
+            'id' => 24,
+            'kyc_profile_id' => 9,
+            'kyc_related_person_id' => 14,
+            'type' => 'passport_front',
+            'status' => 'approved',
+            'file_url' => 'private://fixture/24',
+            'metadata' => [
+                'logical_role' => 'beneficial_owner_stakeholder_identity',
+                'nium_file_id' => '20000000-0000-4000-8000-000000000024',
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
     #[DataProvider('rejectedStatuses')]
     public function test_definite_4xx_and_5xx_never_retry(int $status): void
     {
@@ -305,6 +390,20 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             'country_code' => 'HK',
             'metadata' => ['nium_region' => 'HK'],
         ]);
+        KycRelatedPerson::query()->forceCreate([
+            'id' => 13,
+            'kyc_profile_id' => 9,
+            'relationship_type' => 'applicant',
+            'status' => 'approved',
+            'legal_name' => 'Fixture Applicant',
+        ]);
+        KycRelatedPerson::query()->forceCreate([
+            'id' => 14,
+            'kyc_profile_id' => 9,
+            'relationship_type' => 'beneficial_owner',
+            'status' => 'approved',
+            'legal_name' => 'Fixture Stakeholder',
+        ]);
         UserProviderAccount::query()->forceCreate(['id' => 4, 'user_id' => 4, 'provider_id' => $provider->id]);
         UserProviderAccount::query()->forceCreate([
             'id' => 7,
@@ -325,10 +424,20 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             KycDocument::query()->forceCreate([
                 'id' => $id,
                 'kyc_profile_id' => 9,
+                'kyc_related_person_id' => match ($id) {
+                    22 => 13,
+                    23 => 14,
+                    default => null,
+                },
                 'type' => $index === 0 ? 'business_registration' : 'passport_front',
                 'status' => 'approved',
                 'file_url' => 'private://fixture/'.$id,
                 'metadata' => [
+                    'logical_role' => match ($id) {
+                        21 => 'corporate_registration',
+                        22 => 'applicant_authorized_person_identity',
+                        23 => 'beneficial_owner_stakeholder_identity',
+                    },
                     'nium_file_id' => sprintf('20000000-0000-4000-8000-%012d', $id),
                     'nium_file_state' => 'AVAILABLE',
                 ],
@@ -339,7 +448,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             $this->logRequest($index < 3 ? 'POST' : 'GET', $index < 3 ? 'customer_create' : 'safe_diagnostic', 200);
         }
 
-        $payload = [
+        $this->payload = [
             'type' => 'corporate',
             'region' => 'HK',
             'kycType' => 'full',
@@ -348,7 +457,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             'stakeholders' => ['individual' => [['documents' => [['fileIds' => ['20000000-0000-4000-8000-000000000023']]]]]],
             'documents' => [['fileIds' => ['20000000-0000-4000-8000-000000000021']]],
         ];
-        $this->mock(NiumCustomerPayloadFactory::class, fn (MockInterface $mock) => $mock->shouldReceive('build')->andReturn($payload));
+        $this->mock(NiumCustomerPayloadFactory::class, fn (MockInterface $mock) => $mock->shouldReceive('build')->andReturnUsing(fn (): array => $this->payload));
         $this->mock(NiumProviderAccountStateService::class, function (MockInterface $mock): void {
             $mock->shouldReceive('applyAuthenticatedState')->andReturnUsing(function (UserProviderAccount $account, array $payload): UserProviderAccount {
                 $account->forceFill([
@@ -382,5 +491,29 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->executionRoots[] = $root;
 
         return $root;
+    }
+
+    private function assertPreflightFailureBeforeHttp(): void
+    {
+        $this->mock(NiumService::class, function (MockInterface $mock): void {
+            $mock->shouldNotReceive('get');
+            $mock->shouldNotReceive('post');
+        });
+
+        try {
+            $this->runner()->run($this->executionRoot());
+            $this->fail('Expected the role-binding preflight to fail before provider HTTP.');
+        } catch (RuntimeException) {
+            $this->addToAssertionCount(1);
+        }
+
+        $this->assertSame(65, ApiRequestLog::query()->count());
+        $this->assertSame(3, ApiRequestLog::query()->where('operation', 'customer_create')->where('request_method', 'POST')->count());
+    }
+
+    private function replaceDocumentMetadata(int $documentId, array $changes): void
+    {
+        $document = KycDocument::query()->findOrFail($documentId);
+        $document->forceFill(['metadata' => [...(array) $document->metadata, ...$changes]])->save();
     }
 }

@@ -7,11 +7,13 @@ use App\Models\IdentityVerificationSession;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
+use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -42,6 +44,7 @@ final class NiumHkCustomerV5OneShotRunner
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumCustomerPayloadFactory $payloadFactory,
+        private readonly NiumCustomerDocumentResolver $documentResolver,
         private readonly NiumProviderAccountStateService $stateService,
     ) {}
 
@@ -218,6 +221,7 @@ final class NiumHkCustomerV5OneShotRunner
 
     private function assertDocuments(KycProfile $profile, array $payload): void
     {
+        $profile->loadMissing(['documents', 'relatedPersons.documents']);
         $documents = KycDocument::query()->whereIn('id', self::DOCUMENT_IDS)->where('kyc_profile_id', $profile->id)->get();
         $fileIds = $documents->map(fn (KycDocument $document): mixed => Arr::get((array) $document->metadata, 'nium_file_id'));
         $payloadFileIds = collect($payload['documents'] ?? [])
@@ -237,6 +241,97 @@ final class NiumHkCustomerV5OneShotRunner
             || KycDocument::query()->whereIn('id', self::HISTORICAL_DOCUMENT_IDS)->where('kyc_profile_id', $profile->id)->where('status', 'approved')->exists()
         ) {
             throw new RuntimeException('Customer V5 documents must be exactly approved AVAILABLE documents 21, 22, and 23.');
+        }
+
+        $selectedIds = $this->documentResolver->forProfile($profile)
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->sort()
+            ->values()
+            ->all();
+
+        if ($selectedIds !== self::DOCUMENT_IDS) {
+            throw new RuntimeException('The production document resolver must select exactly documents 21, 22, and 23.');
+        }
+
+        $this->assertDocumentRolePlacement($profile, $documents->keyBy('id'), $payload);
+    }
+
+    /** @param Collection<int, KycDocument> $documents */
+    private function assertDocumentRolePlacement(KycProfile $profile, Collection $documents, array $payload): void
+    {
+        $applicants = $profile->relatedPersons->filter(fn (KycRelatedPerson $person): bool => in_array(
+            strtolower((string) $person->relationship_type),
+            ['applicant', 'authorized_representative', 'authorised_representative'],
+            true,
+        ));
+
+        if ($applicants->count() !== 1 || (int) $applicants->first()->getKey() !== 13) {
+            throw new RuntimeException('The fixture must contain exactly the production-selected applicant related person 13.');
+        }
+
+        $applicant = $applicants->first();
+        $stakeholders = $profile->relatedPersons->reject(fn (KycRelatedPerson $person): bool => $person->is($applicant));
+
+        if ($stakeholders->count() !== 1 || (int) $stakeholders->first()->getKey() !== 14) {
+            throw new RuntimeException('The fixture must contain exactly the intended stakeholder related person 14.');
+        }
+
+        $stakeholder = $stakeholders->first();
+        $stakeholderRelationship = str_replace(['-', ' '], '_', strtolower(trim((string) $stakeholder->relationship_type)));
+
+        if (! str_contains($stakeholderRelationship, 'beneficial') && ! str_contains($stakeholderRelationship, 'ubo')) {
+            throw new RuntimeException('Related person 14 must be the beneficial-owner stakeholder.');
+        }
+
+        $expected = [
+            21 => [null, 'corporate_registration'],
+            22 => [13, 'applicant_authorized_person_identity'],
+            23 => [14, 'beneficial_owner_stakeholder_identity'],
+        ];
+
+        foreach ($expected as $documentId => [$relatedPersonId, $logicalRole]) {
+            $document = $documents->get($documentId);
+
+            if (
+                ! $document instanceof KycDocument
+                || $document->kyc_related_person_id !== $relatedPersonId
+                || Arr::get((array) $document->metadata, 'logical_role') !== $logicalRole
+            ) {
+                throw new RuntimeException('Customer V5 document relationship or logical role is invalid.');
+            }
+        }
+
+        $companyDocuments = $payload['documents'] ?? null;
+        $applicantDocuments = data_get($payload, 'applicant.documents');
+        $individualStakeholders = data_get($payload, 'stakeholders.individual');
+
+        if (
+            ! is_array($companyDocuments) || ! array_is_list($companyDocuments) || count($companyDocuments) !== 1
+            || ! is_array($applicantDocuments) || ! array_is_list($applicantDocuments) || count($applicantDocuments) !== 1
+            || ! is_array($individualStakeholders) || ! array_is_list($individualStakeholders) || count($individualStakeholders) !== 1
+        ) {
+            throw new RuntimeException('Customer V5 company, applicant, and stakeholder payload shapes must each contain exactly one entry.');
+        }
+
+        $stakeholderDocuments = $individualStakeholders[0]['documents'] ?? null;
+
+        if (! is_array($stakeholderDocuments) || ! array_is_list($stakeholderDocuments) || count($stakeholderDocuments) !== 1) {
+            throw new RuntimeException('The intended stakeholder payload must contain exactly one document.');
+        }
+
+        $placements = [
+            21 => $companyDocuments[0]['fileIds'] ?? null,
+            22 => $applicantDocuments[0]['fileIds'] ?? null,
+            23 => $stakeholderDocuments[0]['fileIds'] ?? null,
+        ];
+
+        foreach ($placements as $documentId => $placedFileIds) {
+            $expectedFileId = Arr::get((array) $documents->get($documentId)->metadata, 'nium_file_id');
+
+            if (! is_array($placedFileIds) || $placedFileIds !== [$expectedFileId]) {
+                throw new RuntimeException('Customer V5 payload document File ID is assigned to the wrong role.');
+            }
         }
     }
 
