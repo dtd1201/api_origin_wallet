@@ -138,12 +138,25 @@ class NiumCustomerPayloadFactory
         $registeredAddress = $this->address($profile);
         $businessAddress = $registeredAddress;
         $addressRelationship = null;
+        $hkApplicantPositions = null;
 
         if ($region === 'SG') {
             [$addressRelationship, $businessAddress] = $this->sgCorporateAddressSources($profile);
         } elseif ($region === 'HK' && $kycType === 'full') {
             [$addressRelationship, $businessAddress] = $this->hkCorporateAddressSources($profile);
+            $hkApplicantPositions = $this->hkApplicantPositions($applicant);
         }
+
+        $applicantPayload = $this->person(
+            $applicant,
+            $user->email,
+            (string) $user->phone,
+            $hkApplicantPositions === null ? ['director'] : [],
+            'nium_v5_fields.applicant.email',
+            true,
+            normalizeNiumPositions: $region === 'SG',
+            positionsOverride: $hkApplicantPositions,
+        );
 
         $payload = $this->filter(array_merge($this->regionFields($profile), [
             'type' => 'corporate',
@@ -163,15 +176,7 @@ class NiumCustomerPayloadFactory
                 'registeredAddress' => $registeredAddress,
                 'businessAddress' => $businessAddress,
             ]),
-            'applicant' => $this->person(
-                $applicant,
-                $user->email,
-                (string) $user->phone,
-                ['director'],
-                'nium_v5_fields.applicant.email',
-                true,
-                normalizeNiumPositions: $region === 'SG',
-            ),
+            'applicant' => $applicantPayload,
             'stakeholders' => $this->stakeholders($profile, $applicant, $region === 'SG'),
             'documents' => $this->documents($this->documentResolver->profileDocuments($profile)),
         ]));
@@ -205,6 +210,7 @@ class NiumCustomerPayloadFactory
         string $emailPath,
         bool $emailRequired,
         bool $normalizeNiumPositions = false,
+        ?array $positionsOverride = null,
     ): array {
         [$firstName, $lastName] = $this->splitName($person->legal_name);
         $metadata = (array) ($person->metadata ?? []);
@@ -224,7 +230,7 @@ class NiumCustomerPayloadFactory
             'nationality' => strtoupper((string) ($person->nationality_country_code ?: $person->country_code)),
             'address' => $this->address($person),
             'positions' => $this->positions(
-                (array) ($metadata['positions'] ?? $fallbackPositions),
+                $positionsOverride ?? (array) ($metadata['positions'] ?? $fallbackPositions),
                 $normalizeNiumPositions,
             ),
             'sharePercentage' => $person->ownership_percentage !== null
@@ -384,6 +390,33 @@ class NiumCustomerPayloadFactory
         }
 
         return trim($tradeName);
+    }
+
+    /** @return list<string> */
+    private function hkApplicantPositions(KycRelatedPerson $applicant): array
+    {
+        $metadata = (array) ($applicant->metadata ?? []);
+        $positions = $metadata['positions'] ?? null;
+
+        if (! is_array($positions) || $positions === [] || ! array_is_list($positions)) {
+            throw new RuntimeException('Nium HK Corporate Full requires approved applicant metadata.positions as a non-empty array.');
+        }
+
+        $normalized = [];
+
+        foreach ($positions as $position) {
+            if (! is_string($position) || trim($position) === '') {
+                throw new RuntimeException('Nium HK Corporate Full requires approved applicant metadata.positions as non-empty strings.');
+            }
+
+            $position = trim($position);
+
+            if (! in_array($position, $normalized, true)) {
+                $normalized[] = $position;
+            }
+        }
+
+        return $normalized;
     }
 
     private function validateEmptySgCorporateBusinessAddress(mixed $source): void
@@ -874,9 +907,8 @@ class NiumCustomerPayloadFactory
         }
 
         $applicant = $this->corporateApplicant($profile);
-        $positions = collect((array) Arr::get((array) $applicant->metadata, 'positions', ['director']))
-            ->filter(fn ($position): bool => is_string($position))
-            ->map(fn (string $position): string => str_replace(['-', ' '], '_', strtolower(trim($position))));
+        $positions = collect($this->hkApplicantPositions($applicant))
+            ->map(fn (string $position): string => NiumHkCorporateV5Validator::documentRoleKey($position));
 
         if ($positions->intersect(['director', 'ubo', 'ultimate_beneficial_owner', 'partner'])->isEmpty() && ! $types->contains('loa')) {
             $missing[] = 'loa';

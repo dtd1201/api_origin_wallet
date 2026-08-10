@@ -97,6 +97,19 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
         $this->validator()->assert(new KycProfile, $payload);
     }
 
+    public function test_loa_exemption_normalization_matches_payload_position_normalization(): void
+    {
+        $payload = $this->payload();
+        $payload['applicant']['positions'] = [['title' => 'ultimate-beneficial-owner']];
+
+        $this->validator()->assert(new KycProfile, $payload);
+
+        $this->assertSame(
+            'ultimate_beneficial_owner',
+            NiumHkCorporateV5Validator::documentRoleKey($payload['applicant']['positions'][0]['title']),
+        );
+    }
+
     public function test_missing_declaration_is_rejected(): void
     {
         $payload = $this->payload();

@@ -10,6 +10,11 @@ final class NiumHkCorporateV5Validator
 {
     public const REQUIRED_DOCUMENT_MISSING = 'HOLD_HK_REQUIRED_DOCUMENT_MISSING';
 
+    public static function documentRoleKey(string $position): string
+    {
+        return str_replace(['-', ' '], '_', strtolower(trim($position)));
+    }
+
     /** Validate the locally provable HK Corporate Full V5 contract without resolving provider enums. */
     public function assert(KycProfile $profile, array $payload): void
     {
@@ -193,9 +198,9 @@ final class NiumHkCorporateV5Validator
         $applicantPositions = collect(Arr::get($payload, 'applicant.positions', []))
             ->pluck('title')
             ->filter(fn ($position): bool => is_string($position))
-            ->map(fn (string $position): string => strtolower(trim($position)));
+            ->map(fn (string $position): string => self::documentRoleKey($position));
 
-        if ($applicantPositions->intersect(['director', 'ubo', 'partner'])->isEmpty() && ! $types->contains('loa')) {
+        if ($applicantPositions->intersect(['director', 'ubo', 'ultimate_beneficial_owner', 'partner'])->isEmpty() && ! $types->contains('loa')) {
             $missing[] = 'loa';
         }
 

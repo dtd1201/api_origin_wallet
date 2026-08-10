@@ -14,6 +14,7 @@ use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumCustomerPayloadFactory;
 use App\Services\Nium\NiumEvidencePersistenceException;
+use App\Services\Nium\NiumHkCorporateV5Validator;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Services\Nium\NiumRegionResolver;
@@ -1727,6 +1728,110 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertTrue($historical->every(fn (KycDocument $document): bool => $document->fresh()->status === 'superseded'));
         $this->assertSame('SG', $payload['applicant']['nationality']);
         $this->assertSame('SG', $payload['stakeholders']['individual'][0]['nationality']);
+        Http::assertNothingSent();
+    }
+
+    public function test_hk_applicant_explicit_director_position_is_used_without_fallback(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame([['title' => 'director']], $payload['applicant']['positions']);
+        Http::assertNothingSent();
+    }
+
+    public function test_hk_applicant_explicit_non_director_position_is_preserved_and_requires_loa(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $applicant = $profile->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
+        $metadata = (array) $applicant->metadata;
+        $metadata['positions'] = ['compliance_officer'];
+        $applicant->update(['metadata' => $metadata]);
+        $profile->documents()->create([
+            'type' => 'loa',
+            'status' => 'approved',
+            'file_url' => 'private://fixture/loa',
+            'document_number' => 'LOA-SYNTHETIC',
+            'issuing_country_code' => 'HK',
+            'metadata' => $this->availableFileMetadata('40000000-0000-4000-8000-000000000025'),
+        ]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame([['title' => 'compliance_officer']], $payload['applicant']['positions']);
+        $this->assertContains('loa', collect($payload['documents'])->pluck('type')->all());
+        Http::assertNothingSent();
+    }
+
+    #[DataProvider('invalidHkApplicantPositions')]
+    public function test_hk_applicant_without_valid_factual_positions_fails_before_http(bool $include, mixed $positions): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $applicant = $user->kycProfile()->firstOrFail()->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
+        $metadata = (array) $applicant->metadata;
+
+        if ($include) {
+            $metadata['positions'] = $positions;
+        } else {
+            unset($metadata['positions']);
+        }
+
+        $applicant->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('approved applicant metadata.positions');
+
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    }
+
+    public static function invalidHkApplicantPositions(): array
+    {
+        return [
+            'absent' => [false, null],
+            'empty array' => [true, []],
+            'scalar' => [true, 'director'],
+            'non string member' => [true, [null]],
+            'empty string member' => [true, ['']],
+        ];
+    }
+
+    public function test_hk_non_exempt_factual_position_without_loa_holds_locally(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $applicant = $user->kycProfile()->firstOrFail()->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
+        $metadata = (array) $applicant->metadata;
+        $metadata['positions'] = ['compliance_officer'];
+        $applicant->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(NiumHkCorporateV5Validator::REQUIRED_DOCUMENT_MISSING.':loa');
+
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    }
+
+    public function test_hk_explicit_ubo_position_waives_loa_without_relationship_inference(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $applicant = $user->kycProfile()->firstOrFail()->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
+        $metadata = (array) $applicant->metadata;
+        $metadata['positions'] = ['ubo'];
+        $applicant->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame([['title' => 'ubo']], $payload['applicant']['positions']);
+        $this->assertNotContains('loa', collect($payload['documents'])->pluck('type')->all());
         Http::assertNothingSent();
     }
 
@@ -4049,6 +4154,46 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'status' => 'approved',
             'approved_at' => now(),
         ]);
+
+        return $user;
+    }
+
+    private function approvedHkCorporate(IntegrationProvider $provider): User
+    {
+        config()->set('services.nium.regulatory_region', 'HK');
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_region'] = 'HK';
+        $metadata['nium_v5_fields']['addresses'] = [
+            'isBusinessAddressSameAsRegisteredAddress' => true,
+        ];
+        $metadata['nium_v5_fields']['website'] = 'https://business.example.test';
+        $metadata['nium_v5_fields']['natureOfBusiness']['operatingCountries'] = ['HK'];
+        $metadata['nium_v5_fields']['expectedAccountUsage']['credit']['topTransactionCountries'] = ['HK'];
+        $metadata['nium_v5_fields']['expectedAccountUsage']['debit']['topTransactionCountries'] = ['HK'];
+        $metadata['nium_v5_fields']['bankAccountDetails']['bankCountry'] = 'HK';
+        $metadata['nium_v5_fields']['bankAccountDetails']['currency'] = 'HKD';
+        $metadata['nium_v5_fields']['deviceDetails']['ipCountryCode'] = 'HK';
+        $profile->update([
+            'registered_country_code' => 'HK',
+            'address_line1' => '1 Synthetic Harbour Road',
+            'city' => 'Hong Kong',
+            'state' => 'Hong Kong',
+            'country_code' => 'HK',
+            'metadata' => $metadata,
+        ]);
+        $profile->documents()->where('type', 'business_registration')->update(['issuing_country_code' => 'HK']);
+        $profile->documents()->create([
+            'type' => 'nar1',
+            'status' => 'approved',
+            'file_url' => 'private://fixture/nar1',
+            'document_number' => 'NAR1-SYNTHETIC',
+            'issuing_country_code' => 'HK',
+            'metadata' => $this->availableFileMetadata('40000000-0000-4000-8000-000000000024'),
+        ]);
+        $user->profile()->update(['country_code' => 'HK']);
+        $user->unsetRelation('kycProfile');
 
         return $user;
     }
