@@ -322,6 +322,62 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertPreflightFailureBeforeHttp();
     }
 
+    public function test_integer_applicant_full_ownership_passes_guard(): void
+    {
+        $this->payload['applicant']['sharePercentage'] = 100;
+        $this->refreshLockedPayloadSha();
+        $calls = $this->mockGateway(['unexpected' => []]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+    }
+
+    public function test_float_applicant_full_ownership_passes_guard(): void
+    {
+        $this->assertIsFloat($this->payload['applicant']['sharePercentage']);
+        $calls = $this->mockGateway(['unexpected' => []]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+    }
+
+    public function test_float_stakeholder_full_ownership_passes_guard(): void
+    {
+        $this->assertIsFloat($this->payload['stakeholders']['individual'][0]['sharePercentage']);
+        $calls = $this->mockGateway(['unexpected' => []]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+    }
+
+    #[DataProvider('invalidFullOwnershipValues')]
+    public function test_invalid_applicant_full_ownership_fails_before_http(mixed $value): void
+    {
+        $this->payload['applicant']['sharePercentage'] = $value;
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
+    public static function invalidFullOwnershipValues(): array
+    {
+        return [
+            'numeric string' => ['100'],
+            'numeric decimal string' => ['100.0'],
+            'integer below full ownership' => [99],
+            'fractional below full ownership' => [99.999],
+            'fractional above full ownership' => [100.01],
+            'null' => [null],
+            'array' => [[100]],
+            'boolean' => [true],
+        ];
+    }
+
     public function test_production_resolver_selection_other_than_exact_documents_fails_before_http(): void
     {
         KycDocument::query()->forceCreate([
@@ -667,7 +723,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             ],
             'applicant' => [
                 'email' => 'applicant@example.test',
-                'sharePercentage' => 100,
+                'sharePercentage' => 100.0,
                 'positions' => [
                     ['title' => 'representative'],
                     ['title' => 'director'],
@@ -676,7 +732,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
                 ],
             ],
             'stakeholders' => ['individual' => [[
-                'sharePercentage' => 100,
+                'sharePercentage' => 100.0,
                 'positions' => [
                     ['title' => 'director'],
                     ['title' => 'ubo'],
@@ -741,6 +797,11 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
         $this->assertSame(87, ApiRequestLog::query()->count());
         $this->assertSame($expectedCustomerPosts, ApiRequestLog::query()->where('operation', 'customer_create')->where('request_method', 'POST')->count());
+    }
+
+    private function refreshLockedPayloadSha(): void
+    {
+        $this->lockedPayloadSha = hash('sha256', json_encode($this->payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
     }
 
 }

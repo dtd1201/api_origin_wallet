@@ -330,17 +330,22 @@ final class NiumHkCustomerV5OneShotRunner
         $stakeholders = data_get($payload, 'stakeholders.individual');
 
         if (! is_array($applicant)
-            || ($applicant['sharePercentage'] ?? null) !== 100
+            || ! $this->isExactFullOwnership($applicant['sharePercentage'] ?? null)
             || $this->positionTitles($applicant) !== ['director', 'representative', 'shareholder', 'ubo']) {
             throw new RuntimeException('The factual applicant ownership or positions do not match the locked checkpoint.');
         }
 
         if (! is_array($stakeholders) || ! array_is_list($stakeholders) || count($stakeholders) !== 1
             || ! is_array($stakeholders[0])
-            || ($stakeholders[0]['sharePercentage'] ?? null) !== 100
+            || ! $this->isExactFullOwnership($stakeholders[0]['sharePercentage'] ?? null)
             || $this->positionTitles($stakeholders[0]) !== ['director', 'shareholder', 'ubo']) {
             throw new RuntimeException('The factual stakeholder ownership or positions do not match the locked checkpoint.');
         }
+    }
+
+    private function isExactFullOwnership(mixed $value): bool
+    {
+        return (is_int($value) || is_float($value)) && (float) $value === 100.0;
     }
 
     /** @return list<string> */
