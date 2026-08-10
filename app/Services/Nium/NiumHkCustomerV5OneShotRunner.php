@@ -129,7 +129,7 @@ final class NiumHkCustomerV5OneShotRunner
 
         $created = $this->responseObject($createResponse);
 
-        if (! $this->hasIdentifiers($created)) {
+        if (! $this->hasCustomerIdentifier($created)) {
             $this->markCreateTerminal('customer_create_response_review', false);
 
             return $this->finish('HOLD_RESPONSE_REVIEW', $logMaxId, $protectedFingerprint, $createResponse->status());
@@ -271,7 +271,7 @@ final class NiumHkCustomerV5OneShotRunner
             return ['terminal' => null, 'customer' => null];
         }
 
-        if (count($customers) !== 1 || ! is_array($customers[0]) || ($customers[0]['externalId'] ?? null) !== $externalReference || ! $this->hasIdentifiers($customers[0])) {
+        if (count($customers) !== 1 || ! is_array($customers[0]) || ($customers[0]['externalId'] ?? null) !== $externalReference || ! $this->hasCustomerIdentifier($customers[0])) {
             return ['terminal' => 'HOLD_LOOKUP_OUTCOME_UNKNOWN', 'customer' => null];
         }
 
@@ -390,12 +390,11 @@ final class NiumHkCustomerV5OneShotRunner
         return is_array($decoded) && ! array_is_list($decoded) ? $decoded : [];
     }
 
-    private function hasIdentifiers(array $data): bool
+    private function hasCustomerIdentifier(array $data): bool
     {
-        $customer = trim((string) ($data['customerHashId'] ?? ''));
-        $wallet = trim((string) ($data['walletHashId'] ?? Arr::first((array) ($data['walletHashIds'] ?? [])) ?? ''));
+        $customer = $data['customerHashId'] ?? null;
 
-        return $customer !== '' && $wallet !== '';
+        return is_string($customer) && trim($customer) !== '';
     }
 
     private function assertCustomerPostCount(int $providerId, int $expected): void

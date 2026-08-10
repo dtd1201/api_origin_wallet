@@ -69,6 +69,41 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertSame(66, $result['api_request_log_count']);
     }
 
+    public function test_existing_customer_without_wallet_passes_and_persists_only_customer(): void
+    {
+        $calls = $this->mockGateway([
+            'customers' => [[
+                'externalId' => 'origin-wallet-user-9',
+                'customerHashId' => 'customer-safe-test',
+            ]],
+        ]);
+
+        $result = $this->runner()->run($this->executionRoot());
+        $account = UserProviderAccount::query()->findOrFail(7);
+
+        $this->assertSame('PASS_EXISTING_CUSTOMER_FOUND', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+        $this->assertSame('customer-safe-test', $account->external_customer_id);
+        $this->assertNull($account->external_account_id);
+        $this->assertSame(3, $result['fixture_customer_post_count']);
+    }
+
+    public function test_existing_lookup_without_customer_identifier_holds_without_post(): void
+    {
+        $calls = $this->mockGateway([
+            'customers' => [[
+                'externalId' => 'origin-wallet-user-9',
+                'walletHashId' => 'wallet-safe-test',
+            ]],
+        ]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+        $this->assertSame(3, $result['fixture_customer_post_count']);
+    }
+
     public function test_unknown_lookup_never_posts(): void
     {
         $calls = $this->mockGateway(['unexpected' => []]);
@@ -94,6 +129,84 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertSame(4, $result['fixture_customer_post_count']);
         $this->assertSame(67, $result['api_request_log_count']);
         $this->assertNotNull(UserProviderAccount::query()->findOrFail(7)->external_customer_id);
+    }
+
+    public function test_successful_create_without_wallet_passes_and_persists_only_customer(): void
+    {
+        $calls = $this->mockGateway(['customers' => []], [
+            'customerHashId' => 'customer-safe-test',
+        ]);
+
+        $result = $this->runner()->run($this->executionRoot());
+        $account = UserProviderAccount::query()->findOrFail(7);
+
+        $this->assertSame('PASS_CUSTOMER_CREATED', $result['terminal']);
+        $this->assertSame(['GET', 'POST'], $calls->methods);
+        $this->assertSame('customer-safe-test', $account->external_customer_id);
+        $this->assertNull($account->external_account_id);
+        $this->assertSame(4, $result['fixture_customer_post_count']);
+    }
+
+    public function test_successful_create_without_customer_identifier_holds_without_replay(): void
+    {
+        $calls = $this->mockGateway(['customers' => []], [
+            'walletHashId' => 'wallet-safe-test',
+        ]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_RESPONSE_REVIEW', $result['terminal']);
+        $this->assertSame(['GET', 'POST'], $calls->methods);
+        $this->assertSame(4, $result['fixture_customer_post_count']);
+        $this->assertFalse(UserProviderAccount::query()->findOrFail(7)->metadata['is_resubmission_allowed']);
+    }
+
+    #[DataProvider('unsafeLookupResponses')]
+    public function test_malformed_multiple_and_mismatched_lookup_responses_never_post(array $lookupBody): void
+    {
+        $calls = $this->mockGateway($lookupBody);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+        $this->assertSame(3, $result['fixture_customer_post_count']);
+    }
+
+    public static function unsafeLookupResponses(): array
+    {
+        return [
+            'malformed object' => [['unexpected' => []]],
+            'customers not list shaped' => [['customers' => ['customerHashId' => 'customer-safe-test']]],
+            'multiple customers' => [['customers' => [
+                ['externalId' => 'origin-wallet-user-9', 'customerHashId' => 'customer-safe-test-1'],
+                ['externalId' => 'origin-wallet-user-9', 'customerHashId' => 'customer-safe-test-2'],
+            ]]],
+            'mismatched external reference' => [['customers' => [[
+                'externalId' => 'another-fixture',
+                'customerHashId' => 'customer-safe-test',
+            ]]]],
+            'non-string customer identifier' => [['customers' => [[
+                'externalId' => 'origin-wallet-user-9',
+                'customerHashId' => [],
+            ]]]],
+        ];
+    }
+
+    public function test_safe_output_contains_no_raw_identifiers_file_ids_or_pii(): void
+    {
+        $this->mockGateway(['customers' => []], [
+            'customerHashId' => 'customer-safe-test',
+            'walletHashId' => 'wallet-safe-test',
+        ]);
+
+        $output = json_encode($this->runner()->run($this->executionRoot()), JSON_THROW_ON_ERROR);
+
+        $this->assertStringNotContainsString('customer-safe-test', $output);
+        $this->assertStringNotContainsString('wallet-safe-test', $output);
+        $this->assertStringNotContainsString('20000000-0000-4000-8000-', $output);
+        $this->assertStringNotContainsString('applicant@example.test', $output);
+        $this->assertStringNotContainsString('origin-wallet-user-9', $output);
     }
 
     #[DataProvider('rejectedStatuses')]
@@ -240,7 +353,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             $mock->shouldReceive('applyAuthenticatedState')->andReturnUsing(function (UserProviderAccount $account, array $payload): UserProviderAccount {
                 $account->forceFill([
                     'external_customer_id' => $payload['customerHashId'],
-                    'external_account_id' => $payload['walletHashId'],
+                    'external_account_id' => $payload['walletHashId'] ?? null,
                 ])->save();
 
                 return $account->fresh();
