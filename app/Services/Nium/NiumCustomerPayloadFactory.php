@@ -88,7 +88,7 @@ class NiumCustomerPayloadFactory
     ): array {
         [$firstName, $lastName] = $this->splitName($profile->legal_name ?: $user->full_name);
         [$mobileCountryCode, $mobile] = $this->mobileParts((string) $user->phone, $profile);
-        $regionFields = $this->regionFields($profile);
+        $regionFields = $this->regionFields($profile, $region);
 
         $payload = $this->filter(array_merge($regionFields, [
             'type' => 'individual',
@@ -158,7 +158,7 @@ class NiumCustomerPayloadFactory
             positionsOverride: $hkApplicantPositions,
         );
 
-        $payload = $this->filter(array_merge($this->regionFields($profile), [
+        $payload = $this->filter(array_merge($this->regionFields($profile, $region), [
             'type' => 'corporate',
             'region' => $region,
             'kycType' => $kycType,
@@ -849,8 +849,12 @@ class NiumCustomerPayloadFactory
             throw new RuntimeException('Nium HK Corporate Full requires nium_v5_fields.applicantDeclaration as boolean true.');
         }
 
-        if (! is_string($fields['applicantDeclarationTimeStamp'] ?? null) || trim($fields['applicantDeclarationTimeStamp']) === '') {
-            throw new RuntimeException('Nium HK Corporate Full requires nium_v5_fields.applicantDeclarationTimeStamp as a non-empty string.');
+        $declarationTimestamp = array_key_exists('applicantDeclarationTimestamp', $fields)
+            ? $fields['applicantDeclarationTimestamp']
+            : ($fields['applicantDeclarationTimeStamp'] ?? null);
+
+        if (! $this->isNiumDateTime($declarationTimestamp)) {
+            throw new RuntimeException('Nium HK Corporate Full requires nium_v5_fields.applicantDeclarationTimestamp in YYYY-MM-DD HH:MM:SS format.');
         }
 
         if (! is_bool($fields['isMultiLayeredCompany'] ?? null)) {
@@ -1243,7 +1247,7 @@ class NiumCustomerPayloadFactory
         };
     }
 
-    private function regionFields(KycProfile $profile): array
+    private function regionFields(KycProfile $profile, string $region): array
     {
         $fields = Arr::get((array) $profile->metadata, 'nium_v5_fields', []);
 
@@ -1251,7 +1255,7 @@ class NiumCustomerPayloadFactory
             throw new RuntimeException('Approved KYC metadata nium_v5_fields must be an object.');
         }
 
-        return Arr::only($fields, [
+        $regionFields = Arr::only($fields, [
             'annualIncome',
             'applicantDeclaration',
             'applicantDeclarationTimeStamp',
@@ -1275,6 +1279,15 @@ class NiumCustomerPayloadFactory
             'trustType',
             'website',
         ]);
+
+        if ($region === 'HK') {
+            unset($regionFields['applicantDeclarationTimeStamp']);
+            $regionFields['applicantDeclarationTimestamp'] = array_key_exists('applicantDeclarationTimestamp', $fields)
+                ? $fields['applicantDeclarationTimestamp']
+                : ($fields['applicantDeclarationTimeStamp'] ?? null);
+        }
+
+        return $regionFields;
     }
 
     private function requireFields(array $payload, array $fields, string $context): void

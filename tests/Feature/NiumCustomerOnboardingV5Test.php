@@ -1732,6 +1732,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('HKD', $payload['bankAccountDetails']['currency']);
         $this->assertSame('HK', $payload['deviceDetails']['ipCountryCode']);
         $this->assertSame(self::DEVICE_SESSION_ID, $payload['deviceDetails']['sessionId']);
+        $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimestamp']);
+        $this->assertArrayNotHasKey('applicantDeclarationTimeStamp', $payload);
         $this->assertSame(4, $fileIds->count());
         $this->assertSame(4, $fileIds->unique()->count());
         $this->assertTrue($fileIds->every(fn (string $fileId): bool => Str::isUuid($fileId)));
@@ -1739,6 +1741,43 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('SG', $payload['applicant']['nationality']);
         $this->assertSame('SG', $payload['stakeholders']['individual'][0]['nationality']);
         Http::assertNothingSent();
+    }
+
+    public function test_hk_legacy_declaration_timestamp_alias_is_normalized_to_canonical_output(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['applicantDeclarationTimeStamp'] = $metadata['nium_v5_fields']['applicantDeclarationTimestamp'];
+        unset($metadata['nium_v5_fields']['applicantDeclarationTimestamp']);
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimestamp']);
+        $this->assertArrayNotHasKey('applicantDeclarationTimeStamp', $payload);
+        Http::assertNothingSent();
+    }
+
+    public function test_malformed_hk_canonical_declaration_timestamp_fails_before_http(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['applicantDeclarationTimestamp'] = '2026-07-23T05:00:00Z';
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectExceptionMessage('applicantDeclarationTimestamp in YYYY-MM-DD HH:MM:SS format');
+
+        try {
+            app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+        } finally {
+            Http::assertNothingSent();
+        }
     }
 
     public function test_hk_applicant_explicit_director_position_is_used_without_fallback(): void
@@ -4217,6 +4256,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $profile = $user->kycProfile()->firstOrFail();
         $metadata = (array) $profile->metadata;
         $metadata['nium_region'] = 'HK';
+        $metadata['nium_v5_fields']['applicantDeclarationTimestamp'] = $metadata['nium_v5_fields']['applicantDeclarationTimeStamp'];
+        unset($metadata['nium_v5_fields']['applicantDeclarationTimeStamp']);
         $metadata['nium_v5_fields']['addresses'] = [
             'isBusinessAddressSameAsRegisteredAddress' => true,
         ];

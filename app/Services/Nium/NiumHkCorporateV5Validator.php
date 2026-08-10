@@ -167,7 +167,17 @@ final class NiumHkCorporateV5Validator
             throw new RuntimeException('Nium HK Corporate Full requires applicantDeclaration as boolean true.');
         }
 
-        $this->requireString($payload, 'applicantDeclarationTimeStamp');
+        $this->requireString($payload, 'applicantDeclarationTimestamp');
+
+        $timestamp = $payload['applicantDeclarationTimestamp'];
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $timestamp);
+        $errors = \DateTimeImmutable::getLastErrors();
+
+        if ($date === false
+            || ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0))
+            || $date->format('Y-m-d H:i:s') !== $timestamp) {
+            throw new RuntimeException('Nium HK Corporate Full requires applicantDeclarationTimestamp in YYYY-MM-DD HH:MM:SS format.');
+        }
     }
 
     private function assertDeviceDetails(array $payload): void

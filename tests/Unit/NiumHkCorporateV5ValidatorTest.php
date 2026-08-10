@@ -61,6 +61,15 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_malformed_canonical_declaration_timestamp_is_rejected(): void
+    {
+        $payload = $this->payload();
+        $payload['applicantDeclarationTimestamp'] = '2026-08-10T00:00:00Z';
+
+        $this->expectExceptionMessage('applicantDeclarationTimestamp in YYYY-MM-DD HH:MM:SS format');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
     public function test_invalid_ipv4_is_rejected(): void
     {
         $payload = $this->payload();
@@ -325,7 +334,7 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
                 ],
             ],
             'applicantDeclaration' => true,
-            'applicantDeclarationTimeStamp' => '2026-08-10 00:00:00',
+            'applicantDeclarationTimestamp' => '2026-08-10 00:00:00',
             'deviceDetails' => [
                 'ipCountryCode' => 'HK',
                 'deviceInfo' => 'Synthetic browser',
