@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Models\ApiRequestLog;
-use App\Models\IdentityVerificationSession;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
@@ -210,6 +209,47 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertStringNotContainsString('20000000-0000-4000-8000-', $output);
         $this->assertStringNotContainsString('applicant@example.test', $output);
         $this->assertStringNotContainsString('origin-wallet-user-9', $output);
+        $this->assertStringNotContainsString('30000000-0000-4000-8000-000000000009', $output);
+    }
+
+    public function test_valid_payload_device_session_passes_without_identity_verification_session_row(): void
+    {
+        $this->assertDatabaseCount('identity_verification_sessions', 0);
+        $calls = $this->mockGateway(['unexpected' => []]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+        $this->assertDatabaseCount('identity_verification_sessions', 0);
+    }
+
+    public function test_invalid_payload_device_session_fails_before_http_without_identity_row(): void
+    {
+        data_set($this->payload, 'deviceDetails.sessionId', 'not-a-uuid');
+
+        $this->assertPreflightFailureBeforeHttp();
+        $this->assertDatabaseCount('identity_verification_sessions', 0);
+    }
+
+    public function test_hk_payload_may_omit_optional_device_details_without_identity_row(): void
+    {
+        unset($this->payload['deviceDetails']);
+        $this->assertDatabaseCount('identity_verification_sessions', 0);
+        $calls = $this->mockGateway(['unexpected' => []]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+        $this->assertDatabaseCount('identity_verification_sessions', 0);
+    }
+
+    public function test_non_hk_device_country_fails_before_http(): void
+    {
+        data_set($this->payload, 'deviceDetails.ipCountryCode', 'SG');
+
+        $this->assertPreflightFailureBeforeHttp();
     }
 
     #[DataProvider('invalidDocumentBindings')]
@@ -411,15 +451,6 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             'provider_id' => $provider->id,
             'external_reference' => 'origin-wallet-user-9',
         ]);
-        IdentityVerificationSession::query()->forceCreate([
-            'user_id' => 9,
-            'kyc_profile_id' => 9,
-            'provider' => 'origin_capture',
-            'external_session_id' => '10000000-0000-4000-8000-000000000009',
-            'subject_type' => 'business',
-            'status' => 'completed',
-        ]);
-
         foreach ([21, 22, 23] as $index => $id) {
             KycDocument::query()->forceCreate([
                 'id' => $id,
@@ -453,6 +484,12 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             'region' => 'HK',
             'kycType' => 'full',
             'registeredCountry' => 'HK',
+            'deviceDetails' => [
+                'ipCountryCode' => 'HK',
+                'deviceInfo' => 'Fixture browser',
+                'ipAddress' => '192.0.2.9',
+                'sessionId' => '30000000-0000-4000-8000-000000000009',
+            ],
             'applicant' => ['email' => 'applicant@example.test', 'documents' => [['fileIds' => ['20000000-0000-4000-8000-000000000022']]]],
             'stakeholders' => ['individual' => [['documents' => [['fileIds' => ['20000000-0000-4000-8000-000000000023']]]]]],
             'documents' => [['fileIds' => ['20000000-0000-4000-8000-000000000021']]],

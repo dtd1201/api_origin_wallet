@@ -3,7 +3,6 @@
 namespace App\Services\Nium;
 
 use App\Models\ApiRequestLog;
-use App\Models\IdentityVerificationSession;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
@@ -186,7 +185,6 @@ final class NiumHkCustomerV5OneShotRunner
         $payload = $this->payloadFactory->build($user, (string) $account->external_reference);
         $this->assertPayload($profile, $payload);
         $this->assertDocuments($profile, $payload);
-        $this->assertSession($profile);
 
         return compact('user', 'profile', 'account', 'protectedAccount', 'payload') + [
             'protected_account' => $protectedAccount,
@@ -217,6 +215,8 @@ final class NiumHkCustomerV5OneShotRunner
                 throw new RuntimeException('A Customer V5 stakeholder optional email is invalid.');
             }
         }
+
+        $this->assertDeviceDetails($payload);
     }
 
     private function assertDocuments(KycProfile $profile, array $payload): void
@@ -335,16 +335,26 @@ final class NiumHkCustomerV5OneShotRunner
         }
     }
 
-    private function assertSession(KycProfile $profile): void
+    private function assertDeviceDetails(array $payload): void
     {
-        $session = IdentityVerificationSession::query()
-            ->where('user_id', self::USER_ID)
-            ->where('kyc_profile_id', $profile->id)
-            ->latest('id')
-            ->first();
+        if (! array_key_exists('deviceDetails', $payload)) {
+            return;
+        }
 
-        if (! $session || ! Str::isUuid((string) $session->external_session_id)) {
-            throw new RuntimeException('The locked Customer V5 identity session ID is not a UUID.');
+        $deviceDetails = $payload['deviceDetails'];
+
+        if (! is_array($deviceDetails) || array_is_list($deviceDetails)) {
+            throw new RuntimeException('Customer V5 deviceDetails must be an object when supplied.');
+        }
+
+        $sessionId = $deviceDetails['sessionId'] ?? null;
+
+        if (! is_string($sessionId) || trim($sessionId) === '' || ! Str::isUuid($sessionId)) {
+            throw new RuntimeException('Customer V5 deviceDetails.sessionId must be a valid UUID when supplied.');
+        }
+
+        if (array_key_exists('ipCountryCode', $deviceDetails) && $deviceDetails['ipCountryCode'] !== 'HK') {
+            throw new RuntimeException('Customer V5 deviceDetails.ipCountryCode must match the locked HK fixture.');
         }
     }
 
