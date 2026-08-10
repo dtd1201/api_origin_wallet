@@ -101,6 +101,7 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
     {
         $payload = $this->payload();
         $payload['applicant']['positions'] = [['title' => 'ultimate-beneficial-owner']];
+        $payload['applicant']['sharePercentage'] = 25;
 
         $this->validator()->assert(new KycProfile, $payload);
 
@@ -108,6 +109,87 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
             'ultimate_beneficial_owner',
             NiumHkCorporateV5Validator::documentRoleKey($payload['applicant']['positions'][0]['title']),
         );
+    }
+
+    public function test_applicant_bound_loa_satisfies_non_exempt_applicant_requirement(): void
+    {
+        $payload = $this->payload();
+        $payload['applicant']['positions'] = [['title' => 'compliance_officer']];
+        $payload['applicant']['documents'] = [['type' => 'loa']];
+
+        $this->validator()->assert(new KycProfile, $payload);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_top_level_loa_does_not_satisfy_applicant_requirement(): void
+    {
+        $payload = $this->payload();
+        $payload['applicant']['positions'] = [['title' => 'compliance_officer']];
+        $payload['documents'][] = ['type' => 'loa'];
+
+        $this->expectExceptionMessage(NiumHkCorporateV5Validator::REQUIRED_DOCUMENT_MISSING.':loa');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_registered_address_requires_postcode_but_not_state(): void
+    {
+        $payload = $this->payload();
+        unset($payload['addresses']['registeredAddress']['state']);
+
+        $this->validator()->assert(new KycProfile, $payload);
+        unset($payload['addresses']['registeredAddress']['postcode']);
+
+        $this->expectExceptionMessage('addresses.registeredAddress.postcode');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_ubo_applicant_requires_numeric_share_percentage(): void
+    {
+        $payload = $this->payload();
+        $payload['applicant']['positions'] = [['title' => 'ubo']];
+
+        $this->expectExceptionMessage('applicant.sharePercentage');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_ubo_applicant_with_numeric_share_percentage_passes_shape_gate(): void
+    {
+        $payload = $this->payload();
+        $payload['applicant']['positions'] = [['title' => 'ubo']];
+        $payload['applicant']['sharePercentage'] = 25.5;
+
+        $this->validator()->assert(new KycProfile, $payload);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_ubo_stakeholder_requires_numeric_share_percentage(): void
+    {
+        $payload = $this->payload();
+        $payload['stakeholders']['individual'][0]['positions'] = [['title' => 'shareholder']];
+
+        $this->expectExceptionMessage('stakeholders.individual.0.sharePercentage');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_routing_codes_are_required_and_each_entry_must_have_type_and_value(): void
+    {
+        $payload = $this->payload();
+        unset($payload['bankAccountDetails']['routingCodes']);
+
+        try {
+            $this->validator()->assert(new KycProfile, $payload);
+            $this->fail('Missing routingCodes should fail.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('routingCodes as a non-empty array', $exception->getMessage());
+        }
+
+        $payload = $this->payload();
+        $payload['bankAccountDetails']['routingCodes'] = [['type' => 'SWIFT']];
+
+        $this->expectExceptionMessage('routingCodes.0.value');
+        $this->validator()->assert(new KycProfile, $payload);
     }
 
     public function test_missing_declaration_is_rejected(): void
@@ -180,6 +262,7 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
             'addressLine1' => 'Synthetic address',
             'city' => 'Hong Kong',
             'state' => 'Hong Kong',
+            'postcode' => '999077',
             'country' => 'HK',
         ];
         $person = [
@@ -237,6 +320,9 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
                 'bankCountry' => 'HK',
                 'bankName' => 'Synthetic Bank',
                 'currency' => 'HKD',
+                'routingCodes' => [
+                    ['type' => 'SWIFT', 'value' => 'SYNTHETIC'],
+                ],
             ],
             'applicantDeclaration' => true,
             'applicantDeclarationTimeStamp' => '2026-08-10 00:00:00',

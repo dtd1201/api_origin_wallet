@@ -878,12 +878,8 @@ class NiumCustomerPayloadFactory
 
     private function validateHkCorporateDocumentSources(KycProfile $profile): void
     {
-        $types = $this->documentResolver->profileDocuments($profile)
-            ->map(function (KycDocument $document): string {
-                $metadata = (array) ($document->metadata ?? []);
-
-                return strtolower(trim((string) ($metadata['nium_document_type'] ?? $document->type)));
-            });
+        $businessDocuments = $this->documentResolver->profileDocuments($profile);
+        $types = $businessDocuments->map(fn (KycDocument $document): string => $this->documentType($document));
         $missing = [];
 
         if (! $types->intersect(['business_registration', 'business_registration_doc', 'certificate_of_incorporation'])->count()) {
@@ -909,14 +905,74 @@ class NiumCustomerPayloadFactory
         $applicant = $this->corporateApplicant($profile);
         $positions = collect($this->hkApplicantPositions($applicant))
             ->map(fn (string $position): string => NiumHkCorporateV5Validator::documentRoleKey($position));
+        $applicantDocumentTypes = $this->documentResolver->relatedPersonDocuments($applicant)
+            ->map(fn (KycDocument $document): string => $this->documentType($document));
 
-        if ($positions->intersect(['director', 'ubo', 'ultimate_beneficial_owner', 'partner'])->isEmpty() && ! $types->contains('loa')) {
+        if ($positions->intersect(['director', 'ubo', 'ultimate_beneficial_owner', 'partner'])->isEmpty() && ! $applicantDocumentTypes->contains('loa')) {
             $missing[] = 'loa';
         }
 
         if ($missing !== []) {
             throw new RuntimeException(NiumHkCorporateV5Validator::REQUIRED_DOCUMENT_MISSING.':'.implode(',', $missing));
         }
+
+        $businessRegistration = $businessDocuments->first(fn (KycDocument $document): bool => in_array(
+            $this->documentType($document),
+            ['business_registration', 'business_registration_doc', 'certificate_of_incorporation'],
+            true,
+        ));
+
+        if (
+            ! $businessRegistration instanceof KycDocument
+            || $businessRegistration->issued_at === null
+            || $businessRegistration->issued_at->isFuture()
+            || $businessRegistration->issued_at->lt(today()->subMonthsNoOverflow(12))
+        ) {
+            throw new RuntimeException(NiumHkCorporateV5Validator::DOCUMENT_RECENCY_UNPROVEN);
+        }
+
+        if ($businessType === 'private_company') {
+            $filing = $businessDocuments->first(fn (KycDocument $document): bool => in_array($this->documentType($document), ['nar1', 'nnc1'], true));
+            $filingMetadata = $filing instanceof KycDocument ? (array) $filing->metadata : [];
+
+            if (($filingMetadata['is_most_recent_filing'] ?? null) !== true) {
+                throw new RuntimeException(NiumHkCorporateV5Validator::LATEST_FILING_UNPROVEN);
+            }
+        }
+
+        foreach ($profile->relatedPersons as $person) {
+            $documents = $this->documentResolver->relatedPersonDocuments($person);
+            $identity = $documents->first(fn (KycDocument $document): bool => in_array(
+                $this->documentType($document),
+                ['passport', 'passport_front', 'national_id', 'national_id_front'],
+                true,
+            ));
+            $identityMetadata = $identity instanceof KycDocument ? (array) $identity->metadata : [];
+
+            if (! is_bool($identityMetadata['contains_address'] ?? null)) {
+                throw new RuntimeException(NiumHkCorporateV5Validator::IDENTITY_ADDRESS_EVIDENCE_UNPROVEN);
+            }
+
+            if ($identityMetadata['contains_address'] === false) {
+                $proofOfAddress = $documents->first(fn (KycDocument $document): bool => $this->documentType($document) === 'proof_of_address');
+
+                if (
+                    ! $proofOfAddress instanceof KycDocument
+                    || $proofOfAddress->issued_at === null
+                    || $proofOfAddress->issued_at->isFuture()
+                    || $proofOfAddress->issued_at->lt(today()->subDays(90))
+                ) {
+                    throw new RuntimeException(NiumHkCorporateV5Validator::IDENTITY_ADDRESS_EVIDENCE_UNPROVEN);
+                }
+            }
+        }
+    }
+
+    private function documentType(KycDocument $document): string
+    {
+        $metadata = (array) ($document->metadata ?? []);
+
+        return strtolower(trim((string) ($metadata['nium_document_type'] ?? $document->type)));
     }
 
     private function requiredSgCorporateString(KycProfile $profile, string $field): string

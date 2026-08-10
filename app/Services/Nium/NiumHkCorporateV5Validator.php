@@ -10,6 +10,12 @@ final class NiumHkCorporateV5Validator
 {
     public const REQUIRED_DOCUMENT_MISSING = 'HOLD_HK_REQUIRED_DOCUMENT_MISSING';
 
+    public const DOCUMENT_RECENCY_UNPROVEN = 'HOLD_HK_DOCUMENT_RECENCY_UNPROVEN';
+
+    public const LATEST_FILING_UNPROVEN = 'HOLD_HK_LATEST_FILING_UNPROVEN';
+
+    public const IDENTITY_ADDRESS_EVIDENCE_UNPROVEN = 'HOLD_HK_IDENTITY_ADDRESS_EVIDENCE_UNPROVEN';
+
     public static function documentRoleKey(string $position): string
     {
         return str_replace(['-', ' '], '_', strtolower(trim($position)));
@@ -50,7 +56,7 @@ final class NiumHkCorporateV5Validator
             throw new RuntimeException('hk_corporate_address_relationship_invalid');
         }
 
-        $this->assertAddress($addresses['registeredAddress'] ?? null, 'addresses.registeredAddress');
+        $this->assertCorporateAddress($addresses['registeredAddress'] ?? null, 'addresses.registeredAddress');
 
         if ($addresses['isBusinessAddressSameAsRegisteredAddress']) {
             if (array_key_exists('businessAddress', $addresses)) {
@@ -60,7 +66,7 @@ final class NiumHkCorporateV5Validator
             return;
         }
 
-        $this->assertAddress($addresses['businessAddress'] ?? null, 'addresses.businessAddress');
+        $this->assertCorporateAddress($addresses['businessAddress'] ?? null, 'addresses.businessAddress');
     }
 
     private function assertApplicant(array $payload): void
@@ -71,6 +77,7 @@ final class NiumHkCorporateV5Validator
 
         $this->assertAddress(Arr::get($payload, 'applicant.address'), 'applicant.address');
         $this->assertPositionList(Arr::get($payload, 'applicant.positions'), 'applicant.positions');
+        $this->assertConditionalSharePercentage($payload['applicant'], 'applicant');
     }
 
     private function assertStakeholders(array $payload): void
@@ -92,6 +99,7 @@ final class NiumHkCorporateV5Validator
 
             $this->assertAddress($stakeholder['address'] ?? null, "stakeholders.individual.{$index}.address");
             $this->assertPositionList($stakeholder['positions'] ?? null, "stakeholders.individual.{$index}.positions");
+            $this->assertConditionalSharePercentage($stakeholder, "stakeholders.individual.{$index}");
         }
     }
 
@@ -135,6 +143,21 @@ final class NiumHkCorporateV5Validator
 
         foreach (['accountName', 'accountNumber', 'bankCountry', 'bankName', 'currency'] as $field) {
             $this->requireString($details, $field, "bankAccountDetails.{$field}");
+        }
+
+        $routingCodes = $details['routingCodes'] ?? null;
+
+        if (! is_array($routingCodes) || $routingCodes === [] || ! array_is_list($routingCodes)) {
+            throw new RuntimeException('Nium HK Corporate Full requires bankAccountDetails.routingCodes as a non-empty array.');
+        }
+
+        foreach ($routingCodes as $index => $routingCode) {
+            if (! is_array($routingCode) || array_is_list($routingCode)) {
+                throw new RuntimeException("Nium HK Corporate Full requires bankAccountDetails.routingCodes.{$index} as an object.");
+            }
+
+            $this->requireString($routingCode, 'type', "bankAccountDetails.routingCodes.{$index}.type");
+            $this->requireString($routingCode, 'value', "bankAccountDetails.routingCodes.{$index}.value");
         }
     }
 
@@ -200,7 +223,12 @@ final class NiumHkCorporateV5Validator
             ->filter(fn ($position): bool => is_string($position))
             ->map(fn (string $position): string => self::documentRoleKey($position));
 
-        if ($applicantPositions->intersect(['director', 'ubo', 'ultimate_beneficial_owner', 'partner'])->isEmpty() && ! $types->contains('loa')) {
+        $applicantDocumentTypes = collect(Arr::get($payload, 'applicant.documents', []))
+            ->pluck('type')
+            ->filter(fn ($type): bool => is_string($type))
+            ->map(fn (string $type): string => strtolower(trim($type)));
+
+        if ($applicantPositions->intersect(['director', 'ubo', 'ultimate_beneficial_owner', 'partner'])->isEmpty() && ! $applicantDocumentTypes->contains('loa')) {
             $missing[] = 'loa';
         }
 
@@ -221,6 +249,41 @@ final class NiumHkCorporateV5Validator
 
         if (preg_match('/^[A-Z]{2}$/', $address['country']) !== 1) {
             throw new RuntimeException("Nium HK Corporate Full requires {$path}.country as an ISO alpha-2 code.");
+        }
+    }
+
+    private function assertCorporateAddress(mixed $address, string $path): void
+    {
+        if (! is_array($address) || $address === [] || array_is_list($address)) {
+            throw new RuntimeException("Nium HK Corporate Full requires {$path} as an object.");
+        }
+
+        foreach (['addressLine1', 'city', 'postcode', 'country'] as $field) {
+            $this->requireString($address, $field, "{$path}.{$field}");
+        }
+
+        if (array_key_exists('state', $address) && (! is_string($address['state']) || trim($address['state']) === '')) {
+            throw new RuntimeException("Nium HK Corporate Full requires {$path}.state as a non-empty string when supplied.");
+        }
+
+        if (preg_match('/^[A-Z]{2}$/', $address['country']) !== 1) {
+            throw new RuntimeException("Nium HK Corporate Full requires {$path}.country as an ISO alpha-2 code.");
+        }
+    }
+
+    private function assertConditionalSharePercentage(array $person, string $path): void
+    {
+        $positions = collect($person['positions'] ?? [])
+            ->pluck('title')
+            ->filter(fn ($position): bool => is_string($position))
+            ->map(fn (string $position): string => self::documentRoleKey($position));
+
+        if (
+            $positions->intersect(['ubo', 'ultimate_beneficial_owner', 'shareholder'])->isNotEmpty()
+            && ! is_int($person['sharePercentage'] ?? null)
+            && ! is_float($person['sharePercentage'] ?? null)
+        ) {
+            throw new RuntimeException("Nium HK Corporate Full requires {$path}.sharePercentage as a number for UBO or shareholder positions.");
         }
     }
 

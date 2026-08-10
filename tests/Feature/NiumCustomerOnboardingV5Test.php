@@ -1674,24 +1674,34 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'address_line2' => null,
             'city' => 'Hong Kong',
             'state' => 'Hong Kong',
-            'postal_code' => null,
+            'postal_code' => '999077',
             'country_code' => 'HK',
             'metadata' => $metadata,
         ]);
         $user->profile()->update(['country_code' => 'HK']);
         $profile->documents()
             ->where('type', 'business_registration')
-            ->update(['issuing_country_code' => 'HK']);
+            ->update(['issuing_country_code' => 'HK', 'issued_at' => now()->subMonth()]);
         $profile->documents()->create([
             'type' => 'nar1',
             'status' => 'approved',
             'file_url' => 'private://fixture/nar1',
             'document_number' => 'NAR1-SYNTHETIC',
             'issuing_country_code' => 'HK',
-            'metadata' => $this->availableFileMetadata('40000000-0000-4000-8000-000000000024'),
+            'metadata' => [
+                ...$this->availableFileMetadata('40000000-0000-4000-8000-000000000024'),
+                'is_most_recent_filing' => true,
+            ],
         ]);
         $applicant = $profile->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
         $stakeholder = $profile->relatedPersons()->where('relationship_type', 'beneficial_owner')->firstOrFail();
+        foreach ([$applicant, $stakeholder] as $person) {
+            $identityDocument = $person->documents()->where('type', 'passport_front')->firstOrFail();
+            $identityDocument->update(['metadata' => [
+                ...(array) $identityDocument->metadata,
+                'contains_address' => true,
+            ]]);
+        }
         $historical = collect([
             $profile->documents()->create(['type' => 'business_registration', 'status' => 'superseded', 'file_url' => 'private://historical/company']),
             $applicant->documents()->create(['kyc_profile_id' => $profile->id, 'type' => 'passport_front', 'status' => 'superseded', 'file_url' => 'private://historical/applicant']),
@@ -1750,7 +1760,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $metadata = (array) $applicant->metadata;
         $metadata['positions'] = ['compliance_officer'];
         $applicant->update(['metadata' => $metadata]);
-        $profile->documents()->create([
+        $applicant->documents()->create([
+            'kyc_profile_id' => $profile->id,
             'type' => 'loa',
             'status' => 'approved',
             'file_url' => 'private://fixture/loa',
@@ -1764,7 +1775,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
 
         $this->assertSame([['title' => 'compliance_officer']], $payload['applicant']['positions']);
-        $this->assertContains('loa', collect($payload['documents'])->pluck('type')->all());
+        $this->assertContains('loa', collect($payload['applicant']['documents'])->pluck('type')->all());
+        $this->assertNotContains('loa', collect($payload['documents'])->pluck('type')->all());
         Http::assertNothingSent();
     }
 
@@ -1824,7 +1836,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $applicant = $user->kycProfile()->firstOrFail()->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
         $metadata = (array) $applicant->metadata;
         $metadata['positions'] = ['ubo'];
-        $applicant->update(['metadata' => $metadata]);
+        $applicant->update(['metadata' => $metadata, 'ownership_percentage' => 25]);
         $user->unsetRelation('kycProfile');
         Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
 
@@ -1833,6 +1845,46 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame([['title' => 'ubo']], $payload['applicant']['positions']);
         $this->assertNotContains('loa', collect($payload['documents'])->pluck('type')->all());
         Http::assertNothingSent();
+    }
+
+    public function test_hk_business_registration_recency_is_not_silently_assumed(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $user->kycProfile()->firstOrFail()->documents()->where('type', 'business_registration')->update(['issued_at' => null]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectExceptionMessage(NiumHkCorporateV5Validator::DOCUMENT_RECENCY_UNPROVEN);
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    }
+
+    public function test_hk_latest_nar1_or_nnc1_status_is_not_silently_assumed(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $filing = $user->kycProfile()->firstOrFail()->documents()->where('type', 'nar1')->firstOrFail();
+        $metadata = (array) $filing->metadata;
+        unset($metadata['is_most_recent_filing']);
+        $filing->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectExceptionMessage(NiumHkCorporateV5Validator::LATEST_FILING_UNPROVEN);
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    }
+
+    public function test_hk_identity_address_semantics_are_not_inferred_from_passport_type(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $applicant = $user->kycProfile()->firstOrFail()->relatedPersons()->where('relationship_type', 'applicant')->firstOrFail();
+        $identity = $applicant->documents()->where('type', 'passport_front')->firstOrFail();
+        $metadata = (array) $identity->metadata;
+        unset($metadata['contains_address']);
+        $identity->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectExceptionMessage(NiumHkCorporateV5Validator::IDENTITY_ADDRESS_EVIDENCE_UNPROVEN);
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
     }
 
     public function test_configured_regulatory_region_mismatch_fails_before_documents_or_http(): void
@@ -4183,15 +4235,28 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'country_code' => 'HK',
             'metadata' => $metadata,
         ]);
-        $profile->documents()->where('type', 'business_registration')->update(['issuing_country_code' => 'HK']);
+        $profile->documents()->where('type', 'business_registration')->update([
+            'issuing_country_code' => 'HK',
+            'issued_at' => now()->subMonth(),
+        ]);
         $profile->documents()->create([
             'type' => 'nar1',
             'status' => 'approved',
             'file_url' => 'private://fixture/nar1',
             'document_number' => 'NAR1-SYNTHETIC',
             'issuing_country_code' => 'HK',
-            'metadata' => $this->availableFileMetadata('40000000-0000-4000-8000-000000000024'),
+            'metadata' => [
+                ...$this->availableFileMetadata('40000000-0000-4000-8000-000000000024'),
+                'is_most_recent_filing' => true,
+            ],
         ]);
+        foreach ($profile->relatedPersons as $person) {
+            $identityDocument = $person->documents()->where('type', 'passport_front')->firstOrFail();
+            $identityDocument->update(['metadata' => [
+                ...(array) $identityDocument->metadata,
+                'contains_address' => true,
+            ]]);
+        }
         $user->profile()->update(['country_code' => 'HK']);
         $user->unsetRelation('kycProfile');
 
