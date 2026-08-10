@@ -943,33 +943,6 @@ class NiumCustomerPayloadFactory
                 throw new RuntimeException(NiumHkCorporateV5Validator::LATEST_FILING_UNPROVEN);
             }
         }
-
-        foreach ($profile->relatedPersons as $person) {
-            $documents = $this->documentResolver->relatedPersonDocuments($person);
-            $identity = $documents->first(fn (KycDocument $document): bool => in_array(
-                $this->documentType($document),
-                ['passport', 'passport_front', 'national_id', 'national_id_front'],
-                true,
-            ));
-            $identityMetadata = $identity instanceof KycDocument ? (array) $identity->metadata : [];
-
-            if (! is_bool($identityMetadata['contains_address'] ?? null)) {
-                throw new RuntimeException(NiumHkCorporateV5Validator::IDENTITY_ADDRESS_EVIDENCE_UNPROVEN);
-            }
-
-            if ($identityMetadata['contains_address'] === false) {
-                $proofOfAddress = $documents->first(fn (KycDocument $document): bool => $this->documentType($document) === 'proof_of_address');
-
-                if (
-                    ! $proofOfAddress instanceof KycDocument
-                    || $proofOfAddress->issued_at === null
-                    || $proofOfAddress->issued_at->isFuture()
-                    || $proofOfAddress->issued_at->lt(today()->subDays(90))
-                ) {
-                    throw new RuntimeException(NiumHkCorporateV5Validator::IDENTITY_ADDRESS_EVIDENCE_UNPROVEN);
-                }
-            }
-        }
     }
 
     private function documentType(KycDocument $document): string
