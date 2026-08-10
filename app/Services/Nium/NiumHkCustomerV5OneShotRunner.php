@@ -6,13 +6,11 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
-use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -20,7 +18,9 @@ use Throwable;
 
 final class NiumHkCustomerV5OneShotRunner
 {
-    public const EXPECTED_HEAD = '7fd4625b93c25c8562d29b1c1047b6d0c799f993';
+    public const EXPECTED_HEAD = '0ff181d6bb6710732b1ae9b25b07cac424edbf12';
+
+    public const LOCKED_PAYLOAD_SHA256 = 'dfb4dd25efd1e264054b175600c3b04a26c62531b14ae8b86d879a7d36364769';
 
     public const USER_ID = 9;
 
@@ -30,21 +30,26 @@ final class NiumHkCustomerV5OneShotRunner
 
     private const PROTECTED_ACCOUNT_ID = 4;
 
-    private const DOCUMENT_IDS = [21, 22, 23];
+    private const DOCUMENT_IDS = [24, 25];
 
-    private const HISTORICAL_DOCUMENT_IDS = [18, 19, 20];
+    private const HISTORICAL_DOCUMENT_IDS = [18, 19, 20, 21, 22, 23];
 
-    private const REQUEST_LOG_BASELINE = 65;
+    private const REQUEST_LOG_BASELINE = 87;
 
-    private const CUSTOMER_POST_BASELINE = 3;
+    private const CUSTOMER_POST_BASELINE = 4;
 
-    private const SUBMISSION_MARKER = 'nium-v5-hk-customer-create-4';
+    private const PREVIOUS_SUBMISSION_MARKER = 'nium-v5-hk-customer-create-4';
+
+    private const SUBMISSION_MARKER = 'nium-v5-hk-customer-create-5-factual-v1';
 
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumCustomerPayloadFactory $payloadFactory,
         private readonly NiumCustomerDocumentResolver $documentResolver,
         private readonly NiumProviderAccountStateService $stateService,
+        private readonly NiumHkCorporateV5Validator $hkValidator,
+        private readonly string $lockedPayloadSha256 = self::LOCKED_PAYLOAD_SHA256,
+        private readonly bool $validatePayloadWithHkValidator = true,
     ) {}
 
     /**
@@ -169,22 +174,24 @@ final class NiumHkCustomerV5OneShotRunner
             throw new RuntimeException('Provider Account 7 already has a provider identifier.');
         }
 
-        if (
-            $account->reconciliation_error === NiumProviderAccountStateService::CUSTOMER_CREATE_SUBMITTING
-            || Arr::get((array) $account->metadata, 'customer_v5_submission_marker') !== null
-        ) {
-            throw new RuntimeException('Provider Account 7 has already been claimed for Customer Create.');
-        }
+        $this->assertPreviousSubmissionState($account, (int) $provider->getKey());
 
         if (ApiRequestLog::query()->count() !== self::REQUEST_LOG_BASELINE) {
-            throw new RuntimeException('ApiRequestLog count is not the locked value 65.');
+            throw new RuntimeException('ApiRequestLog count is not the locked value 87.');
         }
 
         $this->assertCustomerPostCount((int) $provider->getKey(), self::CUSTOMER_POST_BASELINE);
 
         $payload = $this->payloadFactory->build($user, (string) $account->external_reference);
+        if ($this->validatePayloadWithHkValidator) {
+            $this->hkValidator->assert($profile, $payload);
+        }
         $this->assertPayload($profile, $payload);
         $this->assertDocuments($profile, $payload);
+
+        if ($this->payloadFingerprint($payload) !== $this->lockedPayloadSha256) {
+            throw new RuntimeException('The factual Customer V5 payload SHA-256 does not match the locked checkpoint.');
+        }
 
         return compact('user', 'profile', 'account', 'protectedAccount', 'payload') + [
             'protected_account' => $protectedAccount,
@@ -216,31 +223,48 @@ final class NiumHkCustomerV5OneShotRunner
             }
         }
 
-        $this->assertDeviceDetails($payload);
+        $this->assertFactualPeople($payload);
+        $this->assertDeviceDetails($profile, $payload);
     }
 
     private function assertDocuments(KycProfile $profile, array $payload): void
     {
-        $profile->loadMissing(['documents', 'relatedPersons.documents']);
-        $documents = KycDocument::query()->whereIn('id', self::DOCUMENT_IDS)->where('kyc_profile_id', $profile->id)->get();
+        $profile->loadMissing(['documents', 'relatedPersons']);
+        $documents = KycDocument::query()
+            ->whereIn('id', self::DOCUMENT_IDS)
+            ->where('kyc_profile_id', $profile->id)
+            ->orderBy('id')
+            ->get();
+        $historicalDocuments = KycDocument::query()
+            ->whereIn('id', self::HISTORICAL_DOCUMENT_IDS)
+            ->where('kyc_profile_id', $profile->id)
+            ->orderBy('id')
+            ->get();
         $fileIds = $documents->map(fn (KycDocument $document): mixed => Arr::get((array) $document->metadata, 'nium_file_id'));
-        $payloadFileIds = collect($payload['documents'] ?? [])
-            ->merge(collect(data_get($payload, 'applicant.documents', [])))
-            ->merge(collect(data_get($payload, 'stakeholders.individual', []))->flatMap(fn ($person) => $person['documents'] ?? []))
+        $payloadDocuments = $payload['documents'] ?? null;
+        $payloadFileIds = collect(is_array($payloadDocuments) ? $payloadDocuments : [])
             ->flatMap(fn ($document) => $document['fileIds'] ?? [])->values();
 
         if (
-            $documents->count() !== 3
+            $documents->count() !== 2
             || $documents->pluck('id')->map(fn ($id): int => (int) $id)->sort()->values()->all() !== self::DOCUMENT_IDS
+            || $documents->keyBy('id')->map(fn (KycDocument $document): string => $this->factualDocumentType($document))->all() !== [
+                24 => 'nar1',
+                25 => 'business_registration_doc',
+            ]
             || $documents->contains(fn (KycDocument $document): bool => $document->status !== 'approved')
+            || $documents->contains(fn (KycDocument $document): bool => $document->kyc_related_person_id !== null)
             || $documents->contains(fn (KycDocument $document): bool => strtoupper((string) Arr::get((array) $document->metadata, 'nium_file_state')) !== 'AVAILABLE')
             || $fileIds->contains(fn ($id): bool => ! is_string($id) || ! Str::isUuid($id))
-            || $fileIds->unique()->count() !== 3
-            || $payloadFileIds->count() !== 3
+            || $fileIds->unique()->count() !== 2
+            || ! is_array($payloadDocuments) || ! array_is_list($payloadDocuments) || count($payloadDocuments) !== 2
+            || $payloadFileIds->count() !== 2
             || $payloadFileIds->unique()->sort()->values()->all() !== $fileIds->unique()->sort()->values()->all()
-            || KycDocument::query()->whereIn('id', self::HISTORICAL_DOCUMENT_IDS)->where('kyc_profile_id', $profile->id)->where('status', 'approved')->exists()
+            || $historicalDocuments->count() !== 6
+            || $historicalDocuments->pluck('id')->map(fn ($id): int => (int) $id)->values()->all() !== self::HISTORICAL_DOCUMENT_IDS
+            || $historicalDocuments->contains(fn (KycDocument $document): bool => $document->status !== 'superseded')
         ) {
-            throw new RuntimeException('Customer V5 documents must be exactly approved AVAILABLE documents 21, 22, and 23.');
+            throw new RuntimeException('Customer V5 documents must be exactly approved AVAILABLE corporate documents 24 and 25.');
         }
 
         $selectedIds = $this->documentResolver->forProfile($profile)
@@ -251,91 +275,23 @@ final class NiumHkCustomerV5OneShotRunner
             ->all();
 
         if ($selectedIds !== self::DOCUMENT_IDS) {
-            throw new RuntimeException('The production document resolver must select exactly documents 21, 22, and 23.');
+            throw new RuntimeException('The production document resolver must select exactly documents 24 and 25.');
         }
 
-        $this->assertDocumentRolePlacement($profile, $documents->keyBy('id'), $payload);
+        if (array_key_exists('documents', $payload['applicant'] ?? [])
+            || collect(data_get($payload, 'stakeholders.individual', []))->contains(
+                fn ($stakeholder): bool => is_array($stakeholder) && array_key_exists('documents', $stakeholder),
+            )) {
+            throw new RuntimeException('Customer Create must not include applicant or stakeholder identity documents.');
+        }
     }
 
-    /** @param Collection<int, KycDocument> $documents */
-    private function assertDocumentRolePlacement(KycProfile $profile, Collection $documents, array $payload): void
+    private function factualDocumentType(KycDocument $document): string
     {
-        $applicants = $profile->relatedPersons->filter(fn (KycRelatedPerson $person): bool => in_array(
-            strtolower((string) $person->relationship_type),
-            ['applicant', 'authorized_representative', 'authorised_representative'],
-            true,
-        ));
-
-        if ($applicants->count() !== 1 || (int) $applicants->first()->getKey() !== 13) {
-            throw new RuntimeException('The fixture must contain exactly the production-selected applicant related person 13.');
-        }
-
-        $applicant = $applicants->first();
-        $stakeholders = $profile->relatedPersons->reject(fn (KycRelatedPerson $person): bool => $person->is($applicant));
-
-        if ($stakeholders->count() !== 1 || (int) $stakeholders->first()->getKey() !== 14) {
-            throw new RuntimeException('The fixture must contain exactly the intended stakeholder related person 14.');
-        }
-
-        $stakeholder = $stakeholders->first();
-        $stakeholderRelationship = str_replace(['-', ' '], '_', strtolower(trim((string) $stakeholder->relationship_type)));
-
-        if (! str_contains($stakeholderRelationship, 'beneficial') && ! str_contains($stakeholderRelationship, 'ubo')) {
-            throw new RuntimeException('Related person 14 must be the beneficial-owner stakeholder.');
-        }
-
-        $expected = [
-            21 => [null, 'corporate_registration'],
-            22 => [13, 'applicant_authorized_person_identity'],
-            23 => [14, 'beneficial_owner_stakeholder_identity'],
-        ];
-
-        foreach ($expected as $documentId => [$relatedPersonId, $logicalRole]) {
-            $document = $documents->get($documentId);
-
-            if (
-                ! $document instanceof KycDocument
-                || $document->kyc_related_person_id !== $relatedPersonId
-                || Arr::get((array) $document->metadata, 'logical_role') !== $logicalRole
-            ) {
-                throw new RuntimeException('Customer V5 document relationship or logical role is invalid.');
-            }
-        }
-
-        $companyDocuments = $payload['documents'] ?? null;
-        $applicantDocuments = data_get($payload, 'applicant.documents');
-        $individualStakeholders = data_get($payload, 'stakeholders.individual');
-
-        if (
-            ! is_array($companyDocuments) || ! array_is_list($companyDocuments) || count($companyDocuments) !== 1
-            || ! is_array($applicantDocuments) || ! array_is_list($applicantDocuments) || count($applicantDocuments) !== 1
-            || ! is_array($individualStakeholders) || ! array_is_list($individualStakeholders) || count($individualStakeholders) !== 1
-        ) {
-            throw new RuntimeException('Customer V5 company, applicant, and stakeholder payload shapes must each contain exactly one entry.');
-        }
-
-        $stakeholderDocuments = $individualStakeholders[0]['documents'] ?? null;
-
-        if (! is_array($stakeholderDocuments) || ! array_is_list($stakeholderDocuments) || count($stakeholderDocuments) !== 1) {
-            throw new RuntimeException('The intended stakeholder payload must contain exactly one document.');
-        }
-
-        $placements = [
-            21 => $companyDocuments[0]['fileIds'] ?? null,
-            22 => $applicantDocuments[0]['fileIds'] ?? null,
-            23 => $stakeholderDocuments[0]['fileIds'] ?? null,
-        ];
-
-        foreach ($placements as $documentId => $placedFileIds) {
-            $expectedFileId = Arr::get((array) $documents->get($documentId)->metadata, 'nium_file_id');
-
-            if (! is_array($placedFileIds) || $placedFileIds !== [$expectedFileId]) {
-                throw new RuntimeException('Customer V5 payload document File ID is assigned to the wrong role.');
-            }
-        }
+        return strtolower(trim((string) (Arr::get((array) $document->metadata, 'nium_document_type') ?? $document->type)));
     }
 
-    private function assertDeviceDetails(array $payload): void
+    private function assertDeviceDetails(KycProfile $profile, array $payload): void
     {
         if (! array_key_exists('deviceDetails', $payload)) {
             throw new RuntimeException('Customer V5 deviceDetails is required for HK Corporate Full KYC.');
@@ -353,12 +309,76 @@ final class NiumHkCustomerV5OneShotRunner
             }
         }
 
-        if ($deviceDetails['ipCountryCode'] !== 'HK') {
-            throw new RuntimeException('Customer V5 deviceDetails.ipCountryCode must match the locked HK fixture.');
+        $approvedDeviceDetails = Arr::get((array) $profile->metadata, 'nium_v5_fields.deviceDetails');
+
+        if (! is_array($approvedDeviceDetails) || $deviceDetails !== $approvedDeviceDetails) {
+            throw new RuntimeException('Customer V5 deviceDetails must exactly match approved factual metadata.');
         }
 
         if (filter_var($deviceDetails['ipAddress'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
             throw new RuntimeException('Customer V5 deviceDetails.ipAddress must be a valid IPv4 address.');
+        }
+
+        if (! Str::isUuid($deviceDetails['sessionId'])) {
+            throw new RuntimeException('Customer V5 deviceDetails.sessionId must be a UUID.');
+        }
+    }
+
+    private function assertFactualPeople(array $payload): void
+    {
+        $applicant = $payload['applicant'] ?? null;
+        $stakeholders = data_get($payload, 'stakeholders.individual');
+
+        if (! is_array($applicant)
+            || ($applicant['sharePercentage'] ?? null) !== 100
+            || $this->positionTitles($applicant) !== ['director', 'representative', 'shareholder', 'ubo']) {
+            throw new RuntimeException('The factual applicant ownership or positions do not match the locked checkpoint.');
+        }
+
+        if (! is_array($stakeholders) || ! array_is_list($stakeholders) || count($stakeholders) !== 1
+            || ! is_array($stakeholders[0])
+            || ($stakeholders[0]['sharePercentage'] ?? null) !== 100
+            || $this->positionTitles($stakeholders[0]) !== ['director', 'shareholder', 'ubo']) {
+            throw new RuntimeException('The factual stakeholder ownership or positions do not match the locked checkpoint.');
+        }
+    }
+
+    /** @return list<string> */
+    private function positionTitles(array $person): array
+    {
+        return collect($person['positions'] ?? [])
+            ->pluck('title')
+            ->filter(fn ($title): bool => is_string($title))
+            ->map(fn (string $title): string => NiumHkCorporateV5Validator::documentRoleKey($title))
+            ->sort()
+            ->values()
+            ->all();
+    }
+
+    private function assertPreviousSubmissionState(UserProviderAccount $account, int $providerId): void
+    {
+        $metadata = (array) $account->metadata;
+
+        if (Arr::get($metadata, 'customer_v5_submission_marker') !== self::PREVIOUS_SUBMISSION_MARKER
+            || Arr::get($metadata, 'customer_v5_submission_state') !== 'customer_create_rejected'
+            || ! filled(Arr::get($metadata, 'customer_v5_payload_fingerprint'))
+            || $account->reconciliation_status !== 'failed'
+            || $account->reconciliation_error !== 'customer_create_rejected'
+            || Arr::get($metadata, 'is_resubmission_allowed') !== false) {
+            throw new RuntimeException('Provider Account 7 does not match the locked generation #4 rejected state.');
+        }
+
+        $this->assertCustomerPostCount($providerId, self::CUSTOMER_POST_BASELINE);
+        $lastPost = ApiRequestLog::query()
+            ->where('provider_id', $providerId)
+            ->where('user_id', self::USER_ID)
+            ->where('operation', 'customer_create')
+            ->where('request_method', 'POST')
+            ->latest('id')
+            ->first();
+
+        if (! $lastPost instanceof ApiRequestLog || ! in_array((int) $lastPost->response_status, range(400, 599), true)) {
+            throw new RuntimeException('The last generation #4 Customer Create POST is not a definite HTTP rejection.');
         }
     }
 
@@ -398,15 +418,23 @@ final class NiumHkCustomerV5OneShotRunner
                 ApiRequestLog::query()->count() !== self::REQUEST_LOG_BASELINE + 1
                 || filled($account->external_customer_id)
                 || filled($account->external_account_id)
-                || isset($metadata['customer_v5_submission_marker'])
             ) {
                 throw new RuntimeException('Customer V5 atomic submission claim failed closed.');
             }
 
-            $this->assertCustomerPostCount($providerId, self::CUSTOMER_POST_BASELINE);
+            $this->assertPreviousSubmissionState($account, $providerId);
+            $metadata['customer_v5_previous_submission'] = [
+                'submission_marker' => Arr::get($metadata, 'customer_v5_submission_marker'),
+                'submission_state' => Arr::get($metadata, 'customer_v5_submission_state'),
+                'payload_fingerprint' => Arr::get($metadata, 'customer_v5_payload_fingerprint'),
+                'reconciliation_status' => $account->reconciliation_status,
+                'reconciliation_error' => $account->reconciliation_error,
+                'is_resubmission_allowed' => Arr::get($metadata, 'is_resubmission_allowed'),
+            ];
             $metadata['customer_v5_submission_marker'] = self::SUBMISSION_MARKER;
+            unset($metadata['customer_v5_submission_state']);
             $metadata['is_resubmission_allowed'] = false;
-            $metadata['customer_v5_payload_fingerprint'] = hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR));
+            $metadata['customer_v5_payload_fingerprint'] = $this->payloadFingerprint($payload);
             $account->forceFill([
                 'reconciliation_status' => 'pending',
                 'reconciliation_error' => NiumProviderAccountStateService::CUSTOMER_CREATE_SUBMITTING,
@@ -518,6 +546,11 @@ final class NiumHkCustomerV5OneShotRunner
         $providerId = (int) IntegrationProvider::query()->whereRaw('LOWER(code) = ?', ['nium'])->sole()->getKey();
 
         return ApiRequestLog::query()->where('provider_id', $providerId)->where('user_id', self::USER_ID)->where('operation', 'customer_create')->where('request_method', 'POST')->count();
+    }
+
+    private function payloadFingerprint(array $payload): string
+    {
+        return hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
     }
 
     private function fingerprint(UserProviderAccount $account): string
