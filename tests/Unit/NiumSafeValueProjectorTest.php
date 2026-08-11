@@ -35,6 +35,73 @@ class NiumSafeValueProjectorTest extends TestCase
         $this->assertStringNotContainsString('TEST-IDENTITY-MUST-NOT-SURVIVE', $serialized);
     }
 
+    public function test_provider_errors_preserve_structured_non_pii_evidence_for_every_item(): void
+    {
+        $projection = app(NiumSafeValueProjector::class)->apiResponseBody([
+            'errors' => [
+                [
+                    'code' => 'invalid_input',
+                    'field' => 'entityType',
+                    'description' => 'Invalid submitted value secret_wrong_entity.',
+                    'allowedValues' => ['individual_stakeholder', 'applicant', 'individual_customer'],
+                ],
+                [
+                    'code' => 'validation_error',
+                    'field' => 'kycMode',
+                    'description' => 'Invalid mode secret_wrong_mode.',
+                    'allowedValues' => ['e_kyc', 'biometric_kyc', 'manual_kyc'],
+                ],
+            ],
+        ], 400);
+
+        $this->assertCount(2, $projection['error_items']);
+        $this->assertSame('entityType', $projection['error_items'][0]['error_field']);
+        $this->assertSame('b4753588f3f6ef2b', $projection['error_items'][0]['error_field_fingerprint']);
+        $this->assertSame(
+            ['individual_stakeholder', 'applicant', 'individual_customer'],
+            $projection['error_items'][0]['allowed_values'],
+        );
+        $this->assertMatchesRegularExpression('/^[a-f0-9]{16}$/', $projection['error_items'][0]['error_description_fingerprint']);
+
+        $serialized = json_encode($projection, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('secret_wrong_entity', $serialized);
+        $this->assertStringNotContainsString('secret_wrong_mode', $serialized);
+    }
+
+    public function test_sensitive_and_unknown_error_fields_remain_fingerprint_only(): void
+    {
+        $identificationNumber = 'P123456789';
+        $invalidValue = 'private_invalid_value';
+        $projection = app(NiumSafeValueProjector::class)->apiResponseBody([
+            'errors' => [
+                [
+                    'code' => 'invalid_input',
+                    'field' => 'identificationNumber',
+                    'description' => "Invalid identificationNumber {$identificationNumber}.",
+                    'allowedValues' => [$identificationNumber],
+                ],
+                [
+                    'code' => 'invalid_input',
+                    'field' => 'unrecognizedProviderField',
+                    'description' => "Invalid submitted value {$invalidValue}.",
+                ],
+            ],
+        ], 400);
+
+        foreach ($projection['error_items'] as $item) {
+            $this->assertArrayNotHasKey('error_field', $item);
+            $this->assertArrayNotHasKey('allowed_values', $item);
+            $this->assertArrayHasKey('error_field_fingerprint', $item);
+            $this->assertArrayHasKey('error_description_fingerprint', $item);
+        }
+
+        $serialized = json_encode($projection, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString($identificationNumber, $serialized);
+        $this->assertStringNotContainsString($invalidValue, $serialized);
+        $this->assertStringNotContainsString('identificationNumber', $serialized);
+        $this->assertStringNotContainsString('unrecognizedProviderField', $serialized);
+    }
+
     public function test_exact_enum_contract_normalizes_known_values_and_rejects_unknown_or_secret_values(): void
     {
         config()->set('services.nium.auth.header_value', 'configured-status-secret');

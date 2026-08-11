@@ -154,6 +154,25 @@ final class NiumSafeValueProjector
         'internal_server_error',
     ];
 
+    private const SAFE_ERROR_FIELDS = [
+        'entityType',
+        'kycMode',
+        'region',
+        'isResident',
+        'entityReferenceId',
+        'proofOfIdentityDocument[].type',
+        'proofOfIdentityDocument[].issuanceCountry',
+        'proofOfIdentityDocument[].expiryDate',
+    ];
+
+    private const SAFE_ERROR_ENUM_VALUES = [
+        'entityType' => ['individual_stakeholder', 'applicant', 'individual_customer'],
+        'kycMode' => ['e_kyc', 'biometric_kyc', 'manual_kyc'],
+        'region' => self::REGIONS,
+        'isResident' => ['true', 'false'],
+        'proofOfIdentityDocument[].type' => ['passport'],
+    ];
+
     private const IDENTIFIER_CONFLICT_FIELDS = [
         'external_customer_id',
         'external_account_id',
@@ -433,7 +452,7 @@ final class NiumSafeValueProjector
         $successful = ($this->safeHttpStatus($httpStatus) ?? 0) >= 200
             && ($this->safeHttpStatus($httpStatus) ?? 0) < 300;
 
-        return $this->finalizeFlatProjection(array_filter([
+        $projection = $this->finalizeFlatProjection(array_filter([
             'http_status' => $this->safeHttpStatus($httpStatus),
             'status' => $this->providerStatus($response['status'] ?? null),
             'sub_status' => $this->providerSubStatus($response['subStatus'] ?? null),
@@ -448,7 +467,7 @@ final class NiumSafeValueProjector
             'error_field_fingerprint' => $this->fingerprint($error['field'] ?? null),
             'error_path_fingerprint' => $this->fingerprint($error['path'] ?? null),
             'error_parameter_fingerprint' => $this->fingerprint($error['parameter'] ?? null),
-            'message' => $this->providerMessage($error['message'] ?? $error['description'] ?? $response['message'] ?? null),
+            'message' => $this->providerMessage($response['message'] ?? null),
             'customer_id_present' => $this->isPresent($customerId),
             'wallet_id_present' => $this->isPresent($walletId),
             'customer_hash_id' => $successful ? $this->providerIdentifier($customerId) : null,
@@ -484,6 +503,13 @@ final class NiumSafeValueProjector
             'customer_id_fingerprint' => 'fingerprint',
             'wallet_id_fingerprint' => 'fingerprint',
         ]);
+
+        $errorItems = $this->safeErrorItems($response['errors'] ?? null);
+        if ($errorItems !== []) {
+            $projection['error_items'] = $errorItems;
+        }
+
+        return $projection;
     }
 
     /**
@@ -766,6 +792,66 @@ final class NiumSafeValueProjector
             'error_category' => 'unclassified',
             'error_fingerprint' => $this->fingerprint($raw),
         ];
+    }
+
+    private function safeErrorItems(mixed $errors): array
+    {
+        if (! is_array($errors) || ! array_is_list($errors)) {
+            return [];
+        }
+
+        $items = [];
+        foreach (array_slice($errors, 0, 20) as $error) {
+            if (! is_array($error) || array_is_list($error)) {
+                continue;
+            }
+
+            $fieldValue = $error['field'] ?? $error['path'] ?? $error['parameter'] ?? null;
+            $field = is_string($fieldValue) && in_array($fieldValue, self::SAFE_ERROR_FIELDS, true)
+                ? $fieldValue
+                : null;
+            $description = $error['description'] ?? $error['message'] ?? null;
+            $item = array_filter([
+                ...$this->errorProjection($error['code'] ?? $error['errorCode'] ?? null),
+                'error_field' => $field,
+                'error_field_fingerprint' => $this->fingerprint($fieldValue),
+                'error_description_fingerprint' => $this->fingerprint($description),
+                'allowed_values' => $field === null ? null : $this->safeAllowedValues($field, $error),
+            ], static fn (mixed $value): bool => $value !== null && $value !== []);
+
+            $sanitized = $this->sensitiveDataSanitizer->sanitize($item);
+            if ($item !== [] && is_array($sanitized) && $sanitized === $item) {
+                $items[] = $item;
+            }
+        }
+
+        return $items;
+    }
+
+    private function safeAllowedValues(string $field, array $error): ?array
+    {
+        $allowed = self::SAFE_ERROR_ENUM_VALUES[$field] ?? null;
+        if ($allowed === null) {
+            return null;
+        }
+
+        $values = $error['allowedValues'] ?? $error['allowed_values'] ?? null;
+        if (! is_array($values) || ! array_is_list($values) || count($values) > 20) {
+            return null;
+        }
+
+        $safe = [];
+        foreach ($values as $value) {
+            if (! is_string($value)
+                || preg_match('/^[A-Za-z][A-Za-z0-9_]{0,63}$/', $value) !== 1
+                || ! in_array($value, $allowed, true)) {
+                return null;
+            }
+
+            $safe[] = $value;
+        }
+
+        return $safe !== [] ? array_values(array_unique($safe)) : null;
     }
 
     private function entityStates(array $states): array

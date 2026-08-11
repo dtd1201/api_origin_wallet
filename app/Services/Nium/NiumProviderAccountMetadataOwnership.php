@@ -39,6 +39,9 @@ final class NiumProviderAccountMetadataOwnership
             'nium_sandbox_simulation_submit_kyc_attempt' => $this->simulationAttempt(
                 $metadata['nium_sandbox_simulation_submit_kyc_attempt'] ?? null,
             ),
+            'nium_stakeholder_submit_kyc_retry_generation_2' => $this->stakeholderRetry(
+                $metadata['nium_stakeholder_submit_kyc_retry_generation_2'] ?? null,
+            ),
             'customer_v5_submission_marker' => $this->safeString($metadata['customer_v5_submission_marker'] ?? null, 128),
             'customer_v5_submission_state' => $this->safeString($metadata['customer_v5_submission_state'] ?? null, 64),
             'customer_v5_payload_fingerprint' => $this->fingerprint($metadata['customer_v5_payload_fingerprint'] ?? null, 64),
@@ -96,6 +99,38 @@ final class NiumProviderAccountMetadataOwnership
 
         $safe = array_filter([
             'state' => $this->safeString($value['state'] ?? null, 64),
+            'updated_at' => $this->timestamp($value['updated_at'] ?? null),
+        ], static fn (mixed $item): bool => $item !== null);
+
+        return $safe !== [] ? $safe : null;
+    }
+
+    private function stakeholderRetry(mixed $value): ?array
+    {
+        if (! is_array($value) || array_is_list($value)) {
+            return null;
+        }
+
+        $safe = array_filter([
+            'state' => $this->safeString($value['state'] ?? null, 64),
+            'previous_log_id' => ($value['previous_log_id'] ?? null) === 106 ? 106 : null,
+            'previous_http_status' => ($value['previous_http_status'] ?? null) === 400 ? 400 : null,
+            'previous_error_code' => ($value['previous_error_code'] ?? null) === 'invalid_input' ? 'invalid_input' : null,
+            'previous_error_field' => ($value['previous_error_field'] ?? null) === 'entityType' ? 'entityType' : null,
+            'previous_error_field_fingerprint' => $this->fingerprint(
+                $value['previous_error_field_fingerprint'] ?? null,
+                16,
+            ),
+            'confirmed_entity_type' => in_array($value['confirmed_entity_type'] ?? null, [
+                'individual_stakeholder',
+                'applicant',
+                'individual_customer',
+            ], true) ? $value['confirmed_entity_type'] : null,
+            'confirmed_kyc_mode' => in_array($value['confirmed_kyc_mode'] ?? null, [
+                'e_kyc',
+                'biometric_kyc',
+                'manual_kyc',
+            ], true) ? $value['confirmed_kyc_mode'] : null,
             'updated_at' => $this->timestamp($value['updated_at'] ?? null),
         ], static fn (mixed $item): bool => $item !== null);
 
