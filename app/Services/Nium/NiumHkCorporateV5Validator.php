@@ -189,16 +189,20 @@ final class NiumHkCorporateV5Validator
             throw new RuntimeException('Nium HK Corporate Full requires applicantDeclaration as boolean true.');
         }
 
-        $this->requireString($payload, 'applicantDeclarationTimestamp');
+        if (array_key_exists('applicantDeclarationTimestamp', $payload)) {
+            throw new RuntimeException('Nium HK Corporate Full must not contain applicantDeclarationTimestamp.');
+        }
 
-        $timestamp = $payload['applicantDeclarationTimestamp'];
+        $this->requireString($payload, 'applicantDeclarationTimeStamp');
+
+        $timestamp = $payload['applicantDeclarationTimeStamp'];
         $date = \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $timestamp);
         $errors = \DateTimeImmutable::getLastErrors();
 
         if ($date === false
             || ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0))
             || $date->format('Y-m-d H:i:s') !== $timestamp) {
-            throw new RuntimeException('Nium HK Corporate Full requires applicantDeclarationTimestamp in YYYY-MM-DD HH:MM:SS format.');
+            throw new RuntimeException('Nium HK Corporate Full requires applicantDeclarationTimeStamp in YYYY-MM-DD HH:MM:SS format.');
         }
     }
 

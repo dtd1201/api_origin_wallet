@@ -1651,6 +1651,30 @@ class NiumCustomerOnboardingV5Test extends TestCase
         ];
     }
 
+    public function test_hk_individual_keeps_canonical_declaration_timestamp_key(): void
+    {
+        $user = $this->approvedIndividual($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_region'] = 'HK';
+        $metadata['nium_v5_fields']['applicantDeclarationTimestamp'] = '2026-07-23 05:00:00';
+        $profile->update([
+            'residence_country_code' => 'HK',
+            'country_code' => 'HK',
+            'metadata' => $metadata,
+        ]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('individual', $payload['type']);
+        $this->assertSame('HK', $payload['region']);
+        $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimestamp']);
+        $this->assertArrayNotHasKey('applicantDeclarationTimeStamp', $payload);
+        Http::assertNothingSent();
+    }
+
     public function test_hk_corporate_full_payload_is_country_consistent_and_uses_controlled_fixture_files(): void
     {
         config()->set('services.nium.regulatory_region', 'HK');
@@ -1660,6 +1684,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $metadata = (array) $profile->metadata;
         $metadata['nium_region'] = 'HK';
         $metadata['nium_business_type'] = 'PRIVATE_COMPANY';
+        $metadata['nium_v5_fields']['applicantDeclarationTimestamp'] = $metadata['nium_v5_fields']['applicantDeclarationTimeStamp'];
+        unset($metadata['nium_v5_fields']['applicantDeclarationTimeStamp']);
         $metadata['nium_v5_fields']['addresses'] = [
             'isBusinessAddressSameAsRegisteredAddress' => true,
         ];
@@ -1729,8 +1755,14 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('HKD', $payload['bankAccountDetails']['currency']);
         $this->assertSame('HK', $payload['deviceDetails']['ipCountryCode']);
         $this->assertSame(self::DEVICE_SESSION_ID, $payload['deviceDetails']['sessionId']);
-        $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimestamp']);
-        $this->assertArrayNotHasKey('applicantDeclarationTimeStamp', $payload);
+        $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimeStamp']);
+        $this->assertArrayNotHasKey('applicantDeclarationTimestamp', $payload);
+        $this->assertSame(
+            '2026-07-23 05:00:00',
+            data_get($profile->fresh()->metadata, 'nium_v5_fields.applicantDeclarationTimestamp'),
+        );
+        $this->assertSame('private_company', $payload['businessType']);
+        $this->assertSame('https://business.example.test', $payload['website']);
         $this->assertSame(4, $fileIds->count());
         $this->assertSame(4, $fileIds->unique()->count());
         $this->assertTrue($fileIds->every(fn (string $fileId): bool => Str::isUuid($fileId)));
@@ -1740,7 +1772,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_hk_legacy_declaration_timestamp_alias_is_normalized_to_canonical_output(): void
+    public function test_hk_legacy_declaration_timestamp_alias_remains_supported_for_provider_output(): void
     {
         $user = $this->approvedHkCorporate($this->provider());
         $profile = $user->kycProfile()->firstOrFail();
@@ -1753,8 +1785,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
         $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
 
-        $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimestamp']);
-        $this->assertArrayNotHasKey('applicantDeclarationTimeStamp', $payload);
+        $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimeStamp']);
+        $this->assertArrayNotHasKey('applicantDeclarationTimestamp', $payload);
         Http::assertNothingSent();
     }
 

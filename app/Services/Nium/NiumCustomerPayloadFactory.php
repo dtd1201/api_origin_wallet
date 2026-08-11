@@ -195,6 +195,8 @@ class NiumCustomerPayloadFactory
         }
 
         if ($region === 'HK' && $kycType === 'full') {
+            $payload['applicantDeclarationTimeStamp'] = $payload['applicantDeclarationTimestamp'] ?? null;
+            unset($payload['applicantDeclarationTimestamp']);
             $payload['tradeName'] = $this->requiredHkCorporateTradeName($profile);
             $this->hkCorporateV5Validator->assert($profile, $payload);
         }

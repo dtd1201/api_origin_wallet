@@ -107,12 +107,40 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
-    public function test_malformed_canonical_declaration_timestamp_is_rejected(): void
+    public function test_malformed_provider_declaration_timestamp_is_rejected(): void
     {
         $payload = $this->payload();
-        $payload['applicantDeclarationTimestamp'] = '2026-08-10T00:00:00Z';
+        $payload['applicantDeclarationTimeStamp'] = '2026-08-10T00:00:00Z';
 
-        $this->expectExceptionMessage('applicantDeclarationTimestamp in YYYY-MM-DD HH:MM:SS format');
+        $this->expectExceptionMessage('applicantDeclarationTimeStamp in YYYY-MM-DD HH:MM:SS format');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_canonical_internal_timestamp_key_is_rejected_outbound(): void
+    {
+        $payload = $this->payload();
+        unset($payload['applicantDeclarationTimeStamp']);
+        $payload['applicantDeclarationTimestamp'] = '2026-08-10 00:00:00';
+
+        $this->expectExceptionMessage('must not contain applicantDeclarationTimestamp');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_both_declaration_timestamp_keys_are_rejected(): void
+    {
+        $payload = $this->payload();
+        $payload['applicantDeclarationTimestamp'] = $payload['applicantDeclarationTimeStamp'];
+
+        $this->expectExceptionMessage('must not contain applicantDeclarationTimestamp');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_missing_provider_declaration_timestamp_key_is_rejected(): void
+    {
+        $payload = $this->payload();
+        unset($payload['applicantDeclarationTimeStamp']);
+
+        $this->expectExceptionMessage('applicantDeclarationTimeStamp as a non-empty string');
         $this->validator()->assert(new KycProfile, $payload);
     }
 
@@ -400,7 +428,7 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
                 ],
             ],
             'applicantDeclaration' => true,
-            'applicantDeclarationTimestamp' => '2026-08-10 00:00:00',
+            'applicantDeclarationTimeStamp' => '2026-08-10 00:00:00',
             'deviceDetails' => [
                 'ipCountryCode' => 'HK',
                 'deviceInfo' => 'Synthetic browser',

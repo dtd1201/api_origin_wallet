@@ -18,9 +18,9 @@ use Throwable;
 
 final class NiumHkCustomerV5OneShotRunner
 {
-    public const EXPECTED_HEAD = 'fae9adb8acffb3439cd2fb1c13498c60ec59a5bf';
+    public const EXPECTED_HEAD = 'b18c191be8303f8111adeb5737443211017282ff';
 
-    public const LOCKED_PAYLOAD_SHA256 = '767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9';
+    public const LOCKED_PAYLOAD_SHA256 = 'ec95fad0d7560c528173cbaf9317bb80ea843faef39dbc6facb33c915a40c571';
 
     public const USER_ID = 9;
 
@@ -34,15 +34,17 @@ final class NiumHkCustomerV5OneShotRunner
 
     private const HISTORICAL_DOCUMENT_IDS = [18, 19, 20, 21, 22, 23];
 
-    private const REQUEST_LOG_BASELINE = 89;
+    private const REQUEST_LOG_BASELINE = 91;
 
-    private const CUSTOMER_POST_BASELINE = 5;
+    private const CUSTOMER_POST_BASELINE = 6;
 
-    private const PREVIOUS_SUBMISSION_MARKER = 'nium-v5-hk-customer-create-5-factual-v1';
+    private const PREVIOUS_SUBMISSION_MARKER = 'nium-v5-hk-customer-create-6-factual-business-type-v2';
 
-    private const SUBMISSION_MARKER = 'nium-v5-hk-customer-create-6-factual-business-type-v2';
+    private const SUBMISSION_MARKER = 'nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3';
 
-    private const PREVIOUS_ERROR_FIELD_FINGERPRINT = 'cb538016d80b3271';
+    private const PREVIOUS_PAYLOAD_SHA256 = '767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9';
+
+    private const PREVIOUS_ERROR_FIELD_FINGERPRINT = '30f867e6e24cd4c9';
 
     public function __construct(
         private readonly NiumService $niumService,
@@ -179,7 +181,7 @@ final class NiumHkCustomerV5OneShotRunner
         $this->assertPreviousSubmissionState($account, (int) $provider->getKey());
 
         if (ApiRequestLog::query()->count() !== self::REQUEST_LOG_BASELINE) {
-            throw new RuntimeException('ApiRequestLog count is not the locked value 89.');
+            throw new RuntimeException('ApiRequestLog count is not the locked value 91.');
         }
 
         $this->assertCustomerPostCount((int) $provider->getKey(), self::CUSTOMER_POST_BASELINE);
@@ -213,7 +215,9 @@ final class NiumHkCustomerV5OneShotRunner
 
         if (($payload['type'] ?? null) !== 'corporate'
             || ($payload['kycType'] ?? null) !== 'full'
-            || ($payload['businessType'] ?? null) !== 'private_company') {
+            || ($payload['businessType'] ?? null) !== 'private_company'
+            || ! array_key_exists('applicantDeclarationTimeStamp', $payload)
+            || array_key_exists('applicantDeclarationTimestamp', $payload)) {
             throw new RuntimeException('The locked Customer V5 payload must be corporate HK full KYC.');
         }
 
@@ -370,13 +374,26 @@ final class NiumHkCustomerV5OneShotRunner
 
         if (Arr::get($metadata, 'customer_v5_submission_marker') !== self::PREVIOUS_SUBMISSION_MARKER
             || Arr::get($metadata, 'customer_v5_submission_state') !== 'customer_create_rejected'
-            || ! filled(Arr::get($metadata, 'customer_v5_payload_fingerprint'))
+            || Arr::get($metadata, 'customer_v5_payload_fingerprint') !== self::PREVIOUS_PAYLOAD_SHA256
             || $account->reconciliation_status !== 'failed'
             || $account->reconciliation_error !== 'customer_create_rejected'
             || Arr::get($metadata, 'is_resubmission_allowed') !== false
             || ! is_array(Arr::get($metadata, 'customer_v5_previous_submission'))
             || array_is_list(Arr::get($metadata, 'customer_v5_previous_submission'))) {
-            throw new RuntimeException('Provider Account 7 does not match the locked generation #5 rejected state.');
+            throw new RuntimeException('Provider Account 7 does not match the locked generation #6 rejected state.');
+        }
+
+        $previousSubmission = Arr::get($metadata, 'customer_v5_previous_submission');
+        $history = Arr::get($metadata, 'customer_v5_submission_history');
+
+        if (Arr::get($previousSubmission, 'submission_marker') !== 'nium-v5-hk-customer-create-5-factual-v1'
+            || ! is_array($history)
+            || ! array_is_list($history)
+            || collect($history)->pluck('submission_marker')->all() !== [
+                'nium-v5-hk-customer-create-4',
+                'nium-v5-hk-customer-create-5-factual-v1',
+            ]) {
+            throw new RuntimeException('Provider Account 7 does not preserve the locked generation #4 and #5 provenance.');
         }
 
         $this->assertCustomerPostCount($providerId, self::CUSTOMER_POST_BASELINE);
@@ -389,12 +406,12 @@ final class NiumHkCustomerV5OneShotRunner
             ->first();
 
         if (! $lastPost instanceof ApiRequestLog
-            || (int) $lastPost->getKey() !== 89
+            || (int) $lastPost->getKey() !== 91
             || (int) $lastPost->response_status !== 400
             || $lastPost->is_success !== false
-            || data_get($lastPost->response_body, 'error_code') !== 'invalid_input'
+            || $lastPost->transport_outcome !== 'response_received'
             || data_get($lastPost->response_body, 'error_field_fingerprint') !== self::PREVIOUS_ERROR_FIELD_FINGERPRINT) {
-            throw new RuntimeException('The last generation #5 Customer Create POST does not prove the locked businessType rejection.');
+            throw new RuntimeException('The last generation #6 Customer Create POST does not prove the locked declaration timestamp rejection.');
         }
     }
 
@@ -453,19 +470,6 @@ final class NiumHkCustomerV5OneShotRunner
 
             if (! is_array($history) || ! array_is_list($history)) {
                 throw new RuntimeException('Customer V5 submission history is malformed.');
-            }
-
-            $generationFour = Arr::get($metadata, 'customer_v5_previous_submission');
-            if (! is_array($generationFour) || array_is_list($generationFour)) {
-                throw new RuntimeException('Generation #4 Customer V5 provenance is missing.');
-            }
-
-            $generationFourMarker = Arr::get($generationFour, 'submission_marker');
-            if (! collect($history)->contains(
-                fn ($submission): bool => is_array($submission)
-                    && Arr::get($submission, 'submission_marker') === $generationFourMarker,
-            )) {
-                $history[] = $generationFour;
             }
 
             $history[] = $previousSubmission;
