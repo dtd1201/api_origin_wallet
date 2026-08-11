@@ -322,6 +322,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
 
         $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
 
+        $this->assertSame('private_company', $payload['businessType']);
         $this->assertSame('Different Legal Business Name', $payload['businessName']);
         $this->assertSame('Acme Approved Trade', $payload['tradeName']);
         Http::assertNothingSent();
@@ -1658,6 +1659,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $profile = $user->kycProfile()->firstOrFail();
         $metadata = (array) $profile->metadata;
         $metadata['nium_region'] = 'HK';
+        $metadata['nium_business_type'] = 'PRIVATE_COMPANY';
         $metadata['nium_v5_fields']['addresses'] = [
             'isBusinessAddressSameAsRegisteredAddress' => true,
         ];
@@ -1716,6 +1718,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('corporate', $payload['type']);
         $this->assertSame('HK', $payload['region']);
         $this->assertSame('full', $payload['kycType']);
+        $this->assertSame('private_company', $payload['businessType']);
+        $this->assertSame('PRIVATE_COMPANY', $profile->fresh()->metadata['nium_business_type']);
         $this->assertSame('HK', $payload['registeredCountry']);
         $this->assertSame('HK', $payload['addresses']['registeredAddress']['country']);
         $this->assertTrue($payload['addresses']['isBusinessAddressSameAsRegisteredAddress']);
@@ -1752,6 +1756,26 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('2026-07-23 05:00:00', $payload['applicantDeclarationTimestamp']);
         $this->assertArrayNotHasKey('applicantDeclarationTimeStamp', $payload);
         Http::assertNothingSent();
+    }
+
+    public function test_unknown_hk_corporate_business_type_fails_closed_without_mutating_metadata(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_business_type'] = 'UNKNOWN_COMPANY';
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectExceptionMessage('Unsupported Nium HK Corporate Full V5 business type.');
+
+        try {
+            app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+        } finally {
+            $this->assertSame('UNKNOWN_COMPANY', $profile->fresh()->metadata['nium_business_type']);
+            Http::assertNothingSent();
+        }
     }
 
     public function test_malformed_hk_canonical_declaration_timestamp_fails_before_http(): void
@@ -4285,6 +4309,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $profile = $user->kycProfile()->firstOrFail();
         $metadata = (array) $profile->metadata;
         $metadata['nium_region'] = 'HK';
+        $metadata['nium_business_type'] = 'PRIVATE_COMPANY';
         $metadata['nium_v5_fields']['applicantDeclarationTimestamp'] = $metadata['nium_v5_fields']['applicantDeclarationTimeStamp'];
         unset($metadata['nium_v5_fields']['applicantDeclarationTimeStamp']);
         $metadata['nium_v5_fields']['addresses'] = [

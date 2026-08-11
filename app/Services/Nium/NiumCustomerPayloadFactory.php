@@ -12,6 +12,10 @@ use RuntimeException;
 
 class NiumCustomerPayloadFactory
 {
+    private const HK_CORPORATE_V5_BUSINESS_TYPES = [
+        'PRIVATE_COMPANY' => 'private_company',
+    ];
+
     private const SG_CORPORATE_ADDRESS_RELATIONSHIP_INVALID = 'sg_corporate_address_relationship_invalid';
 
     private const SG_CORPORATE_BUSINESS_ADDRESS_INVALID = 'sg_corporate_business_address_invalid';
@@ -135,6 +139,10 @@ class NiumCustomerPayloadFactory
             throw new RuntimeException('Corporate Nium onboarding requires registered_date and nium_business_type in the approved KYC metadata.');
         }
 
+        if ($region === 'HK' && $kycType === 'full') {
+            $businessType = $this->hkCorporateV5BusinessType($businessType);
+        }
+
         $registeredAddress = $this->address($profile);
         $businessAddress = $registeredAddress;
         $addressRelationship = null;
@@ -200,6 +208,15 @@ class NiumCustomerPayloadFactory
         }
 
         return $payload;
+    }
+
+    private function hkCorporateV5BusinessType(mixed $businessType): string
+    {
+        if (! is_string($businessType) || ! array_key_exists($businessType, self::HK_CORPORATE_V5_BUSINESS_TYPES)) {
+            throw new RuntimeException('Unsupported Nium HK Corporate Full V5 business type.');
+        }
+
+        return self::HK_CORPORATE_V5_BUSINESS_TYPES[$businessType];
     }
 
     private function person(

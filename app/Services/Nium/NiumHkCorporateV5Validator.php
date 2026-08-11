@@ -32,6 +32,10 @@ final class NiumHkCorporateV5Validator
             throw new RuntimeException('Nium HK onboarding requires a corporate full KYC payload.');
         }
 
+        if (($payload['businessType'] ?? null) !== 'private_company') {
+            throw new RuntimeException('Nium HK Corporate Full V5 businessType must be private_company.');
+        }
+
         if (! is_bool($payload['isMultiLayeredCompany'] ?? null)) {
             throw new RuntimeException('Nium HK Corporate Full requires isMultiLayeredCompany as a boolean.');
         }

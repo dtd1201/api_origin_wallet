@@ -10,6 +10,22 @@ use Tests\TestCase;
 
 class NiumHkCorporateV5ValidatorTest extends TestCase
 {
+    public function test_private_company_business_type_is_accepted(): void
+    {
+        $this->validator()->assert(new KycProfile, $this->payload());
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_internal_private_company_business_type_is_rejected_as_outbound_value(): void
+    {
+        $payload = $this->payload();
+        $payload['businessType'] = 'PRIVATE_COMPANY';
+
+        $this->expectExceptionMessage('businessType must be private_company');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
     public function test_missing_address_relationship_is_rejected(): void
     {
         $payload = $this->payload();
