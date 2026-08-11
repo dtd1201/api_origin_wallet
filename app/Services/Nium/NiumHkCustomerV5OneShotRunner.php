@@ -18,9 +18,9 @@ use Throwable;
 
 final class NiumHkCustomerV5OneShotRunner
 {
-    public const EXPECTED_HEAD = 'b18c191be8303f8111adeb5737443211017282ff';
+    public const EXPECTED_HEAD = '3185070c589266eea2cbe4eda08267e72f993cb0';
 
-    public const LOCKED_PAYLOAD_SHA256 = 'ec95fad0d7560c528173cbaf9317bb80ea843faef39dbc6facb33c915a40c571';
+    public const LOCKED_PAYLOAD_SHA256 = '55d97d8fa869c9ce7f21fa96e64e8dfe89e5cd287ded8d4d756c76d989c2c0d6';
 
     public const USER_ID = 9;
 
@@ -34,17 +34,17 @@ final class NiumHkCustomerV5OneShotRunner
 
     private const HISTORICAL_DOCUMENT_IDS = [18, 19, 20, 21, 22, 23];
 
-    private const REQUEST_LOG_BASELINE = 91;
+    private const REQUEST_LOG_BASELINE = 95;
 
-    private const CUSTOMER_POST_BASELINE = 6;
+    private const CUSTOMER_POST_BASELINE = 7;
 
-    private const PREVIOUS_SUBMISSION_MARKER = 'nium-v5-hk-customer-create-6-factual-business-type-v2';
+    private const PREVIOUS_SUBMISSION_MARKER = 'nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3';
 
-    private const SUBMISSION_MARKER = 'nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3';
+    private const SUBMISSION_MARKER = 'nium-v5-hk-customer-create-8-factual-registered-state-v4';
 
-    private const PREVIOUS_PAYLOAD_SHA256 = '767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9';
+    private const PREVIOUS_PAYLOAD_SHA256 = 'ec95fad0d7560c528173cbaf9317bb80ea843faef39dbc6facb33c915a40c571';
 
-    private const PREVIOUS_ERROR_FIELD_FINGERPRINT = '30f867e6e24cd4c9';
+    private const PREVIOUS_ERROR_FIELD_FINGERPRINT = '5a45f7beaf2d0ce6';
 
     public function __construct(
         private readonly NiumService $niumService,
@@ -181,7 +181,7 @@ final class NiumHkCustomerV5OneShotRunner
         $this->assertPreviousSubmissionState($account, (int) $provider->getKey());
 
         if (ApiRequestLog::query()->count() !== self::REQUEST_LOG_BASELINE) {
-            throw new RuntimeException('ApiRequestLog count is not the locked value 91.');
+            throw new RuntimeException('ApiRequestLog count is not the locked value 95.');
         }
 
         $this->assertCustomerPostCount((int) $provider->getKey(), self::CUSTOMER_POST_BASELINE);
@@ -219,6 +219,12 @@ final class NiumHkCustomerV5OneShotRunner
             || ! array_key_exists('applicantDeclarationTimeStamp', $payload)
             || array_key_exists('applicantDeclarationTimestamp', $payload)) {
             throw new RuntimeException('The locked Customer V5 payload must be corporate HK full KYC.');
+        }
+
+        if (data_get($payload, 'addresses.registeredAddress.state') !== 'KOWLOON'
+            || data_get($payload, 'addresses.registeredAddress.country') !== 'HK'
+            || data_get($payload, 'addresses.registeredAddress.city') !== 'MONGKOK, KOWLOON') {
+            throw new RuntimeException('The factual generation #8 registered address does not match the locked checkpoint.');
         }
 
         if (! filter_var(data_get($payload, 'applicant.email'), FILTER_VALIDATE_EMAIL)) {
@@ -380,20 +386,21 @@ final class NiumHkCustomerV5OneShotRunner
             || Arr::get($metadata, 'is_resubmission_allowed') !== false
             || ! is_array(Arr::get($metadata, 'customer_v5_previous_submission'))
             || array_is_list(Arr::get($metadata, 'customer_v5_previous_submission'))) {
-            throw new RuntimeException('Provider Account 7 does not match the locked generation #6 rejected state.');
+            throw new RuntimeException('Provider Account 7 does not match the locked generation #7 rejected state.');
         }
 
         $previousSubmission = Arr::get($metadata, 'customer_v5_previous_submission');
         $history = Arr::get($metadata, 'customer_v5_submission_history');
 
-        if (Arr::get($previousSubmission, 'submission_marker') !== 'nium-v5-hk-customer-create-5-factual-v1'
+        if (Arr::get($previousSubmission, 'submission_marker') !== 'nium-v5-hk-customer-create-6-factual-business-type-v2'
             || ! is_array($history)
             || ! array_is_list($history)
             || collect($history)->pluck('submission_marker')->all() !== [
                 'nium-v5-hk-customer-create-4',
                 'nium-v5-hk-customer-create-5-factual-v1',
+                'nium-v5-hk-customer-create-6-factual-business-type-v2',
             ]) {
-            throw new RuntimeException('Provider Account 7 does not preserve the locked generation #4 and #5 provenance.');
+            throw new RuntimeException('Provider Account 7 does not preserve the locked generation #4, #5, and #6 provenance.');
         }
 
         $this->assertCustomerPostCount($providerId, self::CUSTOMER_POST_BASELINE);
@@ -406,12 +413,12 @@ final class NiumHkCustomerV5OneShotRunner
             ->first();
 
         if (! $lastPost instanceof ApiRequestLog
-            || (int) $lastPost->getKey() !== 91
+            || (int) $lastPost->getKey() !== 93
             || (int) $lastPost->response_status !== 400
             || $lastPost->is_success !== false
             || $lastPost->transport_outcome !== 'response_received'
             || data_get($lastPost->response_body, 'error_field_fingerprint') !== self::PREVIOUS_ERROR_FIELD_FINGERPRINT) {
-            throw new RuntimeException('The last generation #6 Customer Create POST does not prove the locked declaration timestamp rejection.');
+            throw new RuntimeException('The last generation #7 Customer Create POST does not prove the locked registered state rejection.');
         }
     }
 

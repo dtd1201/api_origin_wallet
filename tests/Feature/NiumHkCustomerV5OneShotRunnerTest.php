@@ -72,8 +72,8 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertSame('PASS_EXISTING_CUSTOMER_FOUND', $result['terminal']);
         $this->assertSame(['GET'], $calls->methods);
         $this->assertNotNull(UserProviderAccount::query()->findOrFail(7)->external_customer_id);
-        $this->assertSame(6, $result['fixture_customer_post_count']);
-        $this->assertSame(92, $result['api_request_log_count']);
+        $this->assertSame(7, $result['fixture_customer_post_count']);
+        $this->assertSame(96, $result['api_request_log_count']);
     }
 
     public function test_existing_customer_without_wallet_passes_and_persists_only_customer(): void
@@ -92,7 +92,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertSame(['GET'], $calls->methods);
         $this->assertSame('customer-safe-test', $account->external_customer_id);
         $this->assertNull($account->external_account_id);
-        $this->assertSame(6, $result['fixture_customer_post_count']);
+        $this->assertSame(7, $result['fixture_customer_post_count']);
     }
 
     public function test_existing_lookup_without_customer_identifier_holds_without_post(): void
@@ -108,7 +108,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
         $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
         $this->assertSame(['GET'], $calls->methods);
-        $this->assertSame(6, $result['fixture_customer_post_count']);
+        $this->assertSame(7, $result['fixture_customer_post_count']);
     }
 
     public function test_unknown_lookup_never_posts(): void
@@ -119,7 +119,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
         $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
         $this->assertSame(['GET'], $calls->methods);
-        $this->assertSame(6, $result['fixture_customer_post_count']);
+        $this->assertSame(7, $result['fixture_customer_post_count']);
     }
 
     public function test_absent_lookup_permits_exactly_one_successful_create_and_stops(): void
@@ -133,19 +133,22 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
         $this->assertSame('PASS_CUSTOMER_CREATED', $result['terminal']);
         $this->assertSame(['GET', 'POST'], $calls->methods);
-        $this->assertSame(7, $result['fixture_customer_post_count']);
-        $this->assertSame(93, $result['api_request_log_count']);
+        $this->assertSame(8, $result['fixture_customer_post_count']);
+        $this->assertSame(97, $result['api_request_log_count']);
         $account = UserProviderAccount::query()->findOrFail(7);
         $this->assertNotNull($account->external_customer_id);
-        $this->assertSame('nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3', $account->metadata['customer_v5_submission_marker']);
-        $this->assertSame('nium-v5-hk-customer-create-6-factual-business-type-v2', $account->metadata['customer_v5_previous_submission']['submission_marker']);
+        $this->assertSame('nium-v5-hk-customer-create-8-factual-registered-state-v4', $account->metadata['customer_v5_submission_marker']);
+        $this->assertSame('nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3', $account->metadata['customer_v5_previous_submission']['submission_marker']);
         $this->assertSame('customer_create_rejected', $account->metadata['customer_v5_previous_submission']['submission_state']);
-        $this->assertSame('767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9', $account->metadata['customer_v5_previous_submission']['payload_fingerprint']);
+        $this->assertSame('ec95fad0d7560c528173cbaf9317bb80ea843faef39dbc6facb33c915a40c571', $account->metadata['customer_v5_previous_submission']['payload_fingerprint']);
+        $this->assertSame(400, $account->metadata['customer_v5_previous_submission']['provider_response_status']);
+        $this->assertSame('5a45f7beaf2d0ce6', $account->metadata['customer_v5_previous_submission']['provider_error_field_fingerprint']);
         $this->assertSame(
             [
                 'nium-v5-hk-customer-create-4',
                 'nium-v5-hk-customer-create-5-factual-v1',
                 'nium-v5-hk-customer-create-6-factual-business-type-v2',
+                'nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3',
             ],
             collect($account->metadata['customer_v5_submission_history'])->pluck('submission_marker')->all(),
         );
@@ -164,7 +167,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertSame(['GET', 'POST'], $calls->methods);
         $this->assertSame('customer-safe-test', $account->external_customer_id);
         $this->assertNull($account->external_account_id);
-        $this->assertSame(7, $result['fixture_customer_post_count']);
+        $this->assertSame(8, $result['fixture_customer_post_count']);
     }
 
     public function test_successful_create_without_customer_identifier_holds_without_replay(): void
@@ -177,7 +180,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
         $this->assertSame('HOLD_RESPONSE_REVIEW', $result['terminal']);
         $this->assertSame(['GET', 'POST'], $calls->methods);
-        $this->assertSame(7, $result['fixture_customer_post_count']);
+        $this->assertSame(8, $result['fixture_customer_post_count']);
         $this->assertFalse(UserProviderAccount::query()->findOrFail(7)->metadata['is_resubmission_allowed']);
     }
 
@@ -190,7 +193,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
         $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
         $this->assertSame(['GET'], $calls->methods);
-        $this->assertSame(6, $result['fixture_customer_post_count']);
+        $this->assertSame(7, $result['fixture_customer_post_count']);
     }
 
     public static function unsafeLookupResponses(): array
@@ -410,6 +413,39 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertPreflightFailureBeforeHttp();
     }
 
+    #[DataProvider('invalidFactualRegisteredAddressValues')]
+    public function test_wrong_or_missing_factual_registered_address_fails_before_http(string $path, mixed $value): void
+    {
+        if ($value === null) {
+            data_forget($this->payload, $path);
+        } else {
+            data_set($this->payload, $path, $value);
+        }
+        $this->refreshLockedPayloadSha();
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
+    public static function invalidFactualRegisteredAddressValues(): array
+    {
+        return [
+            'missing state' => ['addresses.registeredAddress.state', null],
+            'wrong state' => ['addresses.registeredAddress.state', 'HONG KONG'],
+            'wrong city' => ['addresses.registeredAddress.city', 'KOWLOON'],
+            'wrong country' => ['addresses.registeredAddress.country', 'SG'],
+        ];
+    }
+
+    public function test_correct_factual_registered_address_passes_preflight(): void
+    {
+        $calls = $this->mockGateway(['unexpected' => []]);
+
+        $result = $this->runner()->run($this->executionRoot());
+
+        $this->assertSame('HOLD_LOOKUP_OUTCOME_UNKNOWN', $result['terminal']);
+        $this->assertSame(['GET'], $calls->methods);
+    }
+
     public function test_locked_payload_sha_uses_unescaped_slashes(): void
     {
         $unescaped = hash('sha256', json_encode($this->payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
@@ -439,12 +475,12 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             $this->assertStringContainsString('Nium HK Corporate Full requires', $exception->getMessage());
         }
 
-        $this->assertSame(91, ApiRequestLog::query()->count());
-        $this->assertSame(6, ApiRequestLog::query()->where('operation', 'customer_create')->where('request_method', 'POST')->count());
+        $this->assertSame(95, ApiRequestLog::query()->count());
+        $this->assertSame(7, ApiRequestLog::query()->where('operation', 'customer_create')->where('request_method', 'POST')->count());
     }
 
     #[DataProvider('invalidPreviousSubmissionStates')]
-    public function test_generation_six_state_mismatch_fails_before_http(string $path, mixed $value): void
+    public function test_generation_seven_state_mismatch_fails_before_http(string $path, mixed $value): void
     {
         $account = UserProviderAccount::query()->findOrFail(7);
 
@@ -472,15 +508,15 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         ];
     }
 
-    public function test_generation_six_post_count_mismatch_fails_before_http(): void
+    public function test_generation_seven_post_count_mismatch_fails_before_http(): void
     {
         ApiRequestLog::query()->where('operation', 'customer_create')->latest('id')->firstOrFail()->delete();
         $this->logRequest('GET', 'safe_diagnostic', 200);
 
-        $this->assertPreflightFailureBeforeHttp(5);
+        $this->assertPreflightFailureBeforeHttp(6);
     }
 
-    public function test_generation_six_last_post_must_be_a_definite_rejection(): void
+    public function test_generation_seven_last_scoped_post_must_be_a_definite_rejection(): void
     {
         ApiRequestLog::query()->where('operation', 'customer_create')->latest('id')->firstOrFail()->update([
             'response_status' => 200,
@@ -490,7 +526,15 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertPreflightFailureBeforeHttp();
     }
 
-    public function test_generation_six_last_post_must_prove_declaration_timestamp_fingerprint(): void
+    public function test_latest_scoped_customer_post_must_remain_id_93(): void
+    {
+        ApiRequestLog::query()->findOrFail(93)->delete();
+        $this->logRequest('POST', 'customer_create', 400, ['error_field_fingerprint' => '5a45f7beaf2d0ce6']);
+
+        $this->assertPreflightFailureBeforeHttp();
+    }
+
+    public function test_generation_seven_last_scoped_post_must_prove_registered_state_fingerprint(): void
     {
         ApiRequestLog::query()->where('operation', 'customer_create')->latest('id')->firstOrFail()->update([
             'response_body' => [
@@ -501,7 +545,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertPreflightFailureBeforeHttp();
     }
 
-    public function test_generation_six_last_post_must_prove_response_received_transport(): void
+    public function test_generation_seven_last_scoped_post_must_prove_response_received_transport(): void
     {
         ApiRequestLog::query()->where('operation', 'customer_create')->latest('id')->firstOrFail()->update([
             'transport_outcome' => 'connection_failed',
@@ -510,10 +554,11 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertPreflightFailureBeforeHttp();
     }
 
-    public function test_generation_six_evidence_does_not_require_error_code(): void
+    public function test_diagnostic_logs_after_generation_seven_scoped_post_do_not_block_preflight(): void
     {
         $lastPost = ApiRequestLog::query()->where('operation', 'customer_create')->latest('id')->firstOrFail();
-        $this->assertArrayNotHasKey('error_code', $lastPost->response_body);
+        $this->assertSame(93, $lastPost->id);
+        $this->assertSame(95, ApiRequestLog::query()->max('id'));
         $calls = $this->mockGateway(['unexpected' => []]);
 
         $result = $this->runner()->run($this->executionRoot());
@@ -522,7 +567,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertSame(['GET'], $calls->methods);
     }
 
-    public function test_generation_six_history_must_contain_exactly_generations_four_and_five(): void
+    public function test_generation_seven_history_must_contain_exactly_generations_four_five_and_six(): void
     {
         $account = UserProviderAccount::query()->findOrFail(7);
         $metadata = (array) $account->metadata;
@@ -532,13 +577,13 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         $this->assertPreflightFailureBeforeHttp();
     }
 
-    public function test_generation_seven_constants_match_factual_locks(): void
+    public function test_generation_eight_constants_match_factual_locks(): void
     {
-        $this->assertSame('b18c191be8303f8111adeb5737443211017282ff', NiumHkCustomerV5OneShotRunner::EXPECTED_HEAD);
-        $this->assertSame('ec95fad0d7560c528173cbaf9317bb80ea843faef39dbc6facb33c915a40c571', NiumHkCustomerV5OneShotRunner::LOCKED_PAYLOAD_SHA256);
+        $this->assertSame('3185070c589266eea2cbe4eda08267e72f993cb0', NiumHkCustomerV5OneShotRunner::EXPECTED_HEAD);
+        $this->assertSame('55d97d8fa869c9ce7f21fa96e64e8dfe89e5cd287ded8d4d756c76d989c2c0d6', NiumHkCustomerV5OneShotRunner::LOCKED_PAYLOAD_SHA256);
     }
 
-    public function test_generation_seven_marker_is_not_written_when_lookup_is_ambiguous(): void
+    public function test_generation_eight_marker_is_not_written_when_lookup_is_ambiguous(): void
     {
         $calls = $this->mockGateway(['unexpected' => []]);
 
@@ -546,7 +591,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
 
         $this->assertSame(['GET'], $calls->methods);
         $this->assertSame(
-            'nium-v5-hk-customer-create-6-factual-business-type-v2',
+            'nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3',
             UserProviderAccount::query()->findOrFail(7)->metadata['customer_v5_submission_marker'],
         );
     }
@@ -625,7 +670,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             $this->runner()->run($newRoot);
             $this->fail('Expected the durable database claim to block a new execution root.');
         } catch (RuntimeException $exception) {
-            $this->assertStringContainsString('locked generation #6 rejected state', $exception->getMessage());
+            $this->assertStringContainsString('locked generation #7 rejected state', $exception->getMessage());
         }
 
         $this->assertSame(['GET', 'POST'], $calls->methods);
@@ -688,7 +733,8 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             'applicant_type' => 'business',
             'legal_name' => 'HK Fixture Limited',
             'address_line1' => '1 Test Road',
-            'city' => 'Hong Kong',
+            'city' => 'MONGKOK, KOWLOON',
+            'state' => 'KOWLOON',
             'registered_country_code' => 'HK',
             'country_code' => 'HK',
             'metadata' => [
@@ -726,14 +772,14 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             'reconciliation_status' => 'failed',
             'reconciliation_error' => 'customer_create_rejected',
             'metadata' => [
-                'customer_v5_submission_marker' => 'nium-v5-hk-customer-create-6-factual-business-type-v2',
+                'customer_v5_submission_marker' => 'nium-v5-hk-customer-create-7-factual-declaration-timestamp-v3',
                 'customer_v5_submission_state' => 'customer_create_rejected',
-                'customer_v5_payload_fingerprint' => '767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9',
+                'customer_v5_payload_fingerprint' => 'ec95fad0d7560c528173cbaf9317bb80ea843faef39dbc6facb33c915a40c571',
                 'is_resubmission_allowed' => false,
                 'customer_v5_previous_submission' => [
-                    'submission_marker' => 'nium-v5-hk-customer-create-5-factual-v1',
+                    'submission_marker' => 'nium-v5-hk-customer-create-6-factual-business-type-v2',
                     'submission_state' => 'customer_create_rejected',
-                    'payload_fingerprint' => 'dfb4dd25efd1e264054b175600c3b04a26c62531b14ae8b86d879a7d36364769',
+                    'payload_fingerprint' => '767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9',
                     'reconciliation_status' => 'failed',
                     'reconciliation_error' => 'customer_create_rejected',
                     'is_resubmission_allowed' => false,
@@ -751,6 +797,14 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
                         'submission_marker' => 'nium-v5-hk-customer-create-5-factual-v1',
                         'submission_state' => 'customer_create_rejected',
                         'payload_fingerprint' => 'dfb4dd25efd1e264054b175600c3b04a26c62531b14ae8b86d879a7d36364769',
+                        'reconciliation_status' => 'failed',
+                        'reconciliation_error' => 'customer_create_rejected',
+                        'is_resubmission_allowed' => false,
+                    ],
+                    [
+                        'submission_marker' => 'nium-v5-hk-customer-create-6-factual-business-type-v2',
+                        'submission_state' => 'customer_create_rejected',
+                        'payload_fingerprint' => '767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9',
                         'reconciliation_status' => 'failed',
                         'reconciliation_error' => 'customer_create_rejected',
                         'is_resubmission_allowed' => false,
@@ -787,13 +841,15 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             ]);
         }
 
-        for ($index = 0; $index < 85; $index++) {
+        for ($index = 0; $index < 86; $index++) {
             $this->logRequest('GET', 'safe_diagnostic', 200);
         }
-        for ($index = 0; $index < 5; $index++) {
+        for ($index = 0; $index < 6; $index++) {
             $this->logRequest('POST', 'customer_create', 400, ['error_field_fingerprint' => 'cb538016d80b3271']);
         }
-        $this->logRequest('POST', 'customer_create', 400, ['error_field_fingerprint' => '30f867e6e24cd4c9']);
+        $this->logRequest('POST', 'customer_create', 400, ['error_field_fingerprint' => '5a45f7beaf2d0ce6']);
+        $this->logRequest('GET', 'fetch_corporate_constants', 200);
+        $this->logRequest('GET', 'public_corporate_details', 200);
 
         $this->payload = [
             'type' => 'corporate',
@@ -804,6 +860,15 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             'businessName' => 'Factual HK Company',
             'website' => 'https://hongkongmachininggroup.com',
             'applicantDeclarationTimeStamp' => '2026-07-23 05:00:00',
+            'addresses' => [
+                'registeredAddress' => [
+                    'addressLine1' => 'FLAT/ROOM 1618B, 16/F, PIONEER CENTRE',
+                    'addressLine2' => '750 NATHAN ROAD',
+                    'city' => 'MONGKOK, KOWLOON',
+                    'state' => 'KOWLOON',
+                    'country' => 'HK',
+                ],
+            ],
             'deviceDetails' => [
                 'ipCountryCode' => 'VN',
                 'deviceInfo' => 'Factual browser',
@@ -871,7 +936,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
         return $root;
     }
 
-    private function assertPreflightFailureBeforeHttp(int $expectedCustomerPosts = 6): void
+    private function assertPreflightFailureBeforeHttp(int $expectedCustomerPosts = 7): void
     {
         $this->mock(NiumService::class, function (MockInterface $mock): void {
             $mock->shouldNotReceive('get');
@@ -885,7 +950,7 @@ class NiumHkCustomerV5OneShotRunnerTest extends TestCase
             $this->addToAssertionCount(1);
         }
 
-        $this->assertSame(91, ApiRequestLog::query()->count());
+        $this->assertSame(95, ApiRequestLog::query()->count());
         $this->assertSame($expectedCustomerPosts, ApiRequestLog::query()->where('operation', 'customer_create')->where('request_method', 'POST')->count());
     }
 
