@@ -10,6 +10,36 @@ use Tests\TestCase;
 
 class NiumHkCorporateV5ValidatorTest extends TestCase
 {
+    #[DataProvider('validWebsites')]
+    public function test_absolute_http_and_https_websites_are_accepted(string $website): void
+    {
+        $payload = $this->payload();
+        $payload['website'] = $website;
+
+        $this->validator()->assert(new KycProfile, $payload);
+
+        $this->addToAssertionCount(1);
+    }
+
+    #[DataProvider('invalidWebsites')]
+    public function test_bare_malformed_and_non_http_websites_are_rejected(mixed $website): void
+    {
+        $payload = $this->payload();
+        $payload['website'] = $website;
+
+        $this->expectExceptionMessage('website must be an absolute HTTP or HTTPS URL');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_absent_website_still_requires_proof_of_business(): void
+    {
+        $payload = $this->payload();
+        unset($payload['website']);
+
+        $this->expectExceptionMessage(NiumHkCorporateV5Validator::REQUIRED_DOCUMENT_MISSING.':proof_of_business');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
     public function test_private_company_business_type_is_accepted(): void
     {
         $this->validator()->assert(new KycProfile, $this->payload());
@@ -259,6 +289,26 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
         return collect(['ipCountryCode', 'deviceInfo', 'ipAddress', 'sessionId'])
             ->mapWithKeys(fn (string $field): array => [$field => [$field]])
             ->all();
+    }
+
+    public static function validWebsites(): array
+    {
+        return [
+            'canonical factual HTTPS' => ['https://hongkongmachininggroup.com'],
+            'HTTPS path' => ['https://example.com/path'],
+            'HTTP' => ['http://example.com'],
+        ];
+    }
+
+    public static function invalidWebsites(): array
+    {
+        return [
+            'bare domain' => ['hongkongmachininggroup.com'],
+            'bare path' => ['example.com/path'],
+            'javascript scheme' => ['javascript:alert(1)'],
+            'malformed URL' => ['https://'],
+            'non-string' => [['https://example.com']],
+        ];
     }
 
     public static function requiredCorporateGroups(): array

@@ -49,7 +49,25 @@ final class NiumHkCorporateV5Validator
         $this->assertBankAccountDetails($payload);
         $this->assertDeclaration($payload);
         $this->assertDeviceDetails($payload);
+        $this->assertWebsite($payload);
         $this->assertDocuments($profile, $payload);
+    }
+
+    private function assertWebsite(array $payload): void
+    {
+        $website = $payload['website'] ?? null;
+
+        if (! filled($website)) {
+            return;
+        }
+
+        if (! is_string($website)
+            || trim($website) !== $website
+            || filter_var($website, FILTER_VALIDATE_URL) === false
+            || ! in_array(parse_url($website, PHP_URL_SCHEME), ['http', 'https'], true)
+            || ! is_string(parse_url($website, PHP_URL_HOST))) {
+            throw new RuntimeException('Nium HK Corporate Full website must be an absolute HTTP or HTTPS URL.');
+        }
     }
 
     private function assertAddresses(array $payload): void

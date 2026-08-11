@@ -20,7 +20,7 @@ final class NiumHkCustomerV5OneShotRunner
 {
     public const EXPECTED_HEAD = 'fae9adb8acffb3439cd2fb1c13498c60ec59a5bf';
 
-    public const LOCKED_PAYLOAD_SHA256 = 'eb4f21d6370a98c4fd546a6848f7d68eb86236b3cc1369160a28a9770f3629d9';
+    public const LOCKED_PAYLOAD_SHA256 = '767d875a5fbcd468c186bf0f045349f36d019694a77b18627ec4a3a468732ad9';
 
     public const USER_ID = 9;
 

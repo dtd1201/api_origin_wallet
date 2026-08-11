@@ -1758,6 +1758,26 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_hk_bare_domain_website_fails_before_http_without_mutating_metadata(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $metadata['nium_v5_fields']['website'] = 'hongkongmachininggroup.com';
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::fake(fn () => throw new RuntimeException('Unexpected HTTP request.'));
+
+        $this->expectExceptionMessage('website must be an absolute HTTP or HTTPS URL');
+
+        try {
+            app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+        } finally {
+            $this->assertSame('hongkongmachininggroup.com', data_get($profile->fresh()->metadata, 'nium_v5_fields.website'));
+            Http::assertNothingSent();
+        }
+    }
+
     public function test_unknown_hk_corporate_business_type_fails_closed_without_mutating_metadata(): void
     {
         $user = $this->approvedHkCorporate($this->provider());
