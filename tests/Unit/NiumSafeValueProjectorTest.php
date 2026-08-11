@@ -8,6 +8,33 @@ use Tests\TestCase;
 
 class NiumSafeValueProjectorTest extends TestCase
 {
+    public function test_submit_kyc_response_projection_preserves_only_safe_diagnostics(): void
+    {
+        $redirectUrl = 'https://sandbox.example.test/kyc/session-sensitive-token';
+        $externalId = 'origin-wallet-person-14';
+        $projection = app(NiumSafeValueProjector::class)->apiResponseBody([
+            'kycStatus' => 'initiated',
+            'kycMode' => 'biometric_kyc',
+            'entityType' => 'individual_stakeholder',
+            'referenceId' => '7609d9d1-9d37-4e08-9197-602d792f7a2e',
+            'externalId' => $externalId,
+            'redirectUrl' => $redirectUrl,
+            'identificationNumber' => 'TEST-IDENTITY-MUST-NOT-SURVIVE',
+        ], 200);
+
+        $this->assertSame('initiated', $projection['kyc_status']);
+        $this->assertSame('biometric_kyc', $projection['kyc_mode']);
+        $this->assertSame('individual_stakeholder', $projection['entity_type']);
+        $this->assertSame('7609d9d1-9d37-4e08-9197-602d792f7a2e', $projection['reference_id']);
+        $this->assertSame(substr(hash('sha256', $externalId), 0, 16), $projection['external_id_fingerprint']);
+        $this->assertTrue($projection['redirect_url_present']);
+        $this->assertSame(substr(hash('sha256', $redirectUrl), 0, 16), $projection['redirect_url_fingerprint']);
+
+        $serialized = json_encode($projection, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString($redirectUrl, $serialized);
+        $this->assertStringNotContainsString('TEST-IDENTITY-MUST-NOT-SURVIVE', $serialized);
+    }
+
     public function test_exact_enum_contract_normalizes_known_values_and_rejects_unknown_or_secret_values(): void
     {
         config()->set('services.nium.auth.header_value', 'configured-status-secret');

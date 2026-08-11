@@ -90,6 +90,19 @@ class NiumHkSubmitKycOneShotRunnerTest extends TestCase
         $this->assertSame(['POST'], $calls->methods);
     }
 
+    public function test_applicant_prior_post_does_not_block_stakeholder_one_shot(): void
+    {
+        $this->logSubmit(self::APPLICANT_REFERENCE, 200);
+        $calls = $this->mockInitiated(NiumHkSubmitKycOneShotRunner::STAKEHOLDER, self::STAKEHOLDER_REFERENCE);
+
+        $result = $this->runner()->run(NiumHkSubmitKycOneShotRunner::STAKEHOLDER);
+
+        $this->assertSame('PASS_KYC_INITIATED', $result['terminal']);
+        $this->assertSame(1, $result['submit_kyc_post_count']);
+        $this->assertSame(['POST'], $calls->methods);
+        $this->assertDatabaseCount('api_request_logs', 2);
+    }
+
     #[DataProvider('invalidAccountStates')]
     public function test_awaiting_kyc_account_prerequisites_fail_before_http(string $field, mixed $value): void
     {

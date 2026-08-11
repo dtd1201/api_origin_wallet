@@ -528,6 +528,56 @@ class ProviderHttpClientTest extends TestCase
         $this->assertArrayNotHasKey('authorization', $responseBody);
     }
 
+    public function test_nium_submit_kyc_log_never_persists_redirect_url_or_identification_number(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+        $user = User::factory()->create();
+        $redirectUrl = 'https://sandbox.example.test/kyc/raw-session-token';
+        $identity = 'TEST-IDENTITY-MUST-NOT-BE-LOGGED';
+
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
+        config()->set('services.nium.timeout', 30);
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => 'safe-test-api-key',
+        ]);
+        Http::fake(['*' => Http::response([
+            'kycStatus' => 'initiated',
+            'kycMode' => 'biometric_kyc',
+            'entityType' => 'individual_stakeholder',
+            'referenceId' => '7609d9d1-9d37-4e08-9197-602d792f7a2e',
+            'externalId' => 'origin-wallet-person-14',
+            'redirectUrl' => $redirectUrl,
+            'identificationNumber' => $identity,
+        ], 200)]);
+
+        (new ProviderHttpClient(
+            provider: $provider,
+            serviceConfigKey: 'nium',
+            operationalContext: [
+                'operation' => 'submit_kyc',
+                'external_reference' => '7609d9d1-9d37-4e08-9197-602d792f7a2e',
+            ],
+        ))->post('/api/v5/safe/submitKyc', [
+            'proofOfIdentityDocument' => [[
+                'identificationNumber' => $identity,
+            ]],
+        ], $user);
+
+        $log = ApiRequestLog::query()->sole();
+        $serialized = json_encode($log->toArray(), JSON_THROW_ON_ERROR);
+        $this->assertSame('initiated', $log->response_body['kyc_status']);
+        $this->assertTrue($log->response_body['redirect_url_present']);
+        $this->assertSame(substr(hash('sha256', $redirectUrl), 0, 16), $log->response_body['redirect_url_fingerprint']);
+        $this->assertStringNotContainsString($redirectUrl, $serialized);
+        $this->assertStringNotContainsString($identity, $serialized);
+    }
+
     public function test_nium_unknown_and_configured_secret_values_fail_closed_without_losing_completed_500_log(): void
     {
         $provider = IntegrationProvider::query()->create([

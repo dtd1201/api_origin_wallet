@@ -31,6 +31,20 @@ class NiumService
         return $this->client($operation, $externalReference)->post($path, $payload, $user, $relatedTransferId);
     }
 
+    public function postOnboardingSimulation(
+        string $path,
+        array $payload,
+        User $user,
+        string $externalReference,
+        string $clientName,
+    ): Response {
+        return $this->client(
+            'onboarding_simulation_submit_kyc',
+            $externalReference,
+            ['x-client-name' => $clientName],
+        )->post($path, $payload, $user);
+    }
+
     public function put(string $path, array $payload = [], ?User $user = null): Response
     {
         return $this->client()->put($path, $payload, $user);
@@ -123,7 +137,11 @@ class NiumService
         return $replacements;
     }
 
-    private function client(?string $operation = null, ?string $externalReference = null): ProviderHttpClient
+    private function client(
+        ?string $operation = null,
+        ?string $externalReference = null,
+        array $additionalHeaders = [],
+    ): ProviderHttpClient
     {
         $provider = $this->provider();
 
@@ -136,6 +154,7 @@ class NiumService
             serviceConfigKey: 'nium',
             headers: [
                 'x-request-id' => (string) Str::uuid(),
+                ...$additionalHeaders,
             ],
             operationalContext: array_filter([
                 'operation' => $operation,

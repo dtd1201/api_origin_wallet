@@ -109,9 +109,13 @@ final class NiumSafeValueProjector
     ];
 
     private const KYC_STATUSES = [
+        'kyc_required',
+        'kyc_not_required',
+        'initiated',
         'pending',
         'submitted',
         'under_review',
+        'verified',
         'approved',
         'rejected',
         'failed',
@@ -119,6 +123,8 @@ final class NiumSafeValueProjector
     ];
 
     private const KYC_MODES = [
+        'e_kyc',
+        'biometric_kyc',
         'manual_kyc',
         'automated_kyc',
     ];
@@ -126,6 +132,8 @@ final class NiumSafeValueProjector
     private const ENTITY_TYPES = [
         'customer',
         'applicant',
+        'individual_stakeholder',
+        'individual_customer',
         'stakeholder',
         'director',
         'shareholder',
@@ -418,6 +426,10 @@ final class NiumSafeValueProjector
         $walletId = $response['walletHashId'] ?? ($response['wallets'][0]['walletHashId'] ?? null);
         $transferId = $response['systemReferenceNumber'] ?? $response['system_reference_number'] ?? null;
         $paymentId = $response['paymentId'] ?? $response['payment_id'] ?? $response['uniquePaymentId'] ?? null;
+        $redirectUrl = $response['redirectUrl'] ?? null;
+        $redirectUrlPresent = array_key_exists('redirectUrl', $response)
+            ? $this->isPresent($redirectUrl)
+            : null;
         $successful = ($this->safeHttpStatus($httpStatus) ?? 0) >= 200
             && ($this->safeHttpStatus($httpStatus) ?? 0) < 300;
 
@@ -425,6 +437,13 @@ final class NiumSafeValueProjector
             'http_status' => $this->safeHttpStatus($httpStatus),
             'status' => $this->providerStatus($response['status'] ?? null),
             'sub_status' => $this->providerSubStatus($response['subStatus'] ?? null),
+            'kyc_status' => $this->kycStatus($response['kycStatus'] ?? null),
+            'kyc_mode' => $this->kycMode($response['kycMode'] ?? null),
+            'entity_type' => $this->entityType($response['entityType'] ?? null),
+            'reference_id' => $this->providerIdentifier($response['referenceId'] ?? null),
+            'external_id_fingerprint' => $this->fingerprint($response['externalId'] ?? null),
+            'redirect_url_present' => $redirectUrlPresent,
+            'redirect_url_fingerprint' => $this->safeOpaqueFingerprint($redirectUrl),
             ...$errorProjection,
             'error_field_fingerprint' => $this->fingerprint($error['field'] ?? null),
             'error_path_fingerprint' => $this->fingerprint($error['path'] ?? null),
@@ -442,6 +461,13 @@ final class NiumSafeValueProjector
             'http_status' => 'int',
             'status' => 'string',
             'sub_status' => 'string',
+            'kyc_status' => 'string',
+            'kyc_mode' => 'string',
+            'entity_type' => 'string',
+            'reference_id' => 'string',
+            'external_id_fingerprint' => 'fingerprint',
+            'redirect_url_present' => 'bool',
+            'redirect_url_fingerprint' => 'fingerprint',
             'error_code' => 'string',
             'error_category' => 'string',
             'error_fingerprint' => 'fingerprint',
