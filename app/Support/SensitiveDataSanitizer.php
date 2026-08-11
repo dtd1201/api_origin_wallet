@@ -92,6 +92,7 @@ class SensitiveDataSanitizer
             'postcode',
             'postalcode',
             'documentnumber',
+            'identificationnumber',
             'documentdetails',
             'documentmetadata',
             'documents',

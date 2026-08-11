@@ -92,6 +92,7 @@ return [
         'customer_create_endpoint' => env('NIUM_CUSTOMER_CREATE_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
         'customer_get_endpoint' => env('NIUM_CUSTOMER_GET_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}'),
         'customer_list_endpoint' => env('NIUM_CUSTOMER_LIST_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
+        'customer_submit_kyc_endpoint' => env('NIUM_CUSTOMER_SUBMIT_KYC_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}/submitKyc'),
         'wallet_balance_endpoint' => env('NIUM_WALLET_BALANCE_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}'),
         'wallet_transactions_endpoint' => env('NIUM_WALLET_TRANSACTIONS_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions'),
         'assign_payment_id_endpoint' => env('NIUM_ASSIGN_PAYMENT_ID_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/paymentId'),
