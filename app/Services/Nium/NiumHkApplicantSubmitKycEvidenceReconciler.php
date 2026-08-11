@@ -12,6 +12,17 @@ use RuntimeException;
 
 final class NiumHkApplicantSubmitKycEvidenceReconciler
 {
+    private const RECONCILED_FIELDS = [
+        'state',
+        'kyc_mode',
+        'provider_http_status',
+        'submit_kyc_log_id',
+        'submit_kyc_log_at',
+        'webhook_id',
+        'webhook_processed_at',
+        'updated_at',
+    ];
+
     private const ACCOUNT_ID = 7;
 
     private const LOG_ID = 104;
@@ -34,11 +45,6 @@ final class NiumHkApplicantSubmitKycEvidenceReconciler
             $log = ApiRequestLog::query()->findOrFail(self::LOG_ID);
             $webhook = WebhookEvent::query()->findOrFail(self::WEBHOOK_ID);
             $key = 'ref_'.substr(hash('sha256', self::REFERENCE_ID), 0, 16);
-            $attempt = Arr::get((array) $account->metadata, 'nium_submit_kyc_attempts.'.$key);
-
-            if (! is_array($attempt) || ($attempt['state'] ?? null) !== 'response_review') {
-                throw new RuntimeException('Applicant Submit KYC attempt is not eligible for offline reconciliation.');
-            }
 
             if ((int) $log->provider_id !== (int) $provider->id
                 || (int) $log->user_id !== (int) $account->user_id
@@ -66,7 +72,29 @@ final class NiumHkApplicantSubmitKycEvidenceReconciler
             }
 
             $metadata = (array) $account->metadata;
-            data_set($metadata, 'nium_submit_kyc_attempts.'.$key, [
+            $attemptPath = 'nium_submit_kyc_attempts.'.$key;
+            if (array_key_exists('nium_submit_kyc_attempts', $metadata)
+                && (! is_array($metadata['nium_submit_kyc_attempts'])
+                    || array_is_list($metadata['nium_submit_kyc_attempts']))) {
+                throw new RuntimeException('Applicant Submit KYC attempt metadata is malformed.');
+            }
+            $attemptExists = Arr::has($metadata, $attemptPath);
+            $attempt = Arr::get($metadata, $attemptPath);
+
+            if ($attemptExists && $this->isAlreadyReconciled($attempt)) {
+                return [
+                    'terminal' => 'ALREADY_RECONCILED_PROVIDER_ACCEPTED_200_SANDBOX_REVIEW',
+                    'state' => 'provider_accepted_200_sandbox_review',
+                    'log_id' => self::LOG_ID,
+                    'webhook_id' => self::WEBHOOK_ID,
+                ];
+            }
+
+            if ($attemptExists && (! is_array($attempt) || ($attempt['state'] ?? null) !== 'response_review')) {
+                throw new RuntimeException('Applicant Submit KYC attempt conflicts with immutable reconciliation evidence.');
+            }
+
+            data_set($metadata, $attemptPath, [
                 'state' => 'provider_accepted_200_sandbox_review',
                 'kyc_mode' => 'biometric_kyc',
                 'provider_http_status' => 200,
@@ -85,5 +113,21 @@ final class NiumHkApplicantSubmitKycEvidenceReconciler
                 'webhook_id' => self::WEBHOOK_ID,
             ];
         });
+    }
+
+    private function isAlreadyReconciled(mixed $attempt): bool
+    {
+        return is_array($attempt)
+            && ! array_is_list($attempt)
+            && count($attempt) === count(self::RECONCILED_FIELDS)
+            && array_diff(array_keys($attempt), self::RECONCILED_FIELDS) === []
+            && ($attempt['state'] ?? null) === 'provider_accepted_200_sandbox_review'
+            && ($attempt['kyc_mode'] ?? null) === 'biometric_kyc'
+            && ($attempt['provider_http_status'] ?? null) === 200
+            && ($attempt['submit_kyc_log_id'] ?? null) === self::LOG_ID
+            && ($attempt['webhook_id'] ?? null) === self::WEBHOOK_ID
+            && is_string($attempt['submit_kyc_log_at'] ?? null)
+            && is_string($attempt['webhook_processed_at'] ?? null)
+            && is_string($attempt['updated_at'] ?? null);
     }
 }

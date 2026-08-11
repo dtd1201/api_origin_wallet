@@ -9,12 +9,14 @@ use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Nium\NiumHkApplicantSubmitKycEvidenceReconciler;
 use App\Services\Nium\NiumHkSandboxKycSimulationRunner;
+use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Mockery\MockInterface;
+use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -56,6 +58,44 @@ class NiumHkSandboxKycEvidenceTest extends TestCase
         $this->assertNotContains($attempt['state'], ['initiated', 'submitted', 'verified']);
     }
 
+    public function test_applicant_reconciliation_reconstructs_completely_missing_attempt_from_locked_evidence(): void
+    {
+        $logCount = ApiRequestLog::query()->count();
+        $account = UserProviderAccount::query()->findOrFail(7);
+        $metadata = $account->metadata;
+        unset($metadata['nium_submit_kyc_attempts'][$this->attemptKey(self::APPLICANT_REFERENCE)]);
+        $account->forceFill(['metadata' => $metadata])->save();
+
+        $result = app(NiumHkApplicantSubmitKycEvidenceReconciler::class)->reconcile();
+        $attempt = $this->attempt(self::APPLICANT_REFERENCE);
+
+        $this->assertSame('HOLD_PROVIDER_ACCEPTED_200_SANDBOX_REVIEW', $result['terminal']);
+        $this->assertSame('provider_accepted_200_sandbox_review', $attempt['state']);
+        $this->assertSame(104, $attempt['submit_kyc_log_id']);
+        $this->assertSame(8, $attempt['webhook_id']);
+        $this->assertSame($logCount, ApiRequestLog::query()->count());
+    }
+
+    public function test_exact_already_reconciled_attempt_is_idempotent(): void
+    {
+        $this->setApplicantAttemptState('response_review');
+        app(NiumHkApplicantSubmitKycEvidenceReconciler::class)->reconcile();
+        $before = UserProviderAccount::query()->findOrFail(7)->getRawOriginal('metadata');
+
+        $result = app(NiumHkApplicantSubmitKycEvidenceReconciler::class)->reconcile();
+
+        $this->assertSame('ALREADY_RECONCILED_PROVIDER_ACCEPTED_200_SANDBOX_REVIEW', $result['terminal']);
+        $this->assertSame($before, UserProviderAccount::query()->findOrFail(7)->getRawOriginal('metadata'));
+    }
+
+    public function test_conflicting_existing_applicant_attempt_fails_closed(): void
+    {
+        $this->setApplicantAttemptState('initiated');
+
+        $this->expectException(RuntimeException::class);
+        app(NiumHkApplicantSubmitKycEvidenceReconciler::class)->reconcile();
+    }
+
     public function test_wrong_applicant_log_reference_prevents_reconciliation(): void
     {
         $this->setApplicantAttemptState('response_review');
@@ -83,6 +123,111 @@ class NiumHkSandboxKycEvidenceTest extends TestCase
 
         $this->expectException(RuntimeException::class);
         app(NiumHkApplicantSubmitKycEvidenceReconciler::class)->reconcile();
+    }
+
+    public function test_wrong_webhook_id_prevents_reconstruction(): void
+    {
+        $this->removeApplicantAttempt();
+        WebhookEvent::query()->findOrFail(8)->delete();
+        $this->applicantWebhook(10);
+
+        $this->expectException(RuntimeException::class);
+        app(NiumHkApplicantSubmitKycEvidenceReconciler::class)->reconcile();
+    }
+
+    #[DataProvider('invalidApplicantWebhookEvidence')]
+    public function test_wrong_applicant_webhook_reference_entity_mode_or_status_prevents_reconstruction(
+        string $field,
+        string $value,
+    ): void {
+        $this->removeApplicantAttempt();
+        $webhook = WebhookEvent::query()->findOrFail(8);
+        $webhook->forceFill(['payload' => [...$webhook->payload, $field => $value]])->save();
+
+        $this->expectException(RuntimeException::class);
+        app(NiumHkApplicantSubmitKycEvidenceReconciler::class)->reconcile();
+    }
+
+    public function test_authenticated_entity_webhook_preserves_attempts_and_refreshes_provider_projection(): void
+    {
+        $beforeFour = UserProviderAccount::query()->findOrFail(4)->getRawOriginal();
+        $account = UserProviderAccount::query()->findOrFail(7);
+        $this->stateService()->recordVerifiedNotificationDetails($account, [
+            'template' => 'CUSTOMER_ENTITY_KYC_STATUS',
+            'externalId' => 'origin-wallet-person-14',
+            'referenceId' => self::STAKEHOLDER_REFERENCE,
+            'entityType' => 'individual_stakeholder',
+            'kycMode' => 'biometric_kyc',
+            'kycStatus' => 'kyc_required',
+        ], 'nium_webhook_notification:customer_entity_kyc_status');
+
+        $metadata = UserProviderAccount::query()->findOrFail(7)->metadata;
+        $this->assertArrayHasKey($this->attemptKey(self::APPLICANT_REFERENCE), $metadata['nium_submit_kyc_attempts']);
+        $this->assertArrayHasKey($this->attemptKey(self::STAKEHOLDER_REFERENCE), $metadata['nium_submit_kyc_attempts']);
+        $this->assertSame('nium_pending_awaiting_kyc', $metadata['integration_status']);
+        $this->assertSame(
+            'kyc_required',
+            $metadata['nium_entity_kyc_states'][$this->attemptKey(self::STAKEHOLDER_REFERENCE)]['kyc_status'],
+        );
+        $this->assertSame($beforeFour, UserProviderAccount::query()->findOrFail(4)->getRawOriginal());
+    }
+
+    public function test_customer_status_webhook_preserves_local_attempt_and_simulation_claim(): void
+    {
+        $account = UserProviderAccount::query()->findOrFail(7);
+        $metadata = $account->metadata;
+        $metadata['nium_sandbox_simulation_submit_kyc_attempt'] = [
+            'state' => 'submitting',
+            'updated_at' => now()->toISOString(),
+        ];
+        $account->forceFill(['metadata' => $metadata])->save();
+
+        $this->stateService()->applyRestrictiveNotification($account, [
+            'status' => 'pending',
+            'subStatus' => 'awaiting_kyc',
+        ], 'nium_webhook_notification:customer_status_webhook');
+
+        $metadata = UserProviderAccount::query()->findOrFail(7)->metadata;
+        $this->assertArrayHasKey('nium_submit_kyc_attempts', $metadata);
+        $this->assertSame('submitting', $metadata['nium_sandbox_simulation_submit_kyc_attempt']['state']);
+    }
+
+    public function test_stale_account_snapshot_cannot_erase_new_local_attempt_or_override_provider_fields(): void
+    {
+        $stale = UserProviderAccount::query()->findOrFail(7);
+        $fresh = UserProviderAccount::query()->findOrFail(7);
+        $metadata = $fresh->metadata;
+        $newKey = 'ref_'.str_repeat('f', 16);
+        $metadata['nium_submit_kyc_attempts'][$newKey] = [
+            'state' => 'response_review',
+            'kyc_mode' => 'biometric_kyc',
+            'provider_http_status' => 200,
+            'updated_at' => now()->toISOString(),
+        ];
+        $metadata['integration_status'] = 'untrusted_local_override';
+        $metadata['arbitrary_unknown'] = 'must-not-survive';
+        $fresh->forceFill(['metadata' => $metadata])->save();
+
+        $this->stateService()->applyAuthenticatedState($stale, [
+            'customerHashId' => 'customer-safe-id',
+            'status' => 'pending',
+            'subStatus' => 'awaiting_kyc',
+        ], 'nium_webhook_notification:customer_status_webhook');
+
+        $metadata = UserProviderAccount::query()->findOrFail(7)->metadata;
+        $this->assertSame('response_review', $metadata['nium_submit_kyc_attempts'][$newKey]['state']);
+        $this->assertSame('nium_pending_awaiting_kyc', $metadata['integration_status']);
+        $this->assertArrayNotHasKey('arbitrary_unknown', $metadata);
+    }
+
+    public static function invalidApplicantWebhookEvidence(): array
+    {
+        return [
+            'reference' => ['referenceId', self::STAKEHOLDER_REFERENCE],
+            'entity' => ['entityType', 'individual_stakeholder'],
+            'mode' => ['kycMode', 'manual_kyc'],
+            'status' => ['kycStatus', 'initiated'],
+        ];
     }
 
     public function test_simulation_fails_outside_sandbox_before_http(): void
@@ -297,6 +442,9 @@ class NiumHkSandboxKycEvidenceTest extends TestCase
             'user_id' => 9,
             'provider_id' => 1,
             'external_customer_id' => 'customer-safe-id',
+            'provider_status' => 'pending',
+            'provider_sub_status' => 'awaiting_kyc',
+            'reconciliation_status' => 'reconciled',
             'metadata' => [
                 'nium_submit_kyc_attempts' => [
                     $this->attemptKey(self::APPLICANT_REFERENCE) => [
@@ -419,6 +567,39 @@ class NiumHkSandboxKycEvidenceTest extends TestCase
         $metadata = $account->metadata;
         $metadata['nium_submit_kyc_attempts'][$this->attemptKey(self::APPLICANT_REFERENCE)]['state'] = $state;
         $account->forceFill(['metadata' => $metadata])->save();
+    }
+
+    private function removeApplicantAttempt(): void
+    {
+        $account = UserProviderAccount::query()->findOrFail(7);
+        $metadata = $account->metadata;
+        unset($metadata['nium_submit_kyc_attempts'][$this->attemptKey(self::APPLICANT_REFERENCE)]);
+        $account->forceFill(['metadata' => $metadata])->save();
+    }
+
+    private function applicantWebhook(int $id): void
+    {
+        WebhookEvent::query()->forceCreate([
+            'id' => $id,
+            'provider_id' => 1,
+            'event_id' => 'applicant-placeholder-'.$id,
+            'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS',
+            'external_resource_id' => 'customer-safe-id',
+            'payload' => [
+                'entityType' => 'applicant',
+                'externalId' => 'origin-wallet-person-13',
+                'referenceId' => self::APPLICANT_REFERENCE,
+                'kycMode' => 'biometric_kyc',
+                'kycStatus' => '${kycStatus}',
+            ],
+            'processing_status' => 'processed',
+            'processed_at' => now(),
+        ]);
+    }
+
+    private function stateService(): NiumProviderAccountStateService
+    {
+        return app(NiumProviderAccountStateService::class);
     }
 
     private function attemptKey(string $referenceId): string

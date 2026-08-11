@@ -93,6 +93,17 @@ class NiumHkSubmitKycOneShotRunnerTest extends TestCase
     public function test_applicant_prior_post_does_not_block_stakeholder_one_shot(): void
     {
         $this->logSubmit(self::APPLICANT_REFERENCE, 200);
+        $account = UserProviderAccount::query()->findOrFail(7);
+        $metadata = $account->metadata;
+        $applicantKey = 'ref_'.substr(hash('sha256', self::APPLICANT_REFERENCE), 0, 16);
+        $stakeholderKey = 'ref_'.substr(hash('sha256', self::STAKEHOLDER_REFERENCE), 0, 16);
+        $metadata['nium_submit_kyc_attempts'][$applicantKey] = [
+            'state' => 'provider_accepted_200_sandbox_review',
+            'kyc_mode' => 'biometric_kyc',
+            'provider_http_status' => 200,
+            'updated_at' => now()->toISOString(),
+        ];
+        $account->forceFill(['metadata' => $metadata])->save();
         $calls = $this->mockInitiated(NiumHkSubmitKycOneShotRunner::STAKEHOLDER, self::STAKEHOLDER_REFERENCE);
 
         $result = $this->runner()->run(NiumHkSubmitKycOneShotRunner::STAKEHOLDER);
@@ -101,6 +112,10 @@ class NiumHkSubmitKycOneShotRunnerTest extends TestCase
         $this->assertSame(1, $result['submit_kyc_post_count']);
         $this->assertSame(['POST'], $calls->methods);
         $this->assertDatabaseCount('api_request_logs', 2);
+        $metadata = UserProviderAccount::query()->findOrFail(7)->metadata;
+        $this->assertSame('provider_accepted_200_sandbox_review', $metadata['nium_submit_kyc_attempts'][$applicantKey]['state']);
+        $this->assertSame('initiated', $metadata['nium_submit_kyc_attempts'][$stakeholderKey]['state']);
+        $this->assertArrayHasKey('nium_entity_kyc_states', $metadata);
     }
 
     #[DataProvider('invalidAccountStates')]

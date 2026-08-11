@@ -9,6 +9,7 @@ class NiumAuthenticatedStateProjector
 {
     public function __construct(
         private readonly NiumSafeValueProjector $safeValues,
+        private readonly ?NiumProviderAccountMetadataOwnership $metadataOwnership = null,
     ) {}
 
     public function accountUpdates(
@@ -74,14 +75,17 @@ class NiumAuthenticatedStateProjector
             ], static fn ($value) => $value !== null && $value !== '');
         }
 
-        $metadata = $this->safeValues->accountMetadata(
-            $providerStatus,
-            $providerSubStatus,
-            $source,
-            now()->toISOString(),
-            $payload['isResubmissionAllowed']
-                ?? Arr::get((array) $providerAccount->metadata, 'is_resubmission_allowed'),
-            $entityStates,
+        $metadata = ($this->metadataOwnership ?? new NiumProviderAccountMetadataOwnership)->merge(
+            (array) $providerAccount->metadata,
+            $this->safeValues->accountMetadata(
+                $providerStatus,
+                $providerSubStatus,
+                $source,
+                now()->toISOString(),
+                $payload['isResubmissionAllowed']
+                    ?? Arr::get((array) $providerAccount->metadata, 'is_resubmission_allowed'),
+                $entityStates,
+            ),
         );
 
         return [

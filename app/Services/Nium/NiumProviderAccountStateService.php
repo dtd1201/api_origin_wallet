@@ -24,6 +24,7 @@ class NiumProviderAccountStateService
     public function __construct(
         private readonly NiumSafeValueProjector $safeValues,
         private readonly NiumAuthenticatedStateProjector $authenticatedStateProjector,
+        private readonly NiumProviderAccountMetadataOwnership $metadataOwnership,
     ) {}
 
     public function applyAuthenticatedState(
@@ -84,13 +85,16 @@ class NiumProviderAccountStateService
                     ? $account->reconciliation_error
                     : null,
                 'reconciliation_requested_at' => now(),
-                'metadata' => $this->safeValues->accountMetadata(
-                    $status,
-                    $subStatus,
-                    $source,
-                    now()->toISOString(),
-                    Arr::get((array) $account->metadata, 'is_resubmission_allowed'),
-                    (array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []),
+                'metadata' => $this->metadataOwnership->merge(
+                    (array) $account->metadata,
+                    $this->safeValues->accountMetadata(
+                        $status,
+                        $subStatus,
+                        $source,
+                        now()->toISOString(),
+                        Arr::get((array) $account->metadata, 'is_resubmission_allowed'),
+                        (array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []),
+                    ),
                 ),
             ]);
             $account = $account->fresh();
@@ -248,13 +252,16 @@ class NiumProviderAccountStateService
             $account->update([
                 'compliance_status' => $complianceStatus,
                 'odd_status' => $oddStatus,
-                'metadata' => $this->safeValues->accountMetadata(
-                    $account->provider_status,
-                    $account->provider_sub_status,
-                    $source,
-                    now()->toISOString(),
-                    Arr::get((array) $account->metadata, 'is_resubmission_allowed'),
-                    $entityStates,
+                'metadata' => $this->metadataOwnership->merge(
+                    (array) $account->metadata,
+                    $this->safeValues->accountMetadata(
+                        $account->provider_status,
+                        $account->provider_sub_status,
+                        $source,
+                        now()->toISOString(),
+                        Arr::get((array) $account->metadata, 'is_resubmission_allowed'),
+                        $entityStates,
+                    ),
                 ),
             ]);
             $account = $account->fresh();
@@ -480,16 +487,19 @@ class NiumProviderAccountStateService
                 'reconciliation_status' => 'quarantined',
                 'reconciliation_error' => 'verified_identifier_mismatch',
                 'reconciliation_requested_at' => now(),
-                'metadata' => array_replace(
-                    $this->safeValues->accountMetadata(
-                        $account->provider_status,
-                        $account->provider_sub_status,
-                        $source,
-                        now()->toISOString(),
-                        Arr::get((array) $account->metadata, 'is_resubmission_allowed'),
-                        (array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []),
+                'metadata' => $this->metadataOwnership->merge(
+                    (array) $account->metadata,
+                    array_replace(
+                        $this->safeValues->accountMetadata(
+                            $account->provider_status,
+                            $account->provider_sub_status,
+                            $source,
+                            now()->toISOString(),
+                            Arr::get((array) $account->metadata, 'is_resubmission_allowed'),
+                            (array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []),
+                        ),
+                        ['integration_status' => 'nium_security_conflict'],
                     ),
-                    ['integration_status' => 'nium_security_conflict'],
                 ),
             ]);
 
