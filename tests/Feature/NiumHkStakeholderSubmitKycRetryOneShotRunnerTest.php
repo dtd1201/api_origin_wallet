@@ -59,6 +59,59 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
         $this->assertAuditHolds();
     }
 
+    public function test_structured_error_items_evidence_mode_passes(): void
+    {
+        $before = ApiRequestLog::query()->findOrFail(106)->getRawOriginal();
+        $result = $this->runner()->audit();
+        $this->assertSame('structured_error_items', $result['previous_error_evidence_mode']);
+        $this->assertSame($before, ApiRequestLog::query()->findOrFail(106)->getRawOriginal());
+    }
+
+    public function test_exact_legacy_106_flat_fingerprint_evidence_mode_passes_without_mutation(): void
+    {
+        $log = ApiRequestLog::query()->findOrFail(106);
+        $body = $log->response_body;
+        unset($body['error_items']);
+        $body['error_field_fingerprint'] = substr(hash('sha256', 'entityType'), 0, 16);
+        $log->forceFill(['response_body' => $body])->save();
+        $before = $log->fresh()->getRawOriginal();
+
+        $result = $this->runner()->audit();
+
+        $this->assertSame('b4753588f3f6ef2b', substr(hash('sha256', 'entityType'), 0, 16));
+        $this->assertSame('legacy_flat_fingerprint_106', $result['previous_error_evidence_mode']);
+        $this->assertSame($before, ApiRequestLog::query()->findOrFail(106)->getRawOriginal());
+    }
+
+    public function test_legacy_flat_wrong_fingerprint_holds(): void
+    {
+        $this->setLegacyBody(['error_field_fingerprint' => str_repeat('a', 16)]);
+        $this->assertAuditHolds();
+    }
+
+    public function test_legacy_flat_wrong_error_code_holds(): void
+    {
+        $this->setLegacyBody(['error_code' => 'other_error']);
+        $this->assertAuditHolds();
+    }
+
+    public function test_legacy_flat_wrong_transport_holds(): void
+    {
+        $this->setLegacyBody();
+        ApiRequestLog::query()->findOrFail(106)->forceFill(['transport_outcome' => 'connection_failed'])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_non_empty_malformed_error_items_do_not_fall_back(): void
+    {
+        $log = ApiRequestLog::query()->findOrFail(106);
+        $body = $log->response_body;
+        $body['error_field_fingerprint'] = 'b4753588f3f6ef2b';
+        $body['error_items'] = [['error_code' => 'invalid_input', 'error_field' => 'kycMode', 'error_field_fingerprint' => 'b4753588f3f6ef2b']];
+        $log->forceFill(['response_body' => $body])->save();
+        $this->assertAuditHolds();
+    }
+
     public function test_prior_generation_two_claim_holds_before_http(): void
     {
         $account = UserProviderAccount::query()->findOrFail(7);
@@ -337,6 +390,14 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
         $metadata = $account->metadata;
         $metadata['nium_stakeholder_submit_kyc_retry_generation_2'] = ['state' => $state];
         $account->forceFill(['metadata' => $metadata])->save();
+    }
+
+    private function setLegacyBody(array $changes = []): void
+    {
+        $log = ApiRequestLog::query()->findOrFail(106);
+        $body = $log->response_body;
+        unset($body['error_items']);
+        $log->forceFill(['response_body' => [...$body, 'error_field_fingerprint' => 'b4753588f3f6ef2b', ...$changes]])->save();
     }
 
     private function runner(): NiumHkStakeholderSubmitKycRetryOneShotRunner

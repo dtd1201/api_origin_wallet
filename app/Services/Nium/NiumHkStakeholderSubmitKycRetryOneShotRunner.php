@@ -49,6 +49,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
             'confirmed_entity_type' => $context['entity_type'],
             'confirmed_kyc_mode' => $context['kyc_mode'],
             'proof_of_address_status' => $context['proof_of_address_status'],
+            'previous_error_evidence_mode' => $context['previous_error_evidence_mode'],
             'stakeholder_retry_post_count' => 0,
         ];
     }
@@ -165,7 +166,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
         if ($documents['proof_of_address'] === null && ! $rfiAcknowledged) {
             throw new RuntimeException('HOLD_RFI_ACKNOWLEDGEMENT_REQUIRED');
         }
-        $this->assertPreviousLog((int) $provider->id);
+        $previousErrorEvidenceMode = $this->assertPreviousLog((int) $provider->id);
         $payload = $this->payloadFactory->buildManual(
             $person,
             self::REFERENCE_ID,
@@ -184,6 +185,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
             'entity_type' => $entityType,
             'kyc_mode' => $kycMode,
             'proof_of_address_status' => $proofOfAddressStatus,
+            'previous_error_evidence_mode' => $previousErrorEvidenceMode,
         ];
     }
 
@@ -204,7 +206,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
         }
     }
 
-    private function assertPreviousLog(int $providerId): void
+    private function assertPreviousLog(int $providerId): string
     {
         $logs = ApiRequestLog::query()
             ->where('provider_id', $providerId)
@@ -218,18 +220,28 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
         }
 
         $log = $logs->sole();
-        $items = $log->response_body['error_items'] ?? [];
+        $body = (array) $log->response_body;
+        $itemsPresent = array_key_exists('error_items', $body) && ! empty($body['error_items']);
+        $items = $body['error_items'] ?? [];
         $hasEntityType = is_array($items) && collect($items)->contains(fn (mixed $item): bool => is_array($item)
             && ($item['error_code'] ?? null) === 'invalid_input'
             && ($item['error_field'] ?? null) === 'entityType'
             && ($item['error_field_fingerprint'] ?? null) === self::ERROR_FIELD_FINGERPRINT);
-        if ((int) $log->response_status !== 400
-            || $log->is_success !== false
-            || $log->transport_outcome !== 'response_received'
-            || ($log->response_body['error_code'] ?? null) !== 'invalid_input'
-            || ! $hasEntityType) {
+        $baseValid = (int) $log->id === self::PREVIOUS_LOG_ID
+            && (int) $log->response_status === 400
+            && $log->is_success === false
+            && $log->transport_outcome === 'response_received'
+            && ($body['error_code'] ?? null) === 'invalid_input';
+        $legacyValid = ! $itemsPresent
+            && ($body['error_field_fingerprint'] ?? null) === self::ERROR_FIELD_FINGERPRINT
+            && substr(hash('sha256', 'entityType'), 0, 16) === self::ERROR_FIELD_FINGERPRINT;
+
+        if (! $baseValid
+            || ($itemsPresent ? ! $hasEntityType : ! $legacyValid)) {
             throw new RuntimeException('Locked Stakeholder rejection evidence is invalid.');
         }
+
+        return $itemsPresent ? 'structured_error_items' : 'legacy_flat_fingerprint_106';
     }
 
     private function claim(array $context): void
