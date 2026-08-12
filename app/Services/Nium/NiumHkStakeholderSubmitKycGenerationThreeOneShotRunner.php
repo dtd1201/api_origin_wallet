@@ -47,6 +47,7 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
         return [
             'terminal' => 'READY_FOR_SEPARATE_HUMAN_APPROVAL',
             'generation_two_log_id' => self::GENERATION_TWO_LOG_ID,
+            'generation_two_error_evidence_mode' => $context['generation_two_error_evidence_mode'],
             'entity_type' => $context['payload']['entityType'],
             'kyc_mode' => $context['payload']['kycMode'],
             'region' => $context['payload']['region'],
@@ -138,7 +139,7 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
             throw new RuntimeException('HOLD_GENERATION_3_ALREADY_CLAIMED');
         }
 
-        $this->assertHistoricalLogs((int) $provider->id);
+        $generationTwoErrorEvidenceMode = $this->assertHistoricalLogs((int) $provider->id);
         $documents = $this->documentResolver->resolve($person);
         if ((int) ($documents['identity']?->id ?? 0) !== 27 || (int) ($documents['proof_of_address']?->id ?? 0) !== 28) {
             throw new RuntimeException('Factual documents 27 and 28 must be approved and NIUM AVAILABLE.');
@@ -158,6 +159,7 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
             'protected_fingerprint' => $this->fingerprint($protected),
             'identity_document_id' => 27,
             'poa_document_id' => 28,
+            'generation_two_error_evidence_mode' => $generationTwoErrorEvidenceMode,
         ];
     }
 
@@ -173,7 +175,7 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
         }
     }
 
-    private function assertHistoricalLogs(int $providerId): void
+    private function assertHistoricalLogs(int $providerId): string
     {
         $applicant = ApiRequestLog::query()->findOrFail(self::APPLICANT_LOG_ID);
         $g1 = ApiRequestLog::query()->findOrFail(self::GENERATION_ONE_LOG_ID);
@@ -186,7 +188,7 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
             throw new RuntimeException('Applicant evidence #104 is invalid.');
         }
         $this->assertGenerationOneRejectedLog($g1);
-        $this->assertGenerationTwoRejectedLog($g2);
+        $generationTwoErrorEvidenceMode = $this->assertGenerationTwoRejectedLog($g2, $providerId);
 
         $stakeholderPosts = ApiRequestLog::query()->where('provider_id', $providerId)->where('user_id', self::USER_ID)
             ->where('operation', 'submit_kyc')->where('request_method', 'POST')
@@ -194,6 +196,8 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
         if ($stakeholderPosts !== [self::GENERATION_ONE_LOG_ID, self::GENERATION_TWO_LOG_ID]) {
             throw new RuntimeException('Logs #106 and #113 must be the sole stakeholder Submit KYC POSTs.');
         }
+
+        return $generationTwoErrorEvidenceMode;
     }
 
     private function assertGenerationOneRejectedLog(ApiRequestLog $log): void
@@ -214,18 +218,38 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
         }
     }
 
-    private function assertGenerationTwoRejectedLog(ApiRequestLog $log): void
+    private function assertGenerationTwoRejectedLog(ApiRequestLog $log, int $providerId): string
     {
         $body = (array) $log->response_body;
         $items = $body['error_items'] ?? null;
-        $structured = is_array($items) && ! empty($items)
+        $structuredExact = is_array($items) && ! empty($items)
             && collect($items)->contains(fn (mixed $item): bool => is_array($item)
                 && ($item['error_code'] ?? null) === 'invalid_input'
                 && ($item['error_field'] ?? null) === self::ERROR_FIELD
                 && ($item['error_field_fingerprint'] ?? null) === self::ERROR_FIELD_FINGERPRINT);
-        if (! $this->baseRejectedLogIsValid($log, $body, self::GENERATION_TWO_LOG_ID) || ! $structured) {
+        $sanitizedStructured = is_array($items)
+            && array_is_list($items)
+            && count($items) === 1
+            && is_array($items[0])
+            && ($items[0]['error_code'] ?? null) === 'invalid_input'
+            && array_key_exists('error_field', $items[0])
+            && $items[0]['error_field'] === null
+            && ($items[0]['error_field_fingerprint'] ?? null) === self::ERROR_FIELD_FINGERPRINT
+            && array_key_exists('error_field', $body)
+            && $body['error_field'] === null
+            && ($body['error_field_fingerprint'] ?? null) === self::ERROR_FIELD_FINGERPRINT
+            && substr(hash('sha256', 'proofOfAddressDocument'), 0, 16) === self::ERROR_FIELD_FINGERPRINT;
+        $scopeValid = (int) $log->provider_id === $providerId
+            && (int) $log->user_id === self::USER_ID
+            && $log->external_reference === self::REFERENCE_ID
+            && $log->operation === 'submit_kyc'
+            && $log->request_method === 'POST';
+        if (! $scopeValid || ! $this->baseRejectedLogIsValid($log, $body, self::GENERATION_TWO_LOG_ID)
+            || (! $structuredExact && ! $sanitizedStructured)) {
             throw new RuntimeException('Locked rejection evidence #113 is invalid.');
         }
+
+        return $structuredExact ? 'structured_exact' : 'sanitized_structured_fingerprint_113';
     }
 
     private function baseRejectedLogIsValid(ApiRequestLog $log, array $body, int $id): bool

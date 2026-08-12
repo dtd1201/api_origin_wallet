@@ -115,6 +115,7 @@ class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunnerTest extends TestCas
         $result = $this->runner()->audit();
 
         $this->assertSame('READY_FOR_SEPARATE_HUMAN_APPROVAL', $result['terminal']);
+        $this->assertSame('structured_exact', $result['generation_two_error_evidence_mode']);
         $this->assertSame('INDIVIDUAL_STAKEHOLDER', $result['entity_type']);
         $this->assertSame('MANUAL_KYC', $result['kyc_mode']);
         $this->assertSame('HK', $result['region']);
@@ -137,6 +138,109 @@ class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunnerTest extends TestCas
         $body = $log->response_body;
         $body['error_items'][0]['error_field_fingerprint'] = str_repeat('f', 16);
         $body['error_field_fingerprint'] = str_repeat('f', 16);
+        $log->forceFill(['response_body' => $body])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_live_113_sanitized_structured_shape_is_ready_and_immutable(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        $logBefore = ApiRequestLog::query()->findOrFail(113)->getRawOriginal();
+        $accountBefore = UserProviderAccount::query()->findOrFail(4)->getRawOriginal();
+        $documentsBefore = KycDocument::query()->whereIn('id', [27, 28])->orderBy('id')->get()->map->getRawOriginal()->all();
+        $accountSevenBefore = UserProviderAccount::query()->findOrFail(7)->getRawOriginal();
+
+        $result = $this->runner()->audit();
+
+        $this->assertSame('READY_FOR_SEPARATE_HUMAN_APPROVAL', $result['terminal']);
+        $this->assertSame('sanitized_structured_fingerprint_113', $result['generation_two_error_evidence_mode']);
+        $this->assertSame('a5b7a48f01932655', substr(hash('sha256', 'proofOfAddressDocument'), 0, 16));
+        $this->assertSame($logBefore, ApiRequestLog::query()->findOrFail(113)->getRawOriginal());
+        $this->assertSame($accountBefore, UserProviderAccount::query()->findOrFail(4)->getRawOriginal());
+        $this->assertSame($documentsBefore, KycDocument::query()->whereIn('id', [27, 28])->orderBy('id')->get()->map->getRawOriginal()->all());
+        $this->assertSame($accountSevenBefore, UserProviderAccount::query()->findOrFail(7)->getRawOriginal());
+        $this->assertArrayNotHasKey('nium_stakeholder_submit_kyc_retry_generation_3', UserProviderAccount::query()->findOrFail(7)->metadata);
+        $this->assertSame(0, $result['stakeholder_generation_three_post_count']);
+        $this->assertSame(0, $result['db_write_count']);
+    }
+
+    public function test_113_sanitized_null_field_with_wrong_fingerprint_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        $log = ApiRequestLog::query()->findOrFail(113);
+        $body = $log->response_body;
+        $body['error_items'][0]['error_field_fingerprint'] = str_repeat('f', 16);
+        $log->forceFill(['response_body' => $body])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_null_field_with_empty_items_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        $log = ApiRequestLog::query()->findOrFail(113);
+        $body = $log->response_body;
+        $body['error_items'] = [];
+        $log->forceFill(['response_body' => $body])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_null_field_with_two_items_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        $log = ApiRequestLog::query()->findOrFail(113);
+        $body = $log->response_body;
+        $body['error_items'][] = $body['error_items'][0];
+        $log->forceFill(['response_body' => $body])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_shape_with_wrong_log_id_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        ApiRequestLog::query()->findOrFail(113)->forceFill(['id' => 114])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_shape_with_wrong_http_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        ApiRequestLog::query()->findOrFail(113)->forceFill(['response_status' => 422])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_shape_with_wrong_error_code_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        $log = ApiRequestLog::query()->findOrFail(113);
+        $body = $log->response_body;
+        $body['error_code'] = 'other_error';
+        $log->forceFill(['response_body' => $body])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_shape_with_wrong_transport_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        ApiRequestLog::query()->findOrFail(113)->forceFill(['transport_outcome' => 'connection_failed'])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_non_null_wrong_field_with_correct_fingerprint_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        $log = ApiRequestLog::query()->findOrFail(113);
+        $body = $log->response_body;
+        $body['error_items'][0]['error_field'] = 'entityType';
+        $log->forceFill(['response_body' => $body])->save();
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_malformed_item_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody();
+        $log = ApiRequestLog::query()->findOrFail(113);
+        $body = $log->response_body;
+        $body['error_items'] = ['malformed'];
         $log->forceFill(['response_body' => $body])->save();
         $this->assertAuditHolds();
     }
@@ -337,6 +441,21 @@ class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunnerTest extends TestCas
         unset($body['error_items']);
         $body['error_field_fingerprint'] = $fingerprint;
         $log->forceFill(['response_body' => $body])->save();
+    }
+
+    private function setSanitizedGenerationTwoBody(): void
+    {
+        $log = ApiRequestLog::query()->findOrFail(113);
+        $log->forceFill(['response_body' => [
+            'error_code' => 'invalid_input',
+            'error_field' => null,
+            'error_field_fingerprint' => 'a5b7a48f01932655',
+            'error_items' => [[
+                'error_code' => 'invalid_input',
+                'error_field' => null,
+                'error_field_fingerprint' => 'a5b7a48f01932655',
+            ]],
+        ]])->save();
     }
 
     private function assertAuditHolds(?string $message = null): void
