@@ -232,11 +232,9 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
             && count($items) === 1
             && is_array($items[0])
             && ($items[0]['error_code'] ?? null) === 'invalid_input'
-            && array_key_exists('error_field', $items[0])
-            && $items[0]['error_field'] === null
+            && $this->fieldIsSanitizedAway($items[0])
             && ($items[0]['error_field_fingerprint'] ?? null) === self::ERROR_FIELD_FINGERPRINT
-            && array_key_exists('error_field', $body)
-            && $body['error_field'] === null
+            && $this->fieldIsSanitizedAway($body)
             && ($body['error_field_fingerprint'] ?? null) === self::ERROR_FIELD_FINGERPRINT
             && substr(hash('sha256', 'proofOfAddressDocument'), 0, 16) === self::ERROR_FIELD_FINGERPRINT;
         $scopeValid = (int) $log->provider_id === $providerId
@@ -250,6 +248,11 @@ final class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunner
         }
 
         return $structuredExact ? 'structured_exact' : 'sanitized_structured_fingerprint_113';
+    }
+
+    private function fieldIsSanitizedAway(array $value): bool
+    {
+        return ! array_key_exists('error_field', $value) || $value['error_field'] === null;
     }
 
     private function baseRejectedLogIsValid(ApiRequestLog $log, array $body, int $id): bool

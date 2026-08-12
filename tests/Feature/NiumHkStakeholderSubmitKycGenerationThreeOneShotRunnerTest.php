@@ -144,7 +144,7 @@ class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunnerTest extends TestCas
 
     public function test_live_113_sanitized_structured_shape_is_ready_and_immutable(): void
     {
-        $this->setSanitizedGenerationTwoBody();
+        $this->setSanitizedGenerationTwoBody(topLevelField: 'omit', itemField: 'omit');
         $logBefore = ApiRequestLog::query()->findOrFail(113)->getRawOriginal();
         $accountBefore = UserProviderAccount::query()->findOrFail(4)->getRawOriginal();
         $documentsBefore = KycDocument::query()->whereIn('id', [27, 28])->orderBy('id')->get()->map->getRawOriginal()->all();
@@ -162,6 +162,33 @@ class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunnerTest extends TestCas
         $this->assertArrayNotHasKey('nium_stakeholder_submit_kyc_retry_generation_3', UserProviderAccount::query()->findOrFail(7)->metadata);
         $this->assertSame(0, $result['stakeholder_generation_three_post_count']);
         $this->assertSame(0, $result['db_write_count']);
+    }
+
+    public function test_113_sanitized_null_top_level_and_null_item_is_accepted(): void
+    {
+        $this->assertSanitizedFieldCombinationAccepted('null', 'null');
+    }
+
+    public function test_113_sanitized_omitted_top_level_and_null_item_is_accepted(): void
+    {
+        $this->assertSanitizedFieldCombinationAccepted('omit', 'null');
+    }
+
+    public function test_113_sanitized_null_top_level_and_omitted_item_is_accepted(): void
+    {
+        $this->assertSanitizedFieldCombinationAccepted('null', 'omit');
+    }
+
+    public function test_113_sanitized_non_null_wrong_top_level_field_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody(topLevelField: 'wrong', itemField: 'omit');
+        $this->assertAuditHolds();
+    }
+
+    public function test_113_sanitized_non_null_wrong_item_field_is_rejected(): void
+    {
+        $this->setSanitizedGenerationTwoBody(topLevelField: 'omit', itemField: 'wrong');
+        $this->assertAuditHolds();
     }
 
     public function test_113_sanitized_null_field_with_wrong_fingerprint_is_rejected(): void
@@ -443,19 +470,35 @@ class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunnerTest extends TestCas
         $log->forceFill(['response_body' => $body])->save();
     }
 
-    private function setSanitizedGenerationTwoBody(): void
+    private function assertSanitizedFieldCombinationAccepted(string $topLevelField, string $itemField): void
+    {
+        $this->setSanitizedGenerationTwoBody($topLevelField, $itemField);
+
+        $result = $this->runner()->audit();
+
+        $this->assertSame('READY_FOR_SEPARATE_HUMAN_APPROVAL', $result['terminal']);
+        $this->assertSame('sanitized_structured_fingerprint_113', $result['generation_two_error_evidence_mode']);
+    }
+
+    private function setSanitizedGenerationTwoBody(string $topLevelField = 'null', string $itemField = 'null'): void
     {
         $log = ApiRequestLog::query()->findOrFail(113);
-        $log->forceFill(['response_body' => [
+        $item = [
             'error_code' => 'invalid_input',
-            'error_field' => null,
             'error_field_fingerprint' => 'a5b7a48f01932655',
-            'error_items' => [[
-                'error_code' => 'invalid_input',
-                'error_field' => null,
-                'error_field_fingerprint' => 'a5b7a48f01932655',
-            ]],
-        ]])->save();
+        ];
+        $body = [
+            'error_code' => 'invalid_input',
+            'error_field_fingerprint' => 'a5b7a48f01932655',
+        ];
+        if ($topLevelField !== 'omit') {
+            $body['error_field'] = $topLevelField === 'null' ? null : 'entityType';
+        }
+        if ($itemField !== 'omit') {
+            $item['error_field'] = $itemField === 'null' ? null : 'entityType';
+        }
+        $body['error_items'] = [$item];
+        $log->forceFill(['response_body' => $body])->save();
     }
 
     private function assertAuditHolds(?string $message = null): void
