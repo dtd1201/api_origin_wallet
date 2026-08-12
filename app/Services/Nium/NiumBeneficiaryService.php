@@ -15,6 +15,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         private readonly NiumService $niumService,
         private readonly NiumSupportedCorridorService $corridorService,
         private readonly NiumProviderAccountStateService $accountStateService,
+        private readonly NiumBeneficiaryPreflightValidator $preflightValidator,
     ) {}
 
     public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
@@ -38,6 +39,18 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         );
 
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
+    }
+
+    public function createValidatedBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary, array $selectedCorridor, NiumBeneficiaryRequirementsResult $schema): Beneficiary
+    {
+        $beneficiary->loadMissing('user.profile');
+        $payload = $this->buildBeneficiaryPayload($beneficiary);
+        $evidence = $this->preflightValidator->validate($payload, $selectedCorridor, $schema);
+        $raw = (array) ($beneficiary->raw_data ?? []);
+        $raw['nium']['beneficiary_preflight'] = $evidence;
+        $beneficiary->update(['raw_data' => $raw]);
+
+        return $this->createBeneficiary($provider, $beneficiary->fresh('user.profile'));
     }
 
     private function verifyAccountIfRequested(Beneficiary $beneficiary): void

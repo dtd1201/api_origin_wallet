@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
 use App\Http\Controllers\Api\Admin\LedgerEntryController;
 use App\Http\Controllers\Api\Admin\ManagedExchangeRateController;
 use App\Http\Controllers\Api\Admin\NiumComplianceEventController;
+use App\Http\Controllers\Api\Admin\NiumRfiCaseController;
 use App\Http\Controllers\Api\Admin\ProviderHealthController;
 use App\Http\Controllers\Api\Admin\ProviderSyncController;
 use App\Http\Controllers\Api\Admin\ProviderWebhookEventController;
@@ -51,6 +52,13 @@ Route::apiResource('nium-compliance-events', NiumComplianceEventController::clas
     ->parameters(['nium-compliance-events' => 'niumComplianceEvent']);
 Route::post('nium-compliance-events/{niumComplianceEvent}/review', [NiumComplianceEventController::class, 'review'])
     ->name('nium-compliance-events.review');
+Route::apiResource('nium-rfi-cases', NiumRfiCaseController::class)
+    ->only(['index', 'show'])
+    ->parameters(['nium-rfi-cases' => 'niumRfiCase']);
+Route::put('nium-rfi-cases/{niumRfiCase}/draft', [NiumRfiCaseController::class, 'draft'])
+    ->name('nium-rfi-cases.draft');
+Route::post('nium-rfi-cases/{niumRfiCase}/approve', [NiumRfiCaseController::class, 'approve'])
+    ->name('nium-rfi-cases.approve');
 
 Route::apiResource('fx-orders', FxOrderController::class)
     ->except(['store'])

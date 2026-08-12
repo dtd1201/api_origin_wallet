@@ -32,6 +32,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         private readonly LedgerService $ledgerService,
         private readonly NiumProviderAccountStateService $providerAccountStateService,
         private readonly NiumCustomerOnboardingService $customerOnboardingService,
+        private readonly NiumRfiWorkflowService $rfiWorkflowService,
     ) {}
 
     public function handleWebhook(IntegrationProvider $provider, Request $request): array
@@ -260,6 +261,12 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             $payload,
             $source,
         );
+        $this->rfiWorkflowService->ingestCustomerEvidence(
+            $provider,
+            $providerAccount,
+            $payload,
+            authenticatedRequestId: (string) $request?->header('x-request-id'),
+        );
 
         try {
             $providerAccount = $this->customerOnboardingService->retrieveCustomer(
@@ -274,6 +281,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 $payload,
                 $source,
             );
+            $this->rfiWorkflowService->reconcileCustomerEvidence($providerAccount->fresh());
         } catch (NiumProviderIdConflictException $exception) {
             throw new RuntimeException('Nium customer reconciliation found a verified identifier conflict.', previous: $exception);
         } catch (Throwable $exception) {
