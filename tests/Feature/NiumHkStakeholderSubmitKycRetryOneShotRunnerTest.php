@@ -141,6 +141,87 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
         $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
     }
 
+    public function test_document_20_staging_convention_is_rejected(): void
+    {
+        $document = KycDocument::query()->where('type', 'passport_front')->sole();
+        $document->forceFill([
+            'id' => 20,
+            'status' => 'superseded',
+            'metadata' => [...$document->metadata, 'synthetic_only' => true],
+        ])->save();
+
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_document_23_staging_convention_is_rejected(): void
+    {
+        $document = KycDocument::query()->where('type', 'passport_front')->sole();
+        $document->forceFill([
+            'id' => 23,
+            'status' => 'superseded',
+            'metadata' => [
+                ...$document->metadata,
+                'synthetic_test' => true,
+                'historical_only' => true,
+                'superseded_at' => '2026-08-11T00:00:00Z',
+            ],
+        ])->save();
+
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_factual_evidence_marker_without_factual_marker_is_accepted(): void
+    {
+        foreach (KycDocument::query()->get() as $document) {
+            $metadata = $document->metadata;
+            unset($metadata['factual']);
+            $metadata['factual_evidence'] = true;
+            $document->forceFill(['metadata' => $metadata])->save();
+        }
+
+        $this->assertSame('READY_FOR_SEPARATE_HUMAN_APPROVAL', $this->runner()->audit()['terminal']);
+    }
+
+    public function test_missing_all_factual_markers_is_rejected(): void
+    {
+        $document = KycDocument::query()->where('type', 'passport_front')->sole();
+        $metadata = $document->metadata;
+        unset($metadata['factual'], $metadata['factual_evidence']);
+        $document->forceFill(['metadata' => $metadata])->save();
+
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_any_additional_synthetic_marker_rejects_identity(): void
+    {
+        $this->setDocumentMetadata('passport_front', ['synthetic_only' => true]);
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_superseded_at_rejects_identity(): void
+    {
+        $this->setDocumentMetadata('passport_front', ['superseded_at' => '2026-08-11T00:00:00Z']);
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_historical_only_rejects_identity(): void
+    {
+        $this->setDocumentMetadata('passport_front', ['historical_only' => true]);
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_wrong_person_document_is_rejected(): void
+    {
+        KycDocument::query()->where('type', 'passport_front')->update(['kyc_related_person_id' => null]);
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_unavailable_file_is_rejected(): void
+    {
+        $this->setDocumentMetadata('passport_front', ['nium_file_state' => 'PROCESSING']);
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
     public function test_synthetic_poa_is_rejected(): void
     {
         $this->setDocumentMetadata('proof_of_address', ['synthetic' => true]);
@@ -308,7 +389,11 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
                 'metadata' => [
                     'document_purpose' => $document['type'],
                     'factual' => true,
+                    'factual_evidence' => true,
                     'synthetic' => false,
+                    'synthetic_only' => false,
+                    'synthetic_test' => false,
+                    'historical_only' => false,
                     'superseded' => false,
                     'nium_file_id' => $document['file'],
                     'nium_file_state' => 'AVAILABLE',
