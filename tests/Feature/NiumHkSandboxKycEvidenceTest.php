@@ -236,28 +236,15 @@ class NiumHkSandboxKycEvidenceTest extends TestCase
         $this->assertSimulationFailsBeforeHttp();
     }
 
-    public function test_missing_client_name_fails_before_http(): void
+    public function test_missing_client_name_is_not_required_for_simulation(): void
     {
         config()->set('services.nium.client_name');
-        $this->assertSimulationFailsBeforeHttp();
-    }
+        Http::fake(['*' => Http::response(['message' => 'KYC submitted successfully.'], 200)]);
 
-    public function test_empty_client_name_fails_before_http(): void
-    {
-        config()->set('services.nium.client_name', '   ');
-        $this->assertSimulationFailsBeforeHttp();
-    }
+        $result = app(NiumHkSandboxKycSimulationRunner::class)->run();
 
-    public function test_client_name_over_32_characters_fails_before_http(): void
-    {
-        config()->set('services.nium.client_name', str_repeat('a', 33));
-        $this->assertSimulationFailsBeforeHttp();
-    }
-
-    public function test_client_name_with_control_characters_fails_before_http(): void
-    {
-        config()->set('services.nium.client_name', "Origin Wallet\r\nInjected");
-        $this->assertSimulationFailsBeforeHttp();
+        $this->assertSame('PASS_SIMULATION_HTTP_200_WAIT_FOR_WEBHOOK', $result['terminal']);
+        Http::assertSent(fn ($request): bool => ! $request->hasHeader('x-client-name'));
     }
 
     public function test_valid_client_name_uses_existing_auth_request_id_and_json_transport(): void
@@ -272,7 +259,7 @@ class NiumHkSandboxKycEvidenceTest extends TestCase
 
             return $request->method() === 'POST'
                 && $request->url() === 'https://gatewaysandbox.nium.com/api/v5/simulations/onboard/customer-safe-id/transition'
-                && $request->hasHeader('x-client-name', 'Origin Wallet HK')
+                && ! $request->hasHeader('x-client-name')
                 && $request->hasHeader('x-api-key', 'safe-sandbox-api-key')
                 && is_string($requestId)
                 && preg_match('/^[0-9a-f-]{36}$/i', $requestId) === 1

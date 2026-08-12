@@ -36,13 +36,9 @@ class NiumService
         array $payload,
         User $user,
         string $externalReference,
-        string $clientName,
     ): Response {
-        return $this->client(
-            'onboarding_simulation_submit_kyc',
-            $externalReference,
-            ['x-client-name' => $clientName],
-        )->post($path, $payload, $user);
+        return $this->client('onboarding_simulation_submit_kyc', $externalReference)
+            ->post($path, $payload, $user);
     }
 
     public function put(string $path, array $payload = [], ?User $user = null): Response

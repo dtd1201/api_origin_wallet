@@ -16,7 +16,7 @@ use Throwable;
 
 final class NiumHkStakeholderSubmitKycRetryOneShotRunner
 {
-    public const EXPECTED_HEAD = 'e473be39f63a0bcb41d3c5dcc6f25773a21e5df4';
+    public const EXPECTED_HEAD = '8241704f5e65dc0f93b1225846ddb10985a46d00';
 
     private const ACCOUNT_ID = 7;
     private const PROTECTED_ACCOUNT_ID = 4;
@@ -31,12 +31,13 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
 
     public function __construct(
         private readonly NiumService $niumService,
-        private readonly NiumHkKycIdentityResolver $identityResolver,
+        private readonly NiumHkManualKycDocumentResolver $documentResolver,
+        private readonly NiumHkSubmitKycPayloadFactory $payloadFactory,
     ) {}
 
-    public function audit(): array
+    public function audit(bool $rfiAcknowledged = false): array
     {
-        $context = $this->preflight();
+        $context = $this->preflight($rfiAcknowledged);
         if ($this->fingerprint(UserProviderAccount::query()->findOrFail(self::PROTECTED_ACCOUNT_ID))
             !== $context['protected_fingerprint']) {
             throw new RuntimeException('Protected Account 4 changed during offline preflight.');
@@ -47,17 +48,18 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
             'previous_log_id' => self::PREVIOUS_LOG_ID,
             'confirmed_entity_type' => $context['entity_type'],
             'confirmed_kyc_mode' => $context['kyc_mode'],
+            'proof_of_address_status' => $context['proof_of_address_status'],
             'stakeholder_retry_post_count' => 0,
         ];
     }
 
-    public function run(bool $separateHumanApproval = false): array
+    public function run(bool $separateHumanApproval = false, bool $rfiAcknowledged = false): array
     {
         if (! $separateHumanApproval) {
             throw new RuntimeException('Separate human approval is required outside the generation #2 runner.');
         }
 
-        $context = $this->preflight();
+        $context = $this->preflight($rfiAcknowledged);
         $protectedFingerprint = $context['protected_fingerprint'];
         $logMaxId = (int) (ApiRequestLog::query()->max('id') ?? 0);
         $this->claim($context);
@@ -108,23 +110,14 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
         );
     }
 
-    private function preflight(): array
+    private function preflight(bool $rfiAcknowledged = false): array
     {
         if (! $this->currentHeadIsCompatible()) {
             throw new RuntimeException('The deployed Git HEAD is not the locked generation #2 checkpoint.');
         }
 
-        $entityType = config('services.nium.confirmed_hk_stakeholder_entity_type');
-        $kycMode = config('services.nium.confirmed_hk_stakeholder_kyc_mode');
-        if (! is_string($entityType) || ! in_array($entityType, ['individual_stakeholder', 'applicant', 'individual_customer'], true)) {
-            throw new RuntimeException('Provider-confirmed Stakeholder entityType is absent or invalid.');
-        }
-        if (! is_string($kycMode) || ! in_array($kycMode, ['e_kyc', 'biometric_kyc', 'manual_kyc'], true)) {
-            throw new RuntimeException('Provider-confirmed Stakeholder kycMode is absent or invalid.');
-        }
-        if ($kycMode === 'manual_kyc') {
-            throw new RuntimeException('Manual KYC factual file and proof-of-address requirements are not satisfied.');
-        }
+        $entityType = 'INDIVIDUAL_STAKEHOLDER';
+        $kycMode = 'MANUAL_KYC';
 
         $provider = IntegrationProvider::query()->whereRaw('LOWER(code) = ?', ['nium'])->sole();
         $account = UserProviderAccount::query()
@@ -162,21 +155,23 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
             throw new RuntimeException('Stakeholder person binding is invalid.');
         }
 
-        $identity = $this->identityResolver->resolve($person);
+        $documents = $this->documentResolver->resolve($person);
+        if ($documents['identity'] === null) {
+            throw new RuntimeException('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+        }
+        $proofOfAddressStatus = $documents['proof_of_address'] === null
+            ? 'POA_MISSING_RFI_EXPECTED'
+            : 'POA_FACTUAL_AVAILABLE';
+        if ($documents['proof_of_address'] === null && ! $rfiAcknowledged) {
+            throw new RuntimeException('HOLD_RFI_ACKNOWLEDGEMENT_REQUIRED');
+        }
         $this->assertPreviousLog((int) $provider->id);
-        $payload = [
-            'region' => 'HK',
-            'entityType' => $entityType,
-            'isResident' => false,
-            'entityReferenceId' => self::REFERENCE_ID,
-            'kycMode' => $kycMode,
-            'proofOfIdentityDocument' => [[
-                'type' => 'passport',
-                'identificationNumber' => $identity['identification_number'],
-                'issuanceCountry' => 'VN',
-                'expiryDate' => $identity['expiry_date'],
-            ]],
-        ];
+        $payload = $this->payloadFactory->buildManual(
+            $person,
+            self::REFERENCE_ID,
+            $documents['identity'],
+            $documents['proof_of_address'],
+        );
 
         return [
             'account' => $account,
@@ -188,6 +183,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
             'user_id' => self::USER_ID,
             'entity_type' => $entityType,
             'kyc_mode' => $kycMode,
+            'proof_of_address_status' => $proofOfAddressStatus,
         ];
     }
 

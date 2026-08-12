@@ -4,12 +4,14 @@ namespace Tests\Feature;
 
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
+use App\Models\KycDocument;
 use App\Models\KycProfile;
 use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Nium\NiumHkStakeholderSubmitKycRetryOneShotRunner;
+use App\Services\Nium\NiumHkSubmitKycPayloadFactory;
 use App\Services\Nium\NiumProviderAccountMetadataOwnership;
 use App\Services\Nium\NiumService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -29,23 +31,11 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
     {
         parent::setUp();
         config([
-            'services.nium.confirmed_hk_stakeholder_entity_type' => 'individual_stakeholder',
-            'services.nium.confirmed_hk_stakeholder_kyc_mode' => 'biometric_kyc',
+            'services.nium.confirmed_hk_stakeholder_entity_type' => 'INDIVIDUAL_STAKEHOLDER',
+            'services.nium.confirmed_hk_stakeholder_kyc_mode' => 'MANUAL_KYC',
         ]);
         $this->seedEvidence();
         $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
-    }
-
-    public function test_absent_provider_confirmed_entity_type_holds_before_http(): void
-    {
-        config()->set('services.nium.confirmed_hk_stakeholder_entity_type');
-        $this->assertAuditHolds();
-    }
-
-    public function test_absent_provider_confirmed_kyc_mode_holds_before_http(): void
-    {
-        config()->set('services.nium.confirmed_hk_stakeholder_kyc_mode');
-        $this->assertAuditHolds();
     }
 
     public function test_wrong_previous_log_id_holds_before_http(): void
@@ -94,13 +84,73 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
         $this->assertAuditHolds();
     }
 
-    public function test_factual_identity_mismatch_holds_before_http(): void
+    public function test_no_factual_identity_document_holds_before_http(): void
     {
-        $person = KycRelatedPerson::query()->findOrFail(14);
-        $metadata = $person->metadata;
-        $metadata['nium_biometric_identity']['factual'] = false;
-        $person->forceFill(['metadata' => $metadata])->save();
-        $this->assertAuditHolds();
+        KycDocument::query()->where('type', 'passport_front')->delete();
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_identity_available_without_poa_requires_rfi_acknowledgement(): void
+    {
+        KycDocument::query()->where('type', 'proof_of_address')->delete();
+        $this->assertAuditHolds('HOLD_RFI_ACKNOWLEDGEMENT_REQUIRED');
+    }
+
+    public function test_identity_available_without_poa_is_offline_ready_after_rfi_acknowledgement(): void
+    {
+        KycDocument::query()->where('type', 'proof_of_address')->delete();
+
+        $result = $this->runner()->audit(rfiAcknowledged: true);
+
+        $this->assertSame('READY_FOR_SEPARATE_HUMAN_APPROVAL', $result['terminal']);
+        $this->assertSame('POA_MISSING_RFI_EXPECTED', $result['proof_of_address_status']);
+        $this->assertDatabaseCount('api_request_logs', 1);
+    }
+
+    public function test_manual_payload_omits_poa_when_absent(): void
+    {
+        $payload = app(NiumHkSubmitKycPayloadFactory::class)->buildManual(
+            KycRelatedPerson::query()->findOrFail(14),
+            self::STAKEHOLDER_REFERENCE,
+            KycDocument::query()->where('type', 'passport_front')->sole(),
+            null,
+        );
+
+        $this->assertSame('INDIVIDUAL_STAKEHOLDER', $payload['entityType']);
+        $this->assertSame('MANUAL_KYC', $payload['kycMode']);
+        $this->assertSame('HK', $payload['region']);
+        $this->assertArrayNotHasKey('proofOfAddressDocument', $payload);
+    }
+
+    public function test_manual_payload_includes_factual_poa_when_present(): void
+    {
+        $payload = app(NiumHkSubmitKycPayloadFactory::class)->buildManual(
+            KycRelatedPerson::query()->findOrFail(14),
+            self::STAKEHOLDER_REFERENCE,
+            KycDocument::query()->where('type', 'passport_front')->sole(),
+            KycDocument::query()->where('type', 'proof_of_address')->sole(),
+        );
+
+        $this->assertArrayHasKey('proofOfAddressDocument', $payload);
+        $this->assertCount(1, $payload['proofOfAddressDocument']);
+    }
+
+    public function test_synthetic_identity_is_rejected(): void
+    {
+        $this->setDocumentMetadata('passport_front', ['synthetic' => true]);
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
+    }
+
+    public function test_synthetic_poa_is_rejected(): void
+    {
+        $this->setDocumentMetadata('proof_of_address', ['synthetic' => true]);
+        $this->assertAuditHolds('HOLD_RFI_ACKNOWLEDGEMENT_REQUIRED');
+    }
+
+    public function test_business_document_cannot_satisfy_personal_poa(): void
+    {
+        KycDocument::query()->where('type', 'proof_of_address')->update(['type' => 'nar1']);
+        $this->assertAuditHolds('HOLD_RFI_ACKNOWLEDGEMENT_REQUIRED');
     }
 
     public function test_valid_confirmed_values_pass_offline_only(): void
@@ -143,8 +193,8 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
 
     public function test_manual_kyc_without_factual_required_documents_holds(): void
     {
-        config()->set('services.nium.confirmed_hk_stakeholder_kyc_mode', 'manual_kyc');
-        $this->assertAuditHolds();
+        KycDocument::query()->delete();
+        $this->assertAuditHolds('HOLD_FACTUAL_IDENTITY_DOCUMENT_REQUIRED');
     }
 
     public function test_account_four_is_byte_identical_after_offline_audit(): void
@@ -180,15 +230,24 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
         );
     }
 
-    private function assertAuditHolds(int $expectedLogCount = 1): void
+    private function assertAuditHolds(?string $message = null, int $expectedLogCount = 1): void
     {
         try {
             $this->runner()->audit();
             $this->fail('Expected generation #2 offline preflight to hold.');
-        } catch (RuntimeException) {
+        } catch (RuntimeException $exception) {
+            if ($message !== null) {
+                $this->assertSame($message, $exception->getMessage());
+            }
             $this->addToAssertionCount(1);
         }
         $this->assertDatabaseCount('api_request_logs', $expectedLogCount);
+    }
+
+    private function setDocumentMetadata(string $type, array $changes): void
+    {
+        $document = KycDocument::query()->where('type', $type)->sole();
+        $document->forceFill(['metadata' => [...$document->metadata, ...$changes]])->save();
     }
 
     private function setRetryClaim(string $state): void
@@ -235,6 +294,27 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
                 'source' => 'operator_verified_factual_identity_v1',
             ]],
         ]);
+        foreach ([
+            ['id' => 24, 'type' => 'passport_front', 'file' => '30000000-0000-4000-8000-000000000024'],
+            ['id' => 25, 'type' => 'proof_of_address', 'file' => '30000000-0000-4000-8000-000000000025'],
+        ] as $document) {
+            KycDocument::query()->forceCreate([
+                'id' => $document['id'],
+                'kyc_profile_id' => 9,
+                'kyc_related_person_id' => 14,
+                'type' => $document['type'],
+                'status' => 'approved',
+                'file_url' => 'private://manual-kyc/'.$document['id'],
+                'metadata' => [
+                    'document_purpose' => $document['type'],
+                    'factual' => true,
+                    'synthetic' => false,
+                    'superseded' => false,
+                    'nium_file_id' => $document['file'],
+                    'nium_file_state' => 'AVAILABLE',
+                ],
+            ]);
+        }
         UserProviderAccount::query()->forceCreate(['id' => 4, 'user_id' => 4, 'provider_id' => 1]);
         UserProviderAccount::query()->forceCreate([
             'id' => 7,

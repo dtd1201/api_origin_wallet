@@ -3,11 +3,44 @@
 namespace App\Services\Nium;
 
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
 
 final class NiumHkSubmitKycValidator
 {
+    public function assertManual(array $payload): void
+    {
+        if (($payload['region'] ?? null) !== 'HK'
+            || ($payload['entityType'] ?? null) !== 'INDIVIDUAL_STAKEHOLDER'
+            || ($payload['kycMode'] ?? null) !== 'MANUAL_KYC'
+            || ! is_string($payload['entityReferenceId'] ?? null)
+            || trim($payload['entityReferenceId']) === '') {
+            throw new RuntimeException('Invalid Nium HK manual KYC stakeholder contract.');
+        }
+
+        $this->assertManualDocument($payload, 'proofOfIdentityDocument');
+        if (array_key_exists('proofOfAddressDocument', $payload)) {
+            $this->assertManualDocument($payload, 'proofOfAddressDocument');
+        }
+    }
+
+    private function assertManualDocument(array $payload, string $field): void
+    {
+            $documents = $payload[$field] ?? null;
+            $document = is_array($documents) && array_is_list($documents) && count($documents) === 1
+                ? $documents[0]
+                : null;
+            if (! is_array($document)
+                || ! is_string($document['type'] ?? null)
+                || trim($document['type']) === ''
+                || ! is_array($document['fileIds'] ?? null)
+                || count($document['fileIds']) !== 1
+                || ! Str::isUuid($document['fileIds'][0] ?? null)) {
+                throw new RuntimeException("Nium HK manual KYC requires one provider-backed {$field}.");
+            }
+    }
+
     public function assert(array $payload): void
     {
         if (($payload['region'] ?? null) !== 'HK'

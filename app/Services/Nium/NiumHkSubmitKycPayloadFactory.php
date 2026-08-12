@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Models\KycDocument;
 use App\Models\KycRelatedPerson;
 
 final class NiumHkSubmitKycPayloadFactory
@@ -31,5 +32,45 @@ final class NiumHkSubmitKycPayloadFactory
         $this->validator->assert($payload);
 
         return $payload;
+    }
+
+    public function buildManual(
+        KycRelatedPerson $person,
+        string $referenceId,
+        KycDocument $identity,
+        ?KycDocument $proofOfAddress,
+    ): array {
+        if ((int) $identity->kyc_related_person_id !== (int) $person->id
+            || (int) $identity->kyc_profile_id !== (int) $person->kyc_profile_id
+            || ($proofOfAddress !== null
+                && ((int) $proofOfAddress->kyc_related_person_id !== (int) $person->id
+                    || (int) $proofOfAddress->kyc_profile_id !== (int) $person->kyc_profile_id))) {
+            throw new \RuntimeException('Manual KYC documents do not belong to the locked stakeholder.');
+        }
+
+        $payload = [
+            'entityReferenceId' => $referenceId,
+            'entityType' => 'INDIVIDUAL_STAKEHOLDER',
+            'kycMode' => 'MANUAL_KYC',
+            'region' => 'HK',
+            'proofOfIdentityDocument' => [$this->manualDocument($identity, 'passport')],
+        ];
+        if ($proofOfAddress !== null) {
+            $payload['proofOfAddressDocument'] = [$this->manualDocument($proofOfAddress, 'proof_of_address')];
+        }
+
+        $this->validator->assertManual($payload);
+
+        return $payload;
+    }
+
+    private function manualDocument(KycDocument $document, string $defaultType): array
+    {
+        $metadata = (array) $document->metadata;
+
+        return [
+            'type' => $metadata['nium_document_type'] ?? $defaultType,
+            'fileIds' => [$metadata['nium_file_id']],
+        ];
     }
 }

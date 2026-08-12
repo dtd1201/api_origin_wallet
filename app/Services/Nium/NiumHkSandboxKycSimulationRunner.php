@@ -50,7 +50,6 @@ final class NiumHkSandboxKycSimulationRunner
                 payload: ['nextAction' => 'submit_kyc'],
                 user: $context['user'],
                 externalReference: $context['account']->external_customer_id,
-                clientName: $context['client_name'],
             );
         } catch (ConnectionException|NiumEvidencePersistenceException) {
             return $this->finish('STOP_SIMULATION_OUTCOME_UNKNOWN_NO_RETRY', $context, $logMaxId, $protectedFingerprint);
@@ -78,7 +77,6 @@ final class NiumHkSandboxKycSimulationRunner
     private function preflight(): array
     {
         $this->assertSandboxBaseUrl();
-        $clientName = $this->clientName();
         $provider = IntegrationProvider::query()->whereRaw('LOWER(code) = ?', ['nium'])->sole();
         $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->where('provider_id', $provider->id)->firstOrFail();
         $user = User::query()->findOrFail($account->user_id);
@@ -127,7 +125,6 @@ final class NiumHkSandboxKycSimulationRunner
             'provider_id' => (int) $provider->id,
             'user_id' => (int) $user->id,
             'external_reference' => (string) $account->external_customer_id,
-            'client_name' => $clientName,
         ];
     }
 
@@ -196,20 +193,6 @@ final class NiumHkSandboxKycSimulationRunner
             || isset($parts['pass'])) {
             throw new RuntimeException('Nium sandbox simulation requires an HTTPS sandbox base URL.');
         }
-    }
-
-    private function clientName(): string
-    {
-        $value = config('services.nium.client_name');
-
-        if (! is_string($value)
-            || trim($value) === ''
-            || strlen(trim($value)) > 32
-            || preg_match('/[\x00-\x1F\x7F]/', $value) === 1) {
-            throw new RuntimeException('Nium sandbox simulation client name is missing or invalid.');
-        }
-
-        return trim($value);
     }
 
     private function finish(string $terminal, array $context, int $logMaxId, string $protectedFingerprint): array
