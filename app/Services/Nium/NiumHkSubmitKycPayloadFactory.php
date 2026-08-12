@@ -48,12 +48,13 @@ final class NiumHkSubmitKycPayloadFactory
             throw new \RuntimeException('Manual KYC documents do not belong to the locked stakeholder.');
         }
 
+        $factualIdentity = $this->identityResolver->resolve($person);
         $payload = [
             'entityReferenceId' => $referenceId,
             'entityType' => 'INDIVIDUAL_STAKEHOLDER',
             'kycMode' => 'MANUAL_KYC',
             'region' => 'HK',
-            'proofOfIdentityDocument' => [$this->manualDocument($identity, 'passport')],
+            'proofOfIdentityDocument' => [$this->manualIdentityDocument($identity, $factualIdentity)],
         ];
         if ($proofOfAddress !== null) {
             $payload['proofOfAddressDocument'] = $this->manualDocument($proofOfAddress, 'proof_of_address');
@@ -71,6 +72,16 @@ final class NiumHkSubmitKycPayloadFactory
         return [
             'type' => $metadata['nium_document_type'] ?? $defaultType,
             'fileIds' => [$metadata['nium_file_id']],
+        ];
+    }
+
+    private function manualIdentityDocument(KycDocument $document, array $identity): array
+    {
+        return [
+            ...$this->manualDocument($document, 'passport'),
+            'identificationNumber' => $identity['identification_number'],
+            'expiryDate' => $identity['expiry_date'],
+            'issuanceCountry' => $identity['issuance_country'],
         ];
     }
 }

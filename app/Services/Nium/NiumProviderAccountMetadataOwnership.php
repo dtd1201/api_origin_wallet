@@ -51,6 +51,9 @@ final class NiumProviderAccountMetadataOwnership
                 'proofOfAddressDocument',
                 'a5b7a48f01932655',
             ),
+            'nium_stakeholder_submit_kyc_retry_generation_4' => $this->stakeholderGenerationFour(
+                $metadata['nium_stakeholder_submit_kyc_retry_generation_4'] ?? null,
+            ),
             'customer_v5_submission_marker' => $this->safeString($metadata['customer_v5_submission_marker'] ?? null, 128),
             'customer_v5_submission_state' => $this->safeString($metadata['customer_v5_submission_state'] ?? null, 64),
             'customer_v5_payload_fingerprint' => $this->fingerprint($metadata['customer_v5_payload_fingerprint'] ?? null, 64),
@@ -139,6 +142,23 @@ final class NiumProviderAccountMetadataOwnership
                 'biometric_kyc',
                 'manual_kyc',
             ], true) ? $value['confirmed_kyc_mode'] : null,
+            'updated_at' => $this->timestamp($value['updated_at'] ?? null),
+        ], static fn (mixed $item): bool => $item !== null);
+
+        return $safe !== [] ? $safe : null;
+    }
+
+    private function stakeholderGenerationFour(mixed $value): ?array
+    {
+        if (! is_array($value) || array_is_list($value)) {
+            return null;
+        }
+
+        $safe = array_filter([
+            'state' => $this->safeString($value['state'] ?? null, 64),
+            'previous_log_id' => ($value['previous_log_id'] ?? null) === 114 ? 114 : null,
+            'previous_http_status' => ($value['previous_http_status'] ?? null) === 400 ? 400 : null,
+            'previous_error_field_count' => ($value['previous_error_field_count'] ?? null) === 3 ? 3 : null,
             'updated_at' => $this->timestamp($value['updated_at'] ?? null),
         ], static fn (mixed $item): bool => $item !== null);
 

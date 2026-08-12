@@ -39,6 +39,7 @@ final class NiumHkKycIdentityResolver
         return [
             'identification_number' => $number,
             'expiry_date' => $expiryValue,
+            'issuance_country' => $identity['issuance_country'],
         ];
     }
 

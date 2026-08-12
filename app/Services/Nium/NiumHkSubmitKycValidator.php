@@ -32,6 +32,15 @@ final class NiumHkSubmitKycValidator
             ? $documents[0]
             : null;
         $this->assertProviderBackedDocument($document, 'proofOfIdentityDocument');
+        $expiry = $this->exactDate($document['expiryDate'] ?? null);
+        if (($document['type'] ?? null) !== 'passport'
+            || ! is_string($document['identificationNumber'] ?? null)
+            || trim($document['identificationNumber']) === ''
+            || $expiry === null
+            || ! $expiry->isFuture()
+            || ($document['issuanceCountry'] ?? null) !== 'VN') {
+            throw new RuntimeException('Invalid Nium HK manual passport identity document.');
+        }
     }
 
     private function assertManualProofOfAddressDocument(array $payload): void
@@ -54,6 +63,21 @@ final class NiumHkSubmitKycValidator
             || ! Str::isUuid($document['fileIds'][0] ?? null)) {
             throw new RuntimeException("Nium HK manual KYC requires one provider-backed {$field}.");
         }
+    }
+
+    private function exactDate(mixed $value): ?CarbonImmutable
+    {
+        try {
+            $date = is_string($value) ? CarbonImmutable::createFromFormat('!Y-m-d', $value) : false;
+        } catch (Throwable) {
+            return null;
+        }
+        $errors = CarbonImmutable::getLastErrors();
+
+        return $date !== false && $date->format('Y-m-d') === $value
+            && ($errors === false || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))
+                ? $date
+                : null;
     }
 
     public function assert(array $payload): void

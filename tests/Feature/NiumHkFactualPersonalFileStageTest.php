@@ -40,7 +40,15 @@ class NiumHkFactualPersonalFileStageTest extends TestCase
             'id' => 9, 'user_id' => 9, 'status' => 'approved', 'applicant_type' => 'business',
             'legal_name' => 'Fixture Company', 'address_line1' => 'Fixture Address', 'city' => 'Hong Kong', 'country_code' => 'HK',
         ]);
-        KycRelatedPerson::query()->forceCreate(['id' => 14, 'kyc_profile_id' => 9, 'relationship_type' => 'beneficial_owner', 'status' => 'approved', 'legal_name' => 'Fixture Person']);
+        KycRelatedPerson::query()->forceCreate([
+            'id' => 14, 'kyc_profile_id' => 9, 'relationship_type' => 'beneficial_owner',
+            'status' => 'approved', 'legal_name' => 'Fixture Person',
+            'metadata' => ['nium_biometric_identity' => [
+                'type' => 'passport', 'identification_number' => 'FACTUAL-PASSPORT-NUMBER',
+                'issuance_country' => 'VN', 'expiry_date' => '2099-12-31', 'factual' => true,
+                'synthetic' => false, 'source' => 'operator_verified_factual_identity_v1',
+            ]],
+        ]);
         KycProfile::query()->forceCreate(['id' => 8, 'user_id' => 8, 'status' => 'approved', 'applicant_type' => 'business', 'legal_name' => 'Other Company', 'address_line1' => 'Other Address', 'city' => 'Hong Kong', 'country_code' => 'HK']);
         KycRelatedPerson::query()->forceCreate(['id' => 15, 'kyc_profile_id' => 9, 'relationship_type' => 'beneficial_owner', 'status' => 'approved', 'legal_name' => 'Other Person']);
         UserProviderAccount::query()->forceCreate(['id' => 4, 'user_id' => 4, 'provider_id' => 1]);

@@ -527,7 +527,11 @@ class NiumHkStakeholderSubmitKycGenerationThreeOneShotRunnerTest extends TestCas
         KycProfile::query()->forceCreate(['id' => 9, 'user_id' => 9, 'status' => 'approved', 'applicant_type' => 'business',
             'legal_name' => 'Placeholder Company', 'address_line1' => 'Placeholder Address', 'city' => 'Hong Kong', 'country_code' => 'HK']);
         KycRelatedPerson::query()->forceCreate(['id' => 14, 'kyc_profile_id' => 9, 'relationship_type' => 'beneficial_owner',
-            'status' => 'approved', 'legal_name' => 'Placeholder Person', 'metadata' => []]);
+            'status' => 'approved', 'legal_name' => 'Placeholder Person', 'metadata' => ['nium_biometric_identity' => [
+                'type' => 'passport', 'identification_number' => 'FACTUAL-PASSPORT-NUMBER', 'issuance_country' => 'VN',
+                'expiry_date' => '2099-12-31', 'factual' => true, 'synthetic' => false,
+                'source' => 'operator_verified_factual_identity_v1',
+            ]]]);
         foreach ([
             ['id' => 27, 'type' => 'passport', 'file' => '30000000-0000-4000-8000-000000000027'],
             ['id' => 28, 'type' => 'bank_statement', 'file' => '30000000-0000-4000-8000-000000000028'],
