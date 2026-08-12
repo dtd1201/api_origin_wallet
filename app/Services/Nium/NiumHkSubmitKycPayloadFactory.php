@@ -56,7 +56,7 @@ final class NiumHkSubmitKycPayloadFactory
             'proofOfIdentityDocument' => [$this->manualDocument($identity, 'passport')],
         ];
         if ($proofOfAddress !== null) {
-            $payload['proofOfAddressDocument'] = [$this->manualDocument($proofOfAddress, 'proof_of_address')];
+            $payload['proofOfAddressDocument'] = $this->manualDocument($proofOfAddress, 'proof_of_address');
         }
 
         $this->validator->assertManual($payload);

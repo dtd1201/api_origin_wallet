@@ -41,6 +41,15 @@ final class NiumProviderAccountMetadataOwnership
             ),
             'nium_stakeholder_submit_kyc_retry_generation_2' => $this->stakeholderRetry(
                 $metadata['nium_stakeholder_submit_kyc_retry_generation_2'] ?? null,
+                106,
+                'entityType',
+                'b4753588f3f6ef2b',
+            ),
+            'nium_stakeholder_submit_kyc_retry_generation_3' => $this->stakeholderRetry(
+                $metadata['nium_stakeholder_submit_kyc_retry_generation_3'] ?? null,
+                113,
+                'proofOfAddressDocument',
+                'a5b7a48f01932655',
             ),
             'customer_v5_submission_marker' => $this->safeString($metadata['customer_v5_submission_marker'] ?? null, 128),
             'customer_v5_submission_state' => $this->safeString($metadata['customer_v5_submission_state'] ?? null, 64),
@@ -105,7 +114,7 @@ final class NiumProviderAccountMetadataOwnership
         return $safe !== [] ? $safe : null;
     }
 
-    private function stakeholderRetry(mixed $value): ?array
+    private function stakeholderRetry(mixed $value, int $logId, string $field, string $fingerprint): ?array
     {
         if (! is_array($value) || array_is_list($value)) {
             return null;
@@ -113,14 +122,13 @@ final class NiumProviderAccountMetadataOwnership
 
         $safe = array_filter([
             'state' => $this->safeString($value['state'] ?? null, 64),
-            'previous_log_id' => ($value['previous_log_id'] ?? null) === 106 ? 106 : null,
+            'previous_log_id' => ($value['previous_log_id'] ?? null) === $logId ? $logId : null,
             'previous_http_status' => ($value['previous_http_status'] ?? null) === 400 ? 400 : null,
             'previous_error_code' => ($value['previous_error_code'] ?? null) === 'invalid_input' ? 'invalid_input' : null,
-            'previous_error_field' => ($value['previous_error_field'] ?? null) === 'entityType' ? 'entityType' : null,
-            'previous_error_field_fingerprint' => $this->fingerprint(
-                $value['previous_error_field_fingerprint'] ?? null,
-                16,
-            ),
+            'previous_error_field' => ($value['previous_error_field'] ?? null) === $field ? $field : null,
+            'previous_error_field_fingerprint' => ($value['previous_error_field_fingerprint'] ?? null) === $fingerprint
+                ? $fingerprint
+                : null,
             'confirmed_entity_type' => in_array($value['confirmed_entity_type'] ?? null, [
                 'individual_stakeholder',
                 'applicant',

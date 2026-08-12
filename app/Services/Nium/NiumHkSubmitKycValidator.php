@@ -19,26 +19,41 @@ final class NiumHkSubmitKycValidator
             throw new RuntimeException('Invalid Nium HK manual KYC stakeholder contract.');
         }
 
-        $this->assertManualDocument($payload, 'proofOfIdentityDocument');
+        $this->assertManualIdentityDocument($payload);
         if (array_key_exists('proofOfAddressDocument', $payload)) {
-            $this->assertManualDocument($payload, 'proofOfAddressDocument');
+            $this->assertManualProofOfAddressDocument($payload);
         }
     }
 
-    private function assertManualDocument(array $payload, string $field): void
+    private function assertManualIdentityDocument(array $payload): void
     {
-            $documents = $payload[$field] ?? null;
-            $document = is_array($documents) && array_is_list($documents) && count($documents) === 1
-                ? $documents[0]
-                : null;
-            if (! is_array($document)
-                || ! is_string($document['type'] ?? null)
-                || trim($document['type']) === ''
-                || ! is_array($document['fileIds'] ?? null)
-                || count($document['fileIds']) !== 1
-                || ! Str::isUuid($document['fileIds'][0] ?? null)) {
-                throw new RuntimeException("Nium HK manual KYC requires one provider-backed {$field}.");
-            }
+        $documents = $payload['proofOfIdentityDocument'] ?? null;
+        $document = is_array($documents) && array_is_list($documents) && count($documents) === 1
+            ? $documents[0]
+            : null;
+        $this->assertProviderBackedDocument($document, 'proofOfIdentityDocument');
+    }
+
+    private function assertManualProofOfAddressDocument(array $payload): void
+    {
+        $document = $payload['proofOfAddressDocument'] ?? null;
+        if (! is_array($document) || array_is_list($document)) {
+            throw new RuntimeException('Nium HK manual KYC requires one provider-backed proofOfAddressDocument object.');
+        }
+        $this->assertProviderBackedDocument($document, 'proofOfAddressDocument');
+    }
+
+    private function assertProviderBackedDocument(mixed $document, string $field): void
+    {
+        if (! is_array($document)
+            || ! is_string($document['type'] ?? null)
+            || trim($document['type']) === ''
+            || ! is_array($document['fileIds'] ?? null)
+            || ! array_is_list($document['fileIds'])
+            || count($document['fileIds']) !== 1
+            || ! Str::isUuid($document['fileIds'][0] ?? null)) {
+            throw new RuntimeException("Nium HK manual KYC requires one provider-backed {$field}.");
+        }
     }
 
     public function assert(array $payload): void

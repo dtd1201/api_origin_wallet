@@ -185,7 +185,8 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
         );
 
         $this->assertArrayHasKey('proofOfAddressDocument', $payload);
-        $this->assertCount(1, $payload['proofOfAddressDocument']);
+        $this->assertFalse(array_is_list($payload['proofOfAddressDocument']));
+        $this->assertCount(1, $payload['proofOfAddressDocument']['fileIds']);
     }
 
     public function test_synthetic_identity_is_rejected(): void
