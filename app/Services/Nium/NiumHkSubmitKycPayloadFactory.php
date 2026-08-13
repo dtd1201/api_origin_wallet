@@ -65,6 +65,21 @@ final class NiumHkSubmitKycPayloadFactory
         return $payload;
     }
 
+    public function buildManualGenerationFive(
+        KycRelatedPerson $person,
+        string $referenceId,
+        KycDocument $identity,
+        ?KycDocument $proofOfAddress,
+    ): array {
+        $payload = $this->buildManual($person, $referenceId, $identity, $proofOfAddress);
+        $payload['entityType'] = 'individual_stakeholder';
+        $payload['kycMode'] = 'manual_kyc';
+
+        $this->validator->assertManualGenerationFive($payload);
+
+        return $payload;
+    }
+
     private function manualDocument(KycDocument $document, string $defaultType): array
     {
         $metadata = (array) $document->metadata;
