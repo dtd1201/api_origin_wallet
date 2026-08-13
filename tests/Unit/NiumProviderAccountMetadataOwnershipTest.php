@@ -7,6 +7,22 @@ use Tests\TestCase;
 
 class NiumProviderAccountMetadataOwnershipTest extends TestCase
 {
+    public function test_generation_six_claim_preserves_only_safe_provenance(): void
+    {
+        $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
+            'nium_stakeholder_submit_kyc_retry_generation_6' => [
+                'state' => 'submitting', 'previous_log_id' => 116, 'previous_http_status' => 400,
+                'previous_error_field_count' => 1, 'previous_error_code' => 'invalid_input',
+                'updated_at' => '2026-08-13T12:00:00.000000Z',
+            ],
+        ], []);
+
+        $claim = $merged['nium_stakeholder_submit_kyc_retry_generation_6'];
+        $this->assertSame(116, $claim['previous_log_id']);
+        $this->assertSame(1, $claim['previous_error_field_count']);
+        $this->assertArrayNotHasKey('previous_error_code', $claim);
+    }
+
     public function test_generation_five_claim_preserves_only_safe_provenance(): void
     {
         $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
