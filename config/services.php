@@ -94,6 +94,7 @@ return [
         'customer_get_endpoint' => env('NIUM_CUSTOMER_GET_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}'),
         'customer_list_endpoint' => env('NIUM_CUSTOMER_LIST_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
         'customer_submit_kyc_endpoint' => env('NIUM_CUSTOMER_SUBMIT_KYC_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}/submitKyc'),
+        'kyc_form_session_endpoint' => env('NIUM_KYC_FORM_SESSION_ENDPOINT', '/api/v1/client/{clientHashId}/sessions'),
         'confirmed_hk_stakeholder_entity_type' => env('NIUM_HK_CONFIRMED_STAKEHOLDER_ENTITY_TYPE'),
         'confirmed_hk_stakeholder_kyc_mode' => env('NIUM_HK_CONFIRMED_STAKEHOLDER_KYC_MODE'),
         'customer_onboarding_simulation_endpoint' => env('NIUM_CUSTOMER_ONBOARDING_SIMULATION_ENDPOINT', '/api/v5/simulations/onboard/{customerHashId}/transition'),

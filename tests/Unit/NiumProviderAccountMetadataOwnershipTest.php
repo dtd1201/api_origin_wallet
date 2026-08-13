@@ -7,6 +7,22 @@ use Tests\TestCase;
 
 class NiumProviderAccountMetadataOwnershipTest extends TestCase
 {
+    public function test_prebuilt_form_session_preserves_only_safe_fields(): void
+    {
+        $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
+            'nium_kyc_prebuilt_form_session' => [
+                'state' => 'created', 'created_at' => '2026-08-13T12:00:00Z',
+                'expiry_at' => '2026-08-13T14:00:00Z', 'session_id_fingerprint' => str_repeat('a', 16),
+                'provider_http_status' => 200, 'sessionId' => 'must-not-survive',
+            ],
+        ], []);
+
+        $claim = $merged['nium_kyc_prebuilt_form_session'];
+        $this->assertSame('created', $claim['state']);
+        $this->assertSame(str_repeat('a', 16), $claim['session_id_fingerprint']);
+        $this->assertArrayNotHasKey('sessionId', $claim);
+    }
+
     public function test_generation_six_claim_preserves_only_safe_provenance(): void
     {
         $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
