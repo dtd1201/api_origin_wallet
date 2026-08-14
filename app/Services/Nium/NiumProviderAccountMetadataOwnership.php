@@ -75,6 +75,9 @@ final class NiumProviderAccountMetadataOwnership
             'nium_customer_onboarding_rfi_prebuilt_session' => $this->customerOnboardingRfiPrebuiltSession(
                 $metadata['nium_customer_onboarding_rfi_prebuilt_session'] ?? null,
             ),
+            'nium_assign_payment_id_one_shot_v1' => $this->assignPaymentIdOneShot(
+                $metadata['nium_assign_payment_id_one_shot_v1'] ?? null,
+            ),
             'customer_v5_submission_marker' => $this->safeString($metadata['customer_v5_submission_marker'] ?? null, 128),
             'customer_v5_submission_state' => $this->safeString($metadata['customer_v5_submission_state'] ?? null, 64),
             'customer_v5_payload_fingerprint' => $this->fingerprint($metadata['customer_v5_payload_fingerprint'] ?? null, 64),
@@ -321,6 +324,29 @@ final class NiumProviderAccountMetadataOwnership
             'transport_outcome' => $this->safeString($value['transport_outcome'] ?? null, 64),
             'created_at' => $this->timestamp($value['created_at'] ?? null),
             'expiry_at' => $this->timestamp($value['expiry_at'] ?? null),
+            'updated_at' => $this->timestamp($value['updated_at'] ?? null),
+        ], static fn (mixed $item): bool => $item !== null);
+
+        return $safe !== [] ? $safe : null;
+    }
+
+    private function assignPaymentIdOneShot(mixed $value): ?array
+    {
+        if (! is_array($value) || array_is_list($value)) {
+            return null;
+        }
+
+        $safe = array_filter([
+            'version' => ($value['version'] ?? null) === 1 ? 1 : null,
+            'state' => $this->safeString($value['state'] ?? null, 64),
+            'currency_code' => $this->safeString($value['currency_code'] ?? null, 3),
+            'account_category' => $this->safeString($value['account_category'] ?? null, 64),
+            'bank_name_fingerprint' => $this->fingerprint($value['bank_name_fingerprint'] ?? null, 16),
+            'payload_fingerprint' => $this->fingerprint($value['payload_fingerprint'] ?? null, 16),
+            'provider_http_status' => $this->httpStatus($value['provider_http_status'] ?? null),
+            'transport_outcome' => $this->safeString($value['transport_outcome'] ?? null, 64),
+            'api_request_log_id' => $this->positiveInt($value['api_request_log_id'] ?? null),
+            'created_at' => $this->timestamp($value['created_at'] ?? null),
             'updated_at' => $this->timestamp($value['updated_at'] ?? null),
         ], static fn (mixed $item): bool => $item !== null);
 

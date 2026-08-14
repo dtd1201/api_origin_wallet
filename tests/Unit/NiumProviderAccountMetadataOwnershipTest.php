@@ -104,6 +104,29 @@ class NiumProviderAccountMetadataOwnershipTest extends TestCase
         $this->assertArrayNotHasKey('url', $claim);
     }
 
+    public function test_assign_payment_id_one_shot_preserves_only_safe_fields(): void
+    {
+        $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
+            'nium_assign_payment_id_one_shot_v1' => [
+                'version' => 1, 'state' => 'assigned', 'currency_code' => 'USD',
+                'account_category' => 'COLLECTION_ACCOUNT',
+                'bank_name_fingerprint' => str_repeat('b', 16), 'payload_fingerprint' => str_repeat('a', 16),
+                'provider_http_status' => 200, 'transport_outcome' => 'response_received',
+                'api_request_log_id' => 120, 'created_at' => '2026-08-14T01:00:00Z',
+                'updated_at' => '2026-08-14T01:00:01Z', 'customerHashId' => 'must-not-survive',
+                'walletHashId' => 'must-not-survive', 'raw_response' => ['secret'],
+            ],
+        ], []);
+
+        $claim = $merged['nium_assign_payment_id_one_shot_v1'];
+        $this->assertSame(1, $claim['version']);
+        $this->assertSame('USD', $claim['currency_code']);
+        $this->assertArrayNotHasKey('account_type', $claim);
+        $this->assertArrayNotHasKey('customerHashId', $claim);
+        $this->assertArrayNotHasKey('walletHashId', $claim);
+        $this->assertArrayNotHasKey('raw_response', $claim);
+    }
+
     public function test_generation_six_claim_preserves_only_safe_provenance(): void
     {
         $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
