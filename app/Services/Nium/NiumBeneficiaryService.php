@@ -14,14 +14,37 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumSupportedCorridorService $corridorService,
-        private readonly NiumProviderAccountStateService $accountStateService,
+        private readonly NiumBeneficiaryExecutionAuthorization $executionAuthorization,
+        private readonly NiumBeneficiaryAccountResolver $accountResolver,
     ) {}
+
+    private const BASE_FIELDS = ['beneficiaryAccountType', 'beneficiaryCountryCode', 'beneficiaryName', 'destinationCurrency', 'payoutMethod'];
+
+    private const CONDITIONAL_FIELDS = [
+        'beneficiaryAccountNumber', 'beneficiaryAddress', 'beneficiaryBankAccountType', 'beneficiaryBankCode',
+        'beneficiaryBankName', 'beneficiaryCity', 'beneficiaryContactCountryCode', 'beneficiaryContactNumber',
+        'beneficiaryEmail', 'beneficiaryIdentificationType', 'beneficiaryIdentificationValue', 'beneficiaryPostcode',
+        'beneficiaryState', 'destinationCountry', 'proxyType', 'proxyValue', 'remitterBeneficiaryRelationship',
+        'routingCodeType1', 'routingCodeValue1', 'routingCodeType2', 'routingCodeValue2',
+    ];
+
+    public function assertReadyForCreate(Beneficiary $beneficiary): void
+    {
+        $beneficiary->loadMissing('user.profile');
+        $this->accountResolver->resolve($beneficiary->user, $beneficiary->provider_id);
+        $this->validateCorridor($beneficiary);
+        $this->assertSchemaProven($beneficiary);
+        $this->buildBeneficiaryPayload($beneficiary);
+    }
 
     public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
-        $beneficiary->loadMissing('user.profile');
-        $this->accountStateService->assertEligible($beneficiary->user);
-        $this->validateCorridor($beneficiary);
+        $this->assertReadyForCreate($beneficiary);
+        $account = $this->accountResolver->resolve($beneficiary->user, $provider->id);
+        $this->assertAccountSevenAuthorization($account->id, $beneficiary);
+        if ($account->id === 7 && (bool) data_get($beneficiary->raw_data, 'nium.verify_before_create', false)) {
+            throw new RuntimeException('HOLD_ACCOUNT_VERIFICATION_SEPARATE_APPROVAL_REQUIRED');
+        }
         $payload = $this->buildBeneficiaryPayload($beneficiary);
         $this->verifyAccountIfRequested($beneficiary);
 
@@ -30,11 +53,13 @@ class NiumBeneficiaryService implements BeneficiaryProvider
                 (string) config('services.nium.beneficiary_endpoint'),
                 [
                     'client' => $this->niumService->clientId(),
-                    'customer' => $this->niumService->customerId($beneficiary->user),
+                    'customer' => (string) $account->external_customer_id,
                 ],
             ),
             payload: $payload,
             user: $beneficiary->user,
+            operation: 'beneficiary_create',
+            externalReference: (string) data_get($beneficiary->raw_data, 'nium.one_shot_claim.tuple_sha256'),
         );
 
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
@@ -72,7 +97,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
             $beneficiary->update([
                 'status' => 'verification_failed',
-                'raw_data' => $this->safeOperationalData($responseData),
+                'raw_data' => $this->mergeProviderOutcome($beneficiary, $responseData),
             ]);
 
             throw new RuntimeException($responseData['message'] ?? 'Nium account verification failed.');
@@ -81,14 +106,14 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
         $beneficiary->update([
-            'raw_data' => $this->safeOperationalData($responseData),
+            'raw_data' => $this->mergeProviderOutcome($beneficiary, $responseData),
         ]);
     }
 
     public function updateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         $beneficiary->loadMissing('user.profile');
-        $this->accountStateService->assertEligible($beneficiary->user);
+        $this->accountResolver->resolve($beneficiary->user, $beneficiary->provider_id);
         $this->validateCorridor($beneficiary);
 
         if (! filled($beneficiary->external_beneficiary_id)) {
@@ -155,7 +180,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
             $beneficiary->update([
                 'status' => 'delete_failed',
-                'raw_data' => $this->safeOperationalData($responseData),
+                'raw_data' => $this->mergeProviderOutcome($beneficiary, $responseData),
             ]);
 
             throw new RuntimeException("{$provider->name} beneficiary deletion failed.");
@@ -166,26 +191,21 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     {
         $rawData = (array) ($beneficiary->raw_data ?? []);
         $nium = (array) ($rawData['nium'] ?? []);
-        $payload = array_merge([
+        $conditional = array_merge([
             'beneficiaryContactCountryCode' => $nium['beneficiaryContactCountryCode'] ?? $nium['beneficiary_contact_country_code'] ?? null,
             'beneficiaryContactNumber' => $beneficiary->phone,
-            'beneficiaryAccountType' => $this->beneficiaryAccountType($beneficiary),
             'beneficiaryEmail' => $beneficiary->email,
             'destinationCountry' => $beneficiary->country_code,
-            'destinationCurrency' => $beneficiary->currency,
-            'payoutMethod' => strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'LOCAL')),
-            'beneficiaryName' => $this->beneficiaryName($beneficiary),
             'beneficiaryAlias' => $nium['beneficiaryAlias'] ?? $nium['beneficiary_alias'] ?? Arr::get($nium, 'beneficiary.alias'),
             'beneficiaryPostcode' => $beneficiary->postal_code,
             'beneficiaryAddress' => $beneficiary->address_line1,
             'beneficiaryCity' => $beneficiary->city,
-            'beneficiaryCountryCode' => $beneficiary->country_code,
             'beneficiaryState' => $beneficiary->state,
             'remitterBeneficiaryRelationship' => $nium['remitterBeneficiaryRelationship']
                 ?? $nium['remitter_beneficiary_relationship']
                 ?? Arr::get($nium, 'beneficiary.remitterBeneficiaryRelationship'),
             'beneficiaryAccountNumber' => $beneficiary->account_number ?: $beneficiary->iban,
-            'beneficiaryBankAccountType' => $this->normalizeBankAccountType($nium['beneficiaryBankAccountType'] ?? $nium['beneficiary_bank_account_type'] ?? 'CHECKING'),
+            'beneficiaryBankAccountType' => $this->bankAccountType($nium['beneficiaryBankAccountType'] ?? $nium['beneficiary_bank_account_type'] ?? null),
             'beneficiaryBankName' => $beneficiary->bank_name,
             'beneficiaryBankCode' => $beneficiary->bank_code,
             'beneficiaryIdentificationType' => $nium['beneficiaryIdentificationType'] ?? $nium['beneficiary_identification_type'] ?? null,
@@ -206,8 +226,25 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             'beneficiaryName_local' => $nium['beneficiaryName_local'] ?? $nium['beneficiary_name_local'] ?? null,
         ], $this->routingCodePayload($beneficiary, $nium));
 
-        if (isset($nium['request']) && is_array($nium['request'])) {
-            $payload = array_replace_recursive($payload, $nium['request']);
+        $approvedFields = (array) Arr::get($nium, 'schema_approval.approved_fields', []);
+        $payload = [
+            'beneficiaryAccountType' => $this->beneficiaryAccountType($beneficiary),
+            'beneficiaryCountryCode' => strtoupper((string) $beneficiary->country_code),
+            'beneficiaryName' => $this->beneficiaryName($beneficiary),
+            'destinationCurrency' => strtoupper((string) $beneficiary->currency),
+            'payoutMethod' => $this->payoutMethod($nium),
+        ];
+
+        foreach ($approvedFields as $field) {
+            if (array_key_exists($field, $conditional)) {
+                $payload[$field] = $conditional[$field];
+            }
+        }
+
+        foreach (self::BASE_FIELDS as $field) {
+            if (! filled($payload[$field] ?? null)) {
+                throw new RuntimeException("Nium beneficiary required base field [{$field}] is missing.");
+            }
         }
 
         return array_filter($payload, static fn ($value) => $value !== null && $value !== '' && $value !== []);
@@ -224,9 +261,10 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $payload = $this->beneficiaryResponsePayload($responseData);
 
         if (! $response->successful() || ! filled($payload['beneficiaryHashId'] ?? $payload['id'] ?? $beneficiary->external_beneficiary_id)) {
+            $definiteRejection = $response->clientError() && ! in_array($response->status(), [408, 429], true);
             $beneficiary->update([
-                'status' => "{$action}_failed",
-                'raw_data' => $this->safeOperationalData($responseData),
+                'status' => $definiteRejection ? 'rejected_no_retry' : 'outcome_unknown_no_retry',
+                'raw_data' => $this->mergeProviderOutcome($beneficiary, $responseData),
             ]);
 
             throw new RuntimeException($responseData['message'] ?? "{$provider->name} beneficiary {$action} failed.");
@@ -235,7 +273,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $beneficiary->update([
             'external_beneficiary_id' => $payload['beneficiaryHashId'] ?? $payload['id'] ?? $beneficiary->external_beneficiary_id,
             'status' => $this->normalizeBeneficiaryStatus($payload['status'] ?? 'ACTIVE'),
-            'raw_data' => $this->safeOperationalData($responseData),
+            'raw_data' => $this->mergeProviderOutcome($beneficiary, $responseData),
         ]);
 
         return $beneficiary->fresh();
@@ -345,16 +383,15 @@ class NiumBeneficiaryService implements BeneficiaryProvider
                     ?? Arr::get($nium, 'beneficiary.remitterBeneficiaryRelationship'),
             ], static fn ($value) => $value !== null && $value !== ''),
             'accountNumber' => $beneficiary->account_number ?: $beneficiary->iban,
-            'bankAccountType' => $this->normalizeBankAccountType($verification['bankAccountType']
+            'bankAccountType' => $this->bankAccountType($verification['bankAccountType']
                 ?? $nium['bankAccountType']
                 ?? $nium['bank_account_type']
-                ?? 'CHECKING'),
+                ?? null),
             'bankCode' => $beneficiary->bank_code,
             'payoutMethod' => strtoupper((string) (
                 $verification['payoutMethod']
                 ?? $nium['payoutMethod']
                 ?? $nium['payout_method']
-                ?? 'LOCAL'
             )),
             'proxyType' => $verification['proxyType'] ?? null,
             'proxyValue' => $verification['proxyValue'] ?? null,
@@ -381,7 +418,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     private function validateCorridor(Beneficiary $beneficiary): void
     {
         $nium = (array) (($beneficiary->raw_data ?? [])['nium'] ?? []);
-        $payoutMethod = strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'LOCAL'));
+        $payoutMethod = $this->payoutMethod($nium);
         $routingTypes = array_values(array_filter(array_map(
             static fn (array $routing): ?string => isset($routing['type']) ? (string) $routing['type'] : null,
             $this->routingInfo($beneficiary, $nium),
@@ -390,12 +427,102 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $this->corridorService->assertSupported($beneficiary, $payoutMethod, $routingTypes);
     }
 
-    private function normalizeBankAccountType(mixed $value): string
+    private function bankAccountType(mixed $value): ?string
     {
-        return match (strtoupper(trim((string) $value))) {
-            'CURRENT' => 'CURRENT',
-            'SAVINGS', 'SAVING' => 'SAVINGS',
-            default => 'CHECKING',
-        };
+        if (! filled($value)) {
+            return null;
+        }
+
+        $value = trim((string) $value);
+        if (! in_array($value, ['Current', 'Saving', 'Maestra', 'Checking'], true)) {
+            throw new RuntimeException('Nium beneficiary bank account type must use an exact provider literal.');
+        }
+
+        return $value;
+    }
+
+    private function payoutMethod(array $nium): string
+    {
+        $value = $nium['payoutMethod'] ?? $nium['payout_method'] ?? null;
+        if (! filled($value)) {
+            throw new RuntimeException('Nium beneficiary payoutMethod must be explicit.');
+        }
+
+        $value = strtoupper(trim((string) $value));
+        if (! in_array($value, ['LOCAL', 'SWIFT', 'WALLET', 'CASH', 'CARD', 'PROXY', 'CHECK'], true)) {
+            throw new RuntimeException('Nium beneficiary payoutMethod is invalid.');
+        }
+
+        return $value;
+    }
+
+    private function assertSchemaProven(Beneficiary $beneficiary): void
+    {
+        $nium = (array) (($beneficiary->raw_data ?? [])['nium'] ?? []);
+        $approval = (array) ($nium['schema_approval'] ?? []);
+        if (! preg_match('/^[a-f0-9]{64}$/', (string) ($approval['schema_sha256'] ?? ''))
+            || ! hash_equals((string) $approval['schema_sha256'], (string) ($nium['schema_sha256'] ?? ''))
+            || ! preg_match('/^[a-f0-9]{64}$/', (string) ($approval['beneficiary_preparation_sha256'] ?? ''))
+            || ! is_int($approval['schema_length'] ?? null) || $approval['schema_length'] <= 0
+            || strtoupper((string) ($approval['currency_code'] ?? '')) !== strtoupper((string) $beneficiary->currency)
+            || strtoupper((string) ($approval['destination_country'] ?? '')) !== strtoupper((string) $beneficiary->country_code)
+            || strtoupper((string) ($approval['payout_method'] ?? '')) !== $this->payoutMethod($nium)
+            || ! is_array($approval['approved_fields'] ?? null)
+            || ! is_array($approval['required_fields'] ?? null)
+            || ! filled($approval['reviewed_at'] ?? null)
+            || ($approval['review_source'] ?? null) !== 'human_reviewed_factual_nium_schema') {
+            throw new RuntimeException('HOLD_BENEFICIARY_SCHEMA_NOT_PROVEN');
+        }
+
+        $knownFields = [...self::BASE_FIELDS, ...self::CONDITIONAL_FIELDS];
+        foreach ([...$approval['approved_fields'], ...$approval['required_fields']] as $field) {
+            if (! is_string($field) || ! in_array($field, $knownFields, true)) {
+                throw new RuntimeException('HOLD_BENEFICIARY_SCHEMA_NOT_PROVEN');
+            }
+        }
+
+        foreach ($approval['required_fields'] as $field) {
+            if (! in_array($field, self::BASE_FIELDS, true) && ! in_array($field, $approval['approved_fields'], true)) {
+                throw new RuntimeException('HOLD_BENEFICIARY_SCHEMA_NOT_PROVEN');
+            }
+            if (! filled($this->buildBeneficiaryPayload($beneficiary)[$field] ?? null)) {
+                throw new RuntimeException("Nium beneficiary required field [{$field}] is missing.");
+            }
+        }
+
+        if (! hash_equals((string) $approval['beneficiary_preparation_sha256'], $this->preparationFingerprint($beneficiary))) {
+            throw new RuntimeException('HOLD_BENEFICIARY_PREPARATION_CHANGED');
+        }
+    }
+
+    private function assertAccountSevenAuthorization(int $accountId, Beneficiary $beneficiary): void
+    {
+        if ($accountId !== 7) {
+            return;
+        }
+
+        $claim = (array) data_get($beneficiary->raw_data, 'nium.one_shot_claim', []);
+        $schemaSha = (string) data_get($beneficiary->raw_data, 'nium.schema_approval.schema_sha256', '');
+        $preparationSha = $this->preparationFingerprint($beneficiary);
+        if (($claim['state'] ?? null) !== 'submitting'
+            || ! $this->executionAuthorization->allows(7, $beneficiary->id, (string) ($claim['tuple_sha256'] ?? ''), $schemaSha, $preparationSha)) {
+            throw new RuntimeException('HOLD_ACCOUNT_7_BENEFICIARY_ONE_SHOT_REQUIRED');
+        }
+    }
+
+    public function preparationFingerprint(Beneficiary $beneficiary): string
+    {
+        $payload = $this->buildBeneficiaryPayload($beneficiary);
+        ksort($payload);
+
+        return hash('sha256', json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
+    }
+
+    private function mergeProviderOutcome(Beneficiary $beneficiary, array $data): array
+    {
+        $raw = (array) $beneficiary->raw_data;
+        $raw['nium']['provider_outcome'] = $this->safeOperationalData($data);
+
+        return $raw;
     }
 }

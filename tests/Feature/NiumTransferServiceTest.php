@@ -24,6 +24,8 @@ class NiumTransferServiceTest extends TestCase
     {
         parent::setUp();
 
+        config()->set('services.nium.purpose_codes', ['IR001']);
+
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
     }
@@ -100,7 +102,7 @@ class NiumTransferServiceTest extends TestCase
             'net_rate' => 83,
             'fee_amount' => 1,
             'expires_at' => now()->addMinutes(5),
-            'raw_data' => ['provider_fx_type' => 'lock_and_hold', 'audit_id' => '112'],
+            'raw_data' => ['provider_fx_type' => 'lock_and_hold', 'provider_status' => 'ACTIVE', 'audit_id' => '112'],
         ]);
         $transfer->update(['fx_quote_id' => $quote->id, 'target_amount' => 8300, 'fx_rate' => 83, 'fee_amount' => 1]);
 
@@ -388,13 +390,14 @@ class NiumTransferServiceTest extends TestCase
             'user_id' => $user->id, 'provider_id' => $provider->id, 'quote_ref' => (string) random_int(1000, 9999),
             'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
             'target_amount' => 830, 'net_rate' => 83, 'fee_amount' => 1, 'expires_at' => now()->addMinutes(5),
-            'raw_data' => ['provider_fx_type' => 'lock_and_hold'],
+            'raw_data' => ['provider_fx_type' => 'lock_and_hold', 'provider_status' => 'ACTIVE'],
         ]);
         $transfer = Transfer::query()->create(array_merge([
             'transfer_no' => 'TRF-'.strtoupper(uniqid()), 'user_id' => $user->id, 'provider_id' => $provider->id,
             'beneficiary_id' => $beneficiary->id, 'fx_quote_id' => $quote->id, 'transfer_type' => 'bank',
             'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
             'target_amount' => 830, 'fx_rate' => 83, 'fee_amount' => 1, 'status' => 'draft',
+            'purpose_code' => 'IR001', 'raw_data' => ['nium' => ['sourceOfFunds' => 'Personal Savings']],
         ], $overrides));
 
         return [$provider, $transfer->fresh(['provider', 'user', 'beneficiary', 'fxQuote'])];

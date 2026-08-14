@@ -18,6 +18,7 @@ class NiumTransferService implements TransferProvider
     public function __construct(
         private readonly NiumService $niumService,
         private readonly TransferEligibilityService $eligibilityService,
+        private readonly NiumPurposeCodeService $purposeCodeService,
     ) {}
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
@@ -26,6 +27,8 @@ class NiumTransferService implements TransferProvider
             $transfer->loadMissing(['provider', 'user', 'beneficiary', 'sourceBankAccount'])
         );
         $this->ensureAuthoritativeQuote($transfer->loadMissing('fxQuote'));
+        $this->purposeCodeService->assertValid($transfer->user, $transfer->purpose_code);
+        $this->sourceOfFunds($transfer);
 
         $transfer = DB::transaction(function () use ($transfer): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
@@ -202,14 +205,14 @@ class NiumTransferService implements TransferProvider
                 'auditId' => $transfer->fxQuote?->quote_ref !== null ? (int) $transfer->fxQuote->quote_ref : null,
                 'scheduledPayoutDate' => $nium['payout']['scheduledPayoutDate'] ?? null,
                 'serviceTime' => $nium['payout']['serviceTime'] ?? null,
-                'tradeOrderID' => $nium['payout']['tradeOrderID'] ?? $transfer->reference_text,
+                'tradeOrderID' => $nium['payout']['tradeOrderID'] ?? null,
                 'swiftFeeType' => $nium['payout']['swiftFeeType'] ?? null,
                 'preScreening' => $nium['payout']['preScreening'] ?? null,
             ], static fn ($value) => $value !== null && $value !== ''),
             'purposeCode' => $transfer->purpose_code,
-            'sourceOfFunds' => $nium['sourceOfFunds'] ?? $nium['source_of_funds'] ?? null,
+            'sourceOfFunds' => $this->sourceOfFunds($transfer),
             'exemptionCode' => $nium['exemptionCode'] ?? $nium['exemption_code'] ?? null,
-            'customerComments' => $transfer->reference_text,
+            'customerComments' => $nium['customerComments'] ?? $nium['customer_comments'] ?? null,
             'ownPayment' => $nium['ownPayment'] ?? null,
             'authenticationCode' => $nium['authenticationCode'] ?? null,
             'deviceDetails' => $nium['deviceDetails'] ?? null,
@@ -292,6 +295,7 @@ class NiumTransferService implements TransferProvider
         }
 
         if (($quote->raw_data['provider_fx_type'] ?? null) !== 'lock_and_hold'
+            || strtoupper((string) ($quote->raw_data['provider_status'] ?? '')) !== 'ACTIVE'
             || ! is_numeric($quote->quote_ref)
             || $quote->user_id !== $transfer->user_id
             || $quote->provider_id !== $transfer->provider_id
@@ -300,5 +304,21 @@ class NiumTransferService implements TransferProvider
             || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')) {
             throw new RuntimeException('Nium FX quote ownership, corridor, or amount does not match the transfer.');
         }
+    }
+
+    private function sourceOfFunds(Transfer $transfer): string
+    {
+        $nium = (array) (($transfer->raw_data ?? [])['nium'] ?? []);
+        $value = $nium['sourceOfFunds'] ?? $nium['source_of_funds'] ?? null;
+        $allowed = [
+            'Salary', 'Personal Savings', 'Personal Wealth', 'Retirement Funds',
+            'Business Owner/Shareholder', 'Loan Facility', 'Personal Account', 'Corporate Account',
+        ];
+
+        if (! is_string($value) || ! in_array($value, $allowed, true)) {
+            throw new RuntimeException('Nium transfer requires an explicit valid sourceOfFunds.');
+        }
+
+        return $value;
     }
 }

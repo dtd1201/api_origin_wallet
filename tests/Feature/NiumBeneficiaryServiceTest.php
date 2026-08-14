@@ -65,7 +65,12 @@ class NiumBeneficiaryServiceTest extends TestCase
             'currency' => 'INR',
             'bank_name' => 'HDFC',
             'bank_code' => 'HDFC0001234',
-            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC']],
+            'raw_data' => ['nium' => [
+                'payoutMethod' => 'LOCAL',
+                'bankCodeType' => 'IFSC',
+                'schema_sha256' => hash('sha256', 'factual-test-schema'),
+                'schema_approval' => $this->schemaApproval(['routingCodeType1', 'routingCodeValue1']),
+            ]],
             'account_number' => '1234567890',
             'swift_bic' => 'HDFCINBB',
             'address_line1' => '1 Main St',
@@ -90,7 +95,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             ], 200),
         ]);
 
-        $updated = app(NiumBeneficiaryService::class)->createBeneficiary($provider, $beneficiary->fresh('user'));
+        $updated = app(NiumBeneficiaryService::class)->createBeneficiary($provider, $this->bindPreparation($beneficiary));
 
         $this->assertSame('bnf_hash_123', $updated->external_beneficiary_id);
         $this->assertSame('active', $updated->status);
@@ -147,7 +152,10 @@ class NiumBeneficiaryServiceTest extends TestCase
             'status' => 'pending',
             'raw_data' => [
                 'nium' => [
+                    'payoutMethod' => 'LOCAL',
                     'bankCodeType' => 'IFSC',
+                    'schema_sha256' => hash('sha256', 'factual-test-schema'),
+                    'schema_approval' => $this->schemaApproval([]),
                     'verify_before_create' => true,
                     'account_verification' => [
                         'routingInfo' => [
@@ -174,7 +182,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             ], 200),
         ]);
 
-        $updated = app(NiumBeneficiaryService::class)->createBeneficiary($provider, $beneficiary->fresh('user'));
+        $updated = app(NiumBeneficiaryService::class)->createBeneficiary($provider, $this->bindPreparation($beneficiary));
 
         $this->assertSame('bnf_hash_456', $updated->external_beneficiary_id);
         $this->assertArrayNotHasKey('verification_response', $updated->raw_data ?? []);
@@ -229,7 +237,12 @@ class NiumBeneficiaryServiceTest extends TestCase
             'currency' => 'INR',
             'account_number' => '1234567890',
             'bank_code' => 'HDFC0001234',
-            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC']],
+            'raw_data' => ['nium' => [
+                'payoutMethod' => 'LOCAL',
+                'bankCodeType' => 'IFSC',
+                'schema_sha256' => hash('sha256', 'factual-test-schema'),
+                'schema_approval' => $this->schemaApproval([]),
+            ]],
             'status' => 'pending',
         ]));
 
@@ -261,7 +274,7 @@ class NiumBeneficiaryServiceTest extends TestCase
         });
 
         foreach ($beneficiaries as $beneficiary) {
-            app(NiumBeneficiaryService::class)->createBeneficiary($provider, $beneficiary->fresh('user'));
+            app(NiumBeneficiaryService::class)->createBeneficiary($provider, $this->bindPreparation($beneficiary));
         }
 
         $this->assertSame(1, $corridorRequests);
@@ -311,6 +324,11 @@ class NiumBeneficiaryServiceTest extends TestCase
             'account_number' => '1234567890',
             'external_beneficiary_id' => 'bnf_hash_123',
             'status' => 'active',
+            'raw_data' => ['nium' => [
+                'payoutMethod' => 'LOCAL',
+                'schema_sha256' => hash('sha256', 'factual-test-schema'),
+                'schema_approval' => $this->schemaApproval(['beneficiaryAccountNumber']),
+            ]],
         ]);
 
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');
@@ -328,7 +346,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             ], 200),
         ]);
 
-        $updated = app(NiumBeneficiaryService::class)->updateBeneficiary($provider, $beneficiary->fresh('user'));
+        $updated = app(NiumBeneficiaryService::class)->updateBeneficiary($provider, $this->bindPreparation($beneficiary));
 
         $this->assertSame('active', $updated->status);
 
@@ -390,5 +408,31 @@ class NiumBeneficiaryServiceTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
             && $request->url() === 'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/beneficiaries/bnf_hash_123');
+    }
+
+    private function schemaApproval(array $approvedFields, array $requiredFields = []): array
+    {
+        return [
+            'schema_sha256' => hash('sha256', 'factual-test-schema'),
+            'beneficiary_preparation_sha256' => str_repeat('0', 64),
+            'schema_length' => strlen('factual-test-schema'),
+            'currency_code' => 'INR',
+            'destination_country' => 'IN',
+            'payout_method' => 'LOCAL',
+            'approved_fields' => $approvedFields,
+            'required_fields' => $requiredFields,
+            'reviewed_at' => now()->toISOString(),
+            'review_source' => 'human_reviewed_factual_nium_schema',
+        ];
+    }
+
+    private function bindPreparation(Beneficiary $beneficiary): Beneficiary
+    {
+        $beneficiary = $beneficiary->fresh('user.profile');
+        $raw = (array) $beneficiary->raw_data;
+        $raw['nium']['schema_approval']['beneficiary_preparation_sha256'] = app(NiumBeneficiaryService::class)->preparationFingerprint($beneficiary);
+        $beneficiary->update(['raw_data' => $raw]);
+
+        return $beneficiary->fresh('user.profile');
     }
 }

@@ -108,6 +108,8 @@ return [
         'beneficiary_endpoint' => env('NIUM_BENEFICIARY_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/beneficiaries'),
         'supported_corridors_endpoint' => env('NIUM_SUPPORTED_CORRIDORS_ENDPOINT', '/api/v3/client/{clientHashId}/supportedCorridors'),
         'beneficiary_validation_schema_endpoint' => env('NIUM_BENEFICIARY_VALIDATION_SCHEMA_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/currency/{currencyCode}/validationSchemas'),
+        'purpose_codes_endpoint' => env('NIUM_PURPOSE_CODES_ENDPOINT', '/api/v1/remittance/purposeCodes'),
+        'purpose_codes' => [],
         'supported_corridors_cache_seconds' => env('NIUM_SUPPORTED_CORRIDORS_CACHE_SECONDS', 3600),
         'supported_corridors' => [],
         'beneficiary_update_enabled' => env('NIUM_BENEFICIARY_UPDATE_ENABLED', false),
