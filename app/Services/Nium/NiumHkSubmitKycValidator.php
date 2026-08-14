@@ -56,6 +56,21 @@ final class NiumHkSubmitKycValidator
         $this->assertManualProofOfAddressDocument($payload);
     }
 
+    public function assertManualGenerationSeven(array $payload): void
+    {
+        if (($payload['region'] ?? null) !== 'HK'
+            || ($payload['entityType'] ?? null) !== 'INDIVIDUAL_STAKEHOLDER'
+            || ($payload['kycMode'] ?? null) !== 'manual_kyc'
+            || array_key_exists('isResident', $payload)
+            || ! is_string($payload['entityReferenceId'] ?? null)
+            || trim($payload['entityReferenceId']) === '') {
+            throw new RuntimeException('Invalid exact Nium HK generation #7 manual KYC stakeholder contract.');
+        }
+
+        $this->assertManualIdentityDocument($payload);
+        $this->assertManualProofOfAddressDocument($payload);
+    }
+
     private function assertManualIdentityDocument(array $payload): void
     {
         $documents = $payload['proofOfIdentityDocument'] ?? null;

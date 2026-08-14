@@ -60,6 +60,9 @@ final class NiumProviderAccountMetadataOwnership
             'nium_stakeholder_submit_kyc_retry_generation_6' => $this->stakeholderGenerationSix(
                 $metadata['nium_stakeholder_submit_kyc_retry_generation_6'] ?? null,
             ),
+            'nium_stakeholder_submit_kyc_retry_generation_7' => $this->stakeholderGenerationSeven(
+                $metadata['nium_stakeholder_submit_kyc_retry_generation_7'] ?? null,
+            ),
             'nium_kyc_prebuilt_form_session' => $this->kycPrebuiltFormSession(
                 $metadata['nium_kyc_prebuilt_form_session'] ?? null,
             ),
@@ -202,6 +205,28 @@ final class NiumProviderAccountMetadataOwnership
             'previous_log_id' => ($value['previous_log_id'] ?? null) === 116 ? 116 : null,
             'previous_http_status' => ($value['previous_http_status'] ?? null) === 400 ? 400 : null,
             'previous_error_field_count' => ($value['previous_error_field_count'] ?? null) === 1 ? 1 : null,
+            'updated_at' => $this->timestamp($value['updated_at'] ?? null),
+        ], static fn (mixed $item): bool => $item !== null);
+
+        return $safe !== [] ? $safe : null;
+    }
+
+    private function stakeholderGenerationSeven(mixed $value): ?array
+    {
+        if (! is_array($value) || array_is_list($value)) {
+            return null;
+        }
+
+        $safe = array_filter([
+            'state' => $this->safeString($value['state'] ?? null, 64),
+            'generation' => ($value['generation'] ?? null) === 7 ? 7 : null,
+            'contract_fingerprint' => $this->fingerprint($value['contract_fingerprint'] ?? null, 16),
+            'prebuilt_session_log_id' => ($value['prebuilt_session_log_id'] ?? null) === 117 ? 117 : null,
+            'expired_prebuilt_session_override' => ($value['expired_prebuilt_session_override'] ?? null)
+                === 'human_verified_provider_ui_expired' ? 'human_verified_provider_ui_expired' : null,
+            'provider_http_status' => $this->httpStatus($value['provider_http_status'] ?? null),
+            'transport_outcome' => $this->safeString($value['transport_outcome'] ?? null, 64),
+            'request_id_fingerprint' => $this->fingerprint($value['request_id_fingerprint'] ?? null, 16),
             'updated_at' => $this->timestamp($value['updated_at'] ?? null),
         ], static fn (mixed $item): bool => $item !== null);
 
