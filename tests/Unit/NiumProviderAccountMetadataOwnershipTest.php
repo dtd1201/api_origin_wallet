@@ -85,6 +85,25 @@ class NiumProviderAccountMetadataOwnershipTest extends TestCase
         $this->assertArrayNotHasKey('url', $claim);
     }
 
+    public function test_customer_onboarding_rfi_session_preserves_only_safe_fields(): void
+    {
+        $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
+            'nium_customer_onboarding_rfi_prebuilt_session' => [
+                'generation' => 1, 'state' => 'created', 'feature_type' => 'customer_onboarding_rfi',
+                'session_id_fingerprint' => str_repeat('a', 16), 'provider_http_status' => 200,
+                'transport_outcome' => 'response_received', 'created_at' => '2026-08-14T01:00:00Z',
+                'expiry_at' => '2026-08-14T03:00:00Z', 'updated_at' => '2026-08-14T01:00:01Z',
+                'sessionId' => 'must-not-survive', 'answers' => ['secret'], 'url' => 'must-not-survive',
+            ],
+        ], []);
+
+        $claim = $merged['nium_customer_onboarding_rfi_prebuilt_session'];
+        $this->assertSame('customer_onboarding_rfi', $claim['feature_type']);
+        $this->assertArrayNotHasKey('sessionId', $claim);
+        $this->assertArrayNotHasKey('answers', $claim);
+        $this->assertArrayNotHasKey('url', $claim);
+    }
+
     public function test_generation_six_claim_preserves_only_safe_provenance(): void
     {
         $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([

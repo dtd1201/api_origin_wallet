@@ -68,15 +68,24 @@ class NiumHkKycPrebuiltFormSessionRecoveryGenerationTwoRunnerTest extends TestCa
 
         $this->assertSame('PASS_SESSION_CREATED', $result['terminal']);
         $this->assertSame(1, $result['session_post_count']);
-        $this->assertArrayNotHasKey('sessionId', $result);
+        $this->assertSame('secret-session-id', $result['sessionId']);
         $this->assertSame(substr(hash('sha256', 'secret-session-id'), 0, 16), $result['session_id_fingerprint']);
         $this->assertSame([
             'generation', 'state', 'created_at', 'expiry_at', 'previous_session_log_id', 'recovery_reason',
             'provider_http_status', 'transport_outcome', 'session_id_fingerprint',
         ], array_keys($this->claim()));
         $this->assertStringNotContainsString('secret-session-id', json_encode($this->claim(), JSON_THROW_ON_ERROR));
+        $this->assertArrayNotHasKey('sessionId', $this->claim());
         $this->assertSame($before, $this->immutableEvidence());
         $this->assertReplayBlocked(1);
+    }
+
+    public function test_offline_audit_never_exposes_runtime_session_id(): void
+    {
+        $result = $this->runner()->audit();
+
+        $this->assertArrayNotHasKey('sessionId', $result);
+        $this->assertFalse($result['session_id_present'] ?? false);
     }
 
     public function test_separate_human_approval_is_required_before_preflight_or_http(): void
