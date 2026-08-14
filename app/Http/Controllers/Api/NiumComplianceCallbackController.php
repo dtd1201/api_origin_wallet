@@ -37,6 +37,6 @@ class NiumComplianceCallbackController extends Controller
             ], 403);
         }
 
-        return response()->json($service->handle($request), 202);
+        return response()->json($service->handle($request), 200);
     }
 }

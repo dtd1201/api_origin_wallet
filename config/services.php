@@ -102,7 +102,7 @@ return [
         'wallet_transactions_endpoint' => env('NIUM_WALLET_TRANSACTIONS_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions'),
         'assign_payment_id_endpoint' => env('NIUM_ASSIGN_PAYMENT_ID_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/paymentId'),
         'transaction_sync_days' => env('NIUM_TRANSACTION_SYNC_DAYS', 30),
-        'transaction_sync_page_size' => env('NIUM_TRANSACTION_SYNC_PAGE_SIZE', 100),
+        'transaction_sync_page_size' => env('NIUM_TRANSACTION_SYNC_PAGE_SIZE', 20),
         'transaction_sync_max_pages' => env('NIUM_TRANSACTION_SYNC_MAX_PAGES', 20),
         'quote_endpoint' => env('NIUM_QUOTE_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate'),
         'beneficiary_endpoint' => env('NIUM_BENEFICIARY_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/beneficiaries'),

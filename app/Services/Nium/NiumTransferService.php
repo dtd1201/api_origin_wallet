@@ -19,6 +19,7 @@ class NiumTransferService implements TransferProvider
         private readonly NiumService $niumService,
         private readonly TransferEligibilityService $eligibilityService,
         private readonly NiumPurposeCodeService $purposeCodeService,
+        private readonly NiumBeneficiaryAccountResolver $accountResolver,
     ) {}
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
@@ -29,6 +30,7 @@ class NiumTransferService implements TransferProvider
         $this->ensureAuthoritativeQuote($transfer->loadMissing('fxQuote'));
         $this->purposeCodeService->assertValid($transfer->user, $transfer->purpose_code);
         $this->sourceOfFunds($transfer);
+        $account = $this->accountResolver->resolve($transfer->user, $provider->id);
 
         $transfer = DB::transaction(function () use ($transfer): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
@@ -53,8 +55,8 @@ class NiumTransferService implements TransferProvider
                     (string) config('services.nium.transfer_endpoint'),
                     [
                         'client' => $this->niumService->clientId(),
-                        'customer' => $this->niumService->customerId($transfer->user),
-                        'wallet' => $this->niumService->walletId($transfer->user),
+                        'customer' => (string) $account->external_customer_id,
+                        'wallet' => (string) $account->external_account_id,
                     ],
                 ),
                 payload: $payload,
@@ -135,14 +137,15 @@ class NiumTransferService implements TransferProvider
         if (! filled($transfer->external_transfer_id)) {
             throw new RuntimeException('Nium transfer is missing the system reference number.');
         }
+        $account = $this->accountResolver->resolve($transfer->user, $provider->id);
 
         $response = $this->niumService->get(
             path: $this->niumService->path(
                 (string) config('services.nium.transfer_status_endpoint'),
                 [
                     'client' => $this->niumService->clientId(),
-                    'customer' => $this->niumService->customerId($transfer->user),
-                    'wallet' => $this->niumService->walletId($transfer->user),
+                    'customer' => (string) $account->external_customer_id,
+                    'wallet' => (string) $account->external_account_id,
                     'transfer' => $transfer->external_transfer_id,
                 ],
             ),
@@ -275,6 +278,12 @@ class NiumTransferService implements TransferProvider
             'provider_request_id' => $providerData['requestId'] ?? $providerData['request_id'] ?? null,
             'provider_error_code' => $providerData['code'] ?? $providerData['errorCode'] ?? null,
             'provider_status' => $providerData['status'] ?? null,
+            'provider_sub_status' => $providerData['subStatus'] ?? null,
+            'status_details' => is_scalar($providerData['statusDetails'] ?? null) ? Str::limit((string) $providerData['statusDetails'], 300, '') : null,
+            'error_reason_code' => $providerData['errorReasonCode'] ?? null,
+            'error_description' => is_scalar($providerData['errorDescription'] ?? null) ? Str::limit((string) $providerData['errorDescription'], 300, '') : null,
+            'payment_reference_number' => $providerData['paymentReferenceNumber'] ?? null,
+            'last_updated_at' => $providerData['lastUpdatedAt'] ?? null,
         ], static fn ($value) => $value !== null && $value !== '');
     }
 

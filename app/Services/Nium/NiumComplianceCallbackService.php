@@ -13,23 +13,30 @@ use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 class NiumComplianceCallbackService
 {
     public function __construct(
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer,
+        private readonly NiumDataSyncService $dataSyncService,
     ) {}
 
     public function handle(Request $request): array
     {
         $payload = $request->all();
+        $callbackType = strtoupper(trim((string) ($payload['type'] ?? '')));
+        $nudgeValue = trim((string) ($payload['value'] ?? ''));
+        if ($callbackType !== 'TRANSACTION' || $nudgeValue === '') {
+            throw new RuntimeException('Nium transaction compliance callback requires type=TRANSACTION and a non-empty value.');
+        }
         $provider = IntegrationProvider::query()->firstOrCreate(
             ['code' => 'nium'],
             ['name' => 'Nium', 'status' => 'active'],
         );
         $requestId = $this->requestId($payload, $request);
-        $references = $this->valuesForKeys($payload, [
+        $references = array_values(array_unique([$nudgeValue, ...$this->valuesForKeys($payload, [
             'systemReferenceNumber',
             'system_reference_number',
             'remittanceId',
@@ -45,16 +52,23 @@ class NiumComplianceCallbackService
             'transferReference',
             'transfer_reference',
             'reference',
-        ]);
+        ])]));
         $customerReferences = $this->valuesForKeys($payload, [
             'customerHashId',
             'customer_hash_id',
             'customerId',
             'customer_id',
         ]);
-        $status = $this->complianceStatus($payload);
+        $status = null;
         $eventId = $this->eventId($payload, $request, $requestId, $references, $status);
-        $sanitizedPayload = (array) $this->sensitiveDataSanitizer->sanitize($payload);
+        $sanitizedPayload = array_filter([
+            'type' => $callbackType,
+            'value' => $this->boundedIdentifier($nudgeValue),
+            'clientHashId' => $this->boundedIdentifier((string) ($payload['clientHashId'] ?? '')),
+            'customerHashId' => $this->boundedIdentifier((string) ($payload['customerHashId'] ?? '')),
+            'walletHashId' => $this->boundedIdentifier((string) ($payload['walletHashId'] ?? '')),
+            'externalId' => $this->boundedIdentifier((string) ($payload['externalId'] ?? '')),
+        ], static fn ($value) => $value !== null && $value !== '' && $value !== []);
 
         $event = NiumComplianceEvent::query()->firstOrCreate(
             ['event_id' => $eventId],
@@ -146,6 +160,34 @@ class NiumComplianceCallbackService
             ]);
 
             throw $exception;
+        }
+
+        if ($event->transfer_id !== null) {
+            try {
+                $transfer = Transfer::query()->with('user')->findOrFail($event->transfer_id);
+                $this->dataSyncService->syncTransactionsFor($provider, $transfer->user, array_filter([
+                    'systemReferenceNumber' => $transfer->external_transfer_id,
+                    'externalId' => $payload['externalId'] ?? null,
+                ], static fn ($value) => filled($value)));
+                $transfer->refresh();
+                $transaction = Transaction::query()->where('transfer_id', $transfer->id)->latest('id')->first();
+                $requiresAction = $transfer->compliance_review_required || (bool) $transaction?->compliance_review_required;
+                $event->update([
+                    'transaction_id' => $transaction?->id ?? $event->transaction_id,
+                    'compliance_status' => $transaction?->compliance_status ?? $transfer->compliance_status,
+                    'requires_action' => $requiresAction,
+                    'review_status' => $requiresAction ? 'pending' : 'not_required',
+                    'processing_status' => 'processed',
+                ]);
+                $event = $event->fresh();
+            } catch (Throwable $exception) {
+                $event->update([
+                    'processing_status' => 'failed',
+                    'review_status' => 'pending',
+                    'error_message' => Str::limit((string) $this->sensitiveDataSanitizer->sanitize($exception->getMessage()), 500, ''),
+                ]);
+                $event = $event->fresh();
+            }
         }
 
         if ($event->match_status === 'unmatched') {

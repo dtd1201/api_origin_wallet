@@ -358,6 +358,37 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('completed', $updated->status);
     }
 
+    public function test_submit_transfer_uses_exact_account_seven_path_over_later_eligible_account(): void
+    {
+        $dummyProvider = IntegrationProvider::query()->create(['code' => 'dummy', 'name' => 'Dummy', 'status' => 'active']);
+        for ($id = 1; $id <= 6; $id++) {
+            User::factory()->create()->providerAccounts()->create([
+                'provider_id' => $dummyProvider->id, 'external_customer_id' => 'dummy-customer-'.$id,
+                'external_account_id' => 'dummy-wallet-'.$id, 'status' => 'active', 'provider_status' => 'clear',
+                'customer_id_verified_at' => now(), 'wallet_id_verified_at' => now(),
+            ]);
+        }
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        $transfer->user->providerAccounts()->where('provider_id', $provider->id)->update([
+            'external_customer_id' => 'exact-customer-7', 'external_account_id' => 'exact-wallet-7',
+        ]);
+        $laterProvider = IntegrationProvider::query()->create(['code' => 'NIUM', 'name' => 'Later Nium', 'status' => 'active']);
+        $transfer->user->providerAccounts()->create([
+            'provider_id' => $laterProvider->id, 'external_customer_id' => 'wrong-later-customer',
+            'external_account_id' => 'wrong-later-wallet', 'status' => 'active', 'provider_status' => 'clear',
+            'customer_id_verified_at' => now(), 'wallet_id_verified_at' => now(),
+        ]);
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-ACCOUNT-7'])]);
+
+        app(NiumTransferService::class)->submitTransfer($provider, $transfer->fresh(['provider', 'user', 'beneficiary', 'fxQuote']));
+
+        Http::assertSent(function ($request): bool {
+            return str_contains($request->url(), '/customer/exact-customer-7/wallet/exact-wallet-7/remittance')
+                && ! str_contains($request->url(), 'wrong-later-customer')
+                && ! str_contains($request->url(), 'wrong-later-wallet');
+        });
+    }
+
     private function makeSubmittableTransfer(array $overrides = []): array
     {
         config()->set('wallet.transfer_controls.require_admin_approval', false);

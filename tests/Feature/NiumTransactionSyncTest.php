@@ -22,6 +22,8 @@ class NiumTransactionSyncTest extends TestCase
         config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-key']);
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
         config()->set('services.nium.transaction_sync_page_size', 1);
         config()->set('services.nium.transaction_sync_max_pages', 2);
 
@@ -63,5 +65,39 @@ class NiumTransactionSyncTest extends TestCase
         $this->assertNotNull($account->fresh()->transactions_last_synced_at);
         $this->assertSame(4, Http::recorded()->count());
         $this->assertStringNotContainsString('must-not-be-stored', json_encode(Transaction::query()->pluck('raw_data')->all()));
+    }
+
+    public function test_targeted_transaction_sync_does_not_advance_global_watermark(): void
+    {
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
+        config()->set('services.nium.client_id', 'client-test');
+        config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-key']);
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
+        config()->set('services.nium.transaction_sync_page_size', 20);
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        $user = User::factory()->create();
+        $oldWatermark = now()->subDays(5)->startOfSecond();
+        $account = $user->providerAccounts()->create([
+            'provider_id' => $provider->id, 'external_customer_id' => 'customer-targeted',
+            'external_account_id' => 'wallet-targeted', 'status' => 'active', 'provider_status' => 'clear',
+            'customer_id_verified_at' => now(), 'wallet_id_verified_at' => now(),
+            'transactions_last_synced_at' => $oldWatermark,
+        ]);
+        Http::fake(['*' => Http::response(['content' => [], 'totalPages' => 1])]);
+
+        app(NiumDataSyncService::class)->syncTransactionsFor($provider, $user, ['systemReferenceNumber' => 'SYS-TARGET']);
+        $this->assertTrue($account->fresh()->transactions_last_synced_at->equalTo($oldWatermark));
+        $targetedRequest = Http::recorded()[0][0];
+        $this->assertSame('SYS-TARGET', $targetedRequest['systemReferenceNumber']);
+        $this->assertArrayNotHasKey('startDate', $targetedRequest->data());
+        $this->assertArrayNotHasKey('endDate', $targetedRequest->data());
+
+        app(NiumDataSyncService::class)->syncTransactions($provider, $user);
+        $this->assertTrue($account->fresh()->transactions_last_synced_at->greaterThan($oldWatermark));
+        $broadRequest = Http::recorded()[1][0];
+        $this->assertNotNull($broadRequest['startDate']);
+        $this->assertNotNull($broadRequest['endDate']);
+        Http::assertSent(fn (Request $request): bool => ($request['size'] ?? null) === 20);
     }
 }

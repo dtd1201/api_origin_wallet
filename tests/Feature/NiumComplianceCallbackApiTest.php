@@ -9,6 +9,7 @@ use App\Models\Transfer;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
@@ -22,6 +23,28 @@ class NiumComplianceCallbackApiTest extends TestCase
 
         config()->set('services.nium.compliance_callback.static_header_name', 'x-partner-key');
         config()->set('services.nium.compliance_callback.static_header_value', 'nium-compliance-test-key');
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
+        config()->set('services.nium.client_id', 'client-test');
+        config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-key']);
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'webhook-key');
+        config()->set('services.nium.transaction_sync_page_size', 200);
+        Http::fake(function ($request) {
+            $reference = $request['systemReferenceNumber'] ?? 'UNKNOWN';
+
+            return Http::response(['content' => [[
+                'authCode' => 'AUTH-'.$reference,
+                'systemReferenceNumber' => $reference,
+                'complianceStatus' => 'RFI_REQUESTED',
+                'status' => 'PENDING',
+                'currencyCode' => 'USD',
+                'amount' => 100,
+                'rfiDetails' => [[
+                    'rfiHashId' => 'rfi-safe', 'rfiStatus' => 'OPEN', 'rfiCategory' => 'TRANSACTION',
+                    'requiredData' => [['label' => 'Invoice', 'type' => 'DOCUMENT', 'mandatory' => true, 'value' => 'SECRET']],
+                ]],
+            ]], 'totalPages' => 1]);
+        });
     }
 
     public function test_compliance_callback_marks_matching_transfer_for_action_required_review(): void
@@ -39,14 +62,14 @@ class NiumComplianceCallbackApiTest extends TestCase
             ],
         ]);
 
-        $response->assertAccepted()
+        $response->assertOk()
             ->assertJsonPath('matched', true)
             ->assertJsonPath('match_status', 'matched_transfer')
             ->assertJsonPath('review_status', 'pending');
 
         $transfer->refresh();
         $this->assertTrue($transfer->compliance_review_required);
-        $this->assertSame('ACTION_REQUIRED', $transfer->compliance_status);
+        $this->assertSame('RFI_REQUESTED', $transfer->compliance_status);
         $this->assertDatabaseHas('nium_compliance_events', [
             'event_id' => 'compliance-event-1001',
             'transfer_id' => $transfer->id,
@@ -68,8 +91,8 @@ class NiumComplianceCallbackApiTest extends TestCase
             ],
         ];
 
-        $this->postComplianceCallback($payload)->assertAccepted()->assertJsonPath('duplicate', false);
-        $this->postComplianceCallback($payload)->assertAccepted()->assertJsonPath('duplicate', true);
+        $this->postComplianceCallback($payload)->assertOk()->assertJsonPath('duplicate', false);
+        $this->postComplianceCallback($payload)->assertOk()->assertJsonPath('duplicate', true);
 
         $this->assertDatabaseCount('nium_compliance_events', 1);
         $this->assertDatabaseHas('nium_compliance_events', [
@@ -92,7 +115,7 @@ class NiumComplianceCallbackApiTest extends TestCase
             ],
         ]);
 
-        $response->assertAccepted()
+        $response->assertOk()
             ->assertJsonPath('matched', false)
             ->assertJsonPath('match_status', 'unmatched')
             ->assertJsonPath('review_status', 'pending');
@@ -104,6 +127,19 @@ class NiumComplianceCallbackApiTest extends TestCase
             'match_status' => 'unmatched',
             'review_status' => 'pending',
         ]);
+    }
+
+    public function test_callback_does_not_persist_raw_tag_values(): void
+    {
+        $this->provider();
+        $this->postComplianceCallback([
+            'eventId' => 'compliance-sensitive-tags',
+            'tags' => ['PHONE_SECRET_789'],
+        ])->assertOk();
+
+        $serialized = json_encode(NiumComplianceEvent::query()->where('event_id', 'compliance-sensitive-tags')->value('payload'));
+        $this->assertStringNotContainsString('PHONE_SECRET_789', $serialized);
+        $this->assertArrayNotHasKey('tags', NiumComplianceEvent::query()->where('event_id', 'compliance-sensitive-tags')->value('payload'));
     }
 
     public function test_compliance_callback_rejects_missing_or_incorrect_static_partner_key(): void
@@ -133,7 +169,7 @@ class NiumComplianceCallbackApiTest extends TestCase
                 'systemReferenceNumber' => 'NIUM-COMP-3001',
                 'complianceStatus' => 'ACTION_REQUIRED',
             ],
-        ])->assertAccepted()->json('event_id');
+        ])->assertOk()->json('event_id');
         $event = NiumComplianceEvent::query()->where('event_id', $eventId)->firstOrFail();
         $admin = User::factory()->create();
         $admin->roles()->create(['role_code' => 'admin']);
@@ -165,6 +201,9 @@ class NiumComplianceCallbackApiTest extends TestCase
 
     private function postComplianceCallback(array $payload): TestResponse
     {
+        $payload['type'] ??= 'TRANSACTION';
+        $payload['value'] ??= data_get($payload, 'data.systemReferenceNumber') ?? $payload['eventId'] ?? 'transaction-nudge';
+
         return $this->withHeader('x-partner-key', 'nium-compliance-test-key')
             ->postJson('/api/callbacks/nium/transaction-compliance', $payload);
     }
@@ -181,6 +220,13 @@ class NiumComplianceCallbackApiTest extends TestCase
     private function transfer(IntegrationProvider $provider, string $externalReference): Transfer
     {
         $user = User::factory()->create();
+        $user->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'external_customer_id' => 'customer-'.$user->id,
+            'external_account_id' => 'wallet-'.$user->id,
+            'status' => 'active', 'provider_status' => 'clear',
+            'customer_id_verified_at' => now(), 'wallet_id_verified_at' => now(), 'provider_ids_verified_at' => now(),
+        ]);
 
         return Transfer::query()->create([
             'transfer_no' => 'TRF-'.str_replace('NIUM-COMP-', '', $externalReference),
