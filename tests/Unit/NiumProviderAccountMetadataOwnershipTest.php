@@ -63,6 +63,28 @@ class NiumProviderAccountMetadataOwnershipTest extends TestCase
         $this->assertArrayNotHasKey('sessionId', $claim);
     }
 
+    public function test_prebuilt_form_session_generation_two_preserves_only_safe_fields(): void
+    {
+        $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
+            'nium_kyc_prebuilt_form_session_generation_2' => [
+                'generation' => 2, 'state' => 'created',
+                'session_id_fingerprint' => str_repeat('a', 16),
+                'created_at' => '2026-08-14T01:00:00Z', 'expiry_at' => '2026-08-14T03:00:00Z',
+                'provider_http_status' => 200, 'transport_outcome' => 'response_received',
+                'previous_session_log_id' => 117,
+                'recovery_reason' => 'expired_after_ekyc_redirect_configuration_blocker',
+                'sessionId' => 'must-not-survive', 'url' => 'must-not-survive',
+            ],
+        ], []);
+
+        $claim = $merged['nium_kyc_prebuilt_form_session_generation_2'];
+        $this->assertSame(2, $claim['generation']);
+        $this->assertSame(117, $claim['previous_session_log_id']);
+        $this->assertSame('expired_after_ekyc_redirect_configuration_blocker', $claim['recovery_reason']);
+        $this->assertArrayNotHasKey('sessionId', $claim);
+        $this->assertArrayNotHasKey('url', $claim);
+    }
+
     public function test_generation_six_claim_preserves_only_safe_provenance(): void
     {
         $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([

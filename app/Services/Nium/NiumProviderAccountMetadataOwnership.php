@@ -69,6 +69,9 @@ final class NiumProviderAccountMetadataOwnership
             'nium_kyc_prebuilt_form_session' => $this->kycPrebuiltFormSession(
                 $metadata['nium_kyc_prebuilt_form_session'] ?? null,
             ),
+            'nium_kyc_prebuilt_form_session_generation_2' => $this->kycPrebuiltFormSessionGenerationTwo(
+                $metadata['nium_kyc_prebuilt_form_session_generation_2'] ?? null,
+            ),
             'customer_v5_submission_marker' => $this->safeString($metadata['customer_v5_submission_marker'] ?? null, 128),
             'customer_v5_submission_state' => $this->safeString($metadata['customer_v5_submission_state'] ?? null, 64),
             'customer_v5_payload_fingerprint' => $this->fingerprint($metadata['customer_v5_payload_fingerprint'] ?? null, 64),
@@ -270,6 +273,30 @@ final class NiumProviderAccountMetadataOwnership
             'expiry_at' => $this->timestamp($value['expiry_at'] ?? null),
             'session_id_fingerprint' => $this->fingerprint($value['session_id_fingerprint'] ?? null, 16),
             'provider_http_status' => $this->httpStatus($value['provider_http_status'] ?? null),
+        ], static fn (mixed $item): bool => $item !== null);
+
+        return $safe !== [] ? $safe : null;
+    }
+
+    private function kycPrebuiltFormSessionGenerationTwo(mixed $value): ?array
+    {
+        if (! is_array($value) || array_is_list($value)) {
+            return null;
+        }
+
+        $safe = array_filter([
+            'generation' => ($value['generation'] ?? null) === 2 ? 2 : null,
+            'state' => $this->safeString($value['state'] ?? null, 64),
+            'session_id_fingerprint' => $this->fingerprint($value['session_id_fingerprint'] ?? null, 16),
+            'created_at' => $this->timestamp($value['created_at'] ?? null),
+            'expiry_at' => $this->timestamp($value['expiry_at'] ?? null),
+            'provider_http_status' => $this->httpStatus($value['provider_http_status'] ?? null),
+            'transport_outcome' => $this->safeString($value['transport_outcome'] ?? null, 64),
+            'previous_session_log_id' => ($value['previous_session_log_id'] ?? null) === 117 ? 117 : null,
+            'recovery_reason' => ($value['recovery_reason'] ?? null)
+                === 'expired_after_ekyc_redirect_configuration_blocker'
+                    ? 'expired_after_ekyc_redirect_configuration_blocker'
+                    : null,
         ], static fn (mixed $item): bool => $item !== null);
 
         return $safe !== [] ? $safe : null;
