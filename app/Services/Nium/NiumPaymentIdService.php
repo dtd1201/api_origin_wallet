@@ -46,6 +46,7 @@ final class NiumPaymentIdService
             ]),
             payload: $payload,
             user: $account->user,
+            operation: 'assign_payment_id',
         );
         $data = $response->json() ?? [];
         $paymentId = $data['uniquePaymentId'] ?? null;

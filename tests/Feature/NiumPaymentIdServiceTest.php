@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\NiumVirtualAccount;
 use App\Models\User;
@@ -48,6 +49,7 @@ class NiumPaymentIdServiceTest extends TestCase
                 ];
         });
         $this->assertNull($virtualAccount->account_type);
+        $this->assertSame('assign_payment_id', ApiRequestLog::query()->latest('id')->firstOrFail()->operation);
     }
 
     public function test_v1_required_fields_and_categories_fail_before_http(): void
