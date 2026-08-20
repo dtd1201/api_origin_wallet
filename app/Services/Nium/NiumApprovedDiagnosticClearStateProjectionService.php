@@ -19,7 +19,7 @@ final class NiumApprovedDiagnosticClearStateProjectionService
 
     public const EVIDENCE_LOG_ID = 186;
 
-    public const EVIDENCE_OPERATION = 'customer_get_diagnostic_su_authorized_4';
+    public const EVIDENCE_OPERATION = 'get_nium_api';
 
     public const CUSTOMER_HASH_ID = '3bb08685-06ad-4d1d-9823-983c45a3d1c5';
 
