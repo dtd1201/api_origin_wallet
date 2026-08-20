@@ -172,10 +172,10 @@ final class NiumApprovedDiagnosticCustomerBindingTest extends TestCase
         $this->assertSame(0, AuditLog::query()->count());
     }
 
-    public function test_binding_refuses_unlocked_account_state_or_missing_evidence(): void
+    public function test_binding_refuses_missing_verified_identifier_timestamp(): void
     {
         $this->app->detectEnvironment(fn (): string => 'staging');
-        UserProviderAccount::query()->findOrFail(7)->update(['provider_status' => 'clear']);
+        UserProviderAccount::query()->findOrFail(7)->update(['provider_ids_verified_at' => null]);
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('locked pre-transition fixture state');

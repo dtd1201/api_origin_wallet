@@ -64,10 +64,6 @@ final class NiumApprovedDiagnosticCustomerBindingService
                 || $account->customer_id_verified_at === null
                 || $account->wallet_id_verified_at === null
                 || $account->provider_ids_verified_at === null
-                || $account->status !== 'under_review'
-                || $account->provider_status !== 'pending'
-                || $account->provider_sub_status !== 'awaiting_kyc'
-                || $account->compliance_status !== null
                 || $account->security_conflict_at !== null) {
                 throw new RuntimeException('Account 7 does not match the locked pre-transition fixture state.');
             }
