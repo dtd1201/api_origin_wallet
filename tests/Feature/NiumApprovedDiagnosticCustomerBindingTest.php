@@ -149,10 +149,33 @@ final class NiumApprovedDiagnosticCustomerBindingTest extends TestCase
         $this->assertSame(0, AuditLog::query()->count());
     }
 
+    public function test_binding_refuses_wrong_wallet_identifier_before_mutation(): void
+    {
+        $this->app->detectEnvironment(fn (): string => 'staging');
+
+        try {
+            app(NiumApprovedDiagnosticCustomerBindingService::class)->bind(
+                NiumApprovedDiagnosticCustomerBindingService::CUSTOMER_HASH_ID,
+                '22222222-2222-2222-2222-222222222222',
+                NiumApprovedDiagnosticCustomerBindingService::APPROVAL,
+                'test',
+            );
+            $this->fail('Expected the locked allowlist to reject an arbitrary wallet identifier.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('allowlist', $exception->getMessage());
+        }
+
+        $this->assertSame(
+            'b005d6ca-ba6c-41d5-b379-d90d2b9be6bb',
+            UserProviderAccount::query()->findOrFail(7)->external_account_id,
+        );
+        $this->assertSame(0, AuditLog::query()->count());
+    }
+
     public function test_binding_refuses_unlocked_account_state_or_missing_evidence(): void
     {
         $this->app->detectEnvironment(fn (): string => 'staging');
-        UserProviderAccount::query()->findOrFail(7)->update(['provider_status' => 'pending']);
+        UserProviderAccount::query()->findOrFail(7)->update(['provider_status' => 'clear']);
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('locked pre-transition fixture state');
@@ -185,10 +208,10 @@ final class NiumApprovedDiagnosticCustomerBindingTest extends TestCase
             'external_customer_id' => 'b4e39b04-08dc-4f03-810a-b96b60950ee1',
             'external_account_id' => 'b005d6ca-ba6c-41d5-b379-d90d2b9be6bb',
             'external_reference' => 'fixture-user-9',
-            'status' => 'active',
-            'provider_status' => 'clear',
-            'provider_sub_status' => null,
-            'compliance_status' => 'completed',
+            'status' => 'under_review',
+            'provider_status' => 'pending',
+            'provider_sub_status' => 'awaiting_kyc',
+            'compliance_status' => null,
             'customer_id_verified_at' => now()->subDay(),
             'wallet_id_verified_at' => now()->subDay(),
             'provider_ids_verified_at' => now()->subDay(),
