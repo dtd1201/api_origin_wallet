@@ -21,7 +21,7 @@ final class NiumApprovedDiagnosticCustomerBindingService
 
     public const CUSTOMER_HASH_ID = '3bb08685-06ad-4d1d-9823-983c45a3d1c5';
 
-    public const WALLET_HASH_ID = '095bbb7b-f1e5-42ec-80ff-2a6e579c1847';
+    public const WALLET_HASH_ID = '095bbbb7-f1e5-42ec-80ff-2a6e579c1847';
 
     private const PREVIOUS_CUSTOMER_HASH_ID = 'b4e39b04-08dc-4f03-810a-b96b60950ee1';
 
