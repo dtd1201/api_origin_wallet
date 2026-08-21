@@ -474,11 +474,14 @@ final class NiumSafeValueProjector
     public function transferMoneyResponseBody(array $response): array
     {
         $projection = array_filter([
-            'message' => $this->providerMessage($response['message'] ?? null),
+            'status' => $this->transferDiagnosticErrorCode($response['status'] ?? null),
+            'message' => $this->transferDiagnosticMessage($response['message'] ?? null),
             'code' => $this->transferDiagnosticErrorCode($response['code'] ?? null),
             'errorCode' => $this->transferDiagnosticErrorCode($response['errorCode'] ?? null),
             'errors' => $this->transferDiagnosticErrors($response['errors'] ?? null),
             'validationErrors' => $this->transferDiagnosticErrors($response['validationErrors'] ?? null),
+            'error' => $this->transferDiagnosticErrors($response['error'] ?? null),
+            'details' => $this->transferDiagnosticErrors($response['details'] ?? null),
         ], static fn ($value): bool => $value !== null && $value !== []);
 
         $sanitized = $this->sensitiveDataSanitizer->sanitize($projection);
@@ -857,7 +860,7 @@ final class NiumSafeValueProjector
     private function transferDiagnosticErrors(mixed $errors): array
     {
         if (! is_array($errors)) {
-            $message = $this->providerMessage($errors);
+            $message = $this->transferDiagnosticMessage($errors);
 
             return $message === null ? [] : [['message' => $message]];
         }
@@ -867,7 +870,7 @@ final class NiumSafeValueProjector
 
         foreach (array_slice($errors, 0, 20) as $error) {
             if (is_string($error)) {
-                $message = $this->providerMessage($error);
+                $message = $this->transferDiagnosticMessage($error);
                 if ($message !== null) {
                     $safe[] = ['message' => $message];
                 }
@@ -883,7 +886,7 @@ final class NiumSafeValueProjector
                 'code' => $this->transferDiagnosticErrorCode($error['code'] ?? null),
                 'errorCode' => $this->transferDiagnosticErrorCode($error['errorCode'] ?? null),
                 'field' => $this->transferDiagnosticField($error['field'] ?? $error['path'] ?? null),
-                'message' => $this->providerMessage($error['message'] ?? $error['description'] ?? null),
+                'message' => $this->transferDiagnosticMessage($error['message'] ?? $error['description'] ?? null),
             ], static fn ($value): bool => $value !== null);
 
             if ($item !== []) {
@@ -892,6 +895,22 @@ final class NiumSafeValueProjector
         }
 
         return $safe;
+    }
+
+    private function transferDiagnosticMessage(mixed $value): ?string
+    {
+        $value = $this->sanitizedString($value, 240);
+
+        if ($value === null
+            || preg_match('/[\r\n\t]/', $value) === 1
+            || preg_match('/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i', $value) === 1
+            || preg_match('#https?://#i', $value) === 1
+            || preg_match('/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/i', $value) === 1
+            || preg_match('/\b\d{7,}\b/', $value) === 1) {
+            return null;
+        }
+
+        return $value;
     }
 
     private function transferDiagnosticString(mixed $value): ?string

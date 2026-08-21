@@ -342,6 +342,16 @@ class NiumTransferServiceTest extends TestCase
                 'field' => 'payout.swiftFeeType',
                 'message' => 'Validation failed for swiftFeeType.',
             ]],
+            'error' => [
+                'code' => 'bad_remittance',
+                'message' => 'Remittance request was rejected.',
+                'accountNumber' => '1234567890123456',
+            ],
+            'details' => [[
+                'field' => 'sourceOfFunds',
+                'description' => 'Unsupported source of funds.',
+                'token' => 'secret-token-must-not-survive',
+            ]],
         ], 400)]);
 
         try {
@@ -360,13 +370,19 @@ class NiumTransferServiceTest extends TestCase
         $this->assertNotEmpty($rawData['provider_operation_key']);
 
         $log = ApiRequestLog::query()->where('related_transfer_id', $transfer->id)->sole();
+        $this->assertSame('BAD_REQUEST', $log->response_body['status']);
         $this->assertSame('invalid_request', $log->response_body['code']);
         $this->assertSame('REM_400_001', $log->response_body['errorCode']);
         $this->assertSame('Invalid transfer request.', $log->response_body['message']);
         $this->assertSame('purposeCode', $log->response_body['errors'][0]['field']);
         $this->assertSame('Invalid purposeCode value.', $log->response_body['errors'][0]['message']);
         $this->assertSame('payout.swiftFeeType', $log->response_body['validationErrors'][0]['field']);
-        $this->assertStringNotContainsString('must-not-be-logged', json_encode($log->response_body, JSON_THROW_ON_ERROR));
+        $this->assertSame('bad_remittance', $log->response_body['error'][0]['code']);
+        $this->assertSame('sourceOfFunds', $log->response_body['details'][0]['field']);
+        $serializedResponse = json_encode($log->response_body, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('must-not-be-logged', $serializedResponse);
+        $this->assertStringNotContainsString('1234567890123456', $serializedResponse);
+        $this->assertStringNotContainsString('secret-token-must-not-survive', $serializedResponse);
     }
 
     public function test_swift_transfer_without_fee_type_fails_before_http(): void
