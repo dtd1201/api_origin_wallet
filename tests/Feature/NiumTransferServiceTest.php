@@ -162,8 +162,19 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('Personal Savings', $log->request_body['source_of_funds']);
         $this->assertContains('beneficiary.id', $log->request_body['payload_keys']);
         $this->assertContains('payout.payoutMethod', $log->request_body['payload_keys']);
+        $customerFingerprint = substr(hash('sha256', 'cust_hash_123'), 0, 16);
+        $walletFingerprint = substr(hash('sha256', 'wallet_hash_123'), 0, 16);
+        $this->assertSame($customerFingerprint, $log->request_body['customer_id_fingerprint']);
+        $this->assertSame($walletFingerprint, $log->request_body['wallet_id_fingerprint']);
+        $this->assertSame($customerFingerprint, $log->response_body['customer_id_fingerprint']);
+        $this->assertSame($walletFingerprint, $log->response_body['wallet_id_fingerprint']);
+        $this->assertTrue($log->response_body['customer_id_present']);
+        $this->assertTrue($log->response_body['wallet_id_present']);
         $this->assertSame('RT6431795378', $log->response_body['system_reference_number']);
         $this->assertSame('pay_123', $log->response_body['payment_id']);
+        $serializedLog = json_encode([$log->request_body, $log->response_body], JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('cust_hash_123', $serializedLog);
+        $this->assertStringNotContainsString('wallet_hash_123', $serializedLog);
     }
 
     public function test_sync_transfer_status_queries_nium_audit_and_updates_transfer(): void

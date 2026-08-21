@@ -461,9 +461,12 @@ class ProviderHttpClient implements ProviderClient
             ?? new NiumSafeValueProjector($this->sensitiveDataSanitizer);
         $operation = $projector->providerIdentifier($this->operationalContext['operation'] ?? $this->inferOperation($method, $url));
         $stagingTransferDiagnostics = app()->environment('staging') && $operation === 'transfer_money';
+        $transferIdentifiers = $stagingTransferDiagnostics
+            ? $projector->transferMoneyIdentifierDiagnostics($url)
+            : [];
         $requestHeaders = $projector->apiRequestHeaders($requestId);
         $requestBody = $stagingTransferDiagnostics
-            ? $projector->transferMoneyRequestBody($payload)
+            ? array_replace($projector->transferMoneyRequestBody($payload), $transferIdentifiers)
             : $projector->apiRequestBody($payload);
         $responseHeaders = $projector->apiResponseHeaders($response?->header('x-request-id'));
         $safeResponseBody = $projector->apiResponseBody($responseData, $response?->status());
@@ -471,6 +474,7 @@ class ProviderHttpClient implements ProviderClient
             $safeResponseBody = array_replace(
                 $safeResponseBody,
                 $projector->transferMoneyResponseBody($responseData),
+                $transferIdentifiers,
             );
         }
         $safeResponseBody = array_filter([

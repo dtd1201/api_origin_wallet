@@ -471,6 +471,28 @@ final class NiumSafeValueProjector
         return is_array($sanitized) && $sanitized === $projection ? $projection : [];
     }
 
+    public function transferMoneyIdentifierDiagnostics(string $url): array
+    {
+        $path = parse_url($url, PHP_URL_PATH);
+        if (! is_string($path)
+            || preg_match('#/customer/([^/]+)/wallet/([^/]+)/remittance(?:/|$)#', $path, $matches) !== 1) {
+            return [];
+        }
+
+        $customerId = rawurldecode($matches[1]);
+        $walletId = rawurldecode($matches[2]);
+        $projection = array_filter([
+            'customer_id_present' => $customerId !== '',
+            'wallet_id_present' => $walletId !== '',
+            'customer_id_fingerprint' => $this->fingerprint($customerId),
+            'wallet_id_fingerprint' => $this->fingerprint($walletId),
+        ], static fn ($value): bool => $value !== null);
+
+        $sanitized = $this->sensitiveDataSanitizer->sanitize($projection);
+
+        return is_array($sanitized) && $sanitized === $projection ? $projection : [];
+    }
+
     public function transferMoneyResponseBody(array $response): array
     {
         $projection = array_filter([
