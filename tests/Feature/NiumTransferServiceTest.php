@@ -286,6 +286,7 @@ class NiumTransferServiceTest extends TestCase
     public function test_swift_transfer_requires_and_sends_configured_fee_type(): void
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'purpose_code' => 'IR01811',
             'raw_data' => [
                 'nium' => [
                     'sourceOfFunds' => 'Corporate Account',
@@ -300,7 +301,42 @@ class NiumTransferServiceTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->data()['payout']['payoutMethod'] === 'SWIFT'
             && $request->data()['payout']['swiftFeeType'] === 'SHA'
+            && $request->data()['purposeCode'] === 'IR01811'
             && $request->data()['sourceOfFunds'] === 'Corporate Account');
+    }
+
+    public function test_provider_error_appends_operational_data_without_replacing_nium_fixture_data(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'purpose_code' => 'IR01811',
+            'raw_data' => [
+                'nium' => [
+                    'sourceOfFunds' => 'Corporate Account',
+                    'payoutMethod' => 'SWIFT',
+                    'payout' => ['swiftFeeType' => 'SHA'],
+                ],
+            ],
+        ]);
+        Http::fake(['*' => Http::response([
+            'status' => 'BAD_REQUEST',
+            'code' => 'invalid_request',
+            'message' => 'Invalid transfer request.',
+        ], 400)]);
+
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+            $this->fail('Expected the provider error to reject the transfer.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Invalid transfer request.', $exception->getMessage());
+        }
+
+        $rawData = (array) $transfer->fresh()->raw_data;
+        $this->assertSame('Corporate Account', $rawData['nium']['sourceOfFunds']);
+        $this->assertSame('SWIFT', $rawData['nium']['payoutMethod']);
+        $this->assertSame('SHA', $rawData['nium']['payout']['swiftFeeType']);
+        $this->assertSame('BAD_REQUEST', $rawData['provider_status']);
+        $this->assertSame('invalid_request', $rawData['provider_error_code']);
+        $this->assertNotEmpty($rawData['provider_operation_key']);
     }
 
     public function test_swift_transfer_without_fee_type_fails_before_http(): void

@@ -298,7 +298,7 @@ class NiumTransferService implements TransferProvider
 
     private function safeOperationalData(Transfer $transfer, array $providerData): array
     {
-        return array_filter([
+        $operationalData = array_filter([
             'fx_quote_id' => $transfer->fx_quote_id,
             'quote_ref' => $transfer->fxQuote?->quote_ref ?? ($transfer->raw_data['quote_ref'] ?? null),
             'provider_operation_key' => $transfer->provider_operation_key,
@@ -306,6 +306,8 @@ class NiumTransferService implements TransferProvider
             'provider_error_code' => $providerData['code'] ?? $providerData['errorCode'] ?? null,
             'provider_status' => $providerData['status'] ?? null,
         ], static fn ($value) => $value !== null && $value !== '');
+
+        return array_replace_recursive((array) ($transfer->raw_data ?? []), $operationalData);
     }
 
     private function ensureAuthoritativeQuote(Transfer $transfer): void
