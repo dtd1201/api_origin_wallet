@@ -9,6 +9,7 @@ use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
+use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumTransferService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
@@ -255,6 +256,26 @@ class NiumTransferServiceTest extends TestCase
         }
 
         Http::assertSentCount(1);
+    }
+
+    public function test_submit_transfer_uses_customer_and_wallet_from_matching_provider_account(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        UserProviderAccount::query()
+            ->where('user_id', $transfer->user_id)
+            ->where('provider_id', $transfer->provider_id)
+            ->update([
+                'external_customer_id' => 'provider-account-customer',
+                'external_account_id' => 'provider-account-wallet',
+            ]);
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-PROVIDER-ACCOUNT'])]);
+
+        app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+
+        Http::assertSent(fn ($request): bool => str_contains(
+            $request->url(),
+            '/customer/provider-account-customer/wallet/provider-account-wallet/remittance',
+        ));
     }
 
     public function test_same_currency_transfer_does_not_require_fx_lock(): void

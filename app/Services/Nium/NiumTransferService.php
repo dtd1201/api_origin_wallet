@@ -4,6 +4,7 @@ namespace App\Services\Nium;
 
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
+use App\Models\UserProviderAccount;
 use App\Services\Integrations\Contracts\TransferProvider;
 use App\Services\Transfers\TransferEligibilityService;
 use Illuminate\Http\Client\ConnectionException;
@@ -27,6 +28,7 @@ class NiumTransferService implements TransferProvider
         );
         $this->ensureAuthoritativeQuote($transfer->loadMissing('fxQuote'));
         $payload = $this->buildTransferPayload($transfer);
+        $providerIdentifiers = $this->providerAccountIdentifiers($transfer);
 
         $transfer = DB::transaction(function () use ($transfer): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
@@ -49,8 +51,8 @@ class NiumTransferService implements TransferProvider
                     (string) config('services.nium.transfer_endpoint'),
                     [
                         'client' => $this->niumService->clientId(),
-                        'customer' => $this->niumService->customerId($transfer->user),
-                        'wallet' => $this->niumService->walletId($transfer->user),
+                        'customer' => $providerIdentifiers['customer'],
+                        'wallet' => $providerIdentifiers['wallet'],
                     ],
                 ),
                 payload: $payload,
@@ -233,6 +235,26 @@ class NiumTransferService implements TransferProvider
         $this->validateTransferPayload($payload);
 
         return $payload;
+    }
+
+    /** @return array{customer: string, wallet: string} */
+    private function providerAccountIdentifiers(Transfer $transfer): array
+    {
+        $providerAccount = UserProviderAccount::query()
+            ->where('user_id', $transfer->user_id)
+            ->where('provider_id', $transfer->provider_id)
+            ->first();
+
+        if (! $providerAccount instanceof UserProviderAccount
+            || ! filled($providerAccount->external_customer_id)
+            || ! filled($providerAccount->external_account_id)) {
+            throw new RuntimeException('Nium transfer requires customer and wallet identifiers from the provider account.');
+        }
+
+        return [
+            'customer' => (string) $providerAccount->external_customer_id,
+            'wallet' => (string) $providerAccount->external_account_id,
+        ];
     }
 
     private function validateTransferPayload(array $payload): void
