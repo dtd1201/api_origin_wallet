@@ -85,6 +85,7 @@ class NiumTransferServiceTest extends TestCase
             'raw_data' => [
                 'nium' => [
                     'sourceOfFunds' => 'Personal Savings',
+                    'payoutMethod' => 'LOCAL',
                 ],
             ],
         ]);
@@ -137,8 +138,11 @@ class NiumTransferServiceTest extends TestCase
                 && $data['beneficiary']['id'] === 'bnf_hash_123'
                 && $data['payout']['sourceCurrency'] === 'USD'
                 && $data['payout']['sourceAmount'] === 100.0
+                && $data['payout']['destinationCurrency'] === 'INR'
+                && $data['payout']['payoutMethod'] === 'LOCAL'
                 && $data['payout']['auditId'] === 112
-                && $data['purposeCode'] === 'IR001';
+                && $data['purposeCode'] === 'IR001'
+                && $data['sourceOfFunds'] === 'Personal Savings';
         });
 
         $this->assertNotEmpty($updated->provider_operation_key);
@@ -279,6 +283,49 @@ class NiumTransferServiceTest extends TestCase
         Http::assertSent(fn ($request): bool => ! array_key_exists('auditId', $request->data()['payout']));
     }
 
+    public function test_swift_transfer_requires_and_sends_configured_fee_type(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'raw_data' => [
+                'nium' => [
+                    'sourceOfFunds' => 'Corporate Account',
+                    'payoutMethod' => 'SWIFT',
+                    'payout' => ['swiftFeeType' => 'SHA'],
+                ],
+            ],
+        ]);
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-SWIFT'])]);
+
+        app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+
+        Http::assertSent(fn ($request): bool => $request->data()['payout']['payoutMethod'] === 'SWIFT'
+            && $request->data()['payout']['swiftFeeType'] === 'SHA'
+            && $request->data()['sourceOfFunds'] === 'Corporate Account');
+    }
+
+    public function test_swift_transfer_without_fee_type_fails_before_http(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'raw_data' => [
+                'nium' => [
+                    'sourceOfFunds' => 'Corporate Account',
+                    'payoutMethod' => 'SWIFT',
+                ],
+            ],
+        ]);
+        Http::fake();
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('requires swiftFeeType');
+
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+        } finally {
+            Http::assertNothingSent();
+            $this->assertSame('draft', $transfer->fresh()->status);
+        }
+    }
+
     public function test_timeout_after_provider_acceptance_marks_unknown_and_never_posts_again(): void
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer();
@@ -395,6 +442,8 @@ class NiumTransferServiceTest extends TestCase
             'beneficiary_id' => $beneficiary->id, 'fx_quote_id' => $quote->id, 'transfer_type' => 'bank',
             'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
             'target_amount' => 830, 'fx_rate' => 83, 'fee_amount' => 1, 'status' => 'draft',
+            'purpose_code' => 'IR001',
+            'raw_data' => ['nium' => ['sourceOfFunds' => 'Corporate Account', 'payoutMethod' => 'LOCAL']],
         ], $overrides));
 
         return [$provider, $transfer->fresh(['provider', 'user', 'beneficiary', 'fxQuote'])];
