@@ -80,7 +80,7 @@ class NiumTransferServiceTest extends TestCase
             'source_currency' => 'USD',
             'target_currency' => 'INR',
             'source_amount' => 100,
-            'purpose_code' => 'IR001',
+            'purpose_code' => 'IR01811',
             'reference_text' => 'Invoice 42',
             'status' => 'draft',
             'raw_data' => [
@@ -142,7 +142,7 @@ class NiumTransferServiceTest extends TestCase
                 && $data['payout']['destinationCurrency'] === 'INR'
                 && $data['payout']['payoutMethod'] === 'LOCAL'
                 && $data['payout']['auditId'] === 112
-                && $data['purposeCode'] === 'IR001'
+                && $data['purposeCode'] === 'IR01811'
                 && $data['sourceOfFunds'] === 'Personal Savings';
         });
 
@@ -157,7 +157,7 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('LOCAL', $log->request_body['payout_method']);
         $this->assertSame('USD', $log->request_body['source_currency']);
         $this->assertSame('INR', $log->request_body['destination_currency']);
-        $this->assertSame('IR001', $log->request_body['purpose_code']);
+        $this->assertSame('IR01811', $log->request_body['purpose_code']);
         $this->assertSame('Personal Savings', $log->request_body['source_of_funds']);
         $this->assertContains('beneficiary.id', $log->request_body['payload_keys']);
         $this->assertContains('payout.payoutMethod', $log->request_body['payload_keys']);
@@ -524,7 +524,7 @@ class NiumTransferServiceTest extends TestCase
             'beneficiary_id' => $beneficiary->id, 'fx_quote_id' => $quote->id, 'transfer_type' => 'bank',
             'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
             'target_amount' => 830, 'fx_rate' => 83, 'fee_amount' => 1, 'status' => 'draft',
-            'purpose_code' => 'IR001',
+            'purpose_code' => 'IR01811',
             'raw_data' => ['nium' => ['sourceOfFunds' => 'Corporate Account', 'payoutMethod' => 'LOCAL']],
         ], $overrides));
 
