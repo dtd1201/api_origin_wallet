@@ -4,6 +4,7 @@ namespace App\Services\Nium;
 
 use App\Support\SensitiveDataSanitizer;
 use DateTimeInterface;
+use Illuminate\Support\Arr;
 
 final class NiumSafeValueProjector
 {
@@ -426,6 +427,65 @@ final class NiumSafeValueProjector
         ]);
     }
 
+    public function transferMoneyRequestBody(array $payload): array
+    {
+        $knownPaths = [
+            'beneficiary.id',
+            'payout.sourceAmount',
+            'payout.sourceCurrency',
+            'payout.destinationAmount',
+            'payout.destinationCurrency',
+            'payout.payoutMethod',
+            'payout.auditId',
+            'payout.scheduledPayoutDate',
+            'payout.serviceTime',
+            'payout.tradeOrderID',
+            'payout.swiftFeeType',
+            'payout.preScreening',
+            'purposeCode',
+            'sourceOfFunds',
+            'exemptionCode',
+            'customerComments',
+            'ownPayment',
+            'authenticationCode',
+            'deviceDetails',
+        ];
+        $presentKeys = array_values(array_filter(
+            $knownPaths,
+            static fn (string $path): bool => Arr::has($payload, $path),
+        ));
+        $projection = array_filter([
+            'payload_keys' => $presentKeys,
+            'beneficiary_id_fingerprint' => $this->fingerprint(Arr::get($payload, 'beneficiary.id')),
+            'payout_method' => $this->transferDiagnosticString(Arr::get($payload, 'payout.payoutMethod')),
+            'source_currency' => $this->transferDiagnosticString(Arr::get($payload, 'payout.sourceCurrency')),
+            'destination_currency' => $this->transferDiagnosticString(Arr::get($payload, 'payout.destinationCurrency')),
+            'purpose_code' => $this->transferDiagnosticString($payload['purposeCode'] ?? null),
+            'source_of_funds' => $this->transferDiagnosticString($payload['sourceOfFunds'] ?? null),
+            'swift_fee_type' => $this->transferDiagnosticString(Arr::get($payload, 'payout.swiftFeeType')),
+            'trade_order_id' => $this->transferDiagnosticString(Arr::get($payload, 'payout.tradeOrderID')),
+        ], static fn ($value): bool => $value !== null && $value !== []);
+
+        $sanitized = $this->sensitiveDataSanitizer->sanitize($projection);
+
+        return is_array($sanitized) && $sanitized === $projection ? $projection : [];
+    }
+
+    public function transferMoneyResponseBody(array $response): array
+    {
+        $projection = array_filter([
+            'message' => $this->providerMessage($response['message'] ?? null),
+            'code' => $this->transferDiagnosticErrorCode($response['code'] ?? null),
+            'errorCode' => $this->transferDiagnosticErrorCode($response['errorCode'] ?? null),
+            'errors' => $this->transferDiagnosticErrors($response['errors'] ?? null),
+            'validationErrors' => $this->transferDiagnosticErrors($response['validationErrors'] ?? null),
+        ], static fn ($value): bool => $value !== null && $value !== []);
+
+        $sanitized = $this->sensitiveDataSanitizer->sanitize($projection);
+
+        return is_array($sanitized) && $sanitized === $projection ? $projection : [];
+    }
+
     public function apiResponseHeaders(mixed $requestId): array
     {
         return $this->apiRequestHeaders($requestId);
@@ -792,6 +852,73 @@ final class NiumSafeValueProjector
             'error_category' => 'unclassified',
             'error_fingerprint' => $this->fingerprint($raw),
         ];
+    }
+
+    private function transferDiagnosticErrors(mixed $errors): array
+    {
+        if (! is_array($errors)) {
+            $message = $this->providerMessage($errors);
+
+            return $message === null ? [] : [['message' => $message]];
+        }
+
+        $errors = array_is_list($errors) ? $errors : [$errors];
+        $safe = [];
+
+        foreach (array_slice($errors, 0, 20) as $error) {
+            if (is_string($error)) {
+                $message = $this->providerMessage($error);
+                if ($message !== null) {
+                    $safe[] = ['message' => $message];
+                }
+
+                continue;
+            }
+
+            if (! is_array($error) || array_is_list($error)) {
+                continue;
+            }
+
+            $item = array_filter([
+                'code' => $this->transferDiagnosticErrorCode($error['code'] ?? null),
+                'errorCode' => $this->transferDiagnosticErrorCode($error['errorCode'] ?? null),
+                'field' => $this->transferDiagnosticField($error['field'] ?? $error['path'] ?? null),
+                'message' => $this->providerMessage($error['message'] ?? $error['description'] ?? null),
+            ], static fn ($value): bool => $value !== null);
+
+            if ($item !== []) {
+                $safe[] = $item;
+            }
+        }
+
+        return $safe;
+    }
+
+    private function transferDiagnosticString(mixed $value): ?string
+    {
+        $value = $this->sanitizedString($value, 96);
+
+        return $value !== null && preg_match('/^[A-Za-z0-9][A-Za-z0-9 _.,:\/-]{0,95}$/', $value) === 1
+            ? $value
+            : null;
+    }
+
+    private function transferDiagnosticErrorCode(mixed $value): ?string
+    {
+        $value = $this->sanitizedString($value, 80);
+
+        return $value !== null && preg_match('/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/', $value) === 1
+            ? $value
+            : null;
+    }
+
+    private function transferDiagnosticField(mixed $value): ?string
+    {
+        $value = $this->sanitizedString($value, 96);
+
+        return $value !== null && preg_match('/^[A-Za-z][A-Za-z0-9_.\[\]-]{0,95}$/', $value) === 1
+            ? $value
+            : null;
     }
 
     private function safeErrorItems(mixed $errors): array

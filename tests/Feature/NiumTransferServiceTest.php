@@ -30,6 +30,7 @@ class NiumTransferServiceTest extends TestCase
 
     public function test_submit_transfer_creates_nium_remittance_and_updates_transfer(): void
     {
+        $this->app->detectEnvironment(fn (): string => 'staging');
         $provider = IntegrationProvider::query()->create([
             'code' => 'nium',
             'name' => 'Nium',
@@ -152,6 +153,14 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame($updated->provider_operation_key, $log->external_reference);
         $this->assertSame(200, $log->response_status);
         $this->assertSame('response_received', $log->transport_outcome);
+        $this->assertSame(substr(hash('sha256', 'bnf_hash_123'), 0, 16), $log->request_body['beneficiary_id_fingerprint']);
+        $this->assertSame('LOCAL', $log->request_body['payout_method']);
+        $this->assertSame('USD', $log->request_body['source_currency']);
+        $this->assertSame('INR', $log->request_body['destination_currency']);
+        $this->assertSame('IR001', $log->request_body['purpose_code']);
+        $this->assertSame('Personal Savings', $log->request_body['source_of_funds']);
+        $this->assertContains('beneficiary.id', $log->request_body['payload_keys']);
+        $this->assertContains('payout.payoutMethod', $log->request_body['payload_keys']);
         $this->assertSame('RT6431795378', $log->response_body['system_reference_number']);
         $this->assertSame('pay_123', $log->response_body['payment_id']);
     }
@@ -307,6 +316,7 @@ class NiumTransferServiceTest extends TestCase
 
     public function test_provider_error_appends_operational_data_without_replacing_nium_fixture_data(): void
     {
+        $this->app->detectEnvironment(fn (): string => 'staging');
         [$provider, $transfer] = $this->makeSubmittableTransfer([
             'purpose_code' => 'IR01811',
             'raw_data' => [
@@ -320,7 +330,18 @@ class NiumTransferServiceTest extends TestCase
         Http::fake(['*' => Http::response([
             'status' => 'BAD_REQUEST',
             'code' => 'invalid_request',
+            'errorCode' => 'REM_400_001',
             'message' => 'Invalid transfer request.',
+            'errors' => [[
+                'field' => 'purposeCode',
+                'code' => 'invalid_enum',
+                'message' => 'Invalid purposeCode value.',
+                'rejectedValue' => 'must-not-be-logged',
+            ]],
+            'validationErrors' => [[
+                'field' => 'payout.swiftFeeType',
+                'message' => 'Validation failed for swiftFeeType.',
+            ]],
         ], 400)]);
 
         try {
@@ -337,6 +358,15 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('BAD_REQUEST', $rawData['provider_status']);
         $this->assertSame('invalid_request', $rawData['provider_error_code']);
         $this->assertNotEmpty($rawData['provider_operation_key']);
+
+        $log = ApiRequestLog::query()->where('related_transfer_id', $transfer->id)->sole();
+        $this->assertSame('invalid_request', $log->response_body['code']);
+        $this->assertSame('REM_400_001', $log->response_body['errorCode']);
+        $this->assertSame('Invalid transfer request.', $log->response_body['message']);
+        $this->assertSame('purposeCode', $log->response_body['errors'][0]['field']);
+        $this->assertSame('Invalid purposeCode value.', $log->response_body['errors'][0]['message']);
+        $this->assertSame('payout.swiftFeeType', $log->response_body['validationErrors'][0]['field']);
+        $this->assertStringNotContainsString('must-not-be-logged', json_encode($log->response_body, JSON_THROW_ON_ERROR));
     }
 
     public function test_swift_transfer_without_fee_type_fails_before_http(): void

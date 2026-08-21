@@ -459,10 +459,20 @@ class ProviderHttpClient implements ProviderClient
         $responseData = is_array($responseBody) ? $responseBody : [];
         $projector = $this->niumSafeValueProjector
             ?? new NiumSafeValueProjector($this->sensitiveDataSanitizer);
+        $operation = $projector->providerIdentifier($this->operationalContext['operation'] ?? $this->inferOperation($method, $url));
+        $stagingTransferDiagnostics = app()->environment('staging') && $operation === 'transfer_money';
         $requestHeaders = $projector->apiRequestHeaders($requestId);
-        $requestBody = $projector->apiRequestBody($payload);
+        $requestBody = $stagingTransferDiagnostics
+            ? $projector->transferMoneyRequestBody($payload)
+            : $projector->apiRequestBody($payload);
         $responseHeaders = $projector->apiResponseHeaders($response?->header('x-request-id'));
         $safeResponseBody = $projector->apiResponseBody($responseData, $response?->status());
+        if ($stagingTransferDiagnostics) {
+            $safeResponseBody = array_replace(
+                $safeResponseBody,
+                $projector->transferMoneyResponseBody($responseData),
+            );
+        }
         $safeResponseBody = array_filter([
             ...$safeResponseBody,
             'response_received' => $response !== null,
@@ -474,7 +484,7 @@ class ProviderHttpClient implements ProviderClient
             'provider_id' => $this->provider->id,
             'user_id' => $user?->id,
             'related_transfer_id' => $relatedTransferId,
-            'operation' => $projector->providerIdentifier($this->operationalContext['operation'] ?? $this->inferOperation($method, $url)),
+            'operation' => $operation,
             'client_hash_id' => $projector->clientHashId($this->operationalContext['client_hash_id'] ?? config('services.nium.client_id')),
             'external_reference' => $projector->providerIdentifier($this->operationalContext['external_reference'] ?? null),
             'request_method' => $method,
