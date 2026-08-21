@@ -346,6 +346,48 @@ class NiumTransferServiceTest extends TestCase
             && $request->data()['sourceOfFunds'] === 'Corporate Account');
     }
 
+    public function test_same_currency_usd_swift_transfer_omits_destination_amount(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'USD',
+            'target_amount' => 10,
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+            'raw_data' => [
+                'nium' => [
+                    'sourceOfFunds' => 'Corporate Account',
+                    'payoutMethod' => 'SWIFT',
+                    'payout' => ['swiftFeeType' => 'SHA'],
+                ],
+            ],
+        ]);
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-USD-USD-SWIFT'])]);
+
+        app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+
+        Http::assertSent(fn ($request): bool => $request->data()['payout']['sourceAmount'] === 10.0
+            && $request->data()['payout']['sourceCurrency'] === 'USD'
+            && $request->data()['payout']['destinationCurrency'] === 'USD'
+            && ! array_key_exists('destinationAmount', $request->data()['payout']));
+    }
+
+    public function test_cross_currency_usd_eur_transfer_sends_destination_amount_when_available(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'target_amount' => 9.2,
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+        Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-USD-EUR'])]);
+
+        app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+
+        Http::assertSent(fn ($request): bool => $request->data()['payout']['sourceCurrency'] === 'USD'
+            && $request->data()['payout']['destinationCurrency'] === 'EUR'
+            && $request->data()['payout']['destinationAmount'] === 9.2);
+    }
+
     public function test_provider_error_appends_operational_data_without_replacing_nium_fixture_data(): void
     {
         $this->app->detectEnvironment(fn (): string => 'staging');

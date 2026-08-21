@@ -231,6 +231,10 @@ class NiumTransferService implements TransferProvider
             $payload = array_replace_recursive($payload, $nium['request']);
         }
 
+        if (strtoupper(trim((string) $transfer->source_currency)) === strtoupper(trim((string) $transfer->target_currency))) {
+            unset($payload['payout']['destinationAmount']);
+        }
+
         $payload = array_filter($payload, static fn ($value) => $value !== null && $value !== '' && $value !== []);
         $this->validateTransferPayload($payload);
 
