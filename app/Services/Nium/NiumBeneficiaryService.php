@@ -180,6 +180,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $rawData = (array) ($beneficiary->raw_data ?? []);
         $nium = (array) ($rawData['nium'] ?? []);
         $payload = array_merge([
+            'clientLegalEntity' => 'HK',
             'beneficiaryContactCountryCode' => $nium['beneficiaryContactCountryCode'] ?? $nium['beneficiary_contact_country_code'] ?? null,
             'beneficiaryContactNumber' => $beneficiary->phone,
             'beneficiaryAccountType' => $this->beneficiaryAccountType($beneficiary),
