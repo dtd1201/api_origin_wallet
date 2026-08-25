@@ -72,6 +72,15 @@ class NiumTransferService implements TransferProvider
         }
 
         $responseData = $response->json() ?? ['raw' => $response->body()];
+        $systemReferenceNumber = $responseData['system_reference_number']
+                          ?? $responseData['systemReferenceNumber']
+                          ?? null;
+
+       if (! filled($systemReferenceNumber)) {
+          throw new RuntimeException(
+            'Nium accepted transfer but returned no system reference number.'
+          );
+       }
 
         if (in_array($response->status(), [408, 429], true) || $response->serverError()) {
             $transfer->update([
@@ -105,16 +114,19 @@ class NiumTransferService implements TransferProvider
 
             throw new RuntimeException($responseData['message'] ?? 'Nium transfer submission failed.');
         }
-
-        return DB::transaction(function () use ($transfer, $responseData): Transfer {
+        
+        return DB::transaction(function () use ($transfer, $responseData, $systemReferenceNumber): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
 
-            if ($locked->status !== 'submitting') {
+            if (
+                 filled($locked->external_transfer_id)
+                 && $locked->status !== 'submitting'
+               ) {
                 return $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
             }
 
             $locked->update([
-                'external_transfer_id' => $responseData['system_reference_number'] ?? $responseData['systemReferenceNumber'] ?? $transfer->external_transfer_id,
+                'external_transfer_id' => $systemReferenceNumber,
                 'external_payment_id' => $responseData['payment_id'] ?? $responseData['paymentId'] ?? $transfer->external_payment_id,
                 'status' => 'pending',
                 'submitted_at' => now(),

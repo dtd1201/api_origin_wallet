@@ -228,7 +228,14 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     ? (string) ($this->value($resource, ['code', 'failureCode', 'errorCode']) ?? 'provider_error')
                     : null,
                 'failure_reason' => $status === 'failed'
-                    ? (string) ($this->value($resource, ['message', 'remarks', 'failureReason', 'errorMessage']) ?? 'Nium transfer failed.')
+                    ? (string) ($this->value($resource, [
+                    'message',
+                    'remarks',
+                    'failureReason',
+                    'errorMessage',
+                    'reasonDescription',
+                    'reason',
+                    ]) ?? 'Nium transfer failed.')
                     : null,
                 'completed_at' => in_array($status, ['completed', 'failed', 'cancelled'], true)
                     ? ($this->value($resource, ['dateTime', 'updatedAt', 'completedAt']) ?? now())
@@ -469,29 +476,54 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     private function findTransfer(IntegrationProvider $provider, array $payload, array $resource): ?Transfer
     {
-        $references = array_filter([
-            $this->value($resource, ['systemReferenceNumber', 'system_reference_number', 'remittanceId', 'remittance_id', 'id']),
-            $this->value($resource, ['paymentId', 'payment_id', 'paymentReferenceNumber', 'payment_reference_number']),
-            $this->value($resource, ['clientReference', 'client_reference', 'customerComments']),
-            $this->value($payload, ['clientReference', 'client_reference']),
-        ], static fn ($value) => filled($value));
+    $references = array_filter([
+        $this->value($resource, [
+            'systemReferenceNumber',
+            'system_reference_number',
+            'remittanceId',
+            'remittance_id',
+            'id',
+        ]),
+        $this->value($resource, [
+            'paymentId',
+            'payment_id',
+            'paymentReferenceNumber',
+            'payment_reference_number',
+        ]),
+        $this->value($resource, [
+            'clientReference',
+            'client_reference',
+            'customerComments',
+        ]),
+        $this->value($payload, [
+            'clientReference',
+            'client_reference',
+            'customerComments',
+        ]),
+    ], static fn ($value) => filled($value));
 
-        if ($references === []) {
-            return null;
-        }
 
-        return Transfer::query()
-            ->where('provider_id', $provider->id)
-            ->where(function ($query) use ($references): void {
-                foreach ($references as $reference) {
-                    $query->orWhere('external_transfer_id', $reference)
-                        ->orWhere('external_payment_id', $reference)
-                        ->orWhere('transfer_no', $reference)
-                        ->orWhere('client_reference', $reference);
-                }
-            })
-            ->first();
+    if ($references === []) {
+        return null;
     }
+
+
+    return Transfer::query()
+        ->where('provider_id', $provider->id)
+        ->where(function ($query) use ($references): void {
+
+            foreach ($references as $reference) {
+                $query
+                    ->orWhere('external_transfer_id', $reference)
+                    ->orWhere('external_payment_id', $reference)
+                    ->orWhere('transfer_no', $reference)
+                    ->orWhere('client_reference', $reference)
+                    ->orWhere('provider_operation_key', $reference);
+            }
+
+        })
+        ->first();
+}
 
     private function eventId(array $payload, Request $request, bool $isCustomerLifecycle = false): string
     {
@@ -522,7 +554,13 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     private function eventType(array $payload): string
     {
-        return (string) ($this->value($payload, ['eventType', 'event_type', 'type', 'name']) ?? 'nium.webhook');
+        return (string) ($this->value($payload, [
+           'eventType',
+           'event_type',
+           'type',
+           'name',
+           'template',
+        ]) ?? 'nium.webhook');
     }
 
     private function resourcePayload(array $payload): array
