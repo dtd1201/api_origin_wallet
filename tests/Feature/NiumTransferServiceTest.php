@@ -459,6 +459,50 @@ class NiumTransferServiceTest extends TestCase
         $this->assertStringNotContainsString('secret-token-must-not-survive', $serializedResponse);
     }
 
+    public function test_accepted_response_without_system_reference_is_marked_unknown(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::fake(['*' => Http::response([
+            'status' => 'ACCEPTED',
+            'message' => 'Transfer accepted.',
+        ], 200)]);
+
+        $updated = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+
+        $this->assertSame('submission_unknown', $updated->status);
+        $this->assertSame('provider_submission_unknown', $updated->failure_code);
+        $this->assertNull($updated->external_transfer_id);
+    }
+
+    public function test_successful_transfer_reference_remains_compatible_with_lifecycle_webhook(): void
+    {
+        config()->set('wallet.ledger.enabled', false);
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::fake(['*' => Http::response([
+            'systemReferenceNumber' => 'RT-WEBHOOK-LIFECYCLE',
+            'paymentId' => 'PAY-WEBHOOK-LIFECYCLE',
+        ], 200)]);
+
+        $submitted = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+        $this->assertSame('pending', $submitted->status);
+
+        $this->withHeader('x-partner-key', 'test-partner-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'eventId' => 'transfer-lifecycle-completed',
+                'eventType' => 'remittance.completed',
+                'data' => [
+                    'resource' => [
+                        'systemReferenceNumber' => 'RT-WEBHOOK-LIFECYCLE',
+                        'transactionId' => 'TXN-WEBHOOK-LIFECYCLE',
+                        'status' => 'COMPLETED',
+                    ],
+                ],
+            ])
+            ->assertOk();
+
+        $this->assertSame('completed', $submitted->fresh()->status);
+    }
+
     public function test_swift_transfer_without_fee_type_fails_before_http(): void
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer([

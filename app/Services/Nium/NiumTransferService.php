@@ -73,31 +73,14 @@ class NiumTransferService implements TransferProvider
 
         $responseData = $response->json() ?? ['raw' => $response->body()];
         $systemReferenceNumber = $responseData['system_reference_number']
-                          ?? $responseData['systemReferenceNumber']
-                          ?? null;
-
-       if (! filled($systemReferenceNumber)) {
-          throw new RuntimeException(
-            'Nium accepted transfer but returned no system reference number.'
-          );
-       }
+            ?? $responseData['systemReferenceNumber']
+            ?? null;
 
         if (in_array($response->status(), [408, 429], true) || $response->serverError()) {
             $transfer->update([
                 'status' => 'submission_unknown',
                 'failure_code' => 'provider_submission_unknown',
                 'failure_reason' => 'Provider submission outcome is unknown; do not retry the POST.',
-                'raw_data' => $this->safeOperationalData($transfer, $responseData),
-            ]);
-
-            return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
-        }
-
-        if ($response->successful() && ! filled($responseData['system_reference_number'] ?? $responseData['systemReferenceNumber'] ?? null)) {
-            $transfer->update([
-                'status' => 'submission_unknown',
-                'failure_code' => 'provider_submission_unknown',
-                'failure_reason' => 'Provider accepted the request without an authoritative transfer reference; do not retry the POST.',
                 'raw_data' => $this->safeOperationalData($transfer, $responseData),
             ]);
 
@@ -114,14 +97,25 @@ class NiumTransferService implements TransferProvider
 
             throw new RuntimeException($responseData['message'] ?? 'Nium transfer submission failed.');
         }
-        
+
+        if (! filled($systemReferenceNumber)) {
+            $transfer->update([
+                'status' => 'submission_unknown',
+                'failure_code' => 'provider_submission_unknown',
+                'failure_reason' => 'Provider accepted the request without an authoritative transfer reference; do not retry the POST.',
+                'raw_data' => $this->safeOperationalData($transfer, $responseData),
+            ]);
+
+            return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
+        }
+
         return DB::transaction(function () use ($transfer, $responseData, $systemReferenceNumber): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
 
             if (
-                 filled($locked->external_transfer_id)
-                 && $locked->status !== 'submitting'
-               ) {
+                filled($locked->external_transfer_id)
+                && $locked->status !== 'submitting'
+            ) {
                 return $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
             }
 
