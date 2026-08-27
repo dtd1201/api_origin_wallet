@@ -68,6 +68,7 @@ final class NiumSafeValueProjector
 
     private const RFI_STATUSES = [
         'requested',
+        'responded',
         'cleared',
     ];
 

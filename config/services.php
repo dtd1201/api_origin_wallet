@@ -129,7 +129,7 @@ return [
             'static_header_name' => env('NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_NAME', 'x-partner-key'),
             'static_header_value' => env('NIUM_COMPLIANCE_CALLBACK_STATIC_HEADER_VALUE'),
         ],
-        'customer_rfi_fetch_endpoint' => env('NIUM_CUSTOMER_RFI_FETCH_ENDPOINT'),
+        'customer_rfi_fetch_endpoint' => env('NIUM_CUSTOMER_RFI_FETCH_ENDPOINT', '/api/v1/client/{clientHashId}/corporate/rfi'),
         'customer_rfi_response_endpoint' => env('NIUM_CUSTOMER_RFI_RESPONSE_ENDPOINT'),
         'transaction_rfi_fetch_endpoint' => env('NIUM_TRANSACTION_RFI_FETCH_ENDPOINT'),
         'transaction_rfi_response_endpoint' => env('NIUM_TRANSACTION_RFI_RESPONSE_ENDPOINT'),

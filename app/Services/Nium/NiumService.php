@@ -15,9 +15,15 @@ class NiumService
         private readonly NiumProviderAccountStateService $stateService,
     ) {}
 
-    public function get(string $path, array $query = [], ?User $user = null): Response
+    public function get(
+        string $path,
+        array $query = [],
+        ?User $user = null,
+        ?string $operation = null,
+        ?string $externalReference = null,
+    ): Response
     {
-        return $this->client()->get($path, $query, $user);
+        return $this->client($operation, $externalReference)->get($path, $query, $user);
     }
 
     public function post(

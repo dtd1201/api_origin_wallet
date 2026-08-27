@@ -112,6 +112,7 @@ class NiumSafeValueProjectorTest extends TestCase
         $this->assertSame('completed', $projector->complianceStatus('COMPLETED'));
         $this->assertSame('odd_due', $projector->oddStatus('ODD_DUE'));
         $this->assertSame('requested', $projector->rfiStatus('REQUESTED'));
+        $this->assertSame('responded', $projector->rfiStatus('RESPONDED'));
         $this->assertSame('reconciled', $projector->reconciliationStatus('RECONCILED'));
         $this->assertSame('corporate', $projector->customerType('CORPORATE'));
         $this->assertSame('SG', $projector->region(' sg '));

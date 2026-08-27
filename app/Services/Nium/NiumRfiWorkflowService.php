@@ -105,13 +105,168 @@ final class NiumRfiWorkflowService
             'supporting_file_count' => count((array) $case->supporting_file_ids)];
     }
 
-    public function reconcileCustomerEvidence(UserProviderAccount $account): void
+    public function requiresAuthoritativeRfiFetch(UserProviderAccount $account): bool
     {
-        $outstanding = in_array($account->rfi_status, ['requested', 'action_required'], true)
-            || str_contains(strtolower((string) $account->provider_sub_status), 'rfi');
-        NiumRfiCase::query()->where('user_provider_account_id', $account->id)
-            ->whereIn('status', ['provisional', 'requested'])
-            ->update(['status' => $outstanding ? 'requested' : 'resolved_authoritative_clear', 'reconciled_at' => now()]);
+        return strtolower(trim((string) $account->provider_sub_status)) === 'under_review'
+            && NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                ->whereIn('status', ['provisional', 'requested'])
+                ->exists();
+    }
+
+    public function reconcileCustomerEvidence(
+        UserProviderAccount $account,
+        ?array $authoritativeRfis = null,
+    ): void
+    {
+        $providerSubStatus = strtolower(trim((string) $account->provider_sub_status));
+        $providerStatus = strtolower(trim((string) $account->provider_status));
+
+        if ($providerSubStatus === 'rfi_requested') {
+            $account->update(['rfi_status' => 'requested']);
+            NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                ->whereIn('status', ['provisional', 'requested'])
+                ->update(['status' => 'requested', 'reconciled_at' => now()]);
+
+            return;
+        }
+
+        if ($providerSubStatus === 'under_review' && $this->requiresAuthoritativeRfiFetch($account)) {
+            if ($authoritativeRfis === null) {
+                throw new RuntimeException('Nium Corporate RFI evidence is required while an actionable RFI is under review.');
+            }
+
+            $cases = NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                ->whereIn('status', ['provisional', 'requested'])
+                ->orderBy('id')
+                ->get();
+            $matches = $this->matchAuthoritativeRfis($cases->all(), $authoritativeRfis);
+            $hasRequested = collect($matches)->contains(
+                fn (array $match): bool => $match['provider']['status'] === 'RFI_REQUESTED',
+            );
+
+            DB::transaction(function () use ($account, $matches, $hasRequested): void {
+                UserProviderAccount::query()->whereKey($account->id)->update([
+                    'rfi_status' => $hasRequested ? 'requested' : 'responded',
+                ]);
+
+                foreach ($matches as $match) {
+                    $providerRfi = $match['provider'];
+                    $updates = [
+                        'status' => $providerRfi['status'] === 'RFI_RESPONDED'
+                            ? 'responded_under_review'
+                            : 'requested',
+                        'evidence' => array_merge((array) $match['case']->evidence, array_filter([
+                            'rfiHashId' => $providerRfi['rfiHashId'],
+                            'caseId' => $providerRfi['caseId'] ?? null,
+                            'referenceId' => $providerRfi['referenceId'] ?? null,
+                            'templateId' => $providerRfi['templateId'] ?? null,
+                            'rfiStatus' => $providerRfi['status'],
+                        ], static fn (mixed $value): bool => $value !== null && $value !== '')),
+                        'reconciled_at' => now(),
+                    ];
+
+                    if ($providerRfi['status'] === 'RFI_RESPONDED') {
+                        $updates['provider_response_evidence'] = array_filter([
+                            'rfi_status' => 'RFI_RESPONDED',
+                            'rfi_hash_id' => $providerRfi['rfiHashId'],
+                            'case_id' => $providerRfi['caseId'] ?? null,
+                            'reference_id' => $providerRfi['referenceId'] ?? null,
+                            'template_id' => $providerRfi['templateId'] ?? null,
+                            'source' => 'authoritative_provider_rfi_fetch',
+                            'recorded_at' => now()->toISOString(),
+                        ], static fn (mixed $value): bool => $value !== null && $value !== '');
+                    }
+
+                    NiumRfiCase::query()->whereKey($match['case']->id)->update($updates);
+                }
+            });
+
+            return;
+        }
+
+        if ($providerStatus === 'clear' && $providerSubStatus === '') {
+            $account->update(['rfi_status' => 'cleared']);
+            NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                ->whereIn('status', ['provisional', 'requested', 'responded_under_review'])
+                ->update(['status' => 'resolved_authoritative_clear', 'reconciled_at' => now()]);
+        }
+    }
+
+    private function matchAuthoritativeRfis(array $cases, array $providerRfis): array
+    {
+        if ($cases === [] || $providerRfis === [] || ! array_is_list($providerRfis)) {
+            throw new RuntimeException('Nium Corporate RFI evidence cannot be matched to an actionable local case.');
+        }
+
+        foreach ($providerRfis as $providerRfi) {
+            if (! is_array($providerRfi)
+                || blank($providerRfi['rfiHashId'] ?? null)
+                || ! in_array($providerRfi['status'] ?? null, ['RFI_REQUESTED', 'RFI_RESPONDED'], true)) {
+                throw new RuntimeException('Nium Corporate RFI evidence contains an invalid provider RFI.');
+            }
+        }
+
+        $matches = [];
+        $usedProviderIndexes = [];
+        foreach ($cases as $case) {
+            $candidateIndexes = [];
+            foreach ($providerRfis as $index => $providerRfi) {
+                if (isset($usedProviderIndexes[$index])) {
+                    continue;
+                }
+                if ($this->caseMatchesProviderRfi($case, $providerRfi)) {
+                    $candidateIndexes[] = $index;
+                }
+            }
+
+            if (count($candidateIndexes) === 0
+                && count($cases) === 1
+                && count($providerRfis) === 1) {
+                $candidateIndexes = [0];
+            }
+
+            if (count($candidateIndexes) !== 1) {
+                throw new RuntimeException('Nium Corporate RFI evidence is ambiguous for the local RFI case.');
+            }
+
+            $providerIndex = $candidateIndexes[0];
+            $usedProviderIndexes[$providerIndex] = true;
+            $matches[] = ['case' => $case, 'provider' => $providerRfis[$providerIndex]];
+        }
+
+        return $matches;
+    }
+
+    private function caseMatchesProviderRfi(NiumRfiCase $case, array $providerRfi): bool
+    {
+        $identifiers = array_values(array_filter([
+            $providerRfi['rfiHashId'] ?? null,
+            $providerRfi['caseId'] ?? null,
+            $providerRfi['referenceId'] ?? null,
+        ], static fn (mixed $value): bool => is_string($value) && trim($value) !== ''));
+
+        foreach ($identifiers as $identifier) {
+            if (hash_equals($case->provider_reference_fingerprint, hash('sha256', $identifier))) {
+                return true;
+            }
+        }
+
+        $evidence = (array) $case->evidence;
+        foreach ([
+            'rfiHashId' => 'rfiHashId',
+            'rfi_hash_id' => 'rfiHashId',
+            'caseId' => 'caseId',
+            'case_id' => 'caseId',
+            'referenceId' => 'referenceId',
+            'reference_id' => 'referenceId',
+        ] as $evidenceKey => $providerKey) {
+            if (is_string($evidence[$evidenceKey] ?? null)
+                && hash_equals($evidence[$evidenceKey], (string) ($providerRfi[$providerKey] ?? ''))) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function resolveFactualFileIds(NiumRfiCase $case, array $fileIds): array

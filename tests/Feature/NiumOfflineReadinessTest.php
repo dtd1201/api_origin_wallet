@@ -157,11 +157,101 @@ class NiumOfflineReadinessTest extends TestCase
         [$provider, $user, $account] = $this->account();
         $service = app(NiumRfiWorkflowService::class);
         $case = $service->ingestCustomerEvidence($provider, $account, ['eventId' => 'reconcile', 'subStatus' => 'RFI_REQUESTED']);
-        $account->update(['rfi_status' => null, 'provider_sub_status' => null]); $service->reconcileCustomerEvidence($account->fresh());
+        $account->update(['rfi_status' => null, 'provider_status' => 'clear', 'provider_sub_status' => null]); $service->reconcileCustomerEvidence($account->fresh());
         $this->assertSame('resolved_authoritative_clear', $case->fresh()->status);
         $case->refresh()->update(['status' => 'provisional']); $account->update(['rfi_status' => 'requested', 'provider_sub_status' => 'rfi_requested']);
         $service->reconcileCustomerEvidence($account->fresh());
         $this->assertSame('requested', $case->fresh()->status);
+    }
+
+    public function test_responded_rfi_under_review_is_non_actionable_but_not_clear(): void
+    {
+        [$provider, $user, $account] = $this->account();
+        $service = app(NiumRfiWorkflowService::class);
+        $case = $service->ingestCustomerEvidence($provider, $account, [
+            'eventId' => 'responded-review',
+            'subStatus' => 'RFI_REQUESTED',
+        ]);
+        $case->update(['status' => 'requested']);
+        $account->update([
+            'provider_status' => 'pending',
+            'provider_sub_status' => 'under_review',
+            'rfi_status' => 'requested',
+        ]);
+
+        $service->reconcileCustomerEvidence($account->fresh(), [[
+            'rfiHashId' => 'c4b61b85-d1c0-4461-83d2-e204de675ed4',
+            'caseId' => '5a32aa25-debd-4b40-b8a3-65a5a7512ae2',
+            'status' => 'RFI_RESPONDED',
+        ]]);
+
+        $case->refresh();
+        $this->assertSame('responded', $account->fresh()->rfi_status);
+        $this->assertSame('responded_under_review', $case->status);
+        $this->assertSame('not_claimed', $case->submission_state);
+        $this->assertNull($case->approved_at);
+        $this->assertNull($case->claimed_at);
+        $this->assertSame('RFI_RESPONDED', data_get($case->provider_response_evidence, 'rfi_status'));
+        $this->assertSame('5a32aa25-debd-4b40-b8a3-65a5a7512ae2', data_get($case->provider_response_evidence, 'case_id'));
+    }
+
+    public function test_under_review_without_responded_evidence_does_not_clear_or_deactivate_rfi(): void
+    {
+        [$provider, $user, $account] = $this->account();
+        $service = app(NiumRfiWorkflowService::class);
+        $case = $service->ingestCustomerEvidence($provider, $account, [
+            'eventId' => 'unproven-review',
+            'subStatus' => 'RFI_REQUESTED',
+        ]);
+        $case->update(['status' => 'requested']);
+        $account->update([
+            'provider_status' => 'pending',
+            'provider_sub_status' => 'under_review',
+            'rfi_status' => 'requested',
+        ]);
+
+        try {
+            $service->reconcileCustomerEvidence($account->fresh());
+            $this->fail('Expected missing authoritative Corporate RFI evidence to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('Corporate RFI evidence is required', $exception->getMessage());
+        }
+
+        $this->assertSame('requested', $account->fresh()->rfi_status);
+        $this->assertSame('requested', $case->fresh()->status);
+    }
+
+    public function test_responded_rfi_resolves_only_on_authoritative_clear_and_later_rfi_is_actionable(): void
+    {
+        [$provider, $user, $account] = $this->account();
+        $service = app(NiumRfiWorkflowService::class);
+        $responded = $service->ingestCustomerEvidence($provider, $account, [
+            'eventId' => 'first-rfi',
+            'subStatus' => 'RFI_REQUESTED',
+        ]);
+        $responded->update(['status' => 'requested']);
+        $account->update(['provider_status' => 'pending', 'provider_sub_status' => 'under_review']);
+        $service->reconcileCustomerEvidence($account->fresh(), [[
+            'rfiHashId' => 'first-rfi-provider-id',
+            'status' => 'RFI_RESPONDED',
+        ]]);
+
+        $account->update(['provider_status' => 'clear', 'provider_sub_status' => null]);
+        $service->reconcileCustomerEvidence($account->fresh());
+
+        $this->assertSame('cleared', $account->fresh()->rfi_status);
+        $this->assertSame('resolved_authoritative_clear', $responded->fresh()->status);
+
+        $newCase = $service->ingestCustomerEvidence($provider, $account->fresh(), [
+            'eventId' => 'later-rfi',
+            'subStatus' => 'RFI_REQUESTED',
+        ]);
+        $account->update(['provider_status' => 'pending', 'provider_sub_status' => 'rfi_requested']);
+        $service->reconcileCustomerEvidence($account->fresh());
+
+        $this->assertSame('requested', $account->fresh()->rfi_status);
+        $this->assertSame('requested', $newCase->fresh()->status);
+        $this->assertSame('resolved_authoritative_clear', $responded->fresh()->status);
     }
 
     public function test_endpoint_only_does_not_open_rfi_contract_gate(): void

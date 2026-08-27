@@ -36,7 +36,7 @@ class NiumAuthenticatedStateProjector
         $providerSubStatus = $this->providerSubStatus($payload, $providerAccount);
         $complianceStatus = $this->complianceStatus($payload, $providerAccount);
         $oddStatus = $this->oddStatus($payload, $providerAccount);
-        $rfiStatus = $this->rfiStatus($providerSubStatus, $providerAccount->rfi_status);
+        $rfiStatus = $this->rfiStatus($providerStatus, $providerSubStatus, $providerAccount->rfi_status);
         $customerVerifiedAt = $customerHashId !== null
             ? ($providerAccount->customer_id_verified_at ?? now())
             : $providerAccount->customer_id_verified_at;
@@ -191,13 +191,13 @@ class NiumAuthenticatedStateProjector
             : 'submitted';
     }
 
-    private function rfiStatus(?string $subStatus, ?string $current): ?string
+    private function rfiStatus(?string $status, ?string $subStatus, ?string $current): ?string
     {
         if ($subStatus === 'rfi_requested') {
             return 'requested';
         }
 
-        if ($subStatus === null && $current === 'requested') {
+        if ($status === 'clear' && $subStatus === null && in_array($current, ['requested', 'responded'], true)) {
             return 'cleared';
         }
 

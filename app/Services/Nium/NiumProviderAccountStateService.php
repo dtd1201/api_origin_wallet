@@ -76,7 +76,7 @@ class NiumProviderAccountStateService
                 'status' => $this->internalStatus($status, $subStatus, $account->compliance_status, false),
                 'provider_status' => $status ?? $account->provider_status,
                 'provider_sub_status' => $subStatus ?? $account->provider_sub_status,
-                'rfi_status' => $this->rfiStatus($subStatus, $account->rfi_status),
+                'rfi_status' => $this->rfiStatus($status, $subStatus, $account->rfi_status),
                 'provider_status_updated_at' => now(),
                 'reconciliation_status' => $customerCreateInFlight
                     ? $account->reconciliation_status
@@ -391,13 +391,13 @@ class NiumProviderAccountStateService
             : 'submitted';
     }
 
-    private function rfiStatus(?string $subStatus, ?string $current): ?string
+    private function rfiStatus(?string $status, ?string $subStatus, ?string $current): ?string
     {
         if ($subStatus === 'rfi_requested') {
             return 'requested';
         }
 
-        if ($subStatus === null && $current === 'requested') {
+        if ($status === 'clear' && $subStatus === null && in_array($current, ['requested', 'responded'], true)) {
             return 'cleared';
         }
 

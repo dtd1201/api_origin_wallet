@@ -30,7 +30,8 @@ final class NiumHkPaymentIdOneShotRunner
         if (strtolower((string) $account->compliance_status) !== 'completed') {
             throw new RuntimeException('VAN HOLD: customer compliance is not explicitly clear.');
         }
-        if (NiumRfiCase::query()->where('user_provider_account_id', $account->id)->whereNotIn('status', ['resolved', 'closed'])->exists()) {
+        if (NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+            ->whereNotIn('status', ['resolved', 'closed', 'resolved_authoritative_clear'])->exists()) {
             throw new RuntimeException('VAN HOLD: an onboarding RFI remains outstanding.');
         }
         $mode = strtolower(trim((string) config('services.nium.hk_van_allocation_mode')));
