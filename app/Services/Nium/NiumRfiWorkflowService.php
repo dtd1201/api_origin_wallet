@@ -9,6 +9,7 @@ use App\Models\UserProviderAccount;
 use App\Support\NiumOperationalData;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 final class NiumRfiWorkflowService
@@ -48,7 +49,12 @@ final class NiumRfiWorkflowService
             $answer['provenance'] = ['source' => 'human_supplied', 'reviewer_id' => $reviewerId, 'recorded_at' => $provenanceAt];
         }
         unset($answer);
-        $resolvedFileIds = $this->resolveFactualFileIds($case, $fileIds);
+        if ($case->scope === 'transaction') {
+            $this->validateTransactionAnswers($case, $answers, $fileIds);
+        }
+        $resolvedFileIds = $case->scope === 'transaction'
+            ? $this->resolveTransactionDocuments($case, $fileIds)
+            : $this->resolveFactualFileIds($case, $fileIds);
 
         $case->update(['response_draft' => $answers, 'supporting_file_ids' => $resolvedFileIds, 'submission_state' => 'draft']);
         return $case->fresh();
@@ -63,7 +69,7 @@ final class NiumRfiWorkflowService
         return $case->fresh();
     }
 
-    public function claimForProviderSubmission(NiumRfiCase $case): NiumRfiCase
+    public function claimForProviderSubmission(NiumRfiCase $case, ?string $requestId = null): NiumRfiCase
     {
         $prefix = $case->scope === 'customer' ? 'customer' : 'transaction';
         $contract = [
@@ -72,21 +78,36 @@ final class NiumRfiWorkflowService
             config("services.nium.{$prefix}_rfi_request_schema_version"),
             config("services.nium.{$prefix}_rfi_response_contract_version"),
         ];
-        if (collect($contract)->contains(fn ($value) => blank($value))) {
-            throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact response endpoint and body are not confirmed.');
-        }
-        if (! in_array(strtoupper((string) $contract[1]), ['POST', 'PUT'], true)
-            || preg_match('/^[A-Za-z0-9._-]{1,80}$/', (string) $contract[2]) !== 1
-            || preg_match('/^[A-Za-z0-9._-]{1,80}$/', (string) $contract[3]) !== 1) {
-            throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: configured contract evidence is invalid.');
+        if ($case->scope === 'transaction') {
+            $officialEndpoint = '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions/{authCode}/rfi/upload';
+            if ($contract[0] !== $officialEndpoint || strtoupper((string) $contract[1]) !== 'POST') {
+                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Transaction RFI response contract is not configured.');
+            }
+        } else {
+            if (collect($contract)->contains(fn ($value) => blank($value))) {
+                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact response endpoint and body are not confirmed.');
+            }
+            if (! in_array(strtoupper((string) $contract[1]), ['POST', 'PUT'], true)
+                || preg_match('/^[A-Za-z0-9._-]{1,80}$/', (string) $contract[2]) !== 1
+                || preg_match('/^[A-Za-z0-9._-]{1,80}$/', (string) $contract[3]) !== 1) {
+                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: configured contract evidence is invalid.');
+            }
         }
 
-        return DB::transaction(function () use ($case): NiumRfiCase {
+        return DB::transaction(function () use ($case, $requestId): NiumRfiCase {
             $locked = NiumRfiCase::query()->lockForUpdate()->findOrFail($case->id);
             if ($locked->submission_state !== 'approved' || $locked->approved_at === null) {
                 throw new RuntimeException('Nium RFI submission requires separate human approval and an unclaimed case.');
             }
-            $locked->update(['submission_state' => 'claimed', 'claimed_at' => now()]);
+            $locked->update([
+                'submission_state' => 'claimed',
+                'claimed_at' => now(),
+                'provider_response_evidence' => array_filter([
+                    'x_request_id' => $requestId,
+                    'request_correlation_fingerprint' => $requestId ? hash('sha256', $requestId) : null,
+                    'claimed_at' => now()->toISOString(),
+                ]),
+            ]);
             return $locked->fresh();
         });
     }
@@ -292,5 +313,122 @@ final class NiumRfiWorkflowService
             $resolved[] = ['document_id' => $document->id, 'file_id_fingerprint' => hash('sha256', $fileId), 'provider_file_id' => $fileId];
         }
         return $resolved;
+    }
+
+    private function validateTransactionAnswers(NiumRfiCase $case, array $answers, array $fileIds): void
+    {
+        $allowedFields = [
+            'bankAccountNumber', 'bankName', 'companyName', 'dateOfBirth', 'firstName', 'middleName',
+            'lastName', 'nationality', 'addressLine1', 'addressLine2', 'city', 'state', 'country',
+            'postcode', 'employmentStatus', 'industryType', 'isPep', 'position', 'reasonForTransfer',
+            'remitterBeneficiaryRelationship', 'sourceOfFunds', 'thirdPartyFunding', 'otherData',
+            'identificationType', 'identificationValue', 'identificationDocIssuanceCountry',
+            'identificationDocExpiry', 'identificationDocIssuingAuthority', 'identificationDocReferenceNumber',
+        ];
+        $requested = collect((array) data_get($case->evidence, 'requiredData', []))
+            ->pluck('value')
+            ->filter(static fn (mixed $value): bool => is_string($value))
+            ->map(static fn (string $value): string => trim($value))
+            ->unique()->values()->all();
+
+        $seen = [];
+        foreach ($answers as $answer) {
+            $field = (string) $answer['questionId'];
+            if (! in_array($field, $allowedFields, true) || ! in_array($field, $requested, true)) {
+                throw new RuntimeException('Transaction RFI draft contains an unrequested response field.');
+            }
+            if (isset($seen[$field]) || $answer['answer'] === '' || $answer['answer'] === []) {
+                throw new RuntimeException('Transaction RFI draft contains an empty or duplicate response field.');
+            }
+            if ($this->containsDocumentData($answer['answer'])) {
+                throw new RuntimeException('Raw or encoded document data cannot be persisted in a Transaction RFI draft.');
+            }
+            $seen[$field] = true;
+        }
+
+        if ($fileIds !== [] && ! $this->transactionRfiRequestsDocuments($case, $requested)) {
+            throw new RuntimeException('Transaction RFI draft contains unrequested supporting documents.');
+        }
+    }
+
+    private function resolveTransactionDocuments(NiumRfiCase $case, array $documentIds): array
+    {
+        if ($documentIds === []) {
+            return [];
+        }
+        if (count($documentIds) > 4) {
+            throw new RuntimeException('Transaction RFI supports at most four documents.');
+        }
+
+        $account = UserProviderAccount::query()->with('user.kycProfile')->findOrFail($case->user_provider_account_id);
+        $resolved = [];
+        $totalBytes = 0;
+        foreach ($documentIds as $documentId) {
+            if (! is_string($documentId) || preg_match('/^[1-9][0-9]*$/', $documentId) !== 1) {
+                throw new RuntimeException('Transaction RFI supporting document ID is invalid.');
+            }
+            $document = KycDocument::query()
+                ->whereKey((int) $documentId)
+                ->where('kyc_profile_id', $account->user?->kycProfile?->id)
+                ->first();
+            $metadata = (array) ($document?->metadata ?? []);
+            $mime = strtolower(trim((string) $document?->mime_type));
+            $size = (int) ($document?->file_size ?? 0);
+            if ($document === null
+                || ! in_array(strtolower((string) $document->status), ['approved', 'verified'], true)
+                || ($metadata['factual'] ?? false) !== true
+                || ($metadata['synthetic'] ?? $metadata['synthetic_test'] ?? true) !== false
+                || ! in_array($mime, ['image/jpeg', 'image/jpg', 'image/png', 'application/pdf'], true)
+                || $size < 1 || $size > 2 * 1024 * 1024
+                || $document->storage_disk !== 'kyc_private'
+                || blank($document->file_path) || str_starts_with((string) $document->file_path, '/')
+                || str_contains((string) $document->file_path, '..') || blank($document->original_name)) {
+                throw new RuntimeException('Transaction RFI supporting document is not approved factual owned evidence.');
+            }
+            $totalBytes += $size;
+            if ($totalBytes >= 10 * 1024 * 1024) {
+                throw new RuntimeException('Transaction RFI supporting documents must total less than 10 MB.');
+            }
+            $resolved[] = [
+                'document_id' => $document->id,
+                'file_name' => Str::limit(basename((string) $document->original_name), 255, ''),
+                'file_type' => $mime,
+                'byte_size' => $size,
+                'file_hash_fingerprint' => filled($document->file_hash) ? hash('sha256', (string) $document->file_hash) : null,
+            ];
+        }
+
+        return $resolved;
+    }
+
+    private function transactionRfiRequestsDocuments(NiumRfiCase $case, array $requested): bool
+    {
+        if (collect($requested)->contains(static fn (string $value): bool => in_array($value, [
+            'identificationDocument', 'identificationDoc', 'document',
+        ], true))) {
+            return true;
+        }
+
+        return filled(data_get($case->evidence, 'documentType'))
+            || str_contains(strtoupper((string) data_get($case->evidence, 'type')), 'DOCUMENT');
+    }
+
+    private function containsDocumentData(mixed $value): bool
+    {
+        if (is_string($value)) {
+            return str_starts_with(strtolower(trim($value)), 'data:') || strlen($value) > 10000;
+        }
+        if (! is_array($value)) {
+            return false;
+        }
+        foreach ($value as $key => $item) {
+            if (is_string($key) && in_array(strtolower($key), ['base64', 'filecontent', 'documentdata', 'content'], true)) {
+                return true;
+            }
+            if ($this->containsDocumentData($item)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

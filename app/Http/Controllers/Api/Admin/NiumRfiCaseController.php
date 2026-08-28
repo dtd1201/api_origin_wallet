@@ -5,13 +5,17 @@ namespace App\Http\Controllers\Api\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\NiumRfiCase;
 use App\Services\Nium\NiumRfiWorkflowService;
+use App\Services\Nium\NiumTransactionRfiSubmissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 final class NiumRfiCaseController extends Controller
 {
-    public function __construct(private readonly NiumRfiWorkflowService $workflow) {}
+    public function __construct(
+        private readonly NiumRfiWorkflowService $workflow,
+        private readonly NiumTransactionRfiSubmissionService $transactionSubmission,
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -53,6 +57,13 @@ final class NiumRfiCaseController extends Controller
     {
         $this->assertNiumCase($niumRfiCase);
         $case = $this->workflow->approve($niumRfiCase, (int) $request->user()->id);
+        return response()->json($this->workflow->detailPayload($case));
+    }
+
+    public function submit(NiumRfiCase $niumRfiCase): JsonResponse
+    {
+        $this->assertNiumCase($niumRfiCase);
+        $case = $this->transactionSubmission->submit($niumRfiCase);
         return response()->json($this->workflow->detailPayload($case));
     }
 

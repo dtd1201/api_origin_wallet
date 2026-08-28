@@ -13,23 +13,26 @@ use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 class NiumComplianceCallbackService
 {
     public function __construct(
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer,
+        private readonly NiumTransactionRfiService $transactionRfiService,
     ) {}
 
     public function handle(Request $request): array
     {
         $payload = $request->all();
+        $transactionNudge = $this->transactionNudge($request);
         $provider = IntegrationProvider::query()->firstOrCreate(
             ['code' => 'nium'],
             ['name' => 'Nium', 'status' => 'active'],
         );
         $requestId = $this->requestId($payload, $request);
-        $references = $this->valuesForKeys($payload, [
+        $references = $transactionNudge !== null ? [$transactionNudge] : $this->valuesForKeys($payload, [
             'systemReferenceNumber',
             'system_reference_number',
             'remittanceId',
@@ -52,9 +55,18 @@ class NiumComplianceCallbackService
             'customerId',
             'customer_id',
         ]);
-        $status = $this->complianceStatus($payload);
-        $eventId = $this->eventId($payload, $request, $requestId, $references, $status);
-        $sanitizedPayload = (array) $this->sensitiveDataSanitizer->sanitize($payload);
+        // The callback is only a nudge; query callbacks never supply authoritative compliance state.
+        $status = $transactionNudge !== null ? null : $this->complianceStatus($payload);
+        $eventPayload = $transactionNudge !== null
+            ? ['type' => 'TRANSACTION', 'value' => $transactionNudge]
+            : $payload;
+        $immutableNudgeId = $transactionNudge !== null
+            ? ($requestId ?? $this->immutableCallbackEventId($payload))
+            : null;
+        $eventId = $transactionNudge !== null
+            ? ($immutableNudgeId ?? 'transaction-nudge:'.Str::uuid())
+            : $this->eventId($eventPayload, $request, $requestId, $references, $status);
+        $sanitizedPayload = (array) $this->sensitiveDataSanitizer->sanitize($eventPayload);
 
         $event = NiumComplianceEvent::query()->firstOrCreate(
             ['event_id' => $eventId],
@@ -63,7 +75,7 @@ class NiumComplianceCallbackService
                 'request_id' => $requestId,
                 'reference' => $references[0] ?? null,
                 'customer_reference' => $customerReferences[0] ?? null,
-                'event_type' => $this->eventType($payload),
+                'event_type' => $transactionNudge !== null ? 'TRANSACTION' : $this->eventType($payload),
                 'compliance_status' => $status,
                 'payload' => $sanitizedPayload,
                 'processing_status' => 'received',
@@ -133,6 +145,24 @@ class NiumComplianceCallbackService
 
                 return $event->fresh();
             });
+
+            if ($transactionNudge !== null) {
+                $transaction = $this->transactionRfiService->fetchAndReconcile($provider, $transactionNudge);
+                $authoritativeStatus = strtoupper((string) $transaction->compliance_status);
+                $requiresAction = in_array($authoritativeStatus, ['RFI_REQUESTED', 'REJECT'], true);
+                $event->update([
+                    'user_id' => $transaction->user_id,
+                    'transfer_id' => $transaction->transfer_id,
+                    'transaction_id' => $transaction->id,
+                    'match_status' => 'matched_transaction',
+                    'compliance_status' => $authoritativeStatus,
+                    'requires_action' => $requiresAction,
+                    'review_status' => $requiresAction ? 'pending' : 'not_required',
+                    'processing_status' => 'processed',
+                    'processed_at' => now(),
+                ]);
+                $event = $event->fresh();
+            }
         } catch (Throwable $exception) {
             $event->update([
                 'processing_status' => 'failed',
@@ -155,6 +185,36 @@ class NiumComplianceCallbackService
         }
 
         return $this->responsePayload($event, false);
+    }
+
+    private function transactionNudge(Request $request): ?string
+    {
+        $hasType = $request->query->has('type');
+        $hasValue = $request->query->has('value');
+        if (! $hasType && ! $hasValue) {
+            return null;
+        }
+
+        $type = strtoupper(trim((string) $request->query('type', '')));
+        $value = trim((string) $request->query('value', ''));
+        if ($type !== 'TRANSACTION') {
+            throw new RuntimeException('Unsupported Nium compliance callback query type.');
+        }
+        if ($value === '') {
+            throw new RuntimeException('Nium transaction compliance callback value is required.');
+        }
+
+        return $this->boundedIdentifier($value);
+    }
+
+    private function immutableCallbackEventId(array $payload): ?string
+    {
+        $value = Arr::get($payload, 'eventId')
+            ?? Arr::get($payload, 'event_id')
+            ?? Arr::get($payload, 'webhookEventId')
+            ?? Arr::get($payload, 'webhook_event_id');
+
+        return filled($value) ? $this->boundedIdentifier((string) $value) : null;
     }
 
     private function findTransaction(IntegrationProvider $provider, array $references): ?Transaction

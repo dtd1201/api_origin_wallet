@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 final class NiumRfiCase extends Model
 {
@@ -20,5 +21,10 @@ final class NiumRfiCase extends Model
             'provider_response_evidence' => 'array', 'approved_at' => 'datetime',
             'claimed_at' => 'datetime', 'reconciled_at' => 'datetime',
         ];
+    }
+
+    public function transaction(): BelongsTo
+    {
+        return $this->belongsTo(Transaction::class);
     }
 }

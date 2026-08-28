@@ -59,6 +59,8 @@ Route::put('nium-rfi-cases/{niumRfiCase}/draft', [NiumRfiCaseController::class, 
     ->name('nium-rfi-cases.draft');
 Route::post('nium-rfi-cases/{niumRfiCase}/approve', [NiumRfiCaseController::class, 'approve'])
     ->name('nium-rfi-cases.approve');
+Route::post('nium-rfi-cases/{niumRfiCase}/submit', [NiumRfiCaseController::class, 'submit'])
+    ->name('nium-rfi-cases.submit');
 
 Route::apiResource('fx-orders', FxOrderController::class)
     ->except(['store'])

@@ -37,6 +37,22 @@ class NiumService
         return $this->client($operation, $externalReference)->post($path, $payload, $user, $relatedTransferId);
     }
 
+    public function postWithRequestId(
+        string $path,
+        array $payload,
+        User $user,
+        string $requestId,
+        ?string $operation = null,
+        ?string $externalReference = null,
+    ): Response {
+        if (! Str::isUuid($requestId)) {
+            throw new RuntimeException('Nium x-request-id must be a UUID.');
+        }
+
+        return $this->client($operation, $externalReference, ['x-request-id' => $requestId])
+            ->post($path, $payload, $user);
+    }
+
     public function postOnboardingSimulation(
         string $path,
         array $payload,
