@@ -358,13 +358,22 @@ class NiumTransactionRfiFlowTest extends TestCase
             'evidence' => ['rfiHashId' => 'rfi-salary-statement', 'authCode' => 'AUTH-SALARY', 'requiredData' => [
                 ['label' => 'Salary Statement Document', 'value' => 'identificationDocument', 'type' => 'document'],
                 ['label' => 'Salary Statement Generated on', 'value' => 'identificationIssuingDate', 'type' => 'data'],
-                ['label' => 'Salary Statement Issuer', 'value' => 'identificationDocIssuingAuthority', 'type' => 'data'],
+                ['label' => 'Salary Statement Issuer', 'value' => 'identificationIssuingAuthority', 'type' => 'data'],
             ]],
         ]);
         $workflow = app(NiumRfiWorkflowService::class);
+        try {
+            $workflow->saveFactualDraft($case, [
+                ['questionId' => 'identificationIssuingDate', 'answer' => '2026-08-29'],
+                ['questionId' => 'identificationDocIssuingAuthority', 'answer' => 'Employer'],
+            ], [(string) $document->id], $user->id);
+            $this->fail('Expected the non-authoritative issuer field spelling to be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('unrequested', $exception->getMessage());
+        }
         $workflow->saveFactualDraft($case, [
-            ['questionId' => 'identificationIssuingDate', 'answer' => '2026-08-01'],
-            ['questionId' => 'identificationDocIssuingAuthority', 'answer' => 'Example Employer'],
+            ['questionId' => 'identificationIssuingDate', 'answer' => '2026-08-29'],
+            ['questionId' => 'identificationIssuingAuthority', 'answer' => 'Employer'],
         ], [(string) $document->id], $user->id);
         $workflow->approve($case->fresh(), $user->id);
         Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
@@ -375,12 +384,13 @@ class NiumTransactionRfiFlowTest extends TestCase
             $identificationDoc = data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc');
 
             return array_keys($identificationDoc) === [
-                'identificationIssuingDate', 'identificationDocIssuingAuthority', 'identificationDocument',
+                'identificationIssuingDate', 'identificationIssuingAuthority', 'identificationDocument',
             ]
                 && ! array_key_exists('identificationType', $identificationDoc)
                 && ! array_key_exists('identificationValue', $identificationDoc)
-                && $identificationDoc['identificationIssuingDate'] === '2026-08-01'
-                && $identificationDoc['identificationDocIssuingAuthority'] === 'Example Employer'
+                && ! array_key_exists('identificationDocIssuingAuthority', $identificationDoc)
+                && $identificationDoc['identificationIssuingDate'] === '2026-08-29'
+                && $identificationDoc['identificationIssuingAuthority'] === 'Employer'
                 && $identificationDoc['identificationDocument'][0] === [
                     'fileName' => 'salary-statement.pdf',
                     'fileType' => 'application/pdf',

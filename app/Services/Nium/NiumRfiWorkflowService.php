@@ -323,8 +323,8 @@ final class NiumRfiWorkflowService
             'postcode', 'employmentStatus', 'industryType', 'isPep', 'position', 'reasonForTransfer',
             'remitterBeneficiaryRelationship', 'sourceOfFunds', 'thirdPartyFunding', 'otherData',
             'identificationType', 'identificationValue', 'identificationDocIssuanceCountry',
-            'identificationIssuingDate', 'identificationDocExpiry', 'identificationDocIssuingAuthority',
-            'identificationDocReferenceNumber',
+            'identificationIssuingDate', 'identificationIssuingAuthority', 'identificationDocExpiry',
+            'identificationDocIssuingAuthority', 'identificationDocReferenceNumber',
         ];
         $requested = collect((array) data_get($case->evidence, 'requiredData', []))
             ->pluck('value')

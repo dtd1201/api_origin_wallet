@@ -19,7 +19,7 @@ final class NiumTransactionRfiSubmissionService
 
     private const ADDITIONAL_INFO_FIELDS = ['employmentStatus', 'industryType', 'isPep', 'position', 'reasonForTransfer', 'remitterBeneficiaryRelationship', 'sourceOfFunds', 'thirdPartyFunding', 'otherData'];
 
-    private const IDENTIFICATION_FIELDS = ['identificationType', 'identificationValue', 'identificationDocIssuanceCountry', 'identificationIssuingDate', 'identificationDocExpiry', 'identificationDocIssuingAuthority', 'identificationDocReferenceNumber'];
+    private const IDENTIFICATION_FIELDS = ['identificationType', 'identificationValue', 'identificationDocIssuanceCountry', 'identificationIssuingDate', 'identificationIssuingAuthority', 'identificationDocExpiry', 'identificationDocIssuingAuthority', 'identificationDocReferenceNumber'];
 
     private const SUPPORTED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'application/pdf'];
 
