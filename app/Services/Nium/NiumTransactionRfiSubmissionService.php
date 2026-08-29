@@ -19,7 +19,7 @@ final class NiumTransactionRfiSubmissionService
 
     private const ADDITIONAL_INFO_FIELDS = ['employmentStatus', 'industryType', 'isPep', 'position', 'reasonForTransfer', 'remitterBeneficiaryRelationship', 'sourceOfFunds', 'thirdPartyFunding', 'otherData'];
 
-    private const IDENTIFICATION_FIELDS = ['identificationType', 'identificationValue', 'identificationDocIssuanceCountry', 'identificationDocExpiry', 'identificationDocIssuingAuthority', 'identificationDocReferenceNumber'];
+    private const IDENTIFICATION_FIELDS = ['identificationType', 'identificationValue', 'identificationDocIssuanceCountry', 'identificationIssuingDate', 'identificationDocExpiry', 'identificationDocIssuingAuthority', 'identificationDocReferenceNumber'];
 
     private const SUPPORTED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'application/pdf'];
 
@@ -182,6 +182,17 @@ final class NiumTransactionRfiSubmissionService
     private function buildIdentificationDocuments(NiumRfiCase $case, UserProviderAccount $account): array
     {
         $references = (array) $case->supporting_file_ids;
+        $documentRequested = collect((array) data_get($case->evidence, 'requiredData', []))->contains(
+            static fn (mixed $required): bool => is_array($required)
+                && strtoupper(trim((string) ($required['type'] ?? ''))) === 'DOCUMENT'
+                && trim((string) ($required['value'] ?? '')) === 'identificationDocument',
+        );
+        if (! $documentRequested && $references !== []) {
+            throw new RuntimeException('Transaction RFI submission contains unrequested supporting documents.');
+        }
+        if ($documentRequested && $references === []) {
+            throw new RuntimeException('Transaction RFI submission requires an approved factual supporting document.');
+        }
         if ($references === []) {
             return [];
         }

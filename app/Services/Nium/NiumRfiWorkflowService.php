@@ -323,7 +323,8 @@ final class NiumRfiWorkflowService
             'postcode', 'employmentStatus', 'industryType', 'isPep', 'position', 'reasonForTransfer',
             'remitterBeneficiaryRelationship', 'sourceOfFunds', 'thirdPartyFunding', 'otherData',
             'identificationType', 'identificationValue', 'identificationDocIssuanceCountry',
-            'identificationDocExpiry', 'identificationDocIssuingAuthority', 'identificationDocReferenceNumber',
+            'identificationIssuingDate', 'identificationDocExpiry', 'identificationDocIssuingAuthority',
+            'identificationDocReferenceNumber',
         ];
         $requested = collect((array) data_get($case->evidence, 'requiredData', []))
             ->pluck('value')
@@ -346,8 +347,12 @@ final class NiumRfiWorkflowService
             $seen[$field] = true;
         }
 
-        if ($fileIds !== [] && ! $this->transactionRfiRequestsDocuments($case, $requested)) {
+        $requestsDocuments = $this->transactionRfiRequestsDocuments($case);
+        if ($fileIds !== [] && ! $requestsDocuments) {
             throw new RuntimeException('Transaction RFI draft contains unrequested supporting documents.');
+        }
+        if ($requestsDocuments && $fileIds === []) {
+            throw new RuntimeException('Transaction RFI draft requires an approved factual supporting document.');
         }
     }
 
@@ -401,16 +406,13 @@ final class NiumRfiWorkflowService
         return $resolved;
     }
 
-    private function transactionRfiRequestsDocuments(NiumRfiCase $case, array $requested): bool
+    private function transactionRfiRequestsDocuments(NiumRfiCase $case): bool
     {
-        if (collect($requested)->contains(static fn (string $value): bool => in_array($value, [
-            'identificationDocument', 'identificationDoc', 'document',
-        ], true))) {
-            return true;
-        }
-
-        return filled(data_get($case->evidence, 'documentType'))
-            || str_contains(strtoupper((string) data_get($case->evidence, 'type')), 'DOCUMENT');
+        return collect((array) data_get($case->evidence, 'requiredData', []))->contains(
+            static fn (mixed $required): bool => is_array($required)
+                && strtoupper(trim((string) ($required['type'] ?? ''))) === 'DOCUMENT'
+                && trim((string) ($required['value'] ?? '')) === 'identificationDocument',
+        );
     }
 
     private function containsDocumentData(mixed $value): bool

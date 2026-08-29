@@ -36,6 +36,7 @@ class NiumTransactionRfiFlowTest extends TestCase
         config()->set('services.nium.webhook.static_header_value', 'webhook-key');
         config()->set('services.nium.compliance_callback.static_header_name', 'x-partner-key');
         config()->set('services.nium.compliance_callback.static_header_value', 'callback-key');
+        Http::preventStrayRequests();
     }
 
     public function test_official_callback_fetches_exact_transaction_and_does_not_post_or_trust_body(): void
@@ -325,6 +326,87 @@ class NiumTransactionRfiFlowTest extends TestCase
             && data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc.identificationDocument.0.document') === $encoded);
         $this->assertStringNotContainsString($encoded, NiumRfiCase::query()->whereKey($case->id)->firstOrFail()->toJson());
         $this->assertStringNotContainsString($encoded, ApiRequestLog::query()->get()->toJson());
+    }
+
+    public function test_identification_type_only_rfi_sends_only_identification_type(): void
+    {
+        [$provider, $user, $account, $transaction] = $this->transactionAccount('tx-identification-type');
+        $case = $this->approvedCase($provider, $account, $transaction, 'rfi-identification-type', 'AUTH-TYPE', [
+            $this->answer('identificationType', 'PASSPORT', $user),
+        ]);
+        Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
+
+        app(NiumTransactionRfiSubmissionService::class)->submit($case);
+
+        Http::assertSent(function ($request): bool {
+            $identificationDoc = data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc');
+
+            return $identificationDoc === ['identificationType' => 'PASSPORT'];
+        });
+    }
+
+    public function test_salary_statement_shape_sends_only_current_required_identification_fields(): void
+    {
+        Storage::fake('kyc_private');
+        [$provider, $user, $account, $transaction] = $this->transactionAccount('tx-salary-statement');
+        $contents = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF";
+        $document = $this->document($user, 'salary-statement.pdf', 'application/pdf', $contents);
+        $case = NiumRfiCase::query()->create([
+            'provider_id' => $provider->id, 'user_provider_account_id' => $account->id,
+            'transaction_id' => $transaction->id, 'scope' => 'transaction',
+            'provider_reference_fingerprint' => hash('sha256', 'rfi-salary-statement'), 'status' => 'requested',
+            'evidence' => ['rfiHashId' => 'rfi-salary-statement', 'authCode' => 'AUTH-SALARY', 'requiredData' => [
+                ['label' => 'Salary Statement Document', 'value' => 'identificationDocument', 'type' => 'document'],
+                ['label' => 'Salary Statement Generated on', 'value' => 'identificationIssuingDate', 'type' => 'data'],
+                ['label' => 'Salary Statement Issuer', 'value' => 'identificationDocIssuingAuthority', 'type' => 'data'],
+            ]],
+        ]);
+        $workflow = app(NiumRfiWorkflowService::class);
+        $workflow->saveFactualDraft($case, [
+            ['questionId' => 'identificationIssuingDate', 'answer' => '2026-08-01'],
+            ['questionId' => 'identificationDocIssuingAuthority', 'answer' => 'Example Employer'],
+        ], [(string) $document->id], $user->id);
+        $workflow->approve($case->fresh(), $user->id);
+        Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
+
+        app(NiumTransactionRfiSubmissionService::class)->submit($case->fresh());
+
+        Http::assertSent(function ($request) use ($contents): bool {
+            $identificationDoc = data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc');
+
+            return array_keys($identificationDoc) === [
+                'identificationIssuingDate', 'identificationDocIssuingAuthority', 'identificationDocument',
+            ]
+                && ! array_key_exists('identificationType', $identificationDoc)
+                && ! array_key_exists('identificationValue', $identificationDoc)
+                && $identificationDoc['identificationIssuingDate'] === '2026-08-01'
+                && $identificationDoc['identificationDocIssuingAuthority'] === 'Example Employer'
+                && $identificationDoc['identificationDocument'][0] === [
+                    'fileName' => 'salary-statement.pdf',
+                    'fileType' => 'application/pdf',
+                    'document' => base64_encode($contents),
+                ];
+        });
+    }
+
+    public function test_requested_document_field_requires_an_approved_factual_document(): void
+    {
+        [$provider, $user, $account, $transaction] = $this->transactionAccount('tx-required-document');
+        $case = $this->documentCase($provider, $account, $transaction, 'required');
+
+        try {
+            app(NiumRfiWorkflowService::class)->saveFactualDraft(
+                $case,
+                [['questionId' => 'identificationType', 'answer' => 'PASSPORT']],
+                [],
+                $user->id,
+            );
+            $this->fail('Expected the requested document to be required.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('approved factual supporting document', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
     }
 
     public function test_document_limits_and_unsupported_mime_are_enforced_before_post(): void
