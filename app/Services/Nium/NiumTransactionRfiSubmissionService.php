@@ -48,6 +48,14 @@ final class NiumTransactionRfiSubmissionService
         }
 
         $responseInfo = $this->buildFactualResponseInfo($case);
+        $derivedIdentificationType = $this->documentRfiIdentificationType($case);
+        if ($derivedIdentificationType !== null) {
+            $responseInfo['identificationDoc']['identificationType'] = $derivedIdentificationType;
+        }
+        if ($this->requestsIdentificationDocument($case)
+            && blank(data_get($responseInfo, 'identificationDoc.identificationType'))) {
+            throw new RuntimeException('Transaction RFI identification document requires a confirmed factual identificationType; none can be derived from authoritative requiredData.');
+        }
         if ($responseInfo === [] && (array) $case->supporting_file_ids === []) {
             throw new RuntimeException('Transaction RFI submission cannot contain an empty response.');
         }
@@ -182,11 +190,7 @@ final class NiumTransactionRfiSubmissionService
     private function buildIdentificationDocuments(NiumRfiCase $case, UserProviderAccount $account): array
     {
         $references = (array) $case->supporting_file_ids;
-        $documentRequested = collect((array) data_get($case->evidence, 'requiredData', []))->contains(
-            static fn (mixed $required): bool => is_array($required)
-                && strtoupper(trim((string) ($required['type'] ?? ''))) === 'DOCUMENT'
-                && trim((string) ($required['value'] ?? '')) === 'identificationDocument',
-        );
+        $documentRequested = $this->requestsIdentificationDocument($case);
         if (! $documentRequested && $references !== []) {
             throw new RuntimeException('Transaction RFI submission contains unrequested supporting documents.');
         }
@@ -260,6 +264,27 @@ final class NiumTransactionRfiSubmissionService
         }
 
         return $documents;
+    }
+
+    private function requestsIdentificationDocument(NiumRfiCase $case): bool
+    {
+        return collect((array) data_get($case->evidence, 'requiredData', []))->contains(
+            static fn (mixed $required): bool => is_array($required)
+                && strtoupper(trim((string) ($required['type'] ?? ''))) === 'DOCUMENT'
+                && trim((string) ($required['value'] ?? '')) === 'identificationDocument',
+        );
+    }
+
+    private function documentRfiIdentificationType(NiumRfiCase $case): ?string
+    {
+        $description = strtolower(trim((string) data_get($case->evidence, 'description')));
+        $requestInfoFor = strtolower(trim((string) data_get($case->evidence, 'requestInfoFor')));
+
+        if ($description === 'salarystatement' || $requestInfoFor === 'creditor_salarystatement') {
+            return 'SALARY_STATEMENT';
+        }
+
+        return null;
     }
 
     private function markUnknown(

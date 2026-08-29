@@ -345,7 +345,7 @@ class NiumTransactionRfiFlowTest extends TestCase
         });
     }
 
-    public function test_salary_statement_shape_sends_only_current_required_identification_fields(): void
+    public function test_salary_statement_shape_derives_confirmed_identification_type(): void
     {
         Storage::fake('kyc_private');
         [$provider, $user, $account, $transaction] = $this->transactionAccount('tx-salary-statement');
@@ -355,7 +355,8 @@ class NiumTransactionRfiFlowTest extends TestCase
             'provider_id' => $provider->id, 'user_provider_account_id' => $account->id,
             'transaction_id' => $transaction->id, 'scope' => 'transaction',
             'provider_reference_fingerprint' => hash('sha256', 'rfi-salary-statement'), 'status' => 'requested',
-            'evidence' => ['rfiHashId' => 'rfi-salary-statement', 'authCode' => 'AUTH-SALARY', 'requiredData' => [
+            'evidence' => ['rfiHashId' => 'rfi-salary-statement', 'authCode' => 'AUTH-SALARY',
+                'requestInfoFor' => 'creditor_salaryStatement', 'description' => 'salaryStatement', 'requiredData' => [
                 ['label' => 'Salary Statement Document', 'value' => 'identificationDocument', 'type' => 'document'],
                 ['label' => 'Salary Statement Generated on', 'value' => 'identificationIssuingDate', 'type' => 'data'],
                 ['label' => 'Salary Statement Issuer', 'value' => 'identificationIssuingAuthority', 'type' => 'data'],
@@ -383,14 +384,11 @@ class NiumTransactionRfiFlowTest extends TestCase
         Http::assertSent(function ($request) use ($contents): bool {
             $identificationDoc = data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc');
 
-            return array_keys($identificationDoc) === [
-                'identificationIssuingDate', 'identificationIssuingAuthority', 'identificationDocument',
-            ]
-                && ! array_key_exists('identificationType', $identificationDoc)
-                && ! array_key_exists('identificationValue', $identificationDoc)
-                && ! array_key_exists('identificationDocIssuingAuthority', $identificationDoc)
+            return $identificationDoc['identificationType'] === 'SALARY_STATEMENT'
                 && $identificationDoc['identificationIssuingDate'] === '2026-08-29'
                 && $identificationDoc['identificationIssuingAuthority'] === 'Employer'
+                && ! array_key_exists('identificationValue', $identificationDoc)
+                && ! array_key_exists('identificationDocIssuingAuthority', $identificationDoc)
                 && $identificationDoc['identificationDocument'][0] === [
                     'fileName' => 'salary-statement.pdf',
                     'fileType' => 'application/pdf',
