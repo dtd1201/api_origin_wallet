@@ -71,6 +71,15 @@ return [
 
     'nium' => [
         'base_url' => env('NIUM_BASE_URL'),
+        'api_key' => env('NIUM_API_KEY'),
+        'customer_onboarding_simulation_base_url' => env(
+            'NIUM_CUSTOMER_ONBOARDING_SIMULATION_BASE_URL',
+            'https://gatewaysandbox.nium.com'
+        ),
+        'transaction_simulation_endpoint' => env(
+            'NIUM_TRANSACTION_SIMULATION_ENDPOINT',
+            '/api/v5/simulations/transactions/{systemReferenceNumber}/transition'
+        ),
         'allow_insecure_local' => env('NIUM_ALLOW_INSECURE_LOCAL', false),
         'timeout' => env('NIUM_TIMEOUT', 30),
         'client_id' => env('NIUM_CLIENT_ID'),

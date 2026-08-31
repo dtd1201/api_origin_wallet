@@ -36,6 +36,8 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             ),
             payload: $payload,
             user: $beneficiary->user,
+            operation: 'beneficiary_create',
+            externalReference: (string) $beneficiary->id,
         );
 
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
@@ -187,7 +189,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             'beneficiaryEmail' => $beneficiary->email,
             'destinationCountry' => $beneficiary->country_code,
             'destinationCurrency' => $beneficiary->currency,
-            'payoutMethod' => strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'LOCAL')),
+            'payoutMethod' => strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'SWIFT')),
             'beneficiaryName' => $this->beneficiaryName($beneficiary),
             'beneficiaryAlias' => $nium['beneficiaryAlias'] ?? $nium['beneficiary_alias'] ?? Arr::get($nium, 'beneficiary.alias'),
             'beneficiaryPostcode' => $beneficiary->postal_code,
@@ -199,7 +201,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
                 ?? $nium['remitter_beneficiary_relationship']
                 ?? Arr::get($nium, 'beneficiary.remitterBeneficiaryRelationship'),
             'beneficiaryAccountNumber' => $beneficiary->account_number ?: $beneficiary->iban,
-            'beneficiaryBankAccountType' => $this->normalizeBankAccountType($nium['beneficiaryBankAccountType'] ?? $nium['beneficiary_bank_account_type'] ?? 'CHECKING'),
+           // 'beneficiaryBankAccountType' => $this->normalizeBankAccountType($nium['beneficiaryBankAccountType'] ?? $nium['beneficiary_bank_account_type'] ?? 'CHECKING'),
             'beneficiaryBankName' => $beneficiary->bank_name,
             'beneficiaryBankCode' => $beneficiary->bank_code,
             'beneficiaryIdentificationType' => $nium['beneficiaryIdentificationType'] ?? $nium['beneficiary_identification_type'] ?? null,
@@ -395,7 +397,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     private function validateCorridor(Beneficiary $beneficiary): void
     {
         $nium = (array) (($beneficiary->raw_data ?? [])['nium'] ?? []);
-        $payoutMethod = strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'LOCAL'));
+        $payoutMethod = strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'SWIFT'));
         $routingTypes = array_values(array_filter(array_map(
             static fn (array $routing): ?string => isset($routing['type']) ? (string) $routing['type'] : null,
             $this->routingInfo($beneficiary, $nium),

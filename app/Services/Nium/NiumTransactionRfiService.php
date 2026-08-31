@@ -73,8 +73,20 @@ final class NiumTransactionRfiService
     private function projectExactTransaction(array $data, string $transactionId): array
     {
         $items = $this->transactionItems($data);
-        $matches = array_values(array_filter($items, static fn (array $item): bool => hash_equals($transactionId, trim((string) ($item['transactionId'] ?? '')))
-        ));
+        $matches = array_values(array_filter($items, static function (array $item) use ($transactionId): bool {
+            foreach ([
+                'transactionId',
+                'authCode',
+                'systemTraceAuditNumber',
+                'retrievalReferenceNumber',
+            ] as $field) {
+                if (hash_equals($transactionId, trim((string) ($item[$field] ?? '')))) {
+                return true;
+                }
+            }
+
+            return false;
+        }));
         if (count($matches) !== 1) {
             throw new RuntimeException('Nium authoritative transaction response is missing or ambiguous.');
         }

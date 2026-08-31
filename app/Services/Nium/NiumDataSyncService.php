@@ -49,6 +49,7 @@ class NiumDataSyncService implements DataSyncProvider
             user: $user,
         );
 
+
         $data = $this->successfulJson($response, 'Nium balance sync failed.');
         $items = $this->balanceItems($data);
         $count = 0;
@@ -177,10 +178,15 @@ class NiumDataSyncService implements DataSyncProvider
         DB::transaction(function () use ($items, $provider, $user, &$count): void {
             foreach ($items as $item) {
                 $externalTransactionId = $this->value($item, [
+                    'transactionHashId',
+                    'transaction_hash_id',
                     'transactionId',
                     'transaction_id',
                     'systemReferenceNumber',
                     'system_reference_number',
+                    'systemTraceAuditNumber',
+                    'retrievalReferenceNumber',
+                    'authCode',
                     'id',
                 ]);
 
@@ -191,6 +197,9 @@ class NiumDataSyncService implements DataSyncProvider
                 $transferReference = $this->value($item, [
                     'systemReferenceNumber',
                     'system_reference_number',
+                    'systemTraceAuditNumber',
+                    'retrievalReferenceNumber',
+                    'authCode',
                     'paymentId',
                     'payment_id',
                     'clientReference',
@@ -198,7 +207,7 @@ class NiumDataSyncService implements DataSyncProvider
                 ]);
                 $transfer = $this->findTransfer($provider, $transferReference);
                 $currency = strtoupper((string) ($this->value($item, ['currency', 'currencyCode']) ?: $transfer?->source_currency ?: 'USD'));
-                $amount = $this->numericValue($item, ['amount', 'transactionAmount', 'sourceAmount'], 0);
+                $amount = $this->numericValue($item, ['amount', 'transactionAmount', 'sourceAmount', 'cardTransactionAmount', 'authAmount', 'billingAmount',], 0);
 
                 Transaction::query()->updateOrCreate(
                     [
@@ -223,7 +232,20 @@ class NiumDataSyncService implements DataSyncProvider
                             'external_transaction_id' => (string) $externalTransactionId,
                             'provider_request_id' => $this->value($item, ['requestId', 'request_id']),
                             'provider_status' => $this->value($item, ['status']),
-                            'system_reference_number' => $this->value($item, ['systemReferenceNumber', 'system_reference_number']),
+                            'settlement_status' => $this->value($item, ['settlementStatus']),
+                            'compliance_status' => $this->value($item, ['complianceStatus']),
+                            'transaction_hash_id' => $this->value($item, [
+                                'transactionHashId',
+                                'transaction_hash_id',
+                            ]),
+                            'auth_code' => $this->value($item, ['authCode']),
+                            'wallet_hash_id' => $this->value($item, ['walletHashId']),
+                            'customer_hash_id' => $this->value($item, ['customerHashId']),
+                            'system_reference_number' => $this->value($item, [
+                                'systemReferenceNumber',
+                                'system_reference_number',
+                            ]),
+                            'rfi_details' => $item['rfiDetails'] ?? [],
                         ], static fn ($value) => $value !== null && $value !== ''),
                     ],
                 );
@@ -345,9 +367,26 @@ class NiumDataSyncService implements DataSyncProvider
     private function normalizeTransactionStatus(mixed $status): string
     {
         return match (strtolower((string) $status)) {
-            'completed', 'success', 'paid', 'posted' => 'completed',
-            'failed', 'rejected', 'returned', 'error' => 'failed',
-            'cancelled', 'canceled', 'voided' => 'cancelled',
+            'completed',
+            'success',
+            'paid',
+            'posted',
+            'approved',
+            'settled'
+                => 'completed',
+
+            'failed',
+            'rejected',
+            'returned',
+            'error',
+            'declined'
+                => 'failed',
+
+            'cancelled',
+            'canceled',
+            'voided'
+                => 'cancelled',
+
             default => 'pending',
         };
     }

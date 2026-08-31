@@ -67,6 +67,18 @@ class NiumService
         )->post($path, $payload, $user);
     }
 
+    public function postTransactionSimulation(
+        string $path,
+        array $payload,
+        User $user,
+        string $externalReference
+    ): Response {
+        return $this->client(
+           'transaction_simulation_transition',
+           $externalReference,
+        )->post($path, $payload, $user);
+    }
+
     public function put(string $path, array $payload = [], ?User $user = null): Response
     {
         return $this->client()->put($path, $payload, $user);
