@@ -96,6 +96,11 @@ final class NiumRfiWorkflowService
 
         return DB::transaction(function () use ($case, $requestId): NiumRfiCase {
             $locked = NiumRfiCase::query()->lockForUpdate()->findOrFail($case->id);
+            if ($locked->scope === 'transaction'
+                && ($locked->status !== 'requested'
+                    || strtoupper(trim((string) data_get($locked->evidence, 'rfiStatus'))) !== 'RFI_REQUESTED')) {
+                throw new RuntimeException('Transaction RFI submission requires the latest authoritative RFI_REQUESTED status.');
+            }
             if ($locked->submission_state !== 'approved' || $locked->approved_at === null) {
                 throw new RuntimeException('Nium RFI submission requires separate human approval and an unclaimed case.');
             }

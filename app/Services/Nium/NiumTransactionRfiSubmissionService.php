@@ -277,14 +277,13 @@ final class NiumTransactionRfiSubmissionService
 
     private function documentRfiIdentificationType(NiumRfiCase $case): ?string
     {
-        $description = strtolower(trim((string) data_get($case->evidence, 'description')));
-        $requestInfoFor = strtolower(trim((string) data_get($case->evidence, 'requestInfoFor')));
-
-        if ($description === 'salarystatement' || $requestInfoFor === 'creditor_salarystatement') {
-            return 'SALARY_STATEMENT';
+        if (strtoupper(trim((string) data_get($case->evidence, 'type'))) !== 'DOCUMENT') {
+            return null;
         }
 
-        return null;
+        $description = trim((string) data_get($case->evidence, 'description'));
+
+        return $description === '' ? null : $description;
     }
 
     private function markUnknown(

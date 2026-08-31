@@ -307,7 +307,7 @@ class NiumTransactionRfiFlowTest extends TestCase
             'provider_id' => $provider->id, 'user_provider_account_id' => $account->id,
             'transaction_id' => $transaction->id, 'scope' => 'transaction',
             'provider_reference_fingerprint' => hash('sha256', 'rfi-document'), 'status' => 'requested',
-            'evidence' => ['rfiHashId' => 'rfi-document', 'authCode' => 'AUTH-DOCUMENT', 'type' => 'DOCUMENT',
+            'evidence' => ['rfiHashId' => 'rfi-document', 'authCode' => 'AUTH-DOCUMENT', 'rfiStatus' => 'RFI_REQUESTED', 'type' => 'DOCUMENT',
                 'documentType' => 'PASSPORT', 'requiredData' => [
                     ['label' => 'Identification type', 'value' => 'identificationType', 'type' => 'TEXT'],
                     ['label' => 'Document', 'value' => 'identificationDocument', 'type' => 'DOCUMENT'],
@@ -356,7 +356,9 @@ class NiumTransactionRfiFlowTest extends TestCase
             'transaction_id' => $transaction->id, 'scope' => 'transaction',
             'provider_reference_fingerprint' => hash('sha256', 'rfi-salary-statement'), 'status' => 'requested',
             'evidence' => ['rfiHashId' => 'rfi-salary-statement', 'authCode' => 'AUTH-SALARY',
-                'requestInfoFor' => 'creditor_salaryStatement', 'description' => 'salaryStatement', 'requiredData' => [
+                'rfiStatus' => 'RFI_REQUESTED', 'transactionId' => 'tx-salary-statement', 'type' => 'document',
+                'requestInfoFor' => 'creditor_salaryStatement', 'description' => 'salaryStatement',
+                'documentType' => 'POA', 'requiredData' => [
                 ['label' => 'Salary Statement Document', 'value' => 'identificationDocument', 'type' => 'document'],
                 ['label' => 'Salary Statement Generated on', 'value' => 'identificationIssuingDate', 'type' => 'data'],
                 ['label' => 'Salary Statement Issuer', 'value' => 'identificationIssuingAuthority', 'type' => 'data'],
@@ -384,7 +386,9 @@ class NiumTransactionRfiFlowTest extends TestCase
         Http::assertSent(function ($request) use ($contents): bool {
             $identificationDoc = data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc');
 
-            return $identificationDoc['identificationType'] === 'SALARY_STATEMENT'
+            return $identificationDoc['identificationType'] === 'salaryStatement'
+                && $identificationDoc['identificationType'] !== 'SALARY_STATEMENT'
+                && $identificationDoc['identificationType'] !== 'POA'
                 && $identificationDoc['identificationIssuingDate'] === '2026-08-29'
                 && $identificationDoc['identificationIssuingAuthority'] === 'Employer'
                 && ! array_key_exists('identificationValue', $identificationDoc)
@@ -395,6 +399,55 @@ class NiumTransactionRfiFlowTest extends TestCase
                     'document' => base64_encode($contents),
                 ];
         });
+    }
+
+    public function test_document_rfi_identification_type_preserves_exact_description_casing(): void
+    {
+        [$provider, $user, $account, $transaction] = $this->transactionAccount('tx-description-mapping');
+        foreach (['passport', 'utilityBill', 'salaryStatement'] as $index => $description) {
+            $hash = 'rfi-description-'.$index;
+            $case = $this->approvedCase($provider, $account, $transaction, $hash, 'AUTH-'.$index, [
+                $this->answer('identificationType', 'untrusted-draft-value', $user),
+            ]);
+            $case->update(['evidence' => [
+                ...$case->evidence,
+                'rfiStatus' => 'RFI_REQUESTED',
+                'description' => $description,
+                'documentType' => 'POA',
+                'type' => 'document',
+            ]]);
+            Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
+
+            app(NiumTransactionRfiSubmissionService::class)->submit($case->fresh());
+
+            Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+                && data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc.identificationType') === $description
+                && data_get($request->data(), 'rfiResponseRequest.0.rfiResponseInfo.identificationDoc.identificationType') !== 'POA');
+        }
+    }
+
+    public function test_authoritative_rfi_responded_status_prevents_provider_post(): void
+    {
+        [$provider, $user, $account, $transaction] = $this->transactionAccount('tx-already-responded');
+        $case = $this->approvedCase($provider, $account, $transaction, 'rfi-already-responded', 'AUTH-OLD', [
+            $this->answer('firstName', 'Ada', $user),
+        ]);
+        $case->update(['evidence' => [...$case->evidence, 'rfiStatus' => 'RFI_REQUESTED']]);
+        $case->update([
+            'status' => 'responded_under_review',
+            'evidence' => [...$case->evidence, 'rfiStatus' => 'RFI_RESPONDED'],
+        ]);
+        Http::fake();
+
+        try {
+            app(NiumTransactionRfiSubmissionService::class)->submit($case->fresh());
+            $this->fail('Expected an authoritatively responded RFI to be rejected before POST.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('latest authoritative RFI_REQUESTED', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+        $this->assertSame('responded_under_review', $case->fresh()->status);
     }
 
     public function test_requested_document_field_requires_an_approved_factual_document(): void
@@ -648,7 +701,7 @@ class NiumTransactionRfiFlowTest extends TestCase
             'provider_id' => $provider->id, 'user_provider_account_id' => $account->id,
             'transaction_id' => $transaction->id, 'scope' => 'transaction',
             'provider_reference_fingerprint' => hash('sha256', $hash), 'status' => 'requested',
-            'evidence' => ['rfiHashId' => $hash, 'authCode' => $authCode, 'requiredData' => array_map(
+            'evidence' => ['rfiHashId' => $hash, 'authCode' => $authCode, 'rfiStatus' => 'RFI_REQUESTED', 'requiredData' => array_map(
                 static fn (array $answer): array => ['label' => $answer['questionId'], 'value' => $answer['questionId'], 'type' => 'TEXT'],
                 $answers,
             )],
@@ -687,7 +740,7 @@ class NiumTransactionRfiFlowTest extends TestCase
             'provider_id' => $provider->id, 'user_provider_account_id' => $account->id,
             'transaction_id' => $transaction->id, 'scope' => 'transaction',
             'provider_reference_fingerprint' => hash('sha256', 'rfi-document-'.$suffix), 'status' => 'requested',
-            'evidence' => ['rfiHashId' => 'rfi-document-'.$suffix, 'authCode' => 'AUTH-DOCUMENT', 'type' => 'DOCUMENT',
+            'evidence' => ['rfiHashId' => 'rfi-document-'.$suffix, 'authCode' => 'AUTH-DOCUMENT', 'rfiStatus' => 'RFI_REQUESTED', 'type' => 'DOCUMENT',
                 'documentType' => 'PASSPORT', 'requiredData' => [
                     ['label' => 'Identification type', 'value' => 'identificationType', 'type' => 'TEXT'],
                     ['label' => 'Document', 'value' => 'identificationDocument', 'type' => 'DOCUMENT'],
