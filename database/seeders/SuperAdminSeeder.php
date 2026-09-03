@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
@@ -30,9 +31,10 @@ class SuperAdminSeeder extends Seeder
             ]
         );
 
+        $role = Role::query()->where('code', 'super_admin')->first();
         $user->roles()->updateOrCreate(
             ['role_code' => 'super_admin'],
-            []
+            ['role_id' => $role?->id]
         );
 
         $this->command?->info("Super admin seeded for {$email}.");

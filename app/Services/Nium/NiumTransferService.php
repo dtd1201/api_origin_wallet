@@ -175,6 +175,13 @@ class NiumTransferService implements TransferProvider
         $transfer->update([
             'external_payment_id' => $statusPayload['paymentReferenceNumber'] ?? $statusPayload['payment_id'] ?? $transfer->external_payment_id,
             'status' => $status,
+            'provider_status' => strtoupper(trim((string) (
+                 $statusPayload['status']
+                 ?? $statusPayload['subStatus']
+                 ?? ''
+             ))),
+
+            'provider_status_detail' => $statusPayload['statusDetails'] ?? null,
             'failure_code' => $status === 'failed' ? 'provider_error' : null,
             'failure_reason' => $status === 'failed'
                 ? ($statusPayload['remarks'] ?? $responseData['message'] ?? $transfer->failure_reason)
@@ -313,7 +320,7 @@ class NiumTransferService implements TransferProvider
             'FAILED', 'ERROR', 'REJECTED', 'RETURNED' => 'failed',
             'CANCELLED', 'VOIDED' => 'cancelled',
             'PENDING', 'PROCESSING', 'IN_PROGRESS', 'ACCEPTED' => 'pending',
-            default => 'unknown',
+            default => 'pending',
         };
     }
 

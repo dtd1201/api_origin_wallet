@@ -16,7 +16,8 @@ class AmlScreeningController extends Controller
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'status' => ['sometimes', 'string', Rule::in(['pending', 'clear', 'potential_match', 'manual_clear', 'confirmed_match', 'failed', 'superseded'])],
+            'status' => ['sometimes', 'string', Rule::in(['pending', 'running', 'completed', 'failed', 'manual_review'])],
+            'compliance_decision' => ['sometimes', 'string', Rule::in(['clear', 'match', 'rejected', 'pending_review'])],
             'user_id' => ['sometimes', 'integer', 'exists:users,id'],
         ]);
 
@@ -30,6 +31,10 @@ class AmlScreeningController extends Controller
             ->when(
                 isset($validated['user_id']),
                 fn (Builder $query) => $query->where('user_id', $validated['user_id'])
+            )
+            ->when(
+                isset($validated['compliance_decision']),
+                fn (Builder $query) => $query->where('compliance_decision', $validated['compliance_decision'])
             )
             ->latest('updated_at')
             ->paginate(15);
@@ -56,7 +61,9 @@ class AmlScreeningController extends Controller
         $screenings = $amlScreeningService->runProfile($kycProfile);
 
         return response()->json([
-            'message' => 'AML screening completed.',
+            'message' => $screenings->contains('status', 'failed')
+                ? 'AML screening execution failed.'
+                : 'AML screening completed.',
             'user' => $user->fresh(),
             'aml_screenings' => $screenings,
         ]);

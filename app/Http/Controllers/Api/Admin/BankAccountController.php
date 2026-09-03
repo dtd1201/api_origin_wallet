@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\Admin\BankAccountDetailResource;
+use App\Http\Resources\Admin\BankAccountListResource;
 use App\Models\BankAccount;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
@@ -13,7 +15,7 @@ class BankAccountController extends Controller
 {
     public function index(): JsonResponse
     {
-        return response()->json(BankAccount::latest('id')->paginate(15));
+        return BankAccountListResource::collection(BankAccount::latest('id')->paginate(15))->response();
     }
 
     public function store(Request $request): JsonResponse
@@ -42,12 +44,12 @@ class BankAccountController extends Controller
 
         $bankAccount = DB::transaction(fn () => BankAccount::create($validated));
 
-        return response()->json($bankAccount, 201);
+        return response()->json((new BankAccountDetailResource($bankAccount))->resolve($request), 201);
     }
 
-    public function show(BankAccount $bankAccount): JsonResponse
+    public function show(Request $request, BankAccount $bankAccount): JsonResponse
     {
-        return response()->json($bankAccount);
+        return response()->json((new BankAccountDetailResource($bankAccount))->resolve($request));
     }
 
     public function update(Request $request, BankAccount $bankAccount): JsonResponse
@@ -82,7 +84,7 @@ class BankAccountController extends Controller
             return $bankAccount->fresh();
         });
 
-        return response()->json($bankAccount);
+        return response()->json((new BankAccountDetailResource($bankAccount))->resolve($request));
     }
 
     public function destroy(BankAccount $bankAccount): JsonResponse

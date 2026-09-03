@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Contracts\Aml\AmlScreeningProvider;
 use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
@@ -13,11 +14,19 @@ use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Fixtures\RedirectOnboardingProvider;
+use Tests\Fixtures\FakeAmlScreeningProvider;
 use Tests\TestCase;
 
 class InternalKycTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->app->instance(AmlScreeningProvider::class, new FakeAmlScreeningProvider);
+    }
 
     public function test_user_can_submit_platform_style_business_kyc_profile_for_review(): void
     {
@@ -34,6 +43,8 @@ class InternalKycTest extends TestCase
             ->assertJsonPath('kyc_status', 'pending')
             ->assertJsonPath('kyc_profile.status', 'submitted')
             ->assertJsonPath('kyc_profile.applicant_type', 'business')
+            ->assertJsonPath('kyc_profile.metadata.registered_date', '2020-01-15')
+            ->assertJsonPath('kyc_profile.metadata.nium_business_type', 'PRIVATE_COMPANY')
             ->assertJsonFragment(['type' => 'passport_front'])
             ->assertJsonPath('kyc_profile.related_persons.0.relationship_type', 'authorized_representative')
             ->assertJsonFragment(['key' => 'business_registration']);
@@ -821,25 +832,11 @@ class InternalKycTest extends TestCase
         $this->submitKycProfile($user);
 
         $screening = $user->fresh('kycProfile.amlScreenings')->kycProfile->amlScreenings->first();
-        $screening->update([
-            'raw_data' => [
-                'metadata' => [
-                    'aml' => [
-                        'matches' => [
-                            [
-                                'list_type' => 'sanctions',
-                                'source' => 'internal_test_list',
-                                'matched_name' => 'Acme Inc',
-                                'score' => 97,
-                            ],
-                        ],
-                    ],
-                ],
-            ],
-        ]);
+        $this->app->instance(AmlScreeningProvider::class, new FakeAmlScreeningProvider('match'));
 
         $this->runAmlForProfile($admin, $user)
-            ->assertJsonPath('aml_screenings.0.status', 'potential_match');
+            ->assertJsonPath('aml_screenings.0.status', 'manual_review')
+            ->assertJsonPath('aml_screenings.0.compliance_decision', 'pending_review');
 
         $this->withToken($this->issueTokenFor($admin))
             ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
@@ -851,7 +848,8 @@ class InternalKycTest extends TestCase
                 'review_note' => 'False positive after manual AML review.',
             ])
             ->assertOk()
-            ->assertJsonPath('aml_screening.status', 'manual_clear');
+            ->assertJsonPath('aml_screening.status', 'completed')
+            ->assertJsonPath('aml_screening.compliance_decision', 'clear');
 
         $this->withToken($this->issueTokenFor($admin))
             ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
@@ -970,6 +968,45 @@ class InternalKycTest extends TestCase
             'user_id' => $admin->id,
             'action' => 'kyc_provider_submission.approved',
             'entity_type' => 'kyc_provider_submission',
+        ]);
+    }
+
+    public function test_admin_cannot_approve_corporate_provider_submission_without_nium_metadata(): void
+    {
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create([
+            'status' => 'active',
+            'kyc_status' => 'verified',
+        ]);
+        $user->kycProfile()->create([
+            'status' => 'verified',
+            'applicant_type' => 'business',
+            'legal_name' => 'Incomplete Corporate Customer',
+            'business_name' => 'Incomplete Corporate Customer',
+            'registered_country_code' => 'US',
+            'address_line1' => '100 Main Street',
+            'city' => 'New York',
+            'country_code' => 'US',
+            'metadata' => [],
+        ]);
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/providers/{$provider->code}/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath(
+                'message',
+                'Corporate KYC metadata is incomplete for Nium provider approval: registered_date, nium_business_type.',
+            );
+
+        $this->assertDatabaseMissing('kyc_provider_submissions', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'status' => 'approved',
         ]);
     }
 
@@ -1339,6 +1376,10 @@ class InternalKycTest extends TestCase
             'business_registration_number' => 'ACME-001',
             'tax_id' => 'TAX-001',
             'registered_country_code' => 'US',
+            'metadata' => [
+                'registered_date' => '2020-01-15',
+                'nium_business_type' => 'PRIVATE_COMPANY',
+            ],
             'documents' => [
                 ...$this->individualKycPayload()['documents'],
                 [

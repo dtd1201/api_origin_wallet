@@ -77,6 +77,7 @@ class KycProviderSubmissionController extends Controller
 
         try {
             $this->ensureInternalKycVerified($user);
+            $this->ensureCorporateNiumMetadataPresent($user);
             $amlScreeningService->assertProfileClear($user->kycProfile);
         } catch (RuntimeException $exception) {
             return response()->json([
@@ -167,6 +168,37 @@ class KycProviderSubmissionController extends Controller
             ! in_array($normalizedProfileStatus, ['verified', 'approved'], true)
         ) {
             throw new RuntimeException('User internal KYC must be verified before approving provider submission.');
+        }
+    }
+
+    private function ensureCorporateNiumMetadataPresent(User $user): void
+    {
+        $profile = $user->kycProfile;
+
+        if ($profile?->applicant_type !== 'business') {
+            return;
+        }
+
+        $metadata = (array) ($profile->metadata ?? []);
+        $missing = collect(['registered_date', 'nium_business_type'])
+            ->filter(fn (string $field): bool => ! is_string($metadata[$field] ?? null) || trim($metadata[$field]) === '')
+            ->values()
+            ->all();
+
+        if ($missing !== []) {
+            throw new RuntimeException(
+                'Corporate KYC metadata is incomplete for Nium provider approval: '.implode(', ', $missing).'.'
+            );
+        }
+
+        $registeredDate = \DateTimeImmutable::createFromFormat('!Y-m-d', trim($metadata['registered_date']));
+
+        if (
+            $registeredDate === false
+            || $registeredDate->format('Y-m-d') !== trim($metadata['registered_date'])
+            || $registeredDate > new \DateTimeImmutable('today')
+        ) {
+            throw new RuntimeException('Corporate KYC metadata registered_date must be a valid non-future date.');
         }
     }
 

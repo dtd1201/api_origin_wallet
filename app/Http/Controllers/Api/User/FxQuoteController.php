@@ -11,7 +11,8 @@ use App\Services\Transfers\TransferEligibilityService;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use RuntimeException;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class FxQuoteController extends Controller
 {
@@ -51,9 +52,15 @@ class FxQuoteController extends Controller
             $provider->assertSupportsCapability('quote');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
             $quote = $manager->createQuote($provider, $user, $validated);
-        } catch (RuntimeException $exception) {
-            return response()->json([
+        } catch (Throwable $exception) {
+            Log::warning('Customer FX quote operation failed.', [
+                'user_id' => $user->id,
+                'exception' => $exception::class,
                 'message' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Unable to create an FX quote with the selected provider. Review the currencies and amount, then try again.',
             ], 422);
         }
 

@@ -8,12 +8,16 @@ use App\Models\PendingLogin;
 use App\Models\User;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 
 class ApiAuthService
 {
-    public function __construct(private readonly IntegrationProviderCatalog $providerCatalog) {}
+    public function __construct(
+        private readonly IntegrationProviderCatalog $providerCatalog,
+        private readonly AuthVerificationSecurity $verificationSecurity,
+    ) {}
 
     public function issueToken(User $user, string $tokenName): string
     {
@@ -37,7 +41,11 @@ class ApiAuthService
                 ['email' => $user->email],
                 [
                     'user_id' => $user->id,
-                    'verification_code' => $verificationCode,
+                    'verification_code' => null,
+                    'verification_code_hash' => Hash::make($verificationCode),
+                    'verification_attempts' => 0,
+                    'locked_until' => null,
+                    'last_attempt_at' => null,
                     'expires_at' => now()->addMinutes(15),
                 ]
             );
@@ -66,23 +74,84 @@ class ApiAuthService
         return $response;
     }
 
-    public function completeLogin(string $email, string $verificationCode, string $tokenName, ?callable $afterUserResolved = null): array
-    {
-        return DB::transaction(function () use ($email, $verificationCode, $tokenName, $afterUserResolved): array {
+    public function completeLogin(
+        string $email,
+        string $verificationCode,
+        string $tokenName,
+        ?callable $afterUserResolved = null,
+        ?string $ipAddress = null,
+    ): array {
+        $this->verificationSecurity->enforceRateLimits('login', $email, $ipAddress, $tokenName);
+
+        $result = DB::transaction(function () use ($email, $verificationCode, $tokenName, $afterUserResolved, $ipAddress): array {
             $pendingLogin = PendingLogin::query()
                 ->where('email', $email)
                 ->lockForUpdate()
                 ->first();
 
-            abort_if($pendingLogin === null, 422, 'No pending login found for this email.');
-            abort_if($pendingLogin->expires_at->isPast(), 422, 'Verification code has expired.');
-            abort_if($pendingLogin->verification_code !== $verificationCode, 422, 'Invalid verification code.');
+            if ($pendingLogin === null) {
+                $this->verificationSecurity->record('login_verification_failed', $email, null, $ipAddress, $tokenName, [
+                    'reason' => 'pending_login_missing',
+                ]);
+
+                return ['error' => 'No pending login found for this email.'];
+            }
+
+            if ($pendingLogin->locked_until?->isFuture()) {
+                $this->verificationSecurity->record('login_verification_lockout', $email, $pendingLogin->user_id, $ipAddress, $tokenName, [
+                    'reason' => 'attempt_limit',
+                    'locked_until' => $pendingLogin->locked_until->toIso8601String(),
+                ]);
+
+                return ['error' => 'Too many invalid verification attempts. Please request a new code.'];
+            }
+
+            if ($pendingLogin->expires_at->isPast()) {
+                $this->verificationSecurity->record('login_verification_failed', $email, $pendingLogin->user_id, $ipAddress, $tokenName, [
+                    'reason' => 'expired',
+                ]);
+
+                return ['error' => 'Verification code has expired.'];
+            }
+
+            if (! Hash::check($verificationCode, (string) $pendingLogin->verification_code_hash)) {
+                $pendingLogin->verification_attempts++;
+                $pendingLogin->last_attempt_at = now();
+                $lockedOut = $pendingLogin->verification_attempts >= $this->verificationSecurity->maxAttempts();
+
+                if ($lockedOut) {
+                    $pendingLogin->locked_until = now()->addMinutes($this->verificationSecurity->lockoutMinutes());
+                }
+
+                $pendingLogin->save();
+                $this->verificationSecurity->record(
+                    $lockedOut ? 'login_verification_lockout' : 'login_verification_failed',
+                    $email,
+                    $pendingLogin->user_id,
+                    $ipAddress,
+                    $tokenName,
+                    ['attempts' => $pendingLogin->verification_attempts, 'reason' => 'invalid_code']
+                );
+
+                if (! $lockedOut && $pendingLogin->verification_attempts >= $this->verificationSecurity->suspiciousAttemptThreshold()) {
+                    $this->verificationSecurity->record('suspicious_verification_attempts', $email, $pendingLogin->user_id, $ipAddress, $tokenName, [
+                        'attempts' => $pendingLogin->verification_attempts,
+                        'purpose' => 'login',
+                    ]);
+                }
+
+                return ['error' => $lockedOut
+                    ? 'Too many invalid verification attempts. Please request a new code.'
+                    : 'Invalid verification code.'];
+            }
 
             $user = User::query()
                 ->with(['profile', 'providerAccounts.provider', 'roles'])
                 ->find($pendingLogin->user_id);
 
-            abort_if($user === null, 422, 'User account no longer exists.');
+            if ($user === null) {
+                return ['error' => 'User account no longer exists.'];
+            }
 
             if ($afterUserResolved !== null) {
                 $afterUserResolved($user);
@@ -92,10 +161,19 @@ class ApiAuthService
             $pendingLogin->delete();
 
             return [
+                'success' => true,
                 $user,
                 $this->buildAuthPayload($user, $token),
             ];
         });
+
+        if (! isset($result['success'])) {
+            abort(422, $result['error']);
+        }
+
+        $this->verificationSecurity->clearAccountRateLimit('login', $email);
+
+        return [$result[0], $result[1]];
     }
 
     public function buildAuthPayload(User $user, ?string $plainToken = null): array

@@ -6,7 +6,7 @@ return [
 
     'admin_role_codes' => array_values(array_filter(array_map(
         static fn (string $roleCode) => trim($roleCode),
-        explode(',', (string) env('AUTH_ADMIN_ROLE_CODES', 'admin,super_admin'))
+        explode(',', (string) env('AUTH_ADMIN_ROLE_CODES', 'admin,super_admin,compliance_officer,finance_operator,operations_operator,support_agent,auditor'))
     ))),
 
     /*
@@ -118,5 +118,14 @@ return [
     */
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
+
+    'verification' => [
+        'max_attempts' => (int) env('AUTH_VERIFICATION_MAX_ATTEMPTS', 5),
+        'lockout_minutes' => (int) env('AUTH_VERIFICATION_LOCKOUT_MINUTES', 15),
+        'suspicious_attempt_threshold' => (int) env('AUTH_VERIFICATION_SUSPICIOUS_THRESHOLD', 3),
+        'account_rate_limit' => (int) env('AUTH_VERIFICATION_ACCOUNT_RATE_LIMIT', 10),
+        'ip_rate_limit' => (int) env('AUTH_VERIFICATION_IP_RATE_LIMIT', 30),
+        'rate_decay_seconds' => (int) env('AUTH_VERIFICATION_RATE_DECAY_SECONDS', 60),
+    ],
 
 ];

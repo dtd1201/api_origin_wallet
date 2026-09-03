@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\Mail;
 
 class PasswordResetService
 {
+    public function __construct(private readonly AuthVerificationSecurity $verificationSecurity) {}
+
     public function sendResetCode(string $email): array
     {
         $user = User::query()
@@ -44,6 +46,9 @@ class PasswordResetService
                 [
                     'token' => Hash::make($verificationCode),
                     'created_at' => now(),
+                    'verification_attempts' => 0,
+                    'locked_until' => null,
+                    'last_attempt_at' => null,
                 ]
             );
 
@@ -65,25 +70,93 @@ class PasswordResetService
         return $response;
     }
 
-    public function resetPassword(array $validated): void
+    public function resetPassword(array $validated, ?string $ipAddress = null, ?string $userAgent = null): void
     {
-        DB::transaction(function () use ($validated): void {
+        $this->verificationSecurity->enforceRateLimits(
+            'password_reset',
+            $validated['email'],
+            $ipAddress,
+            $userAgent,
+        );
+
+        $result = DB::transaction(function () use ($validated, $ipAddress, $userAgent): ?string {
             /** @var User|null $user */
             $user = User::query()
                 ->where('email', $validated['email'])
                 ->lockForUpdate()
                 ->first();
 
-            abort_if($user === null, 422, 'No user found for this email.');
+            if ($user === null) {
+                $this->verificationSecurity->record('password_reset_verification_failed', $validated['email'], null, $ipAddress, $userAgent, [
+                    'reason' => 'user_missing',
+                ]);
+
+                return 'No user found for this email.';
+            }
 
             $passwordReset = DB::table('password_reset_tokens')
                 ->where('email', $validated['email'])
                 ->lockForUpdate()
                 ->first();
 
-            abort_if($passwordReset === null, 422, 'No pending password reset found for this email.');
-            abort_if($this->passwordResetTokenIsExpired($passwordReset), 422, 'Password reset code has expired.');
-            abort_if(! Hash::check($validated['verification_code'], $passwordReset->token), 422, 'Invalid password reset code.');
+            if ($passwordReset === null) {
+                $this->verificationSecurity->record('password_reset_verification_failed', $validated['email'], $user->id, $ipAddress, $userAgent, [
+                    'reason' => 'pending_reset_missing_or_replayed',
+                ]);
+
+                return 'No pending password reset found for this email.';
+            }
+
+            if ($passwordReset->locked_until !== null && Carbon::parse($passwordReset->locked_until)->isFuture()) {
+                $this->verificationSecurity->record('password_reset_verification_lockout', $validated['email'], $user->id, $ipAddress, $userAgent, [
+                    'reason' => 'attempt_limit',
+                ]);
+
+                return 'Too many invalid password reset attempts. Please request a new code.';
+            }
+
+            if ($this->passwordResetTokenIsExpired($passwordReset)) {
+                $this->verificationSecurity->record('password_reset_verification_failed', $validated['email'], $user->id, $ipAddress, $userAgent, [
+                    'reason' => 'expired',
+                ]);
+
+                return 'Password reset code has expired.';
+            }
+
+            if (! Hash::check($validated['verification_code'], $passwordReset->token)) {
+                $attempts = ((int) $passwordReset->verification_attempts) + 1;
+                $lockedOut = $attempts >= $this->verificationSecurity->maxAttempts();
+
+                DB::table('password_reset_tokens')
+                    ->where('email', $validated['email'])
+                    ->update([
+                        'verification_attempts' => $attempts,
+                        'last_attempt_at' => now(),
+                        'locked_until' => $lockedOut
+                            ? now()->addMinutes($this->verificationSecurity->lockoutMinutes())
+                            : null,
+                    ]);
+
+                $this->verificationSecurity->record(
+                    $lockedOut ? 'password_reset_verification_lockout' : 'password_reset_verification_failed',
+                    $validated['email'],
+                    $user->id,
+                    $ipAddress,
+                    $userAgent,
+                    ['attempts' => $attempts, 'reason' => 'invalid_code']
+                );
+
+                if (! $lockedOut && $attempts >= $this->verificationSecurity->suspiciousAttemptThreshold()) {
+                    $this->verificationSecurity->record('suspicious_verification_attempts', $validated['email'], $user->id, $ipAddress, $userAgent, [
+                        'attempts' => $attempts,
+                        'purpose' => 'password_reset',
+                    ]);
+                }
+
+                return $lockedOut
+                    ? 'Too many invalid password reset attempts. Please request a new code.'
+                    : 'Invalid password reset code.';
+            }
 
             $user->forceFill([
                 'password_hash' => Hash::make($validated['password']),
@@ -94,7 +167,15 @@ class PasswordResetService
             DB::table('password_reset_tokens')
                 ->where('email', $validated['email'])
                 ->delete();
+
+            return null;
         });
+
+        if ($result !== null) {
+            abort(422, $result);
+        }
+
+        $this->verificationSecurity->clearAccountRateLimit('password_reset', $validated['email']);
     }
 
     private function generateVerificationCode(): string

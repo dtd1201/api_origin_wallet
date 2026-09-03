@@ -98,9 +98,10 @@ class PingPongUserApiValidationTest extends TestCase
 
         $response
             ->assertCreated()
-            ->assertJsonPath('external_beneficiary_id', 'R202501080950209789')
-            ->assertJsonPath('raw_data.pingpong.document', 'doc-file-id')
-            ->assertJsonPath('raw_data.pingpong.bank_detail.routing_no', '110000000');
+            ->assertJsonPath('full_name', 'Jane Doe')
+            ->assertJsonMissingPath('external_beneficiary_id')
+            ->assertJsonMissingPath('raw_data')
+            ->assertJsonMissingPath('user_id');
     }
 
     public function test_user_can_store_transfer_with_pingpong_override_fields(): void

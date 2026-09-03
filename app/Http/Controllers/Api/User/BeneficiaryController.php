@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\User;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\User\BeneficiaryResource;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
@@ -11,6 +12,7 @@ use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -19,7 +21,7 @@ class BeneficiaryController extends Controller
     public function index(User $user): JsonResponse
     {
         return response()->json(
-            $user->beneficiaries()->latest('id')->get()
+            BeneficiaryResource::collection($user->beneficiaries()->latest('id')->get())->resolve()
         );
     }
 
@@ -27,7 +29,7 @@ class BeneficiaryController extends Controller
     {
         abort_unless($beneficiary->user_id === $user->id, 404);
 
-        return response()->json($beneficiary);
+        return response()->json((new BeneficiaryResource($beneficiary))->resolve());
     }
 
     public function store(Request $request, User $user, ProviderBeneficiaryManager $manager): JsonResponse
@@ -84,12 +86,10 @@ class BeneficiaryController extends Controller
                 throw $exception;
             }
 
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
+            return $this->providerFailureResponse($exception, 'create', $user->id);
         }
 
-        return response()->json($beneficiary, 201);
+        return response()->json((new BeneficiaryResource($beneficiary))->resolve(), 201);
     }
 
     public function update(
@@ -142,12 +142,10 @@ class BeneficiaryController extends Controller
                 return $manager->updateBeneficiary($provider, $beneficiary->fresh()->load('user'));
             });
         } catch (RuntimeException|InvalidArgumentException $exception) {
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
+            return $this->providerFailureResponse($exception, 'update', $user->id, $beneficiary->id);
         }
 
-        return response()->json($beneficiary);
+        return response()->json((new BeneficiaryResource($beneficiary))->resolve());
     }
 
     public function destroy(User $user, Beneficiary $beneficiary, ProviderBeneficiaryManager $manager): JsonResponse
@@ -162,11 +160,28 @@ class BeneficiaryController extends Controller
                 $beneficiary->delete();
             });
         } catch (RuntimeException|InvalidArgumentException $exception) {
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
+            return $this->providerFailureResponse($exception, 'delete', $user->id, $beneficiary->id);
         }
 
         return response()->json(status: 204);
+    }
+
+    private function providerFailureResponse(
+        RuntimeException|InvalidArgumentException $exception,
+        string $operation,
+        int $userId,
+        ?int $beneficiaryId = null,
+    ): JsonResponse {
+        Log::warning('Customer beneficiary provider operation failed.', [
+            'operation' => $operation,
+            'user_id' => $userId,
+            'beneficiary_id' => $beneficiaryId,
+            'exception' => $exception::class,
+            'message' => $exception->getMessage(),
+        ]);
+
+        return response()->json([
+            'message' => "Unable to {$operation} beneficiary with the selected provider. Review the details and try again.",
+        ], 422);
     }
 }

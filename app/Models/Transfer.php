@@ -35,6 +35,8 @@ class Transfer extends Model
         'client_reference',
         'provider_operation_key',
         'status',
+        'provider_status',
+        'provider_status_detail',
         'failure_code',
         'failure_reason',
         'submitted_at',

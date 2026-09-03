@@ -14,8 +14,7 @@ class AdminAuthController extends Controller
 {
     public function __construct(
         private readonly ApiAuthService $apiAuthService,
-    ) {
-    }
+    ) {}
 
     public function login(Request $request): JsonResponse
     {
@@ -57,7 +56,8 @@ class AdminAuthController extends Controller
             (string) $request->userAgent(),
             function (User $user): void {
                 abort_if(! $user->isAdmin(), 403, 'This account is not allowed to access admin.');
-            }
+            },
+            $request->ip(),
         );
 
         return response()->json([

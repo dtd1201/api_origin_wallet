@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\User;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\User\BankAccountResource;
 use App\Models\BankAccount;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
@@ -12,7 +13,7 @@ class BankAccountController extends Controller
     public function index(User $user): JsonResponse
     {
         return response()->json(
-            $user->bankAccounts()->latest('id')->get()
+            BankAccountResource::collection($user->bankAccounts()->latest('id')->get())->resolve()
         );
     }
 
@@ -20,6 +21,6 @@ class BankAccountController extends Controller
     {
         abort_unless($bankAccount->user_id === $user->id, 404);
 
-        return response()->json($bankAccount);
+        return response()->json((new BankAccountResource($bankAccount))->resolve());
     }
 }

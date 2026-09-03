@@ -26,8 +26,7 @@ class AuthController extends Controller
         private readonly ApiAuthService $apiAuthService,
         private readonly PasswordResetService $passwordResetService,
         private readonly RegistrationService $registrationService,
-    ) {
-    }
+    ) {}
 
     public function register(Request $request): JsonResponse
     {
@@ -121,6 +120,7 @@ class AuthController extends Controller
             $validated['email'],
             $validated['verification_code'],
             (string) $request->userAgent(),
+            ipAddress: $request->ip(),
         );
 
         return response()->json([
@@ -149,7 +149,11 @@ class AuthController extends Controller
             'password' => ['required', 'string', 'min:6', 'confirmed'],
         ]);
 
-        $this->passwordResetService->resetPassword($validated);
+        $this->passwordResetService->resetPassword(
+            $validated,
+            $request->ip(),
+            (string) $request->userAgent(),
+        );
 
         return response()->json([
             'message' => 'Password reset successful. Please log in again with your new password.',
@@ -321,5 +325,4 @@ class AuthController extends Controller
             ->where('code', PrimaryProvider::code())
             ->first();
     }
-
 }

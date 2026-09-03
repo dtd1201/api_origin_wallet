@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
+use App\Http\Resources\Admin\TransferDetailResource;
+use App\Http\Resources\Admin\TransferListResource;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
@@ -22,7 +24,7 @@ class TransferController extends Controller
 
     public function index(): JsonResponse
     {
-        return response()->json(
+        return TransferListResource::collection(
             Transfer::query()
                 ->with([
                     'user:id,email,phone,full_name,status,kyc_status',
@@ -31,7 +33,7 @@ class TransferController extends Controller
                 ])
                 ->latest('id')
                 ->paginate(15)
-        );
+        )->response();
     }
 
     public function store(Request $request): JsonResponse
@@ -68,22 +70,24 @@ class TransferController extends Controller
 
         $transfer = DB::transaction(fn () => Transfer::create($validated));
 
-        return response()->json($transfer, 201);
+        return response()->json((new TransferDetailResource($transfer))->resolve($request), 201);
     }
 
-    public function show(Transfer $transfer): JsonResponse
+    public function show(Request $request, Transfer $transfer): JsonResponse
     {
-        return response()->json($transfer->load([
+        $transfer->load([
             'user:id,email,phone,full_name,status,kyc_status',
             'provider:id,code,name,logo_url,status',
             'beneficiary',
             'sourceBankAccount',
             'approvals.approver:id,email,full_name,status,kyc_status',
             'transactions',
-        ]));
+        ]);
+
+        return response()->json((new TransferDetailResource($transfer))->resolve($request));
     }
 
-    public function syncStatus(Transfer $transfer, ProviderTransferManager $manager): JsonResponse
+    public function syncStatus(Request $request, Transfer $transfer, ProviderTransferManager $manager): JsonResponse
     {
         $provider = IntegrationProvider::query()->findOrFail($transfer->provider_id);
         abort_unless(PrimaryProvider::isPrimary($provider), 404);
@@ -102,7 +106,7 @@ class TransferController extends Controller
 
         return response()->json([
             'message' => 'Transfer status synced successfully.',
-            'transfer' => $transfer,
+            'transfer' => (new TransferDetailResource($transfer))->resolve($request),
         ]);
     }
 
@@ -129,7 +133,7 @@ class TransferController extends Controller
 
         return response()->json([
             'message' => 'Transfer approved successfully.',
-            'transfer' => $transfer,
+            'transfer' => (new TransferDetailResource($transfer))->resolve($request),
         ]);
     }
 
@@ -159,7 +163,7 @@ class TransferController extends Controller
 
         return response()->json([
             'message' => 'Transfer rejected successfully.',
-            'transfer' => $transfer,
+            'transfer' => (new TransferDetailResource($transfer))->resolve($request),
         ]);
     }
 
@@ -203,7 +207,7 @@ class TransferController extends Controller
             return $transfer->fresh();
         });
 
-        return response()->json($transfer);
+        return response()->json((new TransferDetailResource($transfer))->resolve($request));
     }
 
     public function destroy(Transfer $transfer): JsonResponse

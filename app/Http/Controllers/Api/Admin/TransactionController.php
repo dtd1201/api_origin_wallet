@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\Admin\TransactionDetailResource;
+use App\Http\Resources\Admin\TransactionListResource;
 use App\Models\Transaction;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
@@ -13,7 +15,7 @@ class TransactionController extends Controller
 {
     public function index(): JsonResponse
     {
-        return response()->json(Transaction::latest('id')->paginate(15));
+        return TransactionListResource::collection(Transaction::latest('id')->paginate(15))->response();
     }
 
     public function store(Request $request): JsonResponse
@@ -41,12 +43,12 @@ class TransactionController extends Controller
 
         $transaction = DB::transaction(fn () => Transaction::create($validated));
 
-        return response()->json($transaction, 201);
+        return response()->json((new TransactionDetailResource($transaction))->resolve($request), 201);
     }
 
-    public function show(Transaction $transaction): JsonResponse
+    public function show(Request $request, Transaction $transaction): JsonResponse
     {
-        return response()->json($transaction->load(['bankAccount', 'transfer']));
+        return response()->json((new TransactionDetailResource($transaction))->resolve($request));
     }
 
     public function update(Request $request, Transaction $transaction): JsonResponse
@@ -80,7 +82,7 @@ class TransactionController extends Controller
             return $transaction->fresh();
         });
 
-        return response()->json($transaction);
+        return response()->json((new TransactionDetailResource($transaction))->resolve($request));
     }
 
     public function destroy(Transaction $transaction): JsonResponse

@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
+use App\Http\Resources\Admin\UserDetailResource;
+use App\Http\Resources\Admin\UserListResource;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationLink;
@@ -24,10 +26,7 @@ class UserController extends Controller
 
     public function index(): JsonResponse
     {
-        return response()->json(
-            $this->manageableUsersQuery()
-                ->paginate(15)
-        );
+        return UserListResource::collection($this->manageableUsersQuery()->paginate(15))->response();
     }
 
     public function store(Request $request): JsonResponse
@@ -62,13 +61,14 @@ class UserController extends Controller
             return $user;
         });
 
-        return response()->json($this->userDetailPayload($user), 201);
+        return response()->json($this->userDetailPayload($request, $user), 201);
     }
 
-    public function show(User $user): JsonResponse
+    public function show(Request $request, User $user): JsonResponse
     {
         return response()->json(
             $this->userDetailPayload(
+                $request,
                 $this->resolveManageableUser($user)->load(['profile', 'kycProfile', 'roles', 'integrationLinks.provider'])
             )
         );
@@ -115,7 +115,7 @@ class UserController extends Controller
             return $user;
         });
 
-        return response()->json($this->userDetailPayload($user));
+        return response()->json($this->userDetailPayload($request, $user));
     }
 
     public function destroy(Request $request, User $user): JsonResponse
@@ -148,12 +148,15 @@ class UserController extends Controller
         return $user;
     }
 
-    private function userDetailPayload(User $user): array
+    private function userDetailPayload(Request $request, User $user): array
     {
-        return [
-            ...$user->toArray(),
-            'available_providers' => $this->providerCatalog->activePublicPayloads(),
-        ];
+        $payload = (new UserDetailResource($user))->resolve($request);
+
+        if ($request->user()?->hasPermission('users.manage') === true) {
+            $payload['available_providers'] = $this->providerCatalog->activePublicPayloads();
+        }
+
+        return $payload;
     }
 
     private function activeProviderCodeRule(): Exists

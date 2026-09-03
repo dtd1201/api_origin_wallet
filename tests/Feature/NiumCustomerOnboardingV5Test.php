@@ -225,6 +225,18 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_corporate_payload_contains_registered_date_and_business_type_from_approved_kyc_metadata(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('2020-01-15', $payload['registeredDate']);
+        $this->assertSame('private_company', $payload['businessType']);
+        Http::assertNothingSent();
+    }
+
     public function test_invalid_individual_email_reports_customer_path_before_any_nium_http(): void
     {
         $provider = $this->provider();

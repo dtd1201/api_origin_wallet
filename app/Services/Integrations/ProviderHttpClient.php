@@ -81,6 +81,10 @@ class ProviderHttpClient implements ProviderClient
         ?User $user,
         ?int $relatedTransferId,
     ): Response {
+        logger()->info('NIUM_SEND_PAYLOAD_DEBUG', [
+    'path' => $path,
+    'payload' => $payload,
+]);
         $request = $this->baseRequest();
         $url = $this->buildUrl($path);
         $startedAt = microtime(true);
@@ -422,6 +426,7 @@ class ProviderHttpClient implements ProviderClient
         }
 
         $responseBody = $response->json() ?? ['raw' => $response->body()];
+        $responseData = is_array($responseBody) ? $responseBody : [];
 
         ApiRequestLog::create([
             'provider_id' => $this->provider->id,
@@ -457,6 +462,12 @@ class ProviderHttpClient implements ProviderClient
         $requestId = collect($this->headers)
             ->first(fn ($value, $key) => strtolower((string) $key) === 'x-request-id');
         $responseData = is_array($responseBody) ? $responseBody : [];
+        if (str_contains($url, '/transactions')) {
+    logger()->info('NIUM_TRANSACTION_RAW_DEBUG', [
+        'url' => $url,
+        'body' => $responseData,
+    ]);
+}
         $projector = $this->niumSafeValueProjector
             ?? new NiumSafeValueProjector($this->sensitiveDataSanitizer);
         $operation = $projector->providerIdentifier($this->operationalContext['operation'] ?? $this->inferOperation($method, $url));
@@ -468,7 +479,19 @@ class ProviderHttpClient implements ProviderClient
         $requestBody = $stagingTransferDiagnostics
             ? array_replace($projector->transferMoneyRequestBody($payload), $transferIdentifiers)
             : $projector->apiRequestBody($payload);
+        if ($operation === 'beneficiary_create') {
+    \Log::channel('single')->info('NIUM_BENEFICIARY_PAYLOAD_DEBUG', [
+        'payload' => $payload,
+    ]);
+}
         $responseHeaders = $projector->apiResponseHeaders($response?->header('x-request-id'));
+        if (str_contains((string) $operation, 'transaction_rfi')) {
+    logger()->info('NIUM_RFI_RAW_RESPONSE', [
+        'operation' => $operation,
+        'status' => $response?->status(),
+        'body' => $responseData,
+    ]);
+}
         $safeResponseBody = $projector->apiResponseBody($responseData, $response?->status());
         if ($stagingTransferDiagnostics) {
             $safeResponseBody = array_replace(
@@ -558,6 +581,7 @@ class ProviderHttpClient implements ProviderClient
             $method === 'POST' && str_ends_with($path, '/customers') => 'customer_create',
             $method === 'POST' && str_ends_with($path, '/remittance') => 'transfer_money',
             $method === 'POST' && str_ends_with($path, '/paymentid') => 'assign_payment_id',
+            $method === 'POST' && str_ends_with($path, '/beneficiaries') => 'beneficiary_create',
             default => strtolower($method).'_nium_api',
         };
     }

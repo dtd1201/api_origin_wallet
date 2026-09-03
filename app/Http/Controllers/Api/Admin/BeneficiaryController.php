@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\Admin\BeneficiaryDetailResource;
+use App\Http\Resources\Admin\BeneficiaryListResource;
 use App\Models\Beneficiary;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
@@ -13,7 +15,7 @@ class BeneficiaryController extends Controller
 {
     public function index(): JsonResponse
     {
-        return response()->json(Beneficiary::latest('id')->paginate(15));
+        return BeneficiaryListResource::collection(Beneficiary::latest('id')->paginate(15))->response();
     }
 
     public function store(Request $request): JsonResponse
@@ -48,12 +50,12 @@ class BeneficiaryController extends Controller
 
         $beneficiary = DB::transaction(fn () => Beneficiary::create($validated));
 
-        return response()->json($beneficiary, 201);
+        return response()->json((new BeneficiaryDetailResource($beneficiary))->resolve($request), 201);
     }
 
-    public function show(Beneficiary $beneficiary): JsonResponse
+    public function show(Request $request, Beneficiary $beneficiary): JsonResponse
     {
-        return response()->json($beneficiary);
+        return response()->json((new BeneficiaryDetailResource($beneficiary))->resolve($request));
     }
 
     public function update(Request $request, Beneficiary $beneficiary): JsonResponse
@@ -94,7 +96,7 @@ class BeneficiaryController extends Controller
             return $beneficiary->fresh();
         });
 
-        return response()->json($beneficiary);
+        return response()->json((new BeneficiaryDetailResource($beneficiary))->resolve($request));
     }
 
     public function destroy(Beneficiary $beneficiary): JsonResponse

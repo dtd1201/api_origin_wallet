@@ -19,20 +19,32 @@ class AmlScreening extends Model
         'subject_name',
         'subject_role',
         'screening_provider',
+        'provider',
+        'screening_reference',
+        'screening_result',
         'status',
+        'compliance_decision',
         'risk_level',
         'risk_score',
         'screened_at',
+        'completed_at',
+        'result_summary',
+        'superseded_at',
         'reviewed_by_user_id',
         'reviewed_at',
         'review_note',
         'raw_data',
     ];
 
+    protected $hidden = ['raw_data'];
+
     protected function casts(): array
     {
         return [
             'screened_at' => 'datetime',
+            'completed_at' => 'datetime',
+            'result_summary' => 'array',
+            'superseded_at' => 'datetime',
             'reviewed_at' => 'datetime',
             'raw_data' => 'array',
         ];

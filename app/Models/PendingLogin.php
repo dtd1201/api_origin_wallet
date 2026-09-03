@@ -11,6 +11,10 @@ class PendingLogin extends Model
         'user_id',
         'email',
         'verification_code',
+        'verification_code_hash',
+        'verification_attempts',
+        'locked_until',
+        'last_attempt_at',
         'expires_at',
     ];
 
@@ -18,6 +22,8 @@ class PendingLogin extends Model
     {
         return [
             'expires_at' => 'datetime',
+            'locked_until' => 'datetime',
+            'last_attempt_at' => 'datetime',
         ];
     }
 

@@ -61,8 +61,25 @@ class TransferEligibilityService
             throw new RuntimeException('Transfer beneficiary is required before submission.');
         }
 
+        if ($transfer->beneficiary->user_id !== $user->id) {
+            throw new RuntimeException('Transfer beneficiary is not available for this customer.');
+        }
+
         if ($transfer->beneficiary->provider_id !== $provider->id) {
             throw new RuntimeException('Beneficiary provider does not match transfer provider.');
+        }
+
+        if (! in_array(strtolower((string) $transfer->beneficiary->status), ['active', 'approved', 'verified'], true)) {
+            throw new RuntimeException('Transfer beneficiary is not active and cannot receive transfers.');
+        }
+
+        if ($transfer->source_bank_account_id !== null
+            && ($transfer->sourceBankAccount === null || $transfer->sourceBankAccount->user_id !== $user->id)) {
+            throw new RuntimeException('Transfer source account is not available for this customer.');
+        }
+
+        if ($transfer->sourceBankAccount !== null && $transfer->sourceBankAccount->provider_id !== $provider->id) {
+            throw new RuntimeException('Source account provider does not match transfer provider.');
         }
 
         if (! in_array($transfer->status, ['draft', 'approval_required', 'approved'], true)) {

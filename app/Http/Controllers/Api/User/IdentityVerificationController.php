@@ -62,6 +62,12 @@ class IdentityVerificationController extends Controller
     {
         $this->assertSessionBelongsToUser($identityVerificationSession, $user);
 
+        if (! in_array($identityVerificationSession->status, ['created', 'in_progress'], true)) {
+            return response()->json([
+                'message' => 'Submitted identity evidence cannot be changed. Start a new verification session if another capture is required.',
+            ], 409);
+        }
+
         $validated = $request->validate([
             'capture_type' => ['required', 'string', Rule::in([
                 'identity_front',
@@ -83,7 +89,7 @@ class IdentityVerificationController extends Controller
         }
 
         $file = $request->file('file');
-        $disk = (string) config('services.identity_verification.evidence_disk', 'public');
+        $disk = (string) config('services.identity_verification.evidence_disk', 'kyc_private');
         $extension = $file->guessExtension() ?: $file->getClientOriginalExtension() ?: 'bin';
         $fileHash = hash_file('sha256', $file->getRealPath());
         $path = sprintf(
@@ -138,29 +144,54 @@ class IdentityVerificationController extends Controller
     {
         $this->assertSessionBelongsToUser($identityVerificationSession, $user);
 
-        $validated = $request->validate([
-            'document_ocr' => ['sometimes', 'array'],
-            'checks' => ['sometimes', 'array'],
-            'liveness_score' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'face_match_score' => ['nullable', 'numeric', 'min:0', 'max:100'],
+        $request->validate([
+            'document_ocr' => ['prohibited'],
+            'checks' => ['prohibited'],
+            'liveness_score' => ['prohibited'],
+            'face_match_score' => ['prohibited'],
+            'status' => ['prohibited'],
+            'completed_at' => ['prohibited'],
         ]);
 
+        if ($identityVerificationSession->status === 'submitted') {
+            return response()->json([
+                'message' => 'Identity verification evidence is already submitted for authoritative review.',
+                'session' => $this->serializeSession($identityVerificationSession),
+            ]);
+        }
+
+        if (! in_array($identityVerificationSession->status, ['created', 'in_progress'], true)) {
+            return response()->json([
+                'message' => 'Identity verification state can only be changed by the authoritative review process.',
+            ], 409);
+        }
+
+        $captures = $identityVerificationSession->raw_response['captures'] ?? [];
+        $hasLivenessEvidence = collect($captures)->contains(
+            fn ($capture): bool => ($capture['capture_type'] ?? null) === 'selfie_liveness'
+        );
+
+        if (! $hasLivenessEvidence) {
+            return response()->json([
+                'message' => 'Selfie liveness evidence must be uploaded before submission.',
+            ], 422);
+        }
+
         $identityVerificationSession->update([
-            'status' => 'completed',
-            'document_ocr' => $validated['document_ocr'] ?? $identityVerificationSession->document_ocr,
+            'status' => 'submitted',
             'checks' => [
                 ...($identityVerificationSession->checks ?? []),
-                ...($validated['checks'] ?? []),
-                'session' => 'completed',
+                'session' => 'submitted',
             ],
-            'liveness_score' => $validated['liveness_score'] ?? $identityVerificationSession->liveness_score,
-            'face_match_score' => $validated['face_match_score'] ?? $identityVerificationSession->face_match_score,
-            'completed_at' => now(),
+            'liveness_score' => null,
+            'face_match_score' => null,
+            'completed_at' => null,
         ]);
 
         return response()->json([
+            'message' => 'Identity verification evidence submitted for authoritative review.',
             'session' => $this->serializeSession($identityVerificationSession->fresh()),
-        ]);
+        ], 202);
     }
 
     public function showEvidence(

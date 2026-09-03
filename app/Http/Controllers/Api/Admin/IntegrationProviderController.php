@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
+use App\Http\Resources\Admin\IntegrationProviderDetailResource;
+use App\Http\Resources\Admin\IntegrationProviderListResource;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use App\Support\PrimaryProvider;
@@ -20,12 +22,12 @@ class IntegrationProviderController extends Controller
 
     public function index(): JsonResponse
     {
-        return response()->json(
+        return IntegrationProviderListResource::collection(
             IntegrationProvider::query()
                 ->where('code', PrimaryProvider::code())
                 ->latest('id')
                 ->paginate(15)
-        );
+        )->response();
     }
 
     public function store(Request $request): JsonResponse
@@ -49,14 +51,14 @@ class IntegrationProviderController extends Controller
         });
         $this->providerCatalog->flush();
 
-        return response()->json($provider, 201);
+        return response()->json((new IntegrationProviderDetailResource($provider))->resolve($request), 201);
     }
 
-    public function show(IntegrationProvider $integrationProvider): JsonResponse
+    public function show(Request $request, IntegrationProvider $integrationProvider): JsonResponse
     {
         abort_unless(PrimaryProvider::isPrimary($integrationProvider), 404);
 
-        return response()->json($integrationProvider);
+        return response()->json((new IntegrationProviderDetailResource($integrationProvider))->resolve($request));
     }
 
     public function update(Request $request, IntegrationProvider $integrationProvider): JsonResponse
@@ -93,7 +95,7 @@ class IntegrationProviderController extends Controller
         });
         $this->providerCatalog->flush();
 
-        return response()->json($integrationProvider);
+        return response()->json((new IntegrationProviderDetailResource($integrationProvider))->resolve($request));
     }
 
     public function destroy(Request $request, IntegrationProvider $integrationProvider): JsonResponse

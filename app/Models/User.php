@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Str;
@@ -65,6 +66,11 @@ class User extends Authenticatable
     public function roles(): HasMany
     {
         return $this->hasMany(UserRole::class);
+    }
+
+    public function assignedRoles(): BelongsToMany
+    {
+        return $this->belongsToMany(Role::class, 'user_roles')->withPivot('role_code');
     }
 
     public function providerAccounts(): HasMany
@@ -171,9 +177,25 @@ class User extends Authenticatable
         return $this->roles()->whereIn('role_code', $normalizedRoleCodes)->exists();
     }
 
+    public function hasPermission(string $permission): bool
+    {
+        $roleCodes = $this->roles()->pluck('role_code')
+            ->map(fn ($code) => Str::lower((string) $code));
+
+        if ($roleCodes->intersect(['admin', 'super_admin'])->isNotEmpty()) {
+            return true;
+        }
+
+        return Permission::query()
+            ->where('code', $permission)
+            ->whereHas('roles', fn (Builder $query) => $query->whereIn('code', $roleCodes))
+            ->exists();
+    }
+
     public function isAdmin(): bool
     {
         $adminRoleCodes = collect(config('auth.admin_role_codes', ['admin', 'super_admin']))
+            ->merge(array_keys((array) config('rbac.roles', [])))
             ->filter(fn ($roleCode) => is_string($roleCode) && $roleCode !== '')
             ->map(fn (string $roleCode) => Str::lower($roleCode))
             ->values()
@@ -193,6 +215,7 @@ class User extends Authenticatable
     public function scopeNonAdmin(Builder $query): Builder
     {
         $adminRoleCodes = collect(config('auth.admin_role_codes', ['admin', 'super_admin']))
+            ->merge(array_keys((array) config('rbac.roles', [])))
             ->filter(fn ($roleCode) => is_string($roleCode) && $roleCode !== '')
             ->map(fn (string $roleCode) => Str::lower($roleCode))
             ->values()

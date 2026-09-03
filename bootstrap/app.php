@@ -14,6 +14,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'auth.token' => \App\Http\Middleware\AuthenticateApiToken::class,
             'auth.admin' => \App\Http\Middleware\EnsureAdminUser::class,
+            'permission' => \App\Http\Middleware\EnsurePermission::class,
             'auth.user' => \App\Http\Middleware\EnsureAuthenticatedUserMatchesRoute::class,
             'profile.complete' => \App\Http\Middleware\EnsureUserProfileIsComplete::class,
         ]);

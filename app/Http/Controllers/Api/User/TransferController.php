@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\User;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\User\TransferResource;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
@@ -13,17 +14,17 @@ use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
-use InvalidArgumentException;
-use RuntimeException;
+use Throwable;
 
 class TransferController extends Controller
 {
     public function index(User $user): JsonResponse
     {
         return response()->json(
-            $user->transfers()->latest('id')->get()
+            TransferResource::collection($user->transfers()->latest('id')->get())->resolve()
         );
     }
 
@@ -31,9 +32,9 @@ class TransferController extends Controller
     {
         abort_unless($transfer->user_id === $user->id, 404);
 
-        return response()->json(
-            $transfer->load(['beneficiary', 'sourceBankAccount', 'approvals', 'transactions'])
-        );
+        return response()->json((new TransferResource(
+            $transfer->load(['beneficiary', 'sourceBankAccount', 'transactions'])
+        ))->resolve());
     }
 
     public function store(
@@ -65,17 +66,34 @@ class TransferController extends Controller
         $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
         $validated['provider_id'] = $provider->id;
 
+        if (isset($validated['beneficiary_id'])) {
+            $beneficiary = $user->beneficiaries()->findOrFail($validated['beneficiary_id']);
+            if ($beneficiary->provider_id !== $provider->id) {
+                return response()->json(['message' => 'Beneficiary provider does not match transfer provider.'], 422);
+            }
+            if (! in_array(strtolower((string) $beneficiary->status), ['active', 'approved', 'verified'], true)) {
+                return response()->json(['message' => 'Transfer beneficiary is not active and cannot receive transfers.'], 422);
+            }
+            $validated['beneficiary_id'] = $beneficiary->id;
+        }
+
+        if (isset($validated['source_bank_account_id'])) {
+            $sourceBankAccount = $user->bankAccounts()->findOrFail($validated['source_bank_account_id']);
+            if ($sourceBankAccount->provider_id !== $provider->id) {
+                return response()->json(['message' => 'Source account provider does not match transfer provider.'], 422);
+            }
+            $validated['source_bank_account_id'] = $sourceBankAccount->id;
+        }
+
         try {
             $provider->assertSupportsCapability('transfer');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
-        } catch (RuntimeException|ValidationException $exception) {
+        } catch (Throwable $exception) {
             if ($exception instanceof ValidationException) {
                 throw $exception;
             }
 
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
+            return $this->operationFailureResponse($exception, 'create');
         }
 
         $fxQuote = null;
@@ -138,7 +156,7 @@ class TransferController extends Controller
             $transfer = $transfer->fresh();
         }
 
-        return response()->json($transfer, 201);
+        return response()->json((new TransferResource($transfer))->resolve(), 201);
     }
 
     private function decimal(mixed $value): string
@@ -161,17 +179,15 @@ class TransferController extends Controller
                 provider: $provider,
                 transfer: $transfer->load(['user', 'beneficiary', 'sourceBankAccount'])
             );
-        } catch (RuntimeException|InvalidArgumentException $exception) {
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
+        } catch (Throwable $exception) {
+            return $this->operationFailureResponse($exception, 'submit', $transfer->id);
         }
 
         return response()->json([
             'message' => $transfer->status === 'submission_unknown'
                 ? 'Transfer submission outcome is unknown. Do not resubmit; reconcile or request human review.'
                 : 'Transfer submitted successfully.',
-            'transfer' => $transfer,
+            'transfer' => (new TransferResource($transfer))->resolve(),
         ]);
     }
 
@@ -190,15 +206,13 @@ class TransferController extends Controller
                 provider: $provider,
                 transfer: $transfer->load(['user', 'beneficiary', 'sourceBankAccount'])
             );
-        } catch (RuntimeException|InvalidArgumentException $exception) {
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
+        } catch (Throwable $exception) {
+            return $this->operationFailureResponse($exception, 'sync', $transfer->id);
         }
 
         return response()->json([
             'message' => 'Transfer status synced successfully.',
-            'transfer' => $transfer,
+            'transfer' => (new TransferResource($transfer))->resolve(),
         ]);
     }
 
@@ -220,6 +234,23 @@ class TransferController extends Controller
             return $transfer->fresh();
         });
 
-        return response()->json($transfer);
+        return response()->json((new TransferResource($transfer))->resolve());
+    }
+
+    private function operationFailureResponse(
+        Throwable $exception,
+        string $operation,
+        ?int $transferId = null,
+    ): JsonResponse {
+        Log::warning('Customer transfer operation failed.', [
+            'operation' => $operation,
+            'transfer_id' => $transferId,
+            'exception' => $exception::class,
+            'message' => $exception->getMessage(),
+        ]);
+
+        return response()->json([
+            'message' => "Unable to {$operation} transfer. Review its current state and try again.",
+        ], 422);
     }
 }
