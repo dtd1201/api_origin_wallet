@@ -25,6 +25,21 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class KycSubmissionController extends Controller
 {
+    private const HK_CORPORATE_BANK_ACCOUNT_FALLBACK = [
+        'bankCode' => '016',
+        'bankName' => 'DBS Bank (Hong Kong) Limited',
+        'currency' => 'USD',
+        'accountName' => 'DBS TEST COMPANY LIMITED',
+        'bankCountry' => 'HK',
+        'routingCodes' => [
+            [
+                'type' => 'SWIFT',
+                'value' => 'DHBKHKHH',
+            ],
+        ],
+        'accountNumber' => '999999999',
+    ];
+
     private const SG_CORPORATE_BUSINESS_ADDRESS_KEYS = [
         'address_line1',
         'address_line2',
@@ -161,6 +176,7 @@ class KycSubmissionController extends Controller
         NiumRegionResolver $regionResolver,
     ): JsonResponse {
         $this->validateNiumRegionInput($request, $regionResolver);
+        $this->applyHkCorporateBankAccountFallback($request);
         $validated = $request->validate($this->rules($request, $user, $regionResolver));
 
         if ($request->exists('metadata')) {
@@ -850,6 +866,51 @@ class KycSubmissionController extends Controller
         ]);
 
         return $validated;
+    }
+
+    private function applyHkCorporateBankAccountFallback(Request $request): void
+    {
+        if (
+            $request->input('applicant_type') !== 'business'
+            || strtoupper((string) $request->input('metadata.nium_region')) !== 'HK'
+            || strtolower((string) $request->input('metadata.nium_kyc_type')) !== 'full'
+        ) {
+            return;
+        }
+
+        $fields = $request->input('metadata.nium_v5_fields');
+
+        if (! is_array($fields)) {
+            return;
+        }
+
+        $bankAccountDetails = $fields['bankAccountDetails'] ?? null;
+
+        if (array_key_exists('bankAccountDetails', $fields) && ! $this->isEmptyBankAccountPlaceholder($bankAccountDetails)) {
+            return;
+        }
+
+        $metadata = (array) $request->input('metadata', []);
+        data_set($metadata, 'nium_v5_fields.bankAccountDetails', self::HK_CORPORATE_BANK_ACCOUNT_FALLBACK);
+        $request->merge(['metadata' => $metadata]);
+    }
+
+    private function isEmptyBankAccountPlaceholder(mixed $details): bool
+    {
+        if (! is_array($details)) {
+            return false;
+        }
+
+        $routingValues = collect($details['routingCodes'] ?? [])
+            ->filter(fn (mixed $routingCode): bool => is_array($routingCode))
+            ->pluck('value');
+
+        return collect([
+            $details['accountName'] ?? null,
+            $details['accountNumber'] ?? null,
+            $details['bankName'] ?? null,
+            ...$routingValues,
+        ])->every(fn (mixed $value): bool => ! is_string($value) || trim($value) === '');
     }
 
     private function preserveNiumDocumentMetadata(array $document, $existingDocuments, ?string $relationshipType): array

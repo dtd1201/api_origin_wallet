@@ -2005,6 +2005,31 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_hk_corporate_full_payload_preserves_sandbox_bank_fallback(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        $fallback = [
+            'bankCode' => '016',
+            'bankName' => 'DBS Bank (Hong Kong) Limited',
+            'currency' => 'USD',
+            'accountName' => 'DBS TEST COMPANY LIMITED',
+            'bankCountry' => 'HK',
+            'routingCodes' => [['type' => 'SWIFT', 'value' => 'DHBKHKHH']],
+            'accountNumber' => '999999999',
+        ];
+        $metadata['nium_v5_fields']['bankAccountDetails'] = $fallback;
+        $profile->update(['metadata' => $metadata]);
+        $user->unsetRelation('kycProfile');
+        Http::preventStrayRequests();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame($fallback, $payload['bankAccountDetails']);
+        Http::assertNothingSent();
+    }
+
     public function test_admin_approval_route_submits_complete_hk_corporate_full_payload_exactly_once(): void
     {
         $provider = $this->provider();

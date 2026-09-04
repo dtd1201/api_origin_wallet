@@ -169,6 +169,75 @@ class InternalKycTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_hk_corporate_full_submission_without_bank_details_uses_sandbox_fallback(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->hkCorporateFullPayload();
+        unset($payload['metadata']['nium_v5_fields']['bankAccountDetails']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        $this->assertSame([
+            'bankCode' => '016',
+            'bankName' => 'DBS Bank (Hong Kong) Limited',
+            'currency' => 'USD',
+            'accountName' => 'DBS TEST COMPANY LIMITED',
+            'bankCountry' => 'HK',
+            'routingCodes' => [['type' => 'SWIFT', 'value' => 'DHBKHKHH']],
+            'accountNumber' => '999999999',
+        ], data_get($user->kycProfile()->firstOrFail()->metadata, 'nium_v5_fields.bankAccountDetails'));
+        Http::assertNothingSent();
+    }
+
+    public function test_hk_corporate_full_submission_with_empty_frontend_bank_placeholder_uses_sandbox_fallback(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->hkCorporateFullPayload();
+        $payload['metadata']['nium_v5_fields']['bankAccountDetails'] = [
+            'accountName' => '',
+            'accountNumber' => '',
+            'bankCountry' => 'HK',
+            'bankName' => '',
+            'currency' => 'HKD',
+            'routingCodes' => [['type' => 'SWIFT', 'value' => '']],
+        ];
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        $this->assertSame(
+            'DBS TEST COMPANY LIMITED',
+            data_get($user->kycProfile()->firstOrFail()->metadata, 'nium_v5_fields.bankAccountDetails.accountName'),
+        );
+        Http::assertNothingSent();
+    }
+
+    public function test_hk_corporate_full_submission_preserves_supplied_bank_details(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->hkCorporateFullPayload();
+        $submittedBankDetails = $payload['metadata']['nium_v5_fields']['bankAccountDetails'];
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        $this->assertSame(
+            $submittedBankDetails,
+            data_get($user->kycProfile()->firstOrFail()->metadata, 'nium_v5_fields.bankAccountDetails'),
+        );
+        Http::assertNothingSent();
+    }
+
     public function test_hk_corporate_full_rejects_browser_spoofed_forwarded_ip_from_untrusted_peer(): void
     {
         Http::preventStrayRequests();
@@ -212,7 +281,6 @@ class InternalKycTest extends TestCase
             'metadata.nium_v5_fields.applicantDeclaration',
             'metadata.nium_v5_fields.applicantDeclarationTimeStamp',
             'metadata.nium_v5_fields.isMultiLayeredCompany',
-            'metadata.nium_v5_fields.bankAccountDetails',
             'metadata.nium_v5_fields.deviceDescriptor',
             'metadata.nium_v5_fields.natureOfBusiness',
             'metadata.nium_v5_fields.expectedAccountUsage',
