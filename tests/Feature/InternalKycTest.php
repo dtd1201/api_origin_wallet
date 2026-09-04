@@ -1253,6 +1253,7 @@ class InternalKycTest extends TestCase
             ->assertAccepted();
 
         $profile = $user->kycProfile()->firstOrFail();
+        $profile->documents()->whereIn('type', ['business_registration', 'certificate_of_incorporation'])->delete();
         $profile->requirements()->whereIn('key', ['business_registration', 'certificate_of_incorporation'])->update([
             'status' => 'required',
         ]);
@@ -1272,7 +1273,7 @@ class InternalKycTest extends TestCase
         $this->assertSame('submitted', $profile->fresh()->status);
     }
 
-    public function test_hk_corporate_unrelated_generic_requirements_do_not_block_staging_approval(): void
+    public function test_hk_business_registration_document_allows_approval_with_required_certificate_and_generic_rows(): void
     {
         $this->app->detectEnvironment(fn (): string => 'staging');
         $admin = $this->createAdminUser();
@@ -1284,6 +1285,11 @@ class InternalKycTest extends TestCase
             ->assertAccepted();
 
         $profile = $user->kycProfile()->firstOrFail();
+        $this->assertDatabaseHas('kyc_documents', [
+            'kyc_profile_id' => $profile->id,
+            'type' => 'business_registration',
+            'status' => 'submitted',
+        ]);
         $unrelatedKeys = [
             'account_opening_application_form',
             'certificate_of_incorporation',

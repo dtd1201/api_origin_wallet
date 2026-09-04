@@ -502,8 +502,16 @@ class UserKycSubmissionController extends Controller
             return $requiredKeys->isNotEmpty();
         }
 
-        $missingBusinessRegistration = $requiredKeys->contains('business_registration')
-            && $requiredKeys->contains('certificate_of_incorporation');
+        $documentTypes = $profile->documents
+            ->filter(fn ($document): bool => in_array(
+                strtolower((string) $document->status),
+                ['submitted', 'approved', 'verified'],
+                true,
+            ))
+            ->map(fn ($document): string => strtolower((string) $document->type));
+        $missingBusinessRegistration = $documentTypes
+            ->intersect(['business_registration', 'certificate_of_incorporation'])
+            ->isEmpty();
         $blockingKeys = [
             'authorized_representative',
             'authorized_representative_identity_document',
