@@ -7,11 +7,16 @@ use App\Models\IntegrationProvider;
 use App\Models\KycProviderSubmission;
 use App\Models\NiumRfiCase;
 use App\Models\User;
+use App\Services\Aml\StagingAmlProviderUnavailableBypass;
 use App\Support\PrimaryProvider;
 use Illuminate\Support\Str;
 
 class ProviderOnboardingReadinessService
 {
+    public function __construct(
+        private readonly StagingAmlProviderUnavailableBypass $stagingAmlBypass,
+    ) {}
+
     public function assertReady(IntegrationProvider $provider, User $user): KycProviderSubmission
     {
         $submission = KycProviderSubmission::query()
@@ -49,8 +54,10 @@ class ProviderOnboardingReadinessService
             $this->reject($provider, $user, $submission, 'nium_submission_wrong_profile', 'current_kyc_profile', 'The Nium submission does not belong to the current KYC profile.');
         }
 
-        if ($profile->amlScreenings->isEmpty()
-            || $profile->amlScreenings->contains(fn ($screening) => $screening->status !== 'completed' || $screening->compliance_decision !== 'clear')) {
+        $amlIsClear = $profile->amlScreenings->isNotEmpty()
+            && ! $profile->amlScreenings->contains(fn ($screening) => $screening->status !== 'completed' || $screening->compliance_decision !== 'clear');
+
+        if (! $amlIsClear && ! $this->stagingAmlBypass->applies($profile->amlScreenings)) {
             $this->reject($provider, $user, $submission, 'aml_not_clear', 'aml', 'All active AML screenings must be completed and clear before Nium onboarding.');
         }
 

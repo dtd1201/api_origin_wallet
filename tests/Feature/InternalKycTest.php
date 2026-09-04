@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Contracts\Aml\AmlScreeningProvider;
 use App\Models\ApiToken;
+use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\User;
@@ -1023,6 +1024,96 @@ class InternalKycTest extends TestCase
             ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
             ->assertOk()
             ->assertJsonPath('user.kyc_status', 'verified');
+    }
+
+    public function test_staging_unconfigured_aml_provider_failure_allows_approval_with_audit_reason(): void
+    {
+        $this->app->detectEnvironment(fn (): string => 'staging');
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+        $this->submitKycProfile($user);
+        $profile = $user->kycProfile()->firstOrFail();
+        $profile->amlScreenings()->whereNull('superseded_at')->update([
+            'screening_provider' => 'unconfigured',
+            'provider' => 'unconfigured',
+            'status' => 'failed',
+            'compliance_decision' => 'pending_review',
+            'result_summary' => ['error' => 'provider_failure'],
+        ]);
+        $screeningSnapshot = $profile->amlScreenings()->whereNull('superseded_at')->get()->map->only([
+            'id', 'screening_provider', 'provider', 'status', 'compliance_decision', 'result_summary',
+        ])->all();
+        $this->mockSuccessfulNiumOnboarding($user);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertOk()
+            ->assertJsonPath('message', 'AML provider unavailable. Staging bypass applied.')
+            ->assertJsonPath('aml_bypass_reason', 'staging_aml_provider_unavailable_bypass')
+            ->assertJsonPath('user.kyc_status', 'verified');
+
+        $this->assertSame($screeningSnapshot, $profile->amlScreenings()->whereNull('superseded_at')->get()->map->only([
+            'id', 'screening_provider', 'provider', 'status', 'compliance_decision', 'result_summary',
+        ])->all());
+        $this->assertDatabaseHas('audit_logs', [
+            'user_id' => $admin->id,
+            'action' => 'kyc.aml_bypass_applied',
+            'entity_type' => 'kyc_profile',
+            'entity_id' => (string) $profile->id,
+        ]);
+        $this->assertSame(
+            'staging_aml_provider_unavailable_bypass',
+            data_get(AuditLog::query()->where('action', 'kyc.aml_bypass_applied')->sole()->new_data, 'reason'),
+        );
+    }
+
+    public function test_staging_real_aml_failure_or_match_still_blocks_approval(): void
+    {
+        $this->app->detectEnvironment(fn (): string => 'staging');
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+        $this->submitKycProfile($user);
+        $profile = $user->kycProfile()->firstOrFail();
+        $profile->amlScreenings()->whereNull('superseded_at')->update([
+            'screening_provider' => 'authoritative',
+            'provider' => 'authoritative',
+            'status' => 'manual_review',
+            'screening_result' => 'match',
+            'compliance_decision' => 'pending_review',
+            'result_summary' => ['error' => 'provider_failure'],
+        ]);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'All AML screenings must be clear or manually cleared before KYC/KYB approval.');
+
+        $this->assertSame('pending', $user->fresh()->kyc_status);
+        $this->assertDatabaseMissing('audit_logs', ['action' => 'kyc.aml_bypass_applied']);
+    }
+
+    public function test_production_unconfigured_aml_provider_failure_still_blocks_approval(): void
+    {
+        $this->app->detectEnvironment(fn (): string => 'production');
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+        $this->submitKycProfile($user);
+        $profile = $user->kycProfile()->firstOrFail();
+        $profile->amlScreenings()->whereNull('superseded_at')->update([
+            'screening_provider' => 'unconfigured',
+            'provider' => 'unconfigured',
+            'status' => 'failed',
+            'compliance_decision' => 'pending_review',
+            'result_summary' => ['error' => 'provider_failure'],
+        ]);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'All AML screenings must be clear or manually cleared before KYC/KYB approval.');
+
+        $this->assertSame('pending', $user->fresh()->kyc_status);
+        $this->assertDatabaseMissing('audit_logs', ['action' => 'kyc.aml_bypass_applied']);
     }
 
     public function test_admin_kyc_responses_only_include_active_aml_screenings(): void

@@ -9,6 +9,7 @@ use App\Models\KycProfile;
 use App\Models\KycProviderSubmission;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
+use App\Services\Aml\StagingAmlProviderUnavailableBypass;
 use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingReadinessService;
@@ -129,6 +130,7 @@ class UserKycSubmissionController extends Controller
                 ]);
             }
 
+            $amlBypassApplied = false;
             $kycProfile = $this->reviewProfile(
                 request: $request,
                 user: $user,
@@ -136,6 +138,7 @@ class UserKycSubmissionController extends Controller
                 reviewNote: $validated['review_note'] ?? null,
                 amlScreeningService: $amlScreeningService,
                 complianceEvidenceService: $complianceEvidenceService,
+                amlBypassApplied: $amlBypassApplied,
             );
 
             if ($provider === null) {
@@ -210,7 +213,10 @@ class UserKycSubmissionController extends Controller
             }
 
             return response()->json([
-                'message' => 'KYC profile approved and Nium onboarding submitted.',
+                'message' => $amlBypassApplied
+                    ? 'AML provider unavailable. Staging bypass applied.'
+                    : 'KYC profile approved and Nium onboarding submitted.',
+                'aml_bypass_reason' => $amlBypassApplied ? StagingAmlProviderUnavailableBypass::REASON : null,
                 'user' => $user->fresh(),
                 'kyc_profile' => $kycProfile,
                 'kyc_submission' => $kycProfile,
@@ -375,6 +381,7 @@ class UserKycSubmissionController extends Controller
         array $requirementReviews = [],
         ?AmlScreeningService $amlScreeningService = null,
         ?ComplianceEvidenceService $complianceEvidenceService = null,
+        ?bool &$amlBypassApplied = null,
     ): KycProfile {
         /** @var KycProfile $kycProfile */
         $kycProfile = $user->kycProfile()
@@ -387,14 +394,14 @@ class UserKycSubmissionController extends Controller
 
         if ($status === 'verified') {
             try {
-                $amlScreeningService?->assertProfileClear($kycProfile);
+                $amlBypassApplied = $amlScreeningService?->assertProfileClear($kycProfile) ?? false;
                 $complianceEvidenceService?->assertNoBlockingNiumCompliance($user->id);
             } catch (RuntimeException $exception) {
                 abort(422, $exception->getMessage());
             }
         }
 
-        return DB::transaction(function () use ($request, $user, $kycProfile, $status, $reviewNote, $rejectionReason, $requirementReviews, $complianceEvidenceService): KycProfile {
+        return DB::transaction(function () use ($request, $user, $kycProfile, $status, $reviewNote, $rejectionReason, $requirementReviews, $complianceEvidenceService, $amlBypassApplied): KycProfile {
             $previousStatus = $kycProfile->status;
             $reviewedByUserId = $request->user()?->id;
 
@@ -455,6 +462,19 @@ class UserKycSubmissionController extends Controller
                 'ip_address' => $request->ip(),
                 'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
             ]);
+
+            if ($status === 'verified' && $amlBypassApplied === true) {
+                AuditLog::query()->create([
+                    'user_id' => $reviewedByUserId,
+                    'action' => 'kyc.aml_bypass_applied',
+                    'entity_type' => 'kyc_profile',
+                    'entity_id' => (string) $kycProfile->id,
+                    'old_data' => null,
+                    'new_data' => ['reason' => StagingAmlProviderUnavailableBypass::REASON],
+                    'ip_address' => $request->ip(),
+                    'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
+                ]);
+            }
 
             return $kycProfile->fresh([
                 'user',

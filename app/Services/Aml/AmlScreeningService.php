@@ -19,6 +19,7 @@ class AmlScreeningService
     public function __construct(
         private readonly AmlScreeningProvider $provider,
         private readonly ?ComplianceEvidenceService $complianceEvidenceService = null,
+        private readonly ?StagingAmlProviderUnavailableBypass $stagingBypass = null,
     ) {}
 
     /** @return Collection<int, AmlScreening> */
@@ -157,7 +158,7 @@ class AmlScreeningService
         return $screening->fresh(['matches', 'reviewedBy']);
     }
 
-    public function assertProfileClear(KycProfile $profile): void
+    public function assertProfileClear(KycProfile $profile): bool
     {
         $screenings = $profile->amlScreenings()->whereNull('superseded_at')->get();
 
@@ -166,8 +167,14 @@ class AmlScreeningService
         }
 
         if ($screenings->contains(fn (AmlScreening $screening) => $screening->status !== 'completed' || $screening->compliance_decision !== 'clear')) {
+            if (($this->stagingBypass ?? app(StagingAmlProviderUnavailableBypass::class))->applies($screenings)) {
+                return true;
+            }
+
             throw new RuntimeException('All AML screenings must be clear or manually cleared before KYC/KYB approval.');
         }
+
+        return false;
     }
 
     /** @param array<string, scalar|null> $attributes */
