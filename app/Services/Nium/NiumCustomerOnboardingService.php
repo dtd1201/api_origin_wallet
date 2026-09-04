@@ -261,6 +261,13 @@ class NiumCustomerOnboardingService implements OnboardingProvider
             query: ['externalId' => $externalReference],
             user: $user,
         );
+        if ($response->status() === 504) {
+            return [
+                'customer' => null,
+                'ambiguous' => false,
+            ];
+        }
+
         $data = $this->successfulResponse($response, 'Nium V5 customer lookup failed.');
         $customers = (array) ($data['customers'] ?? []);
         $matches = array_values(array_filter(
