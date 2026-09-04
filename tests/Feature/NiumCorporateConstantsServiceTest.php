@@ -30,35 +30,34 @@ class NiumCorporateConstantsServiceTest extends TestCase
         config()->set('services.nium.webhook.static_header_value', 'partner-key');
     }
 
-    public function test_fetches_and_caches_vietnam_state_constants(): void
+    public function test_country_name_response_creates_iso_country_options(): void
     {
         Http::fake(['*' => Http::response([
-            ['description' => 'Phu Yen', 'code' => 'VN-70'],
+            ['description' => 'Hong Kong', 'code' => 'HK'],
         ])]);
 
         $user = User::factory()->create();
         $service = app(NiumCorporateConstantsService::class);
 
-        $this->assertSame('VN-70', $service->subdivisions($user, 'HK', 'VN')['values'][0]['value']);
-        $this->assertSame('cache', $service->subdivisions($user, 'HK', 'VN')['source']);
+        $this->assertSame([['label' => 'Hong Kong', 'value' => 'HK']], $service->values($user, 'HK', 'countryName')['values']);
+        $this->assertSame('cache', $service->values($user, 'HK', 'countryName')['source']);
         $this->assertDatabaseHas('nium_corporate_constants', [
             'region' => 'HK',
             'customer_type' => 'CORPORATE',
-            'country_code' => 'VN',
-            'constant_type' => 'isoState',
+            'country_code' => '',
+            'constant_type' => 'countryName',
         ]);
         Http::assertSentCount(1);
     }
 
-    public function test_successful_empty_result_is_cached_without_fallback(): void
+    public function test_unknown_subdivision_category_is_rejected_without_calling_nium(): void
     {
-        Http::fake(['*' => Http::response([])]);
+        Http::fake();
 
-        $result = app(NiumCorporateConstantsService::class)
-            ->subdivisions(User::factory()->create(), 'HK', 'ZZ');
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Unsupported Nium corporate constant category.');
 
-        $this->assertSame([], $result['values']);
-        $this->assertSame('nium', $result['source']);
-        $this->assertSame([], NiumCorporateConstant::query()->firstOrFail()->values);
+        app(NiumCorporateConstantsService::class)
+            ->values(User::factory()->create(), 'HK', 'isoState', 'HK');
     }
 }

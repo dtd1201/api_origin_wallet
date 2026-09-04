@@ -145,21 +145,23 @@ class InternalKycTest extends TestCase
         ]);
     }
 
-    public function test_arbitrary_vietnam_related_person_state_is_rejected_before_nium_submission(): void
+    public function test_iso_state_failure_does_not_block_free_text_vietnam_state(): void
     {
-        Http::preventStrayRequests();
+        Http::fake(fn () => Http::response([], 503));
         $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
         $payload = $this->businessKycPayload();
         $payload['related_persons'][0]['country_code'] = 'VN';
-        $payload['related_persons'][0]['state'] = 'test address';
+        $payload['related_persons'][0]['state'] = 'Phu Yen';
 
         $this->withToken($this->issueTokenFor($user))
             ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors('related_persons.0.state');
+            ->assertAccepted();
 
-        Http::assertNothingSent();
-        $this->assertDatabaseMissing('kyc_profiles', ['user_id' => $user->id]);
+        $this->assertDatabaseHas('kyc_related_persons', [
+            'kyc_profile_id' => $user->kycProfile()->firstOrFail()->id,
+            'country_code' => 'VN',
+            'state' => 'Phu Yen',
+        ]);
     }
 
     public function test_hk_corporate_full_request_persists_complete_trusted_source_contract(): void

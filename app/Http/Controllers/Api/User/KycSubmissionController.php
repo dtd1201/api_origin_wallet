@@ -322,7 +322,6 @@ class KycSubmissionController extends Controller
                 'nullable',
                 'string',
                 'max:100',
-                $this->relatedPersonStateRule($request, 'related_person'),
             ],
             'related_person.postal_code' => ['sometimes', 'nullable', 'string', 'max:30'],
             'related_person.country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
@@ -515,20 +514,6 @@ class KycSubmissionController extends Controller
         return null;
     }
 
-    private function relatedPersonStateRule(Request $request, string $inputKey): Closure
-    {
-        return static function (string $attribute, mixed $value, Closure $fail) use ($request, $inputKey): void {
-            $countryCode = $inputKey === 'related_person'
-                ? $request->input('related_person.country_code')
-                : $request->input(preg_replace('/\.state$/', '.country_code', $attribute));
-
-            if (strtoupper((string) $countryCode) === 'VN'
-                && preg_match('/^VN-\d{2}$/', (string) $value) !== 1) {
-                $fail('The related person state must be a valid Vietnam subdivision code such as VN-70.');
-            }
-        };
-    }
-
     /**
      * @return array<string, mixed>
      */
@@ -612,7 +597,6 @@ class KycSubmissionController extends Controller
                 'nullable',
                 'string',
                 'max:100',
-                $this->relatedPersonStateRule($request, 'related_persons'),
             ],
             'related_persons.*.postal_code' => ['nullable', 'string', 'max:30'],
             'related_persons.*.country_code' => ['nullable', 'string', 'size:2'],

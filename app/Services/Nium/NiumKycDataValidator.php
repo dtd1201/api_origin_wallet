@@ -7,7 +7,6 @@ use App\Models\KycProfile;
 use App\Models\NiumCorporateConstant;
 use App\Models\User;
 use DateTimeImmutable;
-use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 
 final class NiumKycDataValidator
@@ -187,22 +186,8 @@ final class NiumKycDataValidator
 
     private function assertSubdivision(string $region, string $country, mixed $state, string $path): void
     {
-        if (! Schema::hasTable('nium_corporate_constants')) {
-            return;
-        }
-
-        $record = NiumCorporateConstant::query()->where([
-            'region' => $region,
-            'customer_type' => 'CORPORATE',
-            'country_code' => $country,
-            'constant_type' => 'isoState',
-        ])->first();
-        $configured = $record === null
-            ? null
-            : collect((array) $record->values)->pluck('value')->filter()->all();
-
-        if ($configured !== null && $configured !== [] && (! is_string($state) || ! in_array($state, $configured, true))) {
-            throw new RuntimeException("{$path}: must be a configured {$country} subdivision code.");
+        if ($state !== null && (! is_string($state) || trim($state) === '')) {
+            throw new RuntimeException("{$path}: must be free text when provided.");
         }
     }
 

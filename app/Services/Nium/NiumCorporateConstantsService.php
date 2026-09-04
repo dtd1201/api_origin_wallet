@@ -13,16 +13,10 @@ final class NiumCorporateConstantsService
     public const CATEGORIES = [
         'annualTurnover', 'averageTransactionValue', 'businessType', 'countryName',
         'countryOfOperation', 'documentType', 'intendedUseOfAccount', 'industrySector',
-        'isoState', 'monthlyTransactionVolume', 'monthlyTransactions', 'position', 'totalEmployees',
+        'monthlyTransactionVolume', 'monthlyTransactions', 'position', 'totalEmployees',
     ];
 
     public function __construct(private readonly NiumService $niumService) {}
-
-    /** @return array{values: list<array{label: string, value: string}>, source: string} */
-    public function subdivisions(User $user, string $region, string $countryCode): array
-    {
-        return $this->values($user, $region, 'isoState', $countryCode);
-    }
 
     public function values(User $user, string $region, string $category, ?string $countryCode = null): array
     {
