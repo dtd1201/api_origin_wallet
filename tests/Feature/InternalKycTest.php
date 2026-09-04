@@ -1398,6 +1398,16 @@ class InternalKycTest extends TestCase
                     'file_url' => 'https://files.example.com/ownership-structure.pdf',
                     'issuing_country_code' => 'US',
                 ],
+                [
+                    'type' => 'certificate_of_incorporation',
+                    'file_url' => 'https://files.example.com/certificate-of-incorporation.pdf',
+                    'issuing_country_code' => 'US',
+                ],
+                [
+                    'type' => 'account_opening_application_form',
+                    'file_url' => 'https://files.example.com/account-opening-application.pdf',
+                    'issuing_country_code' => 'US',
+                ],
             ],
             'related_persons' => [
                 [
@@ -1437,6 +1447,15 @@ class InternalKycTest extends TestCase
                     'date_of_birth' => '1985-02-01',
                     'nationality_country_code' => 'US',
                     'ownership_percentage' => 55,
+                    'documents' => [
+                        [
+                            'type' => 'passport_front',
+                            'file_url' => 'https://files.example.com/owner-passport-front.jpg',
+                            'side' => 'front',
+                            'document_number' => 'P7654321',
+                            'issuing_country_code' => 'US',
+                        ],
+                    ],
                 ],
             ],
         ];

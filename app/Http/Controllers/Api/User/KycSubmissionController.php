@@ -400,7 +400,7 @@ class KycSubmissionController extends Controller
                 'kyc_status' => $hasOpenRequirements ? 'needs_more_info' : 'pending',
             ]);
 
-            $complianceEvidenceService->invalidateNiumRelease(
+            $complianceEvidenceService->invalidateNiumSubmission(
                 profile: $kycProfile->fresh(),
                 reason: 'kyc_requirement_resubmitted',
                 actorUserId: $user->id,

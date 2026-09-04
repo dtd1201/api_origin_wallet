@@ -119,7 +119,7 @@ class ProviderOnboardingManager
         KycProviderSubmission::query()
             ->where('user_id', $user->id)
             ->where('provider_id', $provider->id)
-            ->whereIn('status', ['approved', 'submitted'])
+            ->whereIn('status', ['pending', 'approved', 'submitted'])
             ->update([
                 'status' => 'submitted',
                 'provider_account_id' => $providerAccount->id,

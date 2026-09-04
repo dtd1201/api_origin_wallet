@@ -25,7 +25,7 @@ class AmlScreeningService
     public function prepareProfile(KycProfile $profile): Collection
     {
         $profile->loadMissing(['user', 'relatedPersons']);
-        $this->evidenceService()->invalidateNiumRelease($profile, 'aml_screening_prepared');
+        $this->evidenceService()->invalidateNiumSubmission($profile, 'aml_screening_prepared');
         $profile->amlScreenings()->whereNull('superseded_at')->update(['superseded_at' => now()]);
 
         $screenings = collect([$this->createScreening(
@@ -73,7 +73,7 @@ class AmlScreeningService
     public function runScreening(AmlScreening $screening): AmlScreening
     {
         if ($screening->kycProfile !== null) {
-            $this->evidenceService()->invalidateNiumRelease($screening->kycProfile, 'aml_screening_rerun');
+            $this->evidenceService()->invalidateNiumSubmission($screening->kycProfile, 'aml_screening_rerun');
         }
 
         $screening->update([
@@ -213,7 +213,7 @@ class AmlScreeningService
         });
 
         if ($screening->kycProfile !== null) {
-            $this->evidenceService()->invalidateNiumRelease(
+            $this->evidenceService()->invalidateNiumSubmission(
                 $screening->kycProfile,
                 'aml_compliance_decision_changed',
                 $reviewer->id,

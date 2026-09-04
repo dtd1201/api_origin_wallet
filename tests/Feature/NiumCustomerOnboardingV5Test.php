@@ -10,7 +10,6 @@ use App\Models\KycDocument;
 use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
@@ -84,6 +83,52 @@ class NiumCustomerOnboardingV5Test extends TestCase
         ]);
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'verified-partner-key');
+    }
+
+    public function test_admin_kyc_approval_automatically_submits_the_customer_to_nium(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $profile = $user->kycProfile;
+        $profile->update([
+            'status' => 'submitted',
+            'reviewed_by_user_id' => null,
+            'reviewed_at' => null,
+        ]);
+        $user->update(['status' => 'pending', 'kyc_status' => 'pending']);
+        $user->kycProviderSubmissions()->delete();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $createResponse = $this->fixture('customer-v5-create-response.json');
+
+        Http::fake(function (Request $request) use ($createResponse) {
+            if ($request->method() === 'GET') {
+                return Http::response(['customers' => []], 200);
+            }
+
+            return Http::response([
+                ...$createResponse,
+                'externalId' => $request->data()['externalId'],
+            ], 200);
+        });
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve", [
+                'review_note' => 'Approved for automatic Nium onboarding.',
+            ])
+            ->assertOk()
+            ->assertJsonPath('user.kyc_status', 'verified')
+            ->assertJsonPath('provider_account.external_customer_id', $createResponse['customerHashId']);
+
+        Http::assertSentCount(2);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_ends_with($request->url(), '/customers'));
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'kyc_profile_id' => $profile->id,
+            'status' => 'submitted',
+        ]);
     }
 
     public function test_v5_customer_creation_stores_only_ids_and_state_from_authenticated_nium_response(): void
@@ -4390,7 +4435,6 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'reviewed_by_user_id' => $user->id,
             'reviewed_at' => now(),
             'approved_at' => now(),
-            'metadata' => app(ComplianceEvidenceService::class)->approvalMetadata($kycProfile),
         ]);
 
         return $user;
@@ -4584,7 +4628,6 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'reviewed_by_user_id' => $user->id,
             'reviewed_at' => now(),
             'approved_at' => now(),
-            'metadata' => app(ComplianceEvidenceService::class)->approvalMetadata($kycProfile),
         ]);
 
         return $user;
@@ -4634,9 +4677,6 @@ class NiumCustomerOnboardingV5Test extends TestCase
             ],
         ]);
         $user->profile()->update(['country_code' => 'HK']);
-        $user->kycProviderSubmissions()->where('provider_id', $provider->id)->update([
-            'metadata' => app(ComplianceEvidenceService::class)->approvalMetadata($profile->fresh()),
-        ]);
         $user->unsetRelation('kycProfile');
 
         return $user;

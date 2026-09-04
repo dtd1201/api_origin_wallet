@@ -4,10 +4,16 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
+use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
 use App\Services\Compliance\ComplianceEvidenceService;
+use App\Services\Integrations\ProviderOnboardingEligibilityException;
+use App\Services\Integrations\ProviderOnboardingReadinessService;
+use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Services\Nium\NiumProviderRequestException;
+use App\Support\PrimaryProvider;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -15,6 +21,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use RuntimeException;
+use Throwable;
 
 class UserKycSubmissionController extends Controller
 {
@@ -60,6 +67,8 @@ class UserKycSubmissionController extends Controller
         User $user,
         AmlScreeningService $amlScreeningService,
         ComplianceEvidenceService $complianceEvidenceService,
+        ProviderOnboardingReadinessService $readinessService,
+        NiumCustomerOnboardingService $onboardingService,
     ): JsonResponse {
         $user = $this->resolveManageableUser($user);
 
@@ -76,11 +85,57 @@ class UserKycSubmissionController extends Controller
             complianceEvidenceService: $complianceEvidenceService,
         );
 
+        $provider = IntegrationProvider::query()
+            ->where('code', PrimaryProvider::code())
+            ->where('status', 'active')
+            ->first();
+
+        if ($provider === null) {
+            return response()->json([
+                'message' => 'KYC was approved, but Nium onboarding is not configured.',
+            ], 422);
+        }
+
+        try {
+            $readyUser = $user->fresh()->load('profile', 'providerAccounts.provider');
+            $submission = $readinessService->assertReady($provider, $readyUser);
+            $providerAccount = $onboardingService->syncUser($provider, $readyUser);
+            $complianceEvidenceService->markNiumSubmissionSubmitted($submission, $providerAccount->id);
+        } catch (ProviderOnboardingEligibilityException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+                ...$exception->context(),
+            ], 422);
+        } catch (NiumProviderRequestException $exception) {
+            $complianceEvidenceService->markNiumSubmissionFailed(
+                $submission,
+                $exception->providerCode ?? 'nium_request_failed',
+            );
+
+            return response()->json(array_filter([
+                'message' => $exception->getMessage(),
+                'code' => $exception->providerCode,
+                'field' => $exception->providerField,
+                'path' => $exception->providerPath,
+            ], static fn ($value): bool => $value !== null), 422);
+        } catch (RuntimeException $exception) {
+            $complianceEvidenceService->markNiumSubmissionFailed($submission, 'nium_onboarding_failed');
+
+            return response()->json(['message' => $exception->getMessage()], 422);
+        } catch (Throwable) {
+            $complianceEvidenceService->markNiumSubmissionFailed($submission, 'nium_onboarding_failed');
+
+            return response()->json([
+                'message' => 'KYC was approved, but Nium onboarding could not be completed. The submission can be retried safely.',
+            ], 422);
+        }
+
         return response()->json([
-            'message' => 'KYC profile approved.',
+            'message' => 'KYC profile approved and Nium onboarding submitted.',
             'user' => $user->fresh(),
             'kyc_profile' => $kycProfile,
             'kyc_submission' => $kycProfile,
+            'provider_account' => $providerAccount,
         ]);
     }
 
@@ -187,7 +242,7 @@ class UserKycSubmissionController extends Controller
                 'kyc_status' => 'needs_more_info',
             ]);
 
-            $complianceEvidenceService->invalidateNiumRelease(
+            $complianceEvidenceService->invalidateNiumSubmission(
                 profile: $kycProfile->fresh(),
                 reason: 'kyc_update_requested',
                 actorUserId: $reviewedByUserId,
@@ -244,6 +299,7 @@ class UserKycSubmissionController extends Controller
         if ($status === 'verified') {
             try {
                 $amlScreeningService?->assertProfileClear($kycProfile);
+                $complianceEvidenceService?->assertNoBlockingNiumCompliance($user->id);
             } catch (RuntimeException $exception) {
                 abort(422, $exception->getMessage());
             }
@@ -279,15 +335,15 @@ class UserKycSubmissionController extends Controller
             ]);
 
             if ($status === 'verified') {
-                $complianceEvidenceService?->requireNiumReleaseReview(
+                $complianceEvidenceService?->prepareNiumSubmission(
                     profile: $kycProfile->fresh(),
-                    reason: 'internal_kyc_approved',
-                    actorUserId: $reviewedByUserId,
+                    reviewerUserId: $reviewedByUserId,
+                    reviewNote: $reviewNote,
                     ipAddress: $request->ip(),
                     userAgent: $request->userAgent(),
                 );
             } else {
-                $complianceEvidenceService?->invalidateNiumRelease(
+                $complianceEvidenceService?->invalidateNiumSubmission(
                     profile: $kycProfile->fresh(),
                     reason: 'internal_kyc_rejected',
                     actorUserId: $reviewedByUserId,

@@ -142,13 +142,6 @@ Route::get('kyc-provider-submissions', [KycProviderSubmissionController::class, 
 Route::get('users/{user}/kyc-profile/provider-submissions', [KycProviderSubmissionController::class, 'userIndex'])
     ->middleware('permission:kyc.view')
     ->name('users.kyc-profile.provider-submissions.index');
-Route::post('users/{user}/kyc-profile/providers/{provider}/approve', [KycProviderSubmissionController::class, 'approve'])
-    ->middleware('permission:kyc.approve')
-    ->name('users.kyc-profile.providers.approve');
-Route::post('users/{user}/kyc-profile/providers/{provider}/reject', [KycProviderSubmissionController::class, 'reject'])
-    ->middleware('permission:kyc.reject')
-    ->name('users.kyc-profile.providers.reject');
-
 Route::get('users/{user}/integration-links', [UserIntegrationLinkController::class, 'index'])
     ->middleware('permission:users.view')
     ->name('users.integration-links.index');
