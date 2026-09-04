@@ -50,14 +50,22 @@ class NiumCorporateConstantsServiceTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_unknown_subdivision_category_is_rejected_without_calling_nium(): void
+    public function test_fetches_iso_state_options_for_the_selected_country(): void
     {
-        Http::fake();
+        Http::fake(['*' => Http::response([
+            ['description' => 'Alaska', 'code' => 'US-AK'],
+            ['description' => 'Alabama', 'code' => 'US-AL'],
+        ])]);
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Unsupported Nium corporate constant category.');
+        $result = app(NiumCorporateConstantsService::class)
+            ->subdivisions(User::factory()->create(), 'HK', 'US');
 
-        app(NiumCorporateConstantsService::class)
-            ->values(User::factory()->create(), 'HK', 'isoState', 'HK');
+        $this->assertSame([
+            ['label' => 'Alaska', 'value' => 'US-AK'],
+            ['label' => 'Alabama', 'value' => 'US-AL'],
+        ], $result['values']);
+        Http::assertSent(fn ($request): bool => str_contains($request->url(), 'category=isoState')
+            && str_contains($request->url(), 'countryCode=US')
+            && str_contains($request->url(), 'region=HK'));
     }
 }
