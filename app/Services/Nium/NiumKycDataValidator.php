@@ -280,13 +280,10 @@ final class NiumKycDataValidator
 
     private function assertConstant(string $region, string $category, mixed $value, string $path): void
     {
-        $record = NiumCorporateConstant::query()->where([
-            'region' => $region, 'customer_type' => 'CORPORATE', 'country_code' => '', 'constant_type' => $category,
-        ])->first();
-        $allowed = collect($constant['values'])
+        $allowed = collect($record?->values ?? [])
         ->pluck('value')
-        ->map(fn($v) => strtolower($v))
-        ->contains(strtolower((string)$value));
+        ->map(fn ($v) => strtolower((string) $v))
+        ->contains(strtolower((string) $value));
 
         if (! is_string($value) || ! in_array($value, $allowed, true)) {
             throw new RuntimeException("{$path}: value was not returned by Nium category {$category}.");
