@@ -130,6 +130,20 @@ class UserKycSubmissionController extends Controller
                 ]);
             }
 
+            $failedSubmission = $provider === null ? null : KycProviderSubmission::query()
+                ->where('user_id', $user->id)
+                ->where('provider_id', $provider->id)
+                ->where('status', 'failed')
+                ->with('providerAccount')
+                ->first();
+
+            if ($failedSubmission !== null && ! $this->isSafeNiumOnboardingRetry($failedSubmission)) {
+                return response()->json([
+                    'message' => 'This failed Nium onboarding submission is not eligible for automatic retry.',
+                    'code' => 'nium_onboarding_retry_not_allowed',
+                ], 409);
+            }
+
             $amlBypassApplied = false;
             $kycProfile = $this->reviewProfile(
                 request: $request,
@@ -559,6 +573,23 @@ class UserKycSubmissionController extends Controller
         abort_if($user->isAdmin(), 404);
 
         return $user;
+    }
+
+    private function isSafeNiumOnboardingRetry(KycProviderSubmission $submission): bool
+    {
+        if ($submission->failure_reason !== 'nium_onboarding_failed') {
+            return false;
+        }
+
+        $providerAccount = $submission->providerAccount
+            ?? $submission->user->providerAccounts()
+                ->where('provider_id', $submission->provider_id)
+                ->latest('id')
+                ->first();
+
+        return $providerAccount === null
+            || (! filled($providerAccount->external_customer_id)
+                && ! filled($providerAccount->external_account_id));
     }
 
     private function logNiumOnboardingFailure(

@@ -2238,6 +2238,115 @@ class NiumCustomerOnboardingV5Test extends TestCase
         ]);
     }
 
+    public function test_failed_nium_onboarding_without_provider_identifiers_retries_with_existing_account(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $submission = $user->kycProviderSubmissions()->where('provider_id', $provider->id)->sole();
+        $account = $this->pendingAccount($user, $provider);
+        $submission->update([
+            'provider_account_id' => $account->id,
+            'status' => 'failed',
+            'failure_reason' => 'nium_onboarding_failed',
+        ]);
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $customerHashId = (string) Str::uuid();
+        $walletHashId = (string) Str::uuid();
+
+        Http::fake(function (Request $request) use ($customerHashId, $walletHashId) {
+            if ($request->method() === 'GET') {
+                return Http::response(['customers' => []]);
+            }
+
+            return Http::response([
+                ...$this->fixture('customer-v5-create-response.json'),
+                'customerHashId' => $customerHashId,
+                'walletHashId' => $walletHashId,
+                'externalId' => $request->data()['externalId'],
+            ]);
+        });
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertOk()
+            ->assertJsonPath('provider_account.id', $account->id)
+            ->assertJsonPath('provider_account.external_customer_id', $customerHashId);
+
+        $this->assertDatabaseCount('user_provider_accounts', 1);
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'id' => $submission->id,
+            'provider_account_id' => $account->id,
+            'status' => 'submitted',
+            'failure_reason' => null,
+        ]);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/customers'));
+    }
+
+    public function test_failed_nium_onboarding_with_provider_identifiers_cannot_retry_customer_create(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $submission = $user->kycProviderSubmissions()->where('provider_id', $provider->id)->sole();
+        $account = $this->pendingAccount($user, $provider, withAuthenticatedIds: true);
+        $submission->update([
+            'provider_account_id' => $account->id,
+            'status' => 'failed',
+            'failure_reason' => 'nium_onboarding_failed',
+        ]);
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        Http::preventStrayRequests();
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertConflict()
+            ->assertJsonPath('code', 'nium_onboarding_retry_not_allowed');
+
+        Http::assertNothingSent();
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'id' => $submission->id,
+            'status' => 'failed',
+            'failure_reason' => 'nium_onboarding_failed',
+        ]);
+        $this->assertSame($account->external_customer_id, $account->fresh()->external_customer_id);
+        $this->assertSame($account->external_account_id, $account->fresh()->external_account_id);
+    }
+
+    public function test_pending_nium_submission_uses_the_normal_approval_onboarding_flow(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $submission = $user->kycProviderSubmissions()->where('provider_id', $provider->id)->sole();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $customerHashId = (string) Str::uuid();
+
+        Http::fake(function (Request $request) use ($customerHashId) {
+            if ($request->method() === 'GET') {
+                return Http::response(['customers' => []]);
+            }
+
+            return Http::response([
+                ...$this->fixture('customer-v5-create-response.json'),
+                'customerHashId' => $customerHashId,
+                'externalId' => $request->data()['externalId'],
+            ]);
+        });
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertOk()
+            ->assertJsonPath('provider_account.external_customer_id', $customerHashId);
+
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'id' => $submission->id,
+            'status' => 'submitted',
+            'failure_reason' => null,
+        ]);
+    }
+
     public function test_admin_approval_keeps_submission_pending_while_nium_documents_are_processing(): void
     {
         $provider = $this->provider();
