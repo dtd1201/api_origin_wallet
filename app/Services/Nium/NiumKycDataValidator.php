@@ -25,6 +25,17 @@ final class NiumKycDataValidator
 
         if ($profile->applicant_type === 'business') {
             $this->assertFactual($profile->business_name, 'kycProfile.businessName');
+
+            $registrationDocument = $profile->documents->first(
+                fn (KycDocument $document): bool => strtolower(trim((string) $document->type)) === 'business_registration'
+            );
+            $registrationNumber = trim((string) $profile->business_registration_number);
+
+            if ($registrationDocument instanceof KycDocument
+                && trim((string) $registrationDocument->document_number) === ''
+                && $registrationNumber !== '') {
+                $registrationDocument->update(['document_number' => $registrationNumber]);
+            }
         }
 
         $this->assertAddressSource($profile, 'kycProfile', $region);
