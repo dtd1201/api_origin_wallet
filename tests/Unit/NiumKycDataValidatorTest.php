@@ -35,6 +35,57 @@ class NiumKycDataValidatorTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_zero_postal_code_passes_nium_preflight_validator(): void
+    {
+        $payload = $this->validPayload();
+        $payload['addresses']['registeredAddress']['postcode'] = '00000';
+        $payload['applicant']['address']['postcode'] = '00000';
+        $payload['stakeholders']['individual'][0]['address']['postcode'] = '00000';
+
+        app(NiumKycDataValidator::class)->assertPayload($payload);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_numeric_postal_code_passes_nium_preflight_validator(): void
+    {
+        $payload = $this->validPayload();
+        $payload['addresses']['registeredAddress']['postcode'] = '12345';
+
+        app(NiumKycDataValidator::class)->assertPayload($payload);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_legal_or_company_name_placeholder_still_fails_factual_validation(): void
+    {
+        $validator = app(NiumKycDataValidator::class);
+        $method = new \ReflectionMethod($validator, 'assertFactual');
+
+        foreach (['kycProfile.legalName', 'kycProfile.businessName'] as $path) {
+            try {
+                $method->invoke($validator, 'test', $path);
+                $this->fail("{$path} should reject placeholder values.");
+            } catch (\ReflectionException $exception) {
+                throw $exception;
+            } catch (RuntimeException $exception) {
+                $this->assertStringContainsString('placeholder or test values are not allowed', $exception->getMessage());
+            }
+        }
+    }
+
+    public function test_business_registration_number_placeholder_still_fails(): void
+    {
+        $payload = $this->validPayload();
+        $payload['businessRegistrationNumber'] = '00000000';
+        $payload['documents'][0]['identificationNumber'] = '00000000';
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('businessRegistrationNumber: placeholder or test values are not allowed.');
+
+        app(NiumKycDataValidator::class)->assertPayload($payload);
+    }
+
     private function validPayload(): array
     {
         $address = [

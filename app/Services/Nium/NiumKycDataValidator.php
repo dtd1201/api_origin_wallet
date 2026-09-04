@@ -21,6 +21,12 @@ final class NiumKycDataValidator
         }
 
         $region = strtoupper((string) (($profile->metadata ?? [])['nium_region'] ?? $profile->registered_country_code ?? $profile->country_code));
+        $this->assertFactual($profile->legal_name, 'kycProfile.legalName');
+
+        if ($profile->applicant_type === 'business') {
+            $this->assertFactual($profile->business_name, 'kycProfile.businessName');
+        }
+
         $this->assertAddressSource($profile, 'kycProfile', $region);
 
         if ($profile->applicant_type === 'individual') {
@@ -39,6 +45,7 @@ final class NiumKycDataValidator
         }
 
         $brn = trim((string) $profile->business_registration_number);
+        $this->assertFactual($brn, 'businessRegistrationNumber');
 
         if (preg_match('/^\d{8}$/', $brn) !== 1) {
             throw new RuntimeException('businessRegistrationNumber: HK corporate registration number must be exactly 8 digits.');
@@ -83,6 +90,8 @@ final class NiumKycDataValidator
 
         if (($payload['type'] ?? null) === 'corporate' && ($payload['region'] ?? null) === 'HK') {
             $brn = $payload['businessRegistrationNumber'] ?? null;
+
+            $this->assertFactual($brn, 'businessRegistrationNumber');
 
             if (! is_string($brn) || preg_match('/^\d{8}$/', $brn) !== 1) {
                 throw new RuntimeException('businessRegistrationNumber: HK corporate registration number must be exactly 8 digits.');
@@ -196,7 +205,6 @@ final class NiumKycDataValidator
         if (! is_string($value) || preg_match('/^[A-Z0-9][A-Z0-9 -]{1,28}[A-Z0-9]$/i', trim($value)) !== 1) {
             throw new RuntimeException("{$path}: invalid postal code.");
         }
-        $this->assertFactual($value, $path);
     }
 
     private function assertFactual(mixed $value, string $path): void
