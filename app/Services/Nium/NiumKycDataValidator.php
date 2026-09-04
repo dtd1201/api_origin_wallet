@@ -281,11 +281,11 @@ final class NiumKycDataValidator
     private function assertConstant(string $region, string $category, mixed $value, string $path): void
     {
         $allowed = collect($record?->values ?? [])
-        ->pluck('value')
-        ->map(fn ($v) => strtolower((string) $v))
-        ->contains(strtolower((string) $value));
+            ->pluck('value')
+            ->map(fn ($v) => strtolower((string) $v))
+            ->toArray();
 
-        if (! is_string($value) || ! in_array($value, $allowed, true)) {
+        if (! is_string($value) || ! in_array(strtolower((string) $value), $allowed, true)) {
             throw new RuntimeException("{$path}: value was not returned by Nium category {$category}.");
         }
     }
