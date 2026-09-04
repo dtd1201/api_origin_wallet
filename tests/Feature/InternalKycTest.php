@@ -1364,6 +1364,39 @@ class InternalKycTest extends TestCase
         ]);
     }
 
+    public function test_user_can_resubmit_a_kyc_requirement_without_server_error(): void
+    {
+        $user = User::factory()->create([
+            'status' => 'pending',
+            'kyc_status' => 'pending',
+        ]);
+        $this->submitKycProfile($user);
+        $profile = $user->kycProfile()->firstOrFail();
+        $requirement = $profile->requirements()
+            ->where('key', 'identity_document_front')
+            ->firstOrFail();
+        $requirement->update(['status' => 'needs_more_info']);
+        $profile->update(['status' => 'needs_more_info']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->postJson("/api/user/users/{$user->id}/kyc-profile/requirements/{$requirement->id}/resubmit", [
+                'profile' => ['legal_name' => 'Jane Resubmitted Doe'],
+                'note' => 'Updated the requested profile information.',
+            ])
+            ->assertAccepted()
+            ->assertJsonPath('kyc_profile.legal_name', 'Jane Resubmitted Doe');
+
+        $this->assertDatabaseHas('kyc_requirements', [
+            'id' => $requirement->id,
+            'status' => 'submitted',
+        ]);
+        $this->assertDatabaseHas('audit_logs', [
+            'user_id' => $user->id,
+            'action' => 'kyc.requirement_resubmitted',
+            'entity_id' => (string) $requirement->id,
+        ]);
+    }
+
     public function test_non_nium_provider_does_not_invoke_hk_validation_during_internal_approval(): void
     {
         $admin = $this->createAdminUser();

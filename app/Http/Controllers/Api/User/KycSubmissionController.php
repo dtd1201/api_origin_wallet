@@ -349,7 +349,7 @@ class KycSubmissionController extends Controller
             ]);
         }
 
-        $kycProfile = DB::transaction(function () use ($request, $user, $kycProfile, $requirement, $validated): KycProfile {
+        $kycProfile = DB::transaction(function () use ($request, $user, $kycProfile, $requirement, $validated, $complianceEvidenceService): KycProfile {
             $oldData = $kycProfile->toArray();
             $profilePayload = Arr::only($validated['profile'] ?? [], $this->profileFields());
             $relatedPersonPayload = Arr::only($validated['related_person'] ?? [], $this->relatedPersonFields());
