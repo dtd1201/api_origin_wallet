@@ -10,25 +10,10 @@ use Throwable;
 
 final class NiumCorporateConstantsService
 {
-    private const FALLBACK_SUBDIVISIONS = [
-        'HK' => [
-            ['label' => 'Central and Western', 'value' => 'HK-HCW'],
-            ['label' => 'Eastern', 'value' => 'HK-HEA'],
-            ['label' => 'Southern', 'value' => 'HK-HSO'],
-            ['label' => 'Wan Chai', 'value' => 'HK-HWC'],
-        ],
-        'SG' => [
-            ['label' => 'Central Singapore', 'value' => 'SG-01'],
-            ['label' => 'North East', 'value' => 'SG-02'],
-            ['label' => 'North West', 'value' => 'SG-03'],
-            ['label' => 'South East', 'value' => 'SG-04'],
-            ['label' => 'South West', 'value' => 'SG-05'],
-        ],
-        'VN' => [
-            ['label' => 'Hanoi', 'value' => 'VN-HN'],
-            ['label' => 'Ho Chi Minh City', 'value' => 'VN-SG'],
-            ['label' => 'Phu Yen', 'value' => 'VN-70'],
-        ],
+    public const CATEGORIES = [
+        'annualTurnover', 'averageTransactionValue', 'businessType', 'countryName',
+        'countryOfOperation', 'documentType', 'intendedUseOfAccount', 'industrySector',
+        'isoState', 'monthlyTransactionVolume', 'monthlyTransactions', 'position', 'totalEmployees',
     ];
 
     public function __construct(private readonly NiumService $niumService) {}
@@ -36,11 +21,19 @@ final class NiumCorporateConstantsService
     /** @return array{values: list<array{label: string, value: string}>, source: string} */
     public function subdivisions(User $user, string $region, string $countryCode): array
     {
+        return $this->values($user, $region, 'isoState', $countryCode);
+    }
+
+    public function values(User $user, string $region, string $category, ?string $countryCode = null): array
+    {
+        if (! in_array($category, self::CATEGORIES, true)) {
+            throw new RuntimeException('Unsupported Nium corporate constant category.');
+        }
         $dimensions = [
             'region' => strtoupper(trim($region)),
             'customer_type' => 'CORPORATE',
-            'country_code' => strtoupper(trim($countryCode)),
-            'constant_type' => 'STATE',
+            'country_code' => strtoupper(trim((string) $countryCode)),
+            'constant_type' => $category,
         ];
         $cached = NiumCorporateConstant::query()->where($dimensions)->first();
 
@@ -62,10 +55,7 @@ final class NiumCorporateConstantsService
                 return ['values' => (array) $cached->values, 'source' => 'stale_cache'];
             }
 
-            return [
-                'values' => self::FALLBACK_SUBDIVISIONS[$dimensions['country_code']] ?? [],
-                'source' => 'fallback',
-            ];
+            throw new RuntimeException('Nium corporate constants are unavailable and no cached values exist.', previous: $exception);
         }
     }
 
@@ -82,9 +72,8 @@ final class NiumCorporateConstantsService
             path: $this->niumService->path($endpoint, ['client' => $this->niumService->clientId()]),
             query: [
                 'region' => $dimensions['region'],
-                'customerType' => $dimensions['customer_type'],
-                'countryCode' => $dimensions['country_code'],
-                'type' => $dimensions['constant_type'],
+                'category' => $dimensions['constant_type'],
+                ...($dimensions['country_code'] !== '' ? ['countryCode' => $dimensions['country_code']] : []),
             ],
             user: $user,
             operation: 'fetch_corporate_constants',
@@ -106,8 +95,8 @@ final class NiumCorporateConstantsService
         return collect($items)
             ->filter(fn ($item): bool => is_array($item))
             ->map(function (array $item): ?array {
-                $value = $item['value'] ?? $item['code'] ?? $item['constantValue'] ?? null;
-                $label = $item['label'] ?? $item['name'] ?? $item['description'] ?? $value;
+                $value = $item['code'] ?? null;
+                $label = $item['description'] ?? null;
 
                 if (! is_string($value) || trim($value) === '' || ! is_string($label) || trim($label) === '') {
                     return null;

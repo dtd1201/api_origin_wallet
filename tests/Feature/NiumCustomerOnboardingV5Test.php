@@ -30,11 +30,12 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
+use Tests\Concerns\SeedsNiumCorporateConstants;
 use Tests\TestCase;
 
 class NiumCustomerOnboardingV5Test extends TestCase
 {
-    use RefreshDatabase;
+    use RefreshDatabase, SeedsNiumCorporateConstants;
 
     private const INDIVIDUAL_FILE_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -63,6 +64,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        $this->seedNiumCorporateConstants();
 
         Storage::fake('kyc_private');
         config()->set('services.kyc.documents_disk', 'kyc_private');

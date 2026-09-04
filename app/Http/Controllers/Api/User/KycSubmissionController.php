@@ -960,7 +960,9 @@ class KycSubmissionController extends Controller
     private function preserveNiumDocumentMetadata(array $document, $existingDocuments, ?string $relationshipType): array
     {
         $clientMetadata = collect((array) ($document['metadata'] ?? []))
-            ->reject(fn (mixed $value, mixed $key): bool => is_string($key) && str_starts_with(strtolower($key), 'nium_'))
+            ->reject(fn (mixed $value, mixed $key): bool => is_string($key)
+                && str_starts_with(strtolower($key), 'nium_')
+                && strtolower($key) !== 'nium_document_type')
             ->all();
         $document['metadata'] = $clientMetadata;
         $hash = trim((string) ($document['file_hash'] ?? ''));

@@ -65,6 +65,23 @@ final class NiumKycDataValidator
         $this->assertCountry($payload['region'] ?? null, 'region');
         $region = (string) $payload['region'];
 
+        if (($payload['type'] ?? null) === 'corporate') {
+            $this->assertConstant($region, 'businessType', $payload['businessType'] ?? null, 'businessType');
+            $this->assertConstantList($region, 'industrySector', $payload['natureOfBusiness']['industryCodes'] ?? null, 'natureOfBusiness.industryCodes');
+            $this->assertConstantList($region, 'countryOfOperation', $payload['natureOfBusiness']['operatingCountries'] ?? null, 'natureOfBusiness.operatingCountries');
+            $this->assertConstantList($region, 'intendedUseOfAccount', $payload['expectedAccountUsage']['intendedUses'] ?? null, 'expectedAccountUsage.intendedUses');
+            $this->assertConstant($region, 'annualTurnover', $payload['sizeOfBusiness']['annualTurnover'] ?? null, 'sizeOfBusiness.annualTurnover');
+            $this->assertConstant($region, 'totalEmployees', $payload['sizeOfBusiness']['totalEmployees'] ?? null, 'sizeOfBusiness.totalEmployees');
+
+            foreach (['credit', 'debit'] as $direction) {
+                $usage = $payload['expectedAccountUsage'][$direction] ?? [];
+                $this->assertConstant($region, 'averageTransactionValue', $usage['averageTransactionValue'] ?? null, "expectedAccountUsage.{$direction}.averageTransactionValue");
+                $this->assertConstant($region, 'monthlyTransactionVolume', $usage['monthlyTransactionVolume'] ?? null, "expectedAccountUsage.{$direction}.monthlyTransactionVolume");
+                $this->assertConstant($region, 'monthlyTransactions', $usage['monthlyTransactions'] ?? null, "expectedAccountUsage.{$direction}.monthlyTransactions");
+                $this->assertConstantList($region, 'countryOfOperation', $usage['topTransactionCountries'] ?? null, "expectedAccountUsage.{$direction}.topTransactionCountries");
+            }
+        }
+
         if (($payload['type'] ?? null) === 'corporate' && ($payload['region'] ?? null) === 'HK') {
             $brn = $payload['businessRegistrationNumber'] ?? null;
 
@@ -88,9 +105,13 @@ final class NiumKycDataValidator
         foreach ($this->payloadPeople($payload) as [$person, $path]) {
             $this->assertDate($person['dateOfBirth'] ?? null, "{$path}.dateOfBirth");
             $this->assertCountry($person['nationality'] ?? null, "{$path}.nationality");
+            $this->assertConstant($region, 'countryName', $person['nationality'] ?? null, "{$path}.nationality");
             $this->assertPayloadAddress($person['address'] ?? $person['billingAddress'] ?? null, "{$path}.address", $region);
 
             foreach (($person['documents'] ?? []) as $index => $document) {
+                if (is_array($document)) {
+                    $this->assertConstant($region, 'documentType', $document['type'] ?? null, "{$path}.documents.{$index}.type");
+                }
                 if (! is_array($document) || ! $this->isIdentityDocument((string) ($document['type'] ?? ''))) {
                     continue;
                 }
@@ -105,6 +126,12 @@ final class NiumKycDataValidator
         foreach (($payload['addresses'] ?? []) as $key => $address) {
             if (is_array($address)) {
                 $this->assertPayloadAddress($address, "addresses.{$key}", $region);
+            }
+        }
+
+        foreach (($payload['documents'] ?? []) as $index => $document) {
+            if (is_array($document)) {
+                $this->assertConstant($region, 'documentType', $document['type'] ?? null, "documents.{$index}.type");
             }
         }
     }
@@ -168,7 +195,7 @@ final class NiumKycDataValidator
             'region' => $region,
             'customer_type' => 'CORPORATE',
             'country_code' => $country,
-            'constant_type' => 'STATE',
+            'constant_type' => 'isoState',
         ])->first();
         $configured = $record === null
             ? null
@@ -231,5 +258,28 @@ final class NiumKycDataValidator
         return str_contains($type, 'passport')
             || str_contains($type, 'national_id')
             || str_contains($type, 'driver');
+    }
+
+    private function assertConstant(string $region, string $category, mixed $value, string $path): void
+    {
+        $record = NiumCorporateConstant::query()->where([
+            'region' => $region, 'customer_type' => 'CORPORATE', 'country_code' => '', 'constant_type' => $category,
+        ])->first();
+        $allowed = collect((array) $record?->values)->pluck('value')->all();
+
+        if (! is_string($value) || ! in_array($value, $allowed, true)) {
+            throw new RuntimeException("{$path}: value was not returned by Nium category {$category}.");
+        }
+    }
+
+    private function assertConstantList(string $region, string $category, mixed $values, string $path): void
+    {
+        if (! is_array($values) || $values === []) {
+            throw new RuntimeException("{$path}: requires Nium category {$category} values.");
+        }
+
+        foreach ($values as $value) {
+            $this->assertConstant($region, $category, $value, $path);
+        }
     }
 }

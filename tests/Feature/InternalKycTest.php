@@ -19,16 +19,18 @@ use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Concerns\SeedsNiumCorporateConstants;
 use Tests\Fixtures\FakeAmlScreeningProvider;
 use Tests\TestCase;
 
 class InternalKycTest extends TestCase
 {
-    use RefreshDatabase;
+    use RefreshDatabase, SeedsNiumCorporateConstants;
 
     protected function setUp(): void
     {
         parent::setUp();
+        $this->seedNiumCorporateConstants();
 
         $this->app->instance(AmlScreeningProvider::class, new FakeAmlScreeningProvider);
     }

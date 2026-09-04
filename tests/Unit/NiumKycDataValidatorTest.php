@@ -3,11 +3,21 @@
 namespace Tests\Unit;
 
 use App\Services\Nium\NiumKycDataValidator;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use RuntimeException;
+use Tests\Concerns\SeedsNiumCorporateConstants;
 use Tests\TestCase;
 
 class NiumKycDataValidatorTest extends TestCase
 {
+    use RefreshDatabase, SeedsNiumCorporateConstants;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->seedNiumCorporateConstants();
+    }
+
     public function test_business_registration_document_mismatch_is_rejected(): void
     {
         $payload = $this->validPayload();
@@ -49,6 +59,27 @@ class NiumKycDataValidatorTest extends TestCase
             'type' => 'corporate',
             'region' => 'HK',
             'businessRegistrationNumber' => '12345678',
+            'businessType' => 'PRIVATE_COMPANY',
+            'natureOfBusiness' => [
+                'industryCodes' => ['is112'],
+                'operatingCountries' => ['HK'],
+            ],
+            'expectedAccountUsage' => [
+                'intendedUses' => ['iu002'],
+                'credit' => [
+                    'averageTransactionValue' => 'tc001',
+                    'monthlyTransactionVolume' => 'eu008',
+                    'monthlyTransactions' => 'tc001',
+                    'topTransactionCountries' => ['HK'],
+                ],
+                'debit' => [
+                    'averageTransactionValue' => 'tc001',
+                    'monthlyTransactionVolume' => 'eu008',
+                    'monthlyTransactions' => 'tc001',
+                    'topTransactionCountries' => ['HK'],
+                ],
+            ],
+            'sizeOfBusiness' => ['annualTurnover' => 'SG011', 'totalEmployees' => 'EM009'],
             'addresses' => ['registeredAddress' => $address],
             'applicant' => $person,
             'stakeholders' => ['individual' => [$person]],

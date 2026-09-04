@@ -20,7 +20,7 @@ class NiumCorporateConstantsServiceTest extends TestCase
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.com');
         config()->set('services.nium.client_id', 'client_hash_123');
         config()->set('services.nium.api_key', 'test-key');
-        config()->set('services.nium.corporate_constants_endpoint', '/api/v5/client/{clientHashId}/corporate/constants');
+        config()->set('services.nium.corporate_constants_endpoint', '/api/v2/client/{clientHashId}/onboarding/constants');
         config()->set('services.nium.auth', [
             'mode' => 'header',
             'header_name' => 'x-api-key',
@@ -33,7 +33,7 @@ class NiumCorporateConstantsServiceTest extends TestCase
     public function test_fetches_and_caches_vietnam_state_constants(): void
     {
         Http::fake(['*' => Http::response([
-            ['name' => 'Phu Yen', 'value' => 'VN-70'],
+            ['description' => 'Phu Yen', 'code' => 'VN-70'],
         ])]);
 
         $user = User::factory()->create();
@@ -45,7 +45,7 @@ class NiumCorporateConstantsServiceTest extends TestCase
             'region' => 'HK',
             'customer_type' => 'CORPORATE',
             'country_code' => 'VN',
-            'constant_type' => 'STATE',
+            'constant_type' => 'isoState',
         ]);
         Http::assertSentCount(1);
     }

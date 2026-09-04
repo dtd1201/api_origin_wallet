@@ -100,7 +100,7 @@ return [
         ],
         'health_endpoint' => env('NIUM_HEALTH_ENDPOINT', '/api/v1/client/{clientHashId}'),
         'customer_create_endpoint' => env('NIUM_CUSTOMER_CREATE_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
-        'corporate_constants_endpoint' => env('NIUM_CORPORATE_CONSTANTS_ENDPOINT', '/api/v5/client/{clientHashId}/corporate/constants'),
+        'corporate_constants_endpoint' => env('NIUM_CORPORATE_CONSTANTS_ENDPOINT'),
         'corporate_constants_cache_seconds' => env('NIUM_CORPORATE_CONSTANTS_CACHE_SECONDS', 86400),
         'customer_get_endpoint' => env('NIUM_CUSTOMER_GET_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}'),
         'customer_list_endpoint' => env('NIUM_CUSTOMER_LIST_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
