@@ -11,6 +11,7 @@ use App\Services\Aml\AmlScreeningService;
 use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Kyc\BusinessRegistryVerificationService;
 use App\Services\Nium\NiumRegionResolver;
+use App\Support\KycAuditProjection;
 use Closure;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -184,9 +185,12 @@ class KycSubmissionController extends Controller
             }
         }
 
+        $validated = $this->enrichHkCorporateFullContract($request, $validated);
+
         $validated = $this->attachBusinessRegistryVerification($validated, $businessRegistryVerificationService);
 
         $kycProfile = DB::transaction(function () use ($user, $validated, $amlScreeningService): KycProfile {
+            $existingDocuments = $user->kycProfile?->documents()->get() ?? collect();
             $payload = Arr::only($validated, $this->profileFields());
             $payload['status'] = 'submitted';
             $payload['submitted_at'] = now();
@@ -205,6 +209,7 @@ class KycSubmissionController extends Controller
             $kycProfile->requirements()->delete();
 
             foreach ($validated['documents'] ?? [] as $document) {
+                $document = $this->preserveNiumDocumentMetadata($document, $existingDocuments, null);
                 $kycProfile->documents()->create([
                     ...Arr::only($document, $this->documentFields()),
                     'status' => 'submitted',
@@ -219,6 +224,11 @@ class KycSubmissionController extends Controller
                 ]);
 
                 foreach ($relatedPersonDocuments as $document) {
+                    $document = $this->preserveNiumDocumentMetadata(
+                        $document,
+                        $existingDocuments,
+                        (string) $relatedPerson['relationship_type'],
+                    );
                     $kycProfile->documents()->create([
                         ...Arr::only($document, $this->documentFields()),
                         'kyc_related_person_id' => $createdRelatedPerson->id,
@@ -413,14 +423,17 @@ class KycSubmissionController extends Controller
                 'action' => 'kyc.requirement_resubmitted',
                 'entity_type' => 'kyc_requirement',
                 'entity_id' => (string) $requirement->id,
-                'old_data' => $oldData,
-                'new_data' => [
-                    'kyc_profile_id' => $kycProfile->id,
-                    'requirement' => $requirement->fresh()?->toArray(),
-                    'resubmitted_document' => $resubmittedDocument?->toArray(),
-                    'profile_status' => $kycProfile->fresh()->status,
-                    'user_kyc_status' => $user->fresh()->kyc_status,
-                ],
+                'old_data' => null,
+                'new_data' => KycAuditProjection::profile(
+                    $kycProfile->fresh(['documents', 'relatedPersons', 'requirements']),
+                    is_array($oldData) ? ($oldData['status'] ?? null) : null,
+                    array_values(array_filter([
+                        ...array_map(fn (string $field): string => 'profile.'.$field, array_keys($profilePayload)),
+                        ...array_map(fn (string $field): string => 'related_person.'.$field, array_keys($relatedPersonPayload)),
+                        'requirements.'.$requirement->id.'.status',
+                        $resubmittedDocument ? 'documents.'.$resubmittedDocument->id : null,
+                    ])),
+                ),
                 'ip_address' => $request->ip(),
                 'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
             ]);
@@ -500,6 +513,10 @@ class KycSubmissionController extends Controller
         );
         $isSgCorporate = $request->input('applicant_type') === 'business'
             && $requestedRegion === 'SG';
+        $isHkCorporate = $request->input('applicant_type') === 'business'
+            && $requestedRegion === 'HK';
+        $isHkCorporateFull = $isHkCorporate
+            && strtolower((string) $request->input('metadata.nium_kyc_type')) === 'full';
         $relationship = $request->input(
             'metadata.nium_v5_fields.addresses.isBusinessAddressSameAsRegisteredAddress',
         );
@@ -573,6 +590,50 @@ class KycSubmissionController extends Controller
             'related_persons.*.documents.*.expires_at' => ['nullable', 'date', 'after:today'],
             'related_persons.*.documents.*.metadata' => ['sometimes', 'array'],
             'metadata' => ['sometimes', 'array'],
+            ...($isHkCorporate ? [
+                'metadata.nium_region' => ['required', 'in:HK'],
+                'metadata.nium_kyc_type' => ['required', 'in:full'],
+            ] : []),
+            ...($isHkCorporateFull ? [
+                'metadata.nium_v5_fields' => ['required', 'array'],
+                'metadata.nium_v5_fields.tradeName' => ['required', 'string', 'max:255'],
+                'metadata.nium_v5_fields.addresses' => ['required', 'array'],
+                'metadata.nium_v5_fields.addresses.isBusinessAddressSameAsRegisteredAddress' => ['required', 'boolean:strict'],
+                'metadata.nium_v5_fields.applicantDeclaration' => ['required', 'accepted'],
+                'metadata.nium_v5_fields.applicantDeclarationTimeStamp' => ['required', 'date_format:Y-m-d H:i:s'],
+                'metadata.nium_v5_fields.isMultiLayeredCompany' => ['required', 'boolean:strict'],
+                'metadata.nium_v5_fields.bankAccountDetails' => ['required', 'array'],
+                'metadata.nium_v5_fields.bankAccountDetails.accountName' => ['required', 'string'],
+                'metadata.nium_v5_fields.bankAccountDetails.accountNumber' => ['required', 'string'],
+                'metadata.nium_v5_fields.bankAccountDetails.bankCountry' => ['required', 'string', 'size:2'],
+                'metadata.nium_v5_fields.bankAccountDetails.bankName' => ['required', 'string'],
+                'metadata.nium_v5_fields.bankAccountDetails.currency' => ['required', 'string', 'size:3'],
+                'metadata.nium_v5_fields.bankAccountDetails.routingCodes' => ['required', 'array', 'min:1'],
+                'metadata.nium_v5_fields.bankAccountDetails.routingCodes.*.type' => ['required', 'string'],
+                'metadata.nium_v5_fields.bankAccountDetails.routingCodes.*.value' => ['required', 'string'],
+                'metadata.nium_v5_fields.deviceDescriptor' => ['required', 'string', 'max:255'],
+                'metadata.nium_v5_fields.deviceDetails' => ['prohibited'],
+                'metadata.nium_v5_fields.natureOfBusiness.industryCodes' => ['required', 'array', 'min:1'],
+                'metadata.nium_v5_fields.natureOfBusiness.industryCodes.*' => ['required', Rule::in(['IS138', 'IS140', 'IS144', 'IS152', 'IS156', 'IS164'])],
+                'metadata.nium_v5_fields.natureOfBusiness.operatingCountries' => ['required', 'array', 'min:1'],
+                'metadata.nium_v5_fields.natureOfBusiness.operatingCountries.*' => ['required', 'string', 'size:2'],
+                'metadata.nium_v5_fields.expectedAccountUsage' => ['required', 'array'],
+                'metadata.nium_v5_fields.expectedAccountUsage.intendedUses' => ['required', 'array', 'min:1'],
+                'metadata.nium_v5_fields.expectedAccountUsage.intendedUses.*' => ['required', Rule::in(['IU001', 'IU002', 'IU003'])],
+                'metadata.nium_v5_fields.expectedAccountUsage.credit' => ['required', 'array'],
+                'metadata.nium_v5_fields.expectedAccountUsage.debit' => ['required', 'array'],
+                ...collect(['credit', 'debit'])->flatMap(fn (string $direction): array => [
+                    "metadata.nium_v5_fields.expectedAccountUsage.{$direction}.averageTransactionValue" => ['required', Rule::in(['ATVHK01', 'ATVHK03', 'ATVHK05', 'ATVHK06'])],
+                    "metadata.nium_v5_fields.expectedAccountUsage.{$direction}.monthlyTransactionVolume" => ['required', Rule::in(['MVHK01', 'MVHK03', 'MVHK05', 'MVHK07', 'MVHK09', 'MVHK10'])],
+                    "metadata.nium_v5_fields.expectedAccountUsage.{$direction}.monthlyTransactions" => ['required', Rule::in(['ATC01', 'ATC02', 'ATC03'])],
+                    "metadata.nium_v5_fields.expectedAccountUsage.{$direction}.topTransactionCountries" => ['required', 'array', 'min:1'],
+                    "metadata.nium_v5_fields.expectedAccountUsage.{$direction}.topTransactionCountries.*" => ['required', 'string', 'size:2'],
+                ])->all(),
+                'metadata.nium_v5_fields.sizeOfBusiness.annualTurnover' => ['required', Rule::in(['HK008', 'HK011'])],
+                'metadata.nium_v5_fields.sizeOfBusiness.totalEmployees' => ['required', Rule::in(['EM006', 'EM008'])],
+                'related_persons.0.metadata.positions' => ['required', 'array', 'min:1'],
+                'related_persons.0.metadata.positions.*' => ['required', 'string'],
+            ] : []),
             ...($isSgCorporate ? [
                 'metadata.nium_v5_fields' => ['required', 'array'],
                 'metadata.nium_v5_fields.addresses' => ['required', 'array', 'min:1'],
@@ -742,6 +803,89 @@ class KycSubmissionController extends Controller
             'country_code',
             'metadata',
         ];
+    }
+
+    /** Server owns IP/session identity; the browser contributes only a bounded display descriptor. */
+    private function enrichHkCorporateFullContract(Request $request, array $validated): array
+    {
+        if (($validated['applicant_type'] ?? null) !== 'business'
+            || strtoupper((string) data_get($validated, 'metadata.nium_region')) !== 'HK') {
+            return $validated;
+        }
+
+        $ipAddress = (string) $request->ip();
+        if (filter_var(
+            $ipAddress,
+            FILTER_VALIDATE_IP,
+            FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE,
+        ) === false) {
+            throw ValidationException::withMessages(['device' => 'HK Corporate Full onboarding requires a trusted public IPv4 address.']);
+        }
+
+        $documents = collect($validated['documents'] ?? []);
+        $filing = $documents->first(fn (array $document): bool => in_array(strtolower((string) ($document['type'] ?? '')), ['nar1', 'nnc1'], true));
+        if (! is_array($filing)
+            || empty($filing['issued_at'])
+            || data_get($filing, 'metadata.is_most_recent_filing') !== true) {
+            throw ValidationException::withMessages(['documents' => 'HK private companies require a dated latest NAR1 or NNC1 filing.']);
+        }
+
+        $registration = $documents->first(fn (array $document): bool => in_array(strtolower((string) ($document['type'] ?? '')), ['business_registration', 'certificate_of_incorporation'], true));
+        if (! is_array($registration) || empty($registration['issued_at'])) {
+            throw ValidationException::withMessages(['documents' => 'The business registration document issue date is required.']);
+        }
+
+        if (data_get($validated, 'metadata.nium_v5_fields.isMultiLayeredCompany') === true
+            && ! $documents->contains(fn (array $document): bool => in_array(strtolower((string) ($document['type'] ?? '')), ['corporate_structure', 'ownership_chart'], true))) {
+            throw ValidationException::withMessages(['documents' => 'A corporate structure document is required for a multilayered company.']);
+        }
+
+        $descriptor = trim((string) data_get($validated, 'metadata.nium_v5_fields.deviceDescriptor'));
+        data_forget($validated, 'metadata.nium_v5_fields.deviceDescriptor');
+        data_set($validated, 'metadata.nium_v5_fields.deviceDetails', [
+            'ipCountryCode' => strtoupper((string) $validated['registered_country_code']),
+            'deviceInfo' => $descriptor,
+            'ipAddress' => $ipAddress,
+            'sessionId' => (string) Str::uuid(),
+        ]);
+
+        return $validated;
+    }
+
+    private function preserveNiumDocumentMetadata(array $document, $existingDocuments, ?string $relationshipType): array
+    {
+        $clientMetadata = collect((array) ($document['metadata'] ?? []))
+            ->reject(fn (mixed $value, mixed $key): bool => is_string($key) && str_starts_with(strtolower($key), 'nium_'))
+            ->all();
+        $document['metadata'] = $clientMetadata;
+        $hash = trim((string) ($document['file_hash'] ?? ''));
+        if ($hash === '') {
+            return $document;
+        }
+
+        $existing = $existingDocuments->first(function ($candidate) use ($document, $hash, $relationshipType): bool {
+            $candidateRelationship = $candidate->relatedPerson?->relationship_type;
+
+            return hash_equals((string) $candidate->file_hash, $hash)
+                && strtolower((string) $candidate->type) === strtolower((string) ($document['type'] ?? ''))
+                && ($relationshipType === null ? $candidate->kyc_related_person_id === null : $candidateRelationship === $relationshipType);
+        });
+
+        if ($existing === null) {
+            return $document;
+        }
+
+        $serverMetadata = Arr::only((array) $existing->metadata, [
+            'nium_file_id',
+            'nium_file_state',
+            'nium_document_type',
+            'nium_uploaded_at',
+            'nium_available_at',
+            'nium_last_checked_at',
+        ]);
+        $document['metadata'] = [...$clientMetadata, ...$serverMetadata];
+
+        return $document;
     }
 
     /**

@@ -9,14 +9,15 @@ use App\Models\KycProfile;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
 use App\Services\Currenxie\CurrenxiePayloadMapper;
+use App\Services\Integrations\DataObjects\ProviderOnboardingResult;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Support\PrimaryProvider;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
-use PHPUnit\Framework\Attributes\DataProvider;
 use Mockery;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Fixtures\FakeAmlScreeningProvider;
 use Tests\TestCase;
 
@@ -29,6 +30,38 @@ class InternalKycTest extends TestCase
         parent::setUp();
 
         $this->app->instance(AmlScreeningProvider::class, new FakeAmlScreeningProvider);
+    }
+
+    public function test_individual_submission_retains_legacy_contract_without_hk_fields(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $this->individualKycPayload())
+            ->assertAccepted();
+
+        $profile = $user->kycProfile()->firstOrFail();
+        $this->assertSame('individual', $profile->applicant_type);
+        $this->assertNull(data_get($profile->metadata, 'nium_kyc_type'));
+        $this->assertNull(data_get($profile->metadata, 'nium_v5_fields'));
+        Http::assertNothingSent();
+    }
+
+    public function test_non_hk_business_submission_retains_legacy_contract_without_hk_fields(): void
+    {
+        Http::fake(fn () => Http::response([], 503));
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $this->businessKycPayload())
+            ->assertAccepted();
+
+        $profile = $user->kycProfile()->firstOrFail();
+        $this->assertSame('business', $profile->applicant_type);
+        $this->assertSame('US', $profile->registered_country_code);
+        $this->assertNull(data_get($profile->metadata, 'nium_kyc_type'));
+        $this->assertNull(data_get($profile->metadata, 'nium_v5_fields'));
     }
 
     public function test_user_can_submit_platform_style_business_kyc_profile_for_review(): void
@@ -87,6 +120,105 @@ class InternalKycTest extends TestCase
             'status' => 'pending',
             'kyc_status' => 'pending',
         ]);
+    }
+
+    public function test_hk_corporate_full_request_persists_complete_trusted_source_contract(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->hkCorporateFullPayload();
+        $payload['documents'][0]['metadata'] = [
+            'customer_note' => 'preserve-me',
+            'nium_file_id' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            'nium_file_state' => 'AVAILABLE',
+        ];
+
+        $response = $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload);
+
+        $response->assertAccepted();
+        $profile = $user->kycProfile()->firstOrFail();
+        $this->assertSame('HK', data_get($profile->metadata, 'nium_region'));
+        $this->assertSame('full', data_get($profile->metadata, 'nium_kyc_type'));
+        $this->assertSame('8.8.8.8', data_get($profile->metadata, 'nium_v5_fields.deviceDetails.ipAddress'));
+        $this->assertTrue(Str::isUuid((string) data_get($profile->metadata, 'nium_v5_fields.deviceDetails.sessionId')));
+        $this->assertNull(data_get($profile->metadata, 'nium_v5_fields.deviceDescriptor'));
+        $this->assertSame(['director'], data_get($profile->relatedPersons()->where('relationship_type', 'authorized_representative')->firstOrFail()->metadata, 'positions'));
+        $this->assertTrue((bool) data_get($profile->documents()->where('type', 'nar1')->firstOrFail()->metadata, 'is_most_recent_filing'));
+        $registration = $profile->documents()->where('type', 'business_registration')->firstOrFail();
+        $this->assertSame('preserve-me', data_get($registration->metadata, 'customer_note'));
+        $this->assertNull(data_get($registration->metadata, 'nium_file_id'));
+        $this->assertNull(data_get($registration->metadata, 'nium_file_state'));
+        $registration->update(['metadata' => [
+            ...((array) $registration->metadata),
+            'nium_file_id' => '40000000-0000-4000-8000-000000000024',
+            'nium_file_state' => 'AVAILABLE',
+            'nium_uploaded_at' => '2026-09-04T08:30:00Z',
+        ]]);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $this->hkCorporateFullPayload())
+            ->assertAccepted();
+
+        $preserved = $user->kycProfile()->firstOrFail()->documents()->where('type', 'business_registration')->firstOrFail();
+        $this->assertSame('40000000-0000-4000-8000-000000000024', data_get($preserved->metadata, 'nium_file_id'));
+        $this->assertSame('AVAILABLE', data_get($preserved->metadata, 'nium_file_state'));
+        $this->assertSame('2026-09-04T08:30:00Z', data_get($preserved->metadata, 'nium_uploaded_at'));
+        Http::assertNothingSent();
+    }
+
+    public function test_hk_corporate_full_rejects_browser_spoofed_forwarded_ip_from_untrusted_peer(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables([
+                'REMOTE_ADDR' => '127.0.0.1',
+                'HTTP_X_FORWARDED_FOR' => '8.8.8.8',
+            ])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $this->hkCorporateFullPayload())
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('device');
+
+        $this->assertNull($user->kycProfile);
+        Http::assertNothingSent();
+    }
+
+    #[DataProvider('missingHkCorporateGroupProvider')]
+    public function test_hk_corporate_full_rejects_each_missing_mandatory_group(string $path): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->hkCorporateFullPayload();
+        data_forget($payload, $path);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertUnprocessable();
+
+        $this->assertNull($user->kycProfile);
+        Http::assertNothingSent();
+    }
+
+    public static function missingHkCorporateGroupProvider(): array
+    {
+        return collect([
+            'metadata.nium_kyc_type',
+            'metadata.nium_v5_fields.addresses',
+            'metadata.nium_v5_fields.applicantDeclaration',
+            'metadata.nium_v5_fields.applicantDeclarationTimeStamp',
+            'metadata.nium_v5_fields.isMultiLayeredCompany',
+            'metadata.nium_v5_fields.bankAccountDetails',
+            'metadata.nium_v5_fields.deviceDescriptor',
+            'metadata.nium_v5_fields.natureOfBusiness',
+            'metadata.nium_v5_fields.expectedAccountUsage',
+            'metadata.nium_v5_fields.sizeOfBusiness',
+            'related_persons.0.metadata.positions',
+        ])->mapWithKeys(fn (string $path): array => [$path => [$path]])->all();
     }
 
     public function test_supplied_nium_address_relationship_requires_a_strict_json_boolean(): void
@@ -182,12 +314,10 @@ class InternalKycTest extends TestCase
             $payload['metadata']['nium_v5_fields']['addresses'] = [];
         } elseif ($scenario === 'relationship missing') {
             unset(
-                $payload['metadata']['nium_v5_fields']['addresses']
-                    ['isBusinessAddressSameAsRegisteredAddress'],
+                $payload['metadata']['nium_v5_fields']['addresses']['isBusinessAddressSameAsRegisteredAddress'],
             );
         } elseif ($scenario === 'relationship null') {
-            $payload['metadata']['nium_v5_fields']['addresses']
-                ['isBusinessAddressSameAsRegisteredAddress'] = null;
+            $payload['metadata']['nium_v5_fields']['addresses']['isBusinessAddressSameAsRegisteredAddress'] = null;
         }
 
         $this->assertSgCorporateAddressContractRejected($payload, $expectedField);
@@ -993,6 +1123,29 @@ class InternalKycTest extends TestCase
         ]);
     }
 
+    public function test_non_nium_provider_does_not_invoke_hk_validation_during_internal_approval(): void
+    {
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+        $this->submitKycProfile($user);
+        $this->runAmlForProfile($admin, $user);
+        IntegrationProvider::query()->create([
+            'code' => 'synthetic_non_nium',
+            'name' => 'Synthetic non-Nium provider',
+            'status' => 'active',
+        ]);
+        Http::preventStrayRequests();
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'KYC was approved, but Nium onboarding is not configured.');
+
+        $this->assertSame('verified', $user->kycProfile()->value('status'));
+        $this->assertSame('verified', $user->fresh()->kyc_status);
+        Http::assertNothingSent();
+    }
+
     public function test_provider_payload_can_reuse_internal_kyc_snapshot(): void
     {
         $user = User::factory()->create([
@@ -1052,9 +1205,15 @@ class InternalKycTest extends TestCase
             'provider_id' => $provider->id,
             'status' => 'pending',
             'provider_status' => 'pending',
+            'external_customer_id' => 'synthetic-customer-id',
         ]);
         $onboardingService = Mockery::mock(NiumCustomerOnboardingService::class);
-        $onboardingService->shouldReceive('syncUser')->once()->andReturn($account);
+        $onboardingService->shouldReceive('beginOnboarding')->once()->andReturn(new ProviderOnboardingResult(
+            providerAccount: $account,
+            status: 'pending',
+            nextAction: 'wait_for_provider_review',
+            message: 'Nium customer onboarding is in progress.',
+        ));
         $this->app->instance(NiumCustomerOnboardingService::class, $onboardingService);
     }
 
@@ -1397,5 +1556,48 @@ class InternalKycTest extends TestCase
                 ],
             ],
         ];
+    }
+
+    private function hkCorporateFullPayload(): array
+    {
+        $payload = $this->businessKycPayload();
+        $payload['registered_country_code'] = 'HK';
+        $payload['country_code'] = 'HK';
+        $payload['state'] = 'Hong Kong';
+        $payload['postal_code'] = '000000';
+        $payload['metadata'] = [
+            'registered_date' => '2020-01-15',
+            'nium_business_type' => 'PRIVATE_COMPANY',
+            'nium_region' => 'HK',
+            'nium_kyc_type' => 'full',
+            'nium_v5_fields' => [
+                'tradeName' => 'Synthetic Trading',
+                'addresses' => ['isBusinessAddressSameAsRegisteredAddress' => true],
+                'applicantDeclaration' => true,
+                'applicantDeclarationTimeStamp' => '2026-09-04 08:30:00',
+                'isMultiLayeredCompany' => false,
+                'deviceDescriptor' => 'Origin Wallet web',
+                'bankAccountDetails' => [
+                    'accountName' => 'Synthetic Trading', 'accountNumber' => '0001',
+                    'bankCountry' => 'HK', 'bankName' => 'Synthetic Bank', 'currency' => 'HKD',
+                    'routingCodes' => [['type' => 'SWIFT', 'value' => 'SYNTHKHH']],
+                ],
+                'natureOfBusiness' => ['industryCodes' => ['IS138'], 'operatingCountries' => ['HK']],
+                'expectedAccountUsage' => [
+                    'intendedUses' => ['IU001'],
+                    'credit' => ['averageTransactionValue' => 'ATVHK03', 'monthlyTransactionVolume' => 'MVHK03', 'monthlyTransactions' => 'ATC02', 'topTransactionCountries' => ['HK']],
+                    'debit' => ['averageTransactionValue' => 'ATVHK03', 'monthlyTransactionVolume' => 'MVHK03', 'monthlyTransactions' => 'ATC02', 'topTransactionCountries' => ['HK']],
+                ],
+                'sizeOfBusiness' => ['annualTurnover' => 'HK011', 'totalEmployees' => 'EM008'],
+            ],
+        ];
+        $payload['related_persons'][0]['metadata'] = ['role' => 'director', 'phone' => '+85290000000', 'positions' => ['director']];
+        $payload['documents'] = [
+            ['type' => 'business_registration', 'file_url' => 'https://files.example.com/registration.pdf', 'file_hash' => str_repeat('a', 64), 'issuing_country_code' => 'HK', 'issued_at' => now()->subMonth()->toDateString()],
+            ['type' => 'nar1', 'file_url' => 'https://files.example.com/nar1.pdf', 'file_hash' => str_repeat('b', 64), 'issuing_country_code' => 'HK', 'issued_at' => now()->subMonth()->toDateString(), 'metadata' => ['is_most_recent_filing' => true]],
+            ['type' => 'proof_of_business_address', 'file_url' => 'https://files.example.com/address.pdf', 'file_hash' => str_repeat('c', 64), 'issuing_country_code' => 'HK'],
+        ];
+
+        return $payload;
     }
 }

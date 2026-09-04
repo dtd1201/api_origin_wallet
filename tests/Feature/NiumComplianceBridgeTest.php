@@ -11,16 +11,18 @@ use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
 use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Integrations\Contracts\OnboardingProvider;
+use App\Services\Integrations\DataObjects\ProviderOnboardingResult;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Integrations\ProviderOnboardingReadinessService;
 use App\Services\Integrations\ProviderRegistry;
 use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Services\Nium\NiumProviderRequestException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Mockery;
-use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\Fixtures\FakeAmlScreeningProvider;
 use Tests\TestCase;
@@ -41,12 +43,18 @@ class NiumComplianceBridgeTest extends TestCase
             'provider_id' => $provider->id,
             'status' => 'pending',
             'provider_status' => 'pending',
+            'external_customer_id' => 'synthetic-customer-id',
         ]);
         $onboardingService = Mockery::mock(NiumCustomerOnboardingService::class);
-        $onboardingService->shouldReceive('syncUser')
+        $onboardingService->shouldReceive('beginOnboarding')
             ->once()
             ->withArgs(fn (IntegrationProvider $candidate, User $candidateUser): bool => $candidate->is($provider) && $candidateUser->is($user))
-            ->andReturn($account);
+            ->andReturn(new ProviderOnboardingResult(
+                providerAccount: $account,
+                status: 'pending',
+                nextAction: 'wait_for_provider_review',
+                message: 'Nium customer onboarding is in progress.',
+            ));
         $request = Request::create('/api/admin/users/'.$user->id.'/kyc-profile/approve', 'POST');
         $request->setUserResolver(fn () => $admin);
 
@@ -97,9 +105,15 @@ class NiumComplianceBridgeTest extends TestCase
             'provider_id' => $provider->id,
             'status' => 'pending',
             'provider_status' => 'pending',
+            'external_customer_id' => 'synthetic-customer-id',
         ]);
         $onboardingService = Mockery::mock(NiumCustomerOnboardingService::class);
-        $onboardingService->shouldReceive('syncUser')->once()->andReturn($account);
+        $onboardingService->shouldReceive('beginOnboarding')->once()->andReturn(new ProviderOnboardingResult(
+            providerAccount: $account,
+            status: 'pending',
+            nextAction: 'wait_for_provider_review',
+            message: 'Nium customer onboarding is in progress.',
+        ));
         $request = Request::create('/api/admin/users/'.$user->id.'/kyc-profile/approve', 'POST');
         $request->setUserResolver(fn () => $admin);
 
@@ -160,6 +174,8 @@ class NiumComplianceBridgeTest extends TestCase
 
     public function test_nium_failure_keeps_kyc_verified_and_marks_submission_retryable(): void
     {
+        config()->set('services.nium.auth.header_value', 'sandbox-secret-api-key');
+        Log::spy();
         $provider = $this->provider();
         $admin = User::factory()->create();
         $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
@@ -167,9 +183,21 @@ class NiumComplianceBridgeTest extends TestCase
         $this->approvedDocument($profile, 'submitted');
         $this->clearAml($profile);
         $onboardingService = Mockery::mock(NiumCustomerOnboardingService::class);
-        $onboardingService->shouldReceive('syncUser')
+        $onboardingService->shouldReceive('beginOnboarding')
             ->once()
-            ->andThrow(new RuntimeException('Synthetic Nium timeout.'));
+            ->andThrow(new NiumProviderRequestException(
+                publicMessage: 'Nium customer onboarding failed.',
+                providerCode: 'invalid_customer',
+                providerField: 'documents.0.fileIds',
+                providerPath: 'documents.0.fileIds',
+                httpStatus: 422,
+                responseBody: [
+                    'errorCode' => 'invalid_customer',
+                    'message' => 'Document verification failed.',
+                    'authorization' => 'Bearer sandbox-secret-api-key',
+                    'apiKey' => 'sandbox-secret-api-key',
+                ],
+            ));
         $request = Request::create('/api/admin/users/'.$user->id.'/kyc-profile/approve', 'POST');
         $request->setUserResolver(fn () => $admin);
 
@@ -183,6 +211,7 @@ class NiumComplianceBridgeTest extends TestCase
         );
 
         $this->assertSame(422, $response->getStatusCode());
+        $this->assertSame('nium_onboarding_failed', $response->getData(true)['code']);
         $this->assertSame('verified', $profile->fresh()->status);
         $this->assertSame('verified', $user->fresh()->kyc_status);
         $this->assertDatabaseHas('kyc_provider_submissions', [
@@ -191,6 +220,27 @@ class NiumComplianceBridgeTest extends TestCase
             'status' => 'failed',
             'failure_reason' => 'nium_onboarding_failed',
         ]);
+        $submission = KycProviderSubmission::query()->where('user_id', $user->id)->sole();
+
+        Log::shouldHaveReceived('error')
+            ->once()
+            ->with('Direct Nium onboarding failed after KYC approval.', Mockery::on(
+                function (array $context) use ($user, $submission): bool {
+                    $this->assertSame(NiumProviderRequestException::class, $context['exception_class']);
+                    $this->assertSame('Nium customer onboarding failed.', $context['exception_message']);
+                    $this->assertSame(422, $context['http_status']);
+                    $this->assertSame($user->id, $context['user_id']);
+                    $this->assertSame($submission->id, $context['kyc_submission_id']);
+                    $this->assertSame('invalid_customer', $context['provider_code']);
+                    $this->assertSame('documents.0.fileIds', $context['provider_field']);
+                    $this->assertSame('documents.0.fileIds', $context['provider_path']);
+                    $this->assertArrayNotHasKey('response_body', $context);
+                    $this->assertStringNotContainsString('Document verification failed.', json_encode($context));
+                    $this->assertStringNotContainsString('sandbox-secret-api-key', json_encode($context));
+
+                    return true;
+                },
+            ));
     }
 
     public function test_aml_rerun_invalidates_existing_nium_submission_tracking(): void

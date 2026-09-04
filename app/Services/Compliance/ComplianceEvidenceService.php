@@ -7,6 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\KycProviderSubmission;
 use App\Models\NiumRfiCase;
+use App\Support\KycAuditProjection;
 use App\Support\PrimaryProvider;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -30,7 +31,7 @@ class ComplianceEvidenceService
             'user_id' => $profile->user_id,
             'provider_id' => $provider->id,
         ]);
-        $oldData = $submission->exists ? $submission->toArray() : null;
+        $previousStatus = $submission->exists ? $submission->status : null;
 
         $submission->fill([
             'kyc_profile_id' => $profile->id,
@@ -50,7 +51,7 @@ class ComplianceEvidenceService
             ],
         ])->save();
 
-        $this->audit($submission, $reviewerUserId, 'kyc_provider_submission.prepared_from_kyc', 'internal_kyc_approved', $oldData, $ipAddress, $userAgent);
+        $this->audit($submission, $reviewerUserId, 'kyc_provider_submission.prepared_from_kyc', 'internal_kyc_approved', $previousStatus, $ipAddress, $userAgent);
 
         return $submission->fresh();
     }
@@ -72,7 +73,7 @@ class ComplianceEvidenceService
             return $submission;
         }
 
-        $oldData = $submission->toArray();
+        $previousStatus = $submission->status;
         $metadata = (array) $submission->metadata;
         $metadata['previous_submission'] = [
             'reviewed_by_user_id' => $submission->reviewed_by_user_id,
@@ -98,7 +99,7 @@ class ComplianceEvidenceService
             'metadata' => $metadata,
         ]);
 
-        $this->audit($submission, $actorUserId, 'kyc_provider_submission.invalidated', $reason, $oldData, $ipAddress, $userAgent);
+        $this->audit($submission, $actorUserId, 'kyc_provider_submission.invalidated', $reason, $previousStatus, $ipAddress, $userAgent);
 
         return $submission->fresh();
     }
@@ -109,6 +110,20 @@ class ComplianceEvidenceService
             'status' => 'submitted',
             'provider_account_id' => $providerAccountId,
             'submitted_at' => now(),
+            'approved_at' => null,
+            'failure_reason' => null,
+        ]);
+
+        return $submission->fresh();
+    }
+
+    public function markNiumSubmissionPendingDocuments(KycProviderSubmission $submission, int $providerAccountId): KycProviderSubmission
+    {
+        $submission->refresh();
+        $submission->update([
+            'status' => 'pending',
+            'provider_account_id' => $providerAccountId,
+            'submitted_at' => null,
             'approved_at' => null,
             'failure_reason' => null,
         ]);
@@ -171,7 +186,7 @@ class ComplianceEvidenceService
         ?int $actorUserId,
         string $action,
         string $reason,
-        ?array $oldData,
+        ?string $previousStatus,
         ?string $ipAddress,
         ?string $userAgent,
     ): void {
@@ -180,15 +195,8 @@ class ComplianceEvidenceService
             'action' => $action,
             'entity_type' => 'kyc_provider_submission',
             'entity_id' => (string) $submission->id,
-            'old_data' => $oldData,
-            'new_data' => [
-                'customer_id' => $submission->user_id,
-                'kyc_profile_id' => $submission->kyc_profile_id,
-                'provider_id' => $submission->provider_id,
-                'provider_submission_id' => $submission->id,
-                'status' => $submission->status,
-                'reason_code' => $reason,
-            ],
+            'old_data' => null,
+            'new_data' => KycAuditProjection::providerSubmission($submission, $previousStatus, $reason),
             'ip_address' => $ipAddress,
             'user_agent' => Str::limit((string) $userAgent, 1000, ''),
         ]);

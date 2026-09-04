@@ -13,6 +13,8 @@ final class NiumProviderRequestException extends RuntimeException
         public readonly ?string $providerCode,
         public readonly ?string $providerField,
         public readonly ?string $providerPath,
+        public readonly ?int $httpStatus = null,
+        public readonly mixed $responseBody = null,
     ) {
         parent::__construct($publicMessage);
     }
@@ -35,6 +37,8 @@ final class NiumProviderRequestException extends RuntimeException
             ),
             self::safePath($error['field'] ?? null),
             self::safePath($error['path'] ?? $error['parameter'] ?? null),
+            $response->status(),
+            $data !== [] ? $data : $response->body(),
         );
     }
 

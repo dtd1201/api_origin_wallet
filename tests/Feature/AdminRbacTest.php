@@ -6,6 +6,7 @@ use App\Models\AmlScreening;
 use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
+use Illuminate\Support\Facades\Http;
 use App\Models\Role;
 use App\Models\Transfer;
 use App\Models\User;
@@ -40,8 +41,9 @@ class AdminRbacTest extends TestCase
             ->assertOk();
     }
 
-    public function test_compliance_officer_can_approve_kyc_but_cannot_approve_transfer(): void
+    public function test_compliance_officer_can_authorize_kyc_approval_but_cannot_approve_transfer(): void
     {
+        Http::preventStrayRequests();
         $officer = $this->createAdminWithRole('compliance_officer');
         $customer = User::factory()->create(['status' => 'pending', 'kyc_status' => 'submitted']);
         $profile = KycProfile::query()->create([
@@ -70,8 +72,10 @@ class AdminRbacTest extends TestCase
 
         $this->withToken($token)
             ->postJson("/api/admin/users/{$customer->id}/kyc-profile/approve")
-            ->assertOk()
-            ->assertJsonPath('kyc_profile.status', 'verified');
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'KYC was approved, but Nium onboarding is not configured.');
+
+        $this->assertSame('verified', $profile->fresh()->status);
 
         $this->withToken($token)
             ->postJson("/api/admin/transfers/{$transfer->id}/approve")

@@ -1984,6 +1984,217 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_hk_corporate_full_payload_matches_successful_baseline_top_level_shape(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        Http::preventStrayRequests();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+        $actual = array_keys($payload);
+        $expected = [
+            'website', 'tradeName', 'deviceDetails', 'sizeOfBusiness', 'natureOfBusiness',
+            'bankAccountDetails', 'applicantDeclaration', 'expectedAccountUsage',
+            'isMultiLayeredCompany', 'type', 'region', 'kycType', 'externalId', 'businessName',
+            'businessRegistrationNumber', 'businessType', 'registeredCountry', 'registeredDate',
+            'addresses', 'applicant', 'stakeholders', 'documents', 'applicantDeclarationTimeStamp',
+        ];
+        sort($actual);
+        sort($expected);
+
+        $this->assertSame($expected, $actual);
+        Http::assertNothingSent();
+    }
+
+    public function test_admin_approval_route_submits_complete_hk_corporate_full_payload_exactly_once(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedHkCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $profile->update(['status' => 'submitted', 'reviewed_by_user_id' => null, 'reviewed_at' => null]);
+        $profile->documents()->update(['status' => 'submitted']);
+        $profile->relatedPersons()->update(['status' => 'submitted']);
+        $user->update(['status' => 'pending', 'kyc_status' => 'pending']);
+        $user->kycProviderSubmissions()->delete();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $customerHashId = (string) Str::uuid();
+        $walletHashId = (string) Str::uuid();
+
+        Http::preventStrayRequests();
+        Http::fake(function (Request $request) use ($customerHashId, $walletHashId) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET' && str_ends_with($path, '/customers')) {
+                return Http::response(['customers' => []]);
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($path, '/customers')) {
+                return Http::response([
+                    'customerHashId' => $customerHashId,
+                    'walletHashId' => $walletHashId,
+                    'externalId' => $request->data()['externalId'],
+                    'status' => 'pending',
+                ]);
+            }
+
+            throw new RuntimeException('Unexpected Nium request in HK approval route test.');
+        });
+
+        $response = $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve", [
+                'review_note' => 'Synthetic HK approval.',
+            ]);
+
+        $response->assertOk()
+            ->assertJsonPath('kyc_profile.status', 'verified')
+            ->assertJsonPath('provider_account.external_customer_id', $customerHashId);
+
+        Http::assertSentCount(2);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_ends_with($request->url(), '/customers')
+            && $request->data()['region'] === 'HK'
+            && $request->data()['kycType'] === 'full'
+            && array_key_exists('applicantDeclarationTimeStamp', $request->data())
+            && array_key_exists('bankAccountDetails', $request->data())
+            && array_key_exists('documents', $request->data()));
+        $this->assertDatabaseHas('user_provider_accounts', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'external_customer_id' => $customerHashId,
+        ]);
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'kyc_profile_id' => $profile->id,
+            'status' => 'submitted',
+            'failure_reason' => null,
+        ]);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve", ['review_note' => 'Duplicate click.'])
+            ->assertOk()
+            ->assertJsonPath('provider_account.external_customer_id', $customerHashId);
+        Http::assertSentCount(2);
+    }
+
+    public function test_admin_approval_route_persists_safe_failure_without_calling_nium_for_invalid_hk_profile(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedHkCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $metadata = (array) $profile->metadata;
+        unset($metadata['nium_kyc_type']);
+        $profile->update([
+            'status' => 'submitted',
+            'reviewed_by_user_id' => null,
+            'reviewed_at' => null,
+            'metadata' => $metadata,
+        ]);
+        $profile->documents()->update(['status' => 'submitted']);
+        $profile->relatedPersons()->update(['status' => 'submitted']);
+        $user->update(['status' => 'pending', 'kyc_status' => 'pending']);
+        $user->kycProviderSubmissions()->delete();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        Http::preventStrayRequests();
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath('code', 'nium_onboarding_failed')
+            ->assertJsonPath('message', 'KYC was approved, but Nium onboarding could not be completed. The submission can be retried safely.')
+            ->assertJsonMissingPath('message.metadata');
+
+        Http::assertNothingSent();
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'kyc_profile_id' => $profile->id,
+            'status' => 'failed',
+            'failure_reason' => 'nium_onboarding_failed',
+            'submitted_at' => null,
+        ]);
+        $this->assertDatabaseHas('kyc_profiles', ['id' => $profile->id, 'status' => 'verified']);
+
+        $metadata['nium_kyc_type'] = 'full';
+        $profile->update(['metadata' => $metadata]);
+        $customerHashId = (string) Str::uuid();
+        $walletHashId = (string) Str::uuid();
+        Http::fake(function (Request $request) use ($customerHashId, $walletHashId) {
+            if ($request->method() === 'GET') {
+                return Http::response(['customers' => []]);
+            }
+
+            return Http::response([
+                'customerHashId' => $customerHashId,
+                'walletHashId' => $walletHashId,
+                'externalId' => $request->data()['externalId'],
+                'status' => 'pending',
+            ]);
+        });
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertOk()
+            ->assertJsonPath('provider_account.external_customer_id', $customerHashId);
+
+        Http::assertSentCount(2);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/customers'));
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'status' => 'submitted',
+            'failure_reason' => null,
+        ]);
+    }
+
+    public function test_admin_approval_keeps_submission_pending_while_nium_documents_are_processing(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedHkCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+        $document = $profile->documents()->where('type', 'nar1')->firstOrFail();
+        $metadata = (array) $document->metadata;
+        $metadata['nium_file_state'] = 'PROCESSING';
+        $document->update(['status' => 'submitted', 'metadata' => $metadata]);
+        $profile->update(['status' => 'submitted', 'reviewed_by_user_id' => null, 'reviewed_at' => null]);
+        $profile->documents()->update(['status' => 'submitted']);
+        $profile->relatedPersons()->update(['status' => 'submitted']);
+        $user->update(['status' => 'pending', 'kyc_status' => 'pending']);
+        $user->kycProviderSubmissions()->delete();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+
+        Http::preventStrayRequests();
+        Http::fake(function (Request $request) use ($metadata) {
+            if ($request->method() === 'GET' && str_contains($request->url(), 'document-storage-sandbox.nium.test')) {
+                return Http::response([
+                    'id' => $metadata['nium_file_id'],
+                    'state' => 'PROCESSING',
+                ]);
+            }
+
+            throw new RuntimeException('Customer API must not be called while a required document is processing.');
+        });
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertAccepted()
+            ->assertJsonPath('message', 'KYC profile approved. Nium document processing must complete before customer submission.')
+            ->assertJsonPath('kyc_profile.status', 'verified');
+
+        Http::assertSentCount(1);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), 'gateway.nium.test'));
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'status' => 'pending',
+            'submitted_at' => null,
+        ]);
+    }
+
     public function test_hk_legacy_declaration_timestamp_alias_remains_supported_for_provider_output(): void
     {
         $user = $this->approvedHkCorporate($this->provider());
