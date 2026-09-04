@@ -100,7 +100,15 @@ class NiumCustomerDocumentPreparationService
                 throw new RuntimeException('Nium file creation returned an invalid file id.');
             }
 
-            return $this->acceptedState($document, $created['state'] ?? null);
+            $state = $this->acceptedState($document, $created['state'] ?? null);
+
+            if ($state === 'PROCESSING') {
+                $details = $this->fileService->refreshDocumentState($document, $user);
+
+                return $this->acceptedState($document, $details['state'] ?? null);
+            }
+
+            return $state;
         }
 
         if (! Str::isUuid($fileId)) {

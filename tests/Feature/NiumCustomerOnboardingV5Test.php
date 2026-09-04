@@ -1255,7 +1255,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertDatabaseCount('user_provider_accounts', 1);
     }
 
-    public function test_missing_file_id_uploads_once_and_waits_without_creating_customer_or_leaking_file_data(): void
+    public function test_created_processing_file_is_refreshed_and_waits_without_creating_customer_or_leaking_file_data(): void
     {
         $provider = $this->provider();
         $user = $this->approvedIndividual($provider);
@@ -1268,12 +1268,19 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::fake(function (Request $request) use ($storagePath, $transactionLevel) {
             $this->assertSame($transactionLevel, DB::transactionLevel());
 
-            if (str_contains($request->url(), 'document-storage-sandbox.nium.test')) {
+            if ($request->method() === 'POST' && str_contains($request->url(), 'document-storage-sandbox.nium.test')) {
                 return Http::response([
                     'id' => self::SECOND_FILE_ID,
                     'state' => 'PROCESSING',
                     'storagePath' => $storagePath,
                 ], 201);
+            }
+
+            if (str_contains($request->url(), 'document-storage-sandbox.nium.test')) {
+                return Http::response([
+                    'id' => self::SECOND_FILE_ID,
+                    'state' => 'PROCESSING',
+                ]);
             }
 
             return Http::response(['customers' => []]);
@@ -1301,11 +1308,66 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertStringNotContainsString($rawBytes, $serializedLogs);
         $this->assertStringNotContainsString((string) $document->file_path, $serializedLogs);
 
-        Http::assertSentCount(1);
+        Http::assertSentCount(2);
         Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), 'document-storage-sandbox.nium.test'));
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
             && str_contains($request->url(), 'document-storage-sandbox.nium.test'));
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST'
             && str_contains($request->url(), 'gateway.nium.test'));
+    }
+
+    public function test_created_processing_file_is_refreshed_to_available_before_customer_submission(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedIndividual($provider);
+        $document = $this->individualDocument($user);
+        $document->update(['metadata' => ['existing_key' => 'existing-value']]);
+        $fileCreateCalls = 0;
+        $fileDetailCalls = 0;
+        $customerCreateCalls = 0;
+
+        Http::fake(function (Request $request) use (&$fileCreateCalls, &$fileDetailCalls, &$customerCreateCalls) {
+            if (str_contains($request->url(), 'document-storage-sandbox.nium.test')) {
+                if ($request->method() === 'POST') {
+                    $fileCreateCalls++;
+
+                    return Http::response([
+                        'id' => self::SECOND_FILE_ID,
+                        'state' => 'PROCESSING',
+                    ], 201);
+                }
+
+                $fileDetailCalls++;
+
+                return Http::response([
+                    'id' => self::SECOND_FILE_ID,
+                    'state' => 'AVAILABLE',
+                ]);
+            }
+
+            if ($request->method() === 'POST') {
+                $customerCreateCalls++;
+
+                return Http::response([
+                    ...$this->fixture('customer-v5-create-response.json'),
+                    'externalId' => $request->data()['externalId'],
+                ]);
+            }
+
+            return Http::response(['customers' => []]);
+        });
+
+        $result = app(NiumCustomerOnboardingService::class)->beginOnboarding($provider, $user);
+
+        $this->assertSame('provider_onboarding_completed', $result->nextAction);
+        $this->assertSame(1, $fileCreateCalls);
+        $this->assertSame(1, $fileDetailCalls);
+        $this->assertSame(1, $customerCreateCalls);
+        $this->assertSame(self::SECOND_FILE_ID, $document->fresh()->metadata['nium_file_id']);
+        $this->assertSame('AVAILABLE', $document->fresh()->metadata['nium_file_state']);
+        $this->assertNotEmpty($document->fresh()->metadata['nium_available_at']);
+        $this->assertSame('existing-value', $document->fresh()->metadata['existing_key']);
     }
 
     public function test_processing_retry_only_fetches_details_then_available_retry_creates_customer_once(): void
@@ -1428,8 +1490,10 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame($availableMetadata, $available->fresh()->metadata);
         $this->assertSame(self::SECOND_FILE_ID, $missing->fresh()->metadata['nium_file_id']);
         $this->assertSame('internal', $missing->fresh()->metadata['review_source']);
-        Http::assertSentCount(1);
+        Http::assertSentCount(2);
         Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), 'document-storage-sandbox.nium.test'));
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
             && str_contains($request->url(), 'document-storage-sandbox.nium.test'));
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST'
             && str_contains($request->url(), 'gateway.nium.test'));
@@ -3955,10 +4019,13 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::fake(function (Request $request) use (&$uploads, &$detailCalls) {
             if ($request->method() === 'GET') {
                 $detailCalls++;
+                $fileId = str_contains($request->url(), self::SECOND_FILE_ID)
+                    ? self::SECOND_FILE_ID
+                    : self::MULTI_DOCUMENT_FILE_ID;
 
                 return Http::response([
-                    'id' => self::MULTI_DOCUMENT_FILE_ID,
-                    'state' => 'AVAILABLE',
+                    'id' => $fileId,
+                    'state' => $detailCalls === 1 ? 'AVAILABLE' : 'PROCESSING',
                 ]);
             }
 
@@ -3993,7 +4060,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $secondAfterFailure = (array) $second->fresh()->metadata;
         $this->assertArrayNotHasKey('nium_file_id', (array) $first->fresh()->metadata);
         $this->assertSame(self::MULTI_DOCUMENT_FILE_ID, $secondAfterFailure['nium_file_id']);
-        $this->assertSame('PROCESSING', $secondAfterFailure['nium_file_state']);
+        $this->assertSame('AVAILABLE', $secondAfterFailure['nium_file_state']);
         $this->assertSame('second-document', $secondAfterFailure['existing_key']);
 
         $retry = app(NiumCustomerOnboardingService::class)->beginOnboarding($provider, $user);
@@ -4001,7 +4068,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('wait_for_document_processing', $retry->nextAction);
         $this->assertSame(2, $uploads['passport-front.jpg']);
         $this->assertSame(1, $uploads['second-document.pdf']);
-        $this->assertSame(1, $detailCalls);
+        $this->assertSame(2, $detailCalls);
         $this->assertSame(
             $secondAfterFailure['nium_uploaded_at'],
             $second->fresh()->metadata['nium_uploaded_at'],
