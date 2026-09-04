@@ -72,6 +72,7 @@ final class NiumCorporateConstantsService
             path: $this->niumService->path($endpoint, ['client' => $this->niumService->clientId()]),
             query: [
                 'region' => $dimensions['region'],
+                'type' => 'CORPORATE',
                 'category' => $dimensions['constant_type'],
                 ...($dimensions['country_code'] !== '' ? ['countryCode' => $dimensions['country_code']] : []),
             ],
