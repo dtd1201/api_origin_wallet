@@ -14,6 +14,7 @@ use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingReadinessService;
 use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Services\Nium\NiumKycDataValidator;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Support\KycAuditProjection;
 use App\Support\PrimaryProvider;
@@ -85,6 +86,7 @@ class UserKycSubmissionController extends Controller
         ComplianceEvidenceService $complianceEvidenceService,
         ProviderOnboardingReadinessService $readinessService,
         NiumCustomerOnboardingService $onboardingService,
+        NiumKycDataValidator $kycDataValidator,
     ): JsonResponse {
         $user = $this->resolveManageableUser($user);
 
@@ -142,6 +144,15 @@ class UserKycSubmissionController extends Controller
                     'message' => 'This failed Nium onboarding submission is not eligible for automatic retry.',
                     'code' => 'nium_onboarding_retry_not_allowed',
                 ], 409);
+            }
+
+            try {
+                $kycDataValidator->assertSource($user);
+            } catch (RuntimeException $exception) {
+                return response()->json([
+                    'message' => $exception->getMessage(),
+                    'code' => 'kyc_data_invalid',
+                ], 422);
             }
 
             $amlBypassApplied = false;

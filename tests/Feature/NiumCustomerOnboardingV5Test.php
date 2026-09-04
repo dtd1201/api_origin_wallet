@@ -1937,6 +1937,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $profile->update([
             'residence_country_code' => 'HK',
             'country_code' => 'HK',
+            'state' => 'HK-HCW',
             'metadata' => $metadata,
         ]);
         $user->unsetRelation('kycProfile');
@@ -1974,10 +1975,11 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $metadata['nium_v5_fields']['deviceDetails']['ipCountryCode'] = 'HK';
         $profile->update([
             'registered_country_code' => 'HK',
+            'business_registration_number' => '12345678',
             'address_line1' => '1 Synthetic Harbour Road',
             'address_line2' => null,
             'city' => 'Hong Kong',
-            'state' => 'Hong Kong',
+            'state' => 'HK-HCW',
             'postal_code' => '999077',
             'country_code' => 'HK',
             'metadata' => $metadata,
@@ -1985,7 +1987,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $user->profile()->update(['country_code' => 'HK']);
         $profile->documents()
             ->where('type', 'business_registration')
-            ->update(['issuing_country_code' => 'HK', 'issued_at' => now()->subMonth()]);
+            ->update(['document_number' => '12345678', 'issuing_country_code' => 'HK', 'issued_at' => now()->subMonth()]);
         $profile->documents()->create([
             'type' => 'nar1',
             'status' => 'approved',
@@ -5063,13 +5065,16 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $metadata['nium_v5_fields']['deviceDetails']['ipCountryCode'] = 'HK';
         $profile->update([
             'registered_country_code' => 'HK',
+            'business_registration_number' => '12345678',
             'address_line1' => '1 Synthetic Harbour Road',
             'city' => 'Hong Kong',
-            'state' => 'Hong Kong',
+            'state' => 'HK-HCW',
+            'postal_code' => '999077',
             'country_code' => 'HK',
             'metadata' => $metadata,
         ]);
         $profile->documents()->where('type', 'business_registration')->update([
+            'document_number' => '12345678',
             'issuing_country_code' => 'HK',
             'issued_at' => now()->subMonth(),
         ]);

@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\User\FxOrderController;
 use App\Http\Controllers\Api\User\FxQuoteController;
 use App\Http\Controllers\Api\User\IdentityVerificationController;
 use App\Http\Controllers\Api\User\KycSubmissionController;
+use App\Http\Controllers\Api\User\NiumCorporateConstantsController;
 use App\Http\Controllers\Api\User\OverviewController;
 use App\Http\Controllers\Api\User\ProfileController;
 use App\Http\Controllers\Api\User\ProviderAccountController;
@@ -24,6 +25,7 @@ Route::put('users/{user}/kyc-profile', [KycSubmissionController::class, 'submit'
 Route::post('users/{user}/kyc-profile/documents', [KycSubmissionController::class, 'uploadDocument']);
 Route::post('users/{user}/kyc-profile/requirements/{requirement}/resubmit', [KycSubmissionController::class, 'resubmitRequirement']);
 Route::post('users/{user}/kyc-profile/business-registry/verify', BusinessRegistryVerificationController::class);
+Route::get('users/{user}/kyc-profile/corporate-constants', NiumCorporateConstantsController::class);
 Route::get('users/{user}/kyc-submission', [KycSubmissionController::class, 'show']);
 Route::put('users/{user}/kyc-submission', [KycSubmissionController::class, 'submit']);
 Route::post('users/{user}/identity-verification-sessions', [IdentityVerificationController::class, 'start']);

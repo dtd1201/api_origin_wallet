@@ -36,6 +36,10 @@ final class NiumHkCorporateV5Validator
             throw new RuntimeException('Nium HK Corporate Full V5 businessType must be private_company.');
         }
 
+        if (preg_match('/^\d{8}$/', $payload['businessRegistrationNumber']) !== 1) {
+            throw new RuntimeException('businessRegistrationNumber: HK corporate registration number must be exactly 8 digits.');
+        }
+
         if (! is_bool($payload['isMultiLayeredCompany'] ?? null)) {
             throw new RuntimeException('Nium HK Corporate Full requires isMultiLayeredCompany as a boolean.');
         }

@@ -47,6 +47,22 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_invalid_hk_business_registration_number_is_rejected_locally(): void
+    {
+        $payload = $this->payload();
+        $payload['businessRegistrationNumber'] = '1234567A';
+
+        $this->expectExceptionMessage('businessRegistrationNumber');
+        $this->validator()->assert(new KycProfile, $payload);
+    }
+
+    public function test_valid_hk_business_registration_number_is_accepted(): void
+    {
+        $this->validator()->assert(new KycProfile, $this->payload());
+
+        $this->addToAssertionCount(1);
+    }
+
     public function test_internal_private_company_business_type_is_rejected_as_outbound_value(): void
     {
         $payload = $this->payload();
@@ -393,7 +409,7 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
             'businessType' => 'private_company',
             'businessName' => 'Synthetic Company',
             'tradeName' => 'Synthetic Company',
-            'businessRegistrationNumber' => 'SYNTHETIC',
+            'businessRegistrationNumber' => '12345678',
             'registeredDate' => '2020-01-01',
             'registeredCountry' => 'HK',
             'website' => 'https://business.example.test',
@@ -436,7 +452,7 @@ class NiumHkCorporateV5ValidatorTest extends TestCase
                 'sessionId' => 'provider-session-string',
             ],
             'documents' => [
-                ['type' => 'business_registration_doc'],
+                ['type' => 'business_registration_doc', 'identificationNumber' => '12345678'],
                 ['type' => 'nar1'],
             ],
         ];

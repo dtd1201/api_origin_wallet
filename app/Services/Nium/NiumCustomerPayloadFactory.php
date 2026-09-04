@@ -36,6 +36,7 @@ class NiumCustomerPayloadFactory
         private readonly NiumSgCorporateClientPolicy $sgCorporateClientPolicy,
         private readonly NiumRegionResolver $regionResolver,
         private readonly NiumHkCorporateV5Validator $hkCorporateV5Validator,
+        private readonly NiumKycDataValidator $kycDataValidator,
     ) {}
 
     /**
@@ -61,7 +62,10 @@ class NiumCustomerPayloadFactory
             ? $this->corporatePayload($user, $profile, $externalReference, $region, $kycType)
             : $this->individualPayload($user, $profile, $externalReference, $region, $kycType);
 
-        return $this->withoutProviderControlledFields($payload);
+        $payload = $this->withoutProviderControlledFields($payload);
+        $this->kycDataValidator->assertPayload($payload);
+
+        return $payload;
     }
 
     /**

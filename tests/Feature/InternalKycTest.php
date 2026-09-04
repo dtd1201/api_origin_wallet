@@ -1824,6 +1824,11 @@ class InternalKycTest extends TestCase
                     'date_of_birth' => '1990-01-01',
                     'nationality_country_code' => 'US',
                     'residence_country_code' => 'US',
+                    'address_line1' => '100 Main Street',
+                    'city' => 'New York',
+                    'state' => 'NY',
+                    'postal_code' => '10001',
+                    'country_code' => 'US',
                     'documents' => [
                         [
                             'type' => 'passport_front',
@@ -1854,7 +1859,13 @@ class InternalKycTest extends TestCase
                     'legal_name' => 'John Owner',
                     'date_of_birth' => '1985-02-01',
                     'nationality_country_code' => 'US',
+                    'residence_country_code' => 'US',
                     'ownership_percentage' => 55,
+                    'address_line1' => '200 Broadway',
+                    'city' => 'New York',
+                    'state' => 'NY',
+                    'postal_code' => '10007',
+                    'country_code' => 'US',
                     'documents' => [
                         [
                             'type' => 'passport_front',
@@ -1872,10 +1883,17 @@ class InternalKycTest extends TestCase
     private function hkCorporateFullPayload(): array
     {
         $payload = $this->businessKycPayload();
+        $payload['business_registration_number'] = '12345678';
         $payload['registered_country_code'] = 'HK';
         $payload['country_code'] = 'HK';
         $payload['state'] = 'Hong Kong';
         $payload['postal_code'] = '000000';
+        foreach ($payload['documents'] as &$document) {
+            if (in_array($document['type'], ['business_registration', 'certificate_of_incorporation'], true)) {
+                $document['document_number'] = '12345678';
+            }
+        }
+        unset($document);
         $payload['metadata'] = [
             'registered_date' => '2020-01-15',
             'nium_business_type' => 'PRIVATE_COMPANY',

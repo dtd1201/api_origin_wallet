@@ -23,6 +23,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
         private readonly NiumCustomerDocumentPreparationService $documentPreparationService,
         private readonly NiumProviderAccountStateService $stateService,
         private readonly NiumCustomerErrorMapper $errorMapper,
+        private readonly NiumKycDataValidator $kycDataValidator,
     ) {}
 
     public function syncUser(IntegrationProvider $provider, User $user): UserProviderAccount
@@ -173,6 +174,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
         $externalReference = (string) $providerAccount->external_reference;
 
         $payload = $this->payloadFactory->build($user, $externalReference);
+        $this->kycDataValidator->assertPayload($payload);
         $response = $this->niumService->post(
             path: $this->niumService->path(
                 (string) config('services.nium.customer_create_endpoint'),

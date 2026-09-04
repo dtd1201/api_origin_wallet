@@ -572,7 +572,9 @@ class KycSubmissionController extends Controller
             'nationality_country_code' => ['nullable', 'string', 'size:2'],
             'residence_country_code' => ['nullable', 'string', 'size:2'],
             'business_name' => ['required_if:applicant_type,business', 'nullable', 'string', 'max:255'],
-            'business_registration_number' => ['nullable', 'string', 'max:100'],
+            'business_registration_number' => $isHkCorporate
+                ? ['required', 'string', 'regex:/^\d{8}$/']
+                : ['nullable', 'string', 'max:100'],
             'tax_id' => ['nullable', 'string', 'max:100'],
             'registered_country_code' => ['required_if:applicant_type,business', 'nullable', 'string', 'size:2'],
             'address_line1' => ['required', 'string', 'max:255'],
@@ -634,6 +636,23 @@ class KycSubmissionController extends Controller
             ...($isHkCorporate ? [
                 'metadata.nium_region' => ['required', 'in:HK'],
                 'metadata.nium_kyc_type' => ['required', 'in:full'],
+                'documents.*.document_number' => [
+                    'nullable',
+                    'string',
+                    'max:100',
+                    static function (string $attribute, mixed $value, Closure $fail) use ($request): void {
+                        preg_match('/^documents\.(\d+)\.document_number$/', $attribute, $matches);
+                        $type = $request->input('documents.'.($matches[1] ?? '').'.type');
+
+                        if (in_array($type, ['business_registration', 'certificate_of_incorporation'], true)) {
+                            if (! is_string($value) || trim($value) === '') {
+                                $fail('The business registration document identification number is required.');
+                            } elseif ($value !== $request->input('business_registration_number')) {
+                                $fail('The business registration document identification number must match business_registration_number.');
+                            }
+                        }
+                    },
+                ],
             ] : []),
             ...($isHkCorporateFull ? [
                 'metadata.nium_v5_fields' => ['required', 'array'],
