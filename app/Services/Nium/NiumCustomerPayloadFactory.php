@@ -186,7 +186,7 @@ class NiumCustomerPayloadFactory
             ]),
             'applicant' => $applicantPayload,
             'stakeholders' => $this->stakeholders($profile, $applicant, $region === 'SG'),
-            'documents' => $this->documents($this->documentResolver->profileDocuments($profile)),
+            'documents' => $this->corporateDocuments($profile),
         ]));
 
         if ($region === 'SG') {
@@ -320,6 +320,14 @@ class NiumCustomerPayloadFactory
             ->unique(fn (array $document) => ($document['type'] ?? '').'|'.($document['identificationNumber'] ?? '').'|'.json_encode($document['fileIds'] ?? []))
             ->values()
             ->all();
+    }
+
+    private function corporateDocuments(KycProfile $profile): array
+    {
+        return $this->documents(
+            $this->documentResolver->profileDocuments($profile)
+                ->reject(fn (KycDocument $document): bool => strtolower((string) $document->type) === 'proof_of_business_address'),
+        );
     }
 
     private function address(object $subject): array

@@ -2069,6 +2069,39 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_corporate_customer_payload_excludes_internal_business_address_proof(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $profile->documents()->where('type', 'nar1')->update(['type' => 'nnc1']);
+        $proof = $profile->documents()->create([
+            'type' => 'proof_of_business_address',
+            'status' => 'approved',
+            'file_url' => 'https://files.example.test/proof-of-business-address.pdf',
+            'storage_disk' => 'kyc_private',
+            'file_path' => 'kyc/corporate/proof-of-business-address.pdf',
+            'original_name' => 'proof-of-business-address.pdf',
+            'mime_type' => 'application/pdf',
+            'file_size' => 32,
+            'issuing_country_code' => 'HK',
+            'metadata' => $this->availableFileMetadata('90000000-0000-4000-8000-000000000009'),
+        ]);
+        Http::preventStrayRequests();
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user->fresh(), (string) Str::uuid());
+        $documentTypes = collect($payload['documents'])->pluck('type')->all();
+
+        $this->assertSame(['business_registration_doc', 'nnc1'], $documentTypes);
+        $this->assertNotContains('proof_of_business_address', $documentTypes);
+        $this->assertDatabaseHas('kyc_documents', [
+            'id' => $proof->id,
+            'kyc_profile_id' => $profile->id,
+            'type' => 'proof_of_business_address',
+            'status' => 'approved',
+        ]);
+        Http::assertNothingSent();
+    }
+
     public function test_hk_corporate_full_payload_preserves_sandbox_bank_fallback(): void
     {
         $user = $this->approvedHkCorporate($this->provider());
