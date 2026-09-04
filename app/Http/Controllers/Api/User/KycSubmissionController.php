@@ -317,7 +317,13 @@ class KycSubmissionController extends Controller
             'related_person.address_line1' => ['sometimes', 'nullable', 'string', 'max:255'],
             'related_person.address_line2' => ['sometimes', 'nullable', 'string', 'max:255'],
             'related_person.city' => ['sometimes', 'nullable', 'string', 'max:100'],
-            'related_person.state' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'related_person.state' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:100',
+                $this->relatedPersonStateRule($request, 'related_person'),
+            ],
             'related_person.postal_code' => ['sometimes', 'nullable', 'string', 'max:30'],
             'related_person.country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
             'related_person.metadata' => ['sometimes', 'array'],
@@ -509,6 +515,20 @@ class KycSubmissionController extends Controller
         return null;
     }
 
+    private function relatedPersonStateRule(Request $request, string $inputKey): Closure
+    {
+        return static function (string $attribute, mixed $value, Closure $fail) use ($request, $inputKey): void {
+            $countryCode = $inputKey === 'related_person'
+                ? $request->input('related_person.country_code')
+                : $request->input(preg_replace('/\.state$/', '.country_code', $attribute));
+
+            if (strtoupper((string) $countryCode) === 'VN'
+                && preg_match('/^VN-\d{2}$/', (string) $value) !== 1) {
+                $fail('The related person state must be a valid Vietnam subdivision code such as VN-70.');
+            }
+        };
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -586,7 +606,12 @@ class KycSubmissionController extends Controller
             'related_persons.*.address_line1' => ['nullable', 'string', 'max:255'],
             'related_persons.*.address_line2' => ['nullable', 'string', 'max:255'],
             'related_persons.*.city' => ['nullable', 'string', 'max:100'],
-            'related_persons.*.state' => ['nullable', 'string', 'max:100'],
+            'related_persons.*.state' => [
+                'nullable',
+                'string',
+                'max:100',
+                $this->relatedPersonStateRule($request, 'related_persons'),
+            ],
             'related_persons.*.postal_code' => ['nullable', 'string', 'max:30'],
             'related_persons.*.country_code' => ['nullable', 'string', 'size:2'],
             'related_persons.*.metadata' => ['sometimes', 'array'],

@@ -123,6 +123,43 @@ class InternalKycTest extends TestCase
         ]);
     }
 
+    public function test_vietnam_related_person_subdivision_code_is_accepted(): void
+    {
+        Http::fake(fn () => Http::response([], 503));
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->businessKycPayload();
+        $payload['related_persons'][0]['country_code'] = 'VN';
+        $payload['related_persons'][0]['state'] = 'VN-70';
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        $this->assertDatabaseHas('kyc_related_persons', [
+            'kyc_profile_id' => $user->kycProfile()->firstOrFail()->id,
+            'relationship_type' => 'authorized_representative',
+            'country_code' => 'VN',
+            'state' => 'VN-70',
+        ]);
+    }
+
+    public function test_arbitrary_vietnam_related_person_state_is_rejected_before_nium_submission(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->businessKycPayload();
+        $payload['related_persons'][0]['country_code'] = 'VN';
+        $payload['related_persons'][0]['state'] = 'test address';
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('related_persons.0.state');
+
+        Http::assertNothingSent();
+        $this->assertDatabaseMissing('kyc_profiles', ['user_id' => $user->id]);
+    }
+
     public function test_hk_corporate_full_request_persists_complete_trusted_source_contract(): void
     {
         Http::preventStrayRequests();
