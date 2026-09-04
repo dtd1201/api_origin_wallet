@@ -1241,6 +1241,82 @@ class InternalKycTest extends TestCase
             ->assertJsonPath('message', 'All required KYC requirements must be submitted before approval.');
     }
 
+    public function test_hk_corporate_missing_nium_business_registration_requirement_blocks_approval(): void
+    {
+        $this->app->detectEnvironment(fn (): string => 'staging');
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $this->hkCorporateFullPayload())
+            ->assertAccepted();
+
+        $profile = $user->kycProfile()->firstOrFail();
+        $profile->requirements()->whereIn('key', ['business_registration', 'certificate_of_incorporation'])->update([
+            'status' => 'required',
+        ]);
+        $profile->amlScreenings()->whereNull('superseded_at')->update([
+            'screening_provider' => 'unconfigured',
+            'provider' => 'unconfigured',
+            'status' => 'failed',
+            'compliance_decision' => 'pending_review',
+            'result_summary' => ['error' => 'provider_failure'],
+        ]);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'All required KYC requirements must be submitted before approval.');
+
+        $this->assertSame('submitted', $profile->fresh()->status);
+    }
+
+    public function test_hk_corporate_unrelated_generic_requirements_do_not_block_staging_approval(): void
+    {
+        $this->app->detectEnvironment(fn (): string => 'staging');
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $this->hkCorporateFullPayload())
+            ->assertAccepted();
+
+        $profile = $user->kycProfile()->firstOrFail();
+        $unrelatedKeys = [
+            'account_opening_application_form',
+            'certificate_of_incorporation',
+            'identity_document_back',
+            'ownership_structure',
+            'selfie_liveness',
+        ];
+        $profile->requirements()->whereIn('key', $unrelatedKeys)->update(['status' => 'required']);
+        $this->assertEqualsCanonicalizing(
+            $unrelatedKeys,
+            $profile->requirements()->whereIn('key', $unrelatedKeys)->where('status', 'required')->pluck('key')->all(),
+        );
+        $profile->amlScreenings()->whereNull('superseded_at')->update([
+            'screening_provider' => 'unconfigured',
+            'provider' => 'unconfigured',
+            'status' => 'failed',
+            'compliance_decision' => 'pending_review',
+            'result_summary' => ['error' => 'provider_failure'],
+        ]);
+        $this->mockSuccessfulNiumOnboarding($user);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
+            ->assertOk()
+            ->assertJsonPath('message', 'AML provider unavailable. Staging bypass applied.')
+            ->assertJsonPath('user.kyc_status', 'verified');
+
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'kyc.aml_bypass_applied',
+            'entity_id' => (string) $profile->id,
+        ]);
+    }
+
     public function test_admin_can_reject_internal_kyc_with_requirement_feedback(): void
     {
         $admin = $this->createAdminUser();

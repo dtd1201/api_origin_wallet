@@ -388,7 +388,7 @@ class UserKycSubmissionController extends Controller
             ->with(['documents', 'relatedPersons', 'requirements'])
             ->firstOrFail();
 
-        if ($status === 'verified' && $kycProfile->requirements()->where('status', 'required')->exists()) {
+        if ($status === 'verified' && $this->hasBlockingRequiredRequirements($kycProfile)) {
             abort(422, 'All required KYC requirements must be submitted before approval.');
         }
 
@@ -486,6 +486,36 @@ class UserKycSubmissionController extends Controller
                 'amlScreenings.matches',
             ]);
         });
+    }
+
+    private function hasBlockingRequiredRequirements(KycProfile $profile): bool
+    {
+        $requiredKeys = $profile->requirements
+            ->where('status', 'required')
+            ->pluck('key');
+
+        $isHkCorporateFull = $profile->applicant_type === 'business'
+            && strtoupper((string) data_get($profile->metadata, 'nium_region')) === 'HK'
+            && strtolower((string) data_get($profile->metadata, 'nium_kyc_type')) === 'full';
+
+        if (! $isHkCorporateFull) {
+            return $requiredKeys->isNotEmpty();
+        }
+
+        $missingBusinessRegistration = $requiredKeys->contains('business_registration')
+            && $requiredKeys->contains('certificate_of_incorporation');
+        $blockingKeys = [
+            'authorized_representative',
+            'authorized_representative_identity_document',
+            'beneficial_owner',
+            'beneficial_owner_identity_document',
+        ];
+
+        if (data_get($profile->metadata, 'nium_v5_fields.isMultiLayeredCompany') === true) {
+            $blockingKeys[] = 'ownership_structure';
+        }
+
+        return $missingBusinessRegistration || $requiredKeys->intersect($blockingKeys)->isNotEmpty();
     }
 
     /**
