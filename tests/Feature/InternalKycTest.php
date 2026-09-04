@@ -211,6 +211,36 @@ class InternalKycTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_hk_corporate_full_submission_accepts_dynamic_nium_constant_codes(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->hkCorporateFullPayload();
+        $payload['metadata']['nium_v5_fields']['natureOfBusiness']['industryCodes'] = ['IS999'];
+        $payload['metadata']['nium_v5_fields']['expectedAccountUsage']['intendedUses'] = ['IU999'];
+
+        foreach (['credit', 'debit'] as $direction) {
+            $payload['metadata']['nium_v5_fields']['expectedAccountUsage'][$direction]['averageTransactionValue'] = 'ATVHK02';
+            $payload['metadata']['nium_v5_fields']['expectedAccountUsage'][$direction]['monthlyTransactionVolume'] = 'MVHK08';
+            $payload['metadata']['nium_v5_fields']['expectedAccountUsage'][$direction]['monthlyTransactions'] = 'ATC04';
+        }
+
+        $payload['metadata']['nium_v5_fields']['sizeOfBusiness']['annualTurnover'] = 'HK999';
+        $payload['metadata']['nium_v5_fields']['sizeOfBusiness']['totalEmployees'] = 'EM999';
+
+        $this->withToken($this->issueTokenFor($user))
+            ->withServerVariables(['REMOTE_ADDR' => '8.8.8.8'])
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        $stored = $user->kycProfile()->firstOrFail()->metadata;
+        $this->assertSame(['IS999'], data_get($stored, 'nium_v5_fields.natureOfBusiness.industryCodes'));
+        $this->assertSame(['IU999'], data_get($stored, 'nium_v5_fields.expectedAccountUsage.intendedUses'));
+        $this->assertSame('ATVHK02', data_get($stored, 'nium_v5_fields.expectedAccountUsage.credit.averageTransactionValue'));
+        $this->assertSame('MVHK08', data_get($stored, 'nium_v5_fields.expectedAccountUsage.credit.monthlyTransactionVolume'));
+        $this->assertSame('ATC04', data_get($stored, 'nium_v5_fields.expectedAccountUsage.credit.monthlyTransactions'));
+    }
+
     public function test_hk_corporate_full_submission_without_bank_details_uses_sandbox_fallback(): void
     {
         Http::preventStrayRequests();
