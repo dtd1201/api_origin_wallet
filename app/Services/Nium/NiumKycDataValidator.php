@@ -283,7 +283,10 @@ final class NiumKycDataValidator
         $record = NiumCorporateConstant::query()->where([
             'region' => $region, 'customer_type' => 'CORPORATE', 'country_code' => '', 'constant_type' => $category,
         ])->first();
-        $allowed = collect((array) $record?->values)->pluck('value')->all();
+        $allowed = collect($constant['values'])
+        ->pluck('value')
+        ->map(fn($v) => strtolower($v))
+        ->contains(strtolower((string)$value));
 
         if (! is_string($value) || ! in_array($value, $allowed, true)) {
             throw new RuntimeException("{$path}: value was not returned by Nium category {$category}.");
