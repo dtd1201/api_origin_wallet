@@ -8,6 +8,7 @@ use App\Models\KycProfile;
 use App\Models\KycRequirement;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
+use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Kyc\BusinessRegistryVerificationService;
 use App\Services\Nium\NiumRegionResolver;
 use Closure;
@@ -248,8 +249,12 @@ class KycSubmissionController extends Controller
         ], 202);
     }
 
-    public function resubmitRequirement(Request $request, User $user, KycRequirement $requirement): JsonResponse
-    {
+    public function resubmitRequirement(
+        Request $request,
+        User $user,
+        KycRequirement $requirement,
+        ComplianceEvidenceService $complianceEvidenceService,
+    ): JsonResponse {
         /** @var KycProfile $kycProfile */
         $kycProfile = $user->kycProfile()
             ->with(['documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches', 'reviewedBy'])
@@ -395,6 +400,14 @@ class KycSubmissionController extends Controller
                 'kyc_status' => $hasOpenRequirements ? 'needs_more_info' : 'pending',
             ]);
 
+            $complianceEvidenceService->invalidateNiumRelease(
+                profile: $kycProfile->fresh(),
+                reason: 'kyc_requirement_resubmitted',
+                actorUserId: $user->id,
+                ipAddress: $request->ip(),
+                userAgent: $request->userAgent(),
+            );
+
             AuditLog::query()->create([
                 'user_id' => $user->id,
                 'action' => 'kyc.requirement_resubmitted',
@@ -474,8 +487,7 @@ class KycSubmissionController extends Controller
         Request $request,
         User $user,
         NiumRegionResolver $regionResolver,
-    ): array
-    {
+    ): array {
         $submittedMetadata = $request->input('metadata');
         $effectiveMetadata = $request->exists('metadata')
             ? (is_array($submittedMetadata) ? $submittedMetadata : [])

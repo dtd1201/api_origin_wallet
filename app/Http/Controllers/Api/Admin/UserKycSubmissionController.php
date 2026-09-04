@@ -7,6 +7,7 @@ use App\Models\AuditLog;
 use App\Models\KycProfile;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
+use App\Services\Compliance\ComplianceEvidenceService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -54,8 +55,12 @@ class UserKycSubmissionController extends Controller
         ]);
     }
 
-    public function approve(Request $request, User $user, AmlScreeningService $amlScreeningService): JsonResponse
-    {
+    public function approve(
+        Request $request,
+        User $user,
+        AmlScreeningService $amlScreeningService,
+        ComplianceEvidenceService $complianceEvidenceService,
+    ): JsonResponse {
         $user = $this->resolveManageableUser($user);
 
         $validated = $request->validate([
@@ -68,6 +73,7 @@ class UserKycSubmissionController extends Controller
             status: 'verified',
             reviewNote: $validated['review_note'] ?? null,
             amlScreeningService: $amlScreeningService,
+            complianceEvidenceService: $complianceEvidenceService,
         );
 
         return response()->json([
@@ -78,7 +84,7 @@ class UserKycSubmissionController extends Controller
         ]);
     }
 
-    public function reject(Request $request, User $user): JsonResponse
+    public function reject(Request $request, User $user, ComplianceEvidenceService $complianceEvidenceService): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
 
@@ -98,6 +104,7 @@ class UserKycSubmissionController extends Controller
             reviewNote: $validated['review_note'] ?? null,
             rejectionReason: $validated['rejection_reason'],
             requirementReviews: $validated['requirements'] ?? [],
+            complianceEvidenceService: $complianceEvidenceService,
         );
 
         return response()->json([
@@ -108,8 +115,11 @@ class UserKycSubmissionController extends Controller
         ]);
     }
 
-    public function requestUpdate(Request $request, User $user): JsonResponse
-    {
+    public function requestUpdate(
+        Request $request,
+        User $user,
+        ComplianceEvidenceService $complianceEvidenceService,
+    ): JsonResponse {
         $user = $this->resolveManageableUser($user);
 
         $validated = $request->validate([
@@ -129,7 +139,7 @@ class UserKycSubmissionController extends Controller
             ->with(['documents', 'relatedPersons', 'requirements'])
             ->firstOrFail();
 
-        $kycProfile = DB::transaction(function () use ($request, $user, $kycProfile, $validated): KycProfile {
+        $kycProfile = DB::transaction(function () use ($request, $user, $kycProfile, $validated, $complianceEvidenceService): KycProfile {
             $oldData = $kycProfile->toArray();
             $reviewedByUserId = $request->user()?->id;
 
@@ -177,6 +187,14 @@ class UserKycSubmissionController extends Controller
                 'kyc_status' => 'needs_more_info',
             ]);
 
+            $complianceEvidenceService->invalidateNiumRelease(
+                profile: $kycProfile->fresh(),
+                reason: 'kyc_update_requested',
+                actorUserId: $reviewedByUserId,
+                ipAddress: $request->ip(),
+                userAgent: $request->userAgent(),
+            );
+
             AuditLog::query()->create([
                 'user_id' => $reviewedByUserId,
                 'action' => 'kyc.update_requested',
@@ -212,6 +230,7 @@ class UserKycSubmissionController extends Controller
         ?string $rejectionReason = null,
         array $requirementReviews = [],
         ?AmlScreeningService $amlScreeningService = null,
+        ?ComplianceEvidenceService $complianceEvidenceService = null,
     ): KycProfile {
         /** @var KycProfile $kycProfile */
         $kycProfile = $user->kycProfile()
@@ -230,7 +249,7 @@ class UserKycSubmissionController extends Controller
             }
         }
 
-        return DB::transaction(function () use ($request, $user, $kycProfile, $status, $reviewNote, $rejectionReason, $requirementReviews): KycProfile {
+        return DB::transaction(function () use ($request, $user, $kycProfile, $status, $reviewNote, $rejectionReason, $requirementReviews, $complianceEvidenceService): KycProfile {
             $oldData = $kycProfile->toArray();
             $reviewedByUserId = $request->user()?->id;
 
@@ -258,6 +277,24 @@ class UserKycSubmissionController extends Controller
                 'status' => $status === 'verified' ? 'active' : 'pending',
                 'kyc_status' => $status === 'verified' ? 'verified' : 'rejected',
             ]);
+
+            if ($status === 'verified') {
+                $complianceEvidenceService?->requireNiumReleaseReview(
+                    profile: $kycProfile->fresh(),
+                    reason: 'internal_kyc_approved',
+                    actorUserId: $reviewedByUserId,
+                    ipAddress: $request->ip(),
+                    userAgent: $request->userAgent(),
+                );
+            } else {
+                $complianceEvidenceService?->invalidateNiumRelease(
+                    profile: $kycProfile->fresh(),
+                    reason: 'internal_kyc_rejected',
+                    actorUserId: $reviewedByUserId,
+                    ipAddress: $request->ip(),
+                    userAgent: $request->userAgent(),
+                );
+            }
 
             AuditLog::query()->create([
                 'user_id' => $reviewedByUserId,

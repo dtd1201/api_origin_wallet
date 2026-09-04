@@ -7,6 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationRequest;
 use App\Services\Integrations\IntegrationProviderCatalog;
+use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Support\PrimaryProvider;
@@ -184,6 +185,11 @@ class ProviderAccountController extends Controller
                 user: $user->load('profile', 'providerAccounts.provider'),
                 force: (bool) $request->boolean('force', false),
             );
+        } catch (ProviderOnboardingEligibilityException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+                ...$exception->context(),
+            ], 422);
         } catch (NiumProviderRequestException $exception) {
             return $this->safeNiumErrorResponse($exception);
         } catch (RuntimeException $exception) {
@@ -216,6 +222,11 @@ class ProviderAccountController extends Controller
                 user: $user->load('profile', 'providerAccounts.provider'),
                 payload: $request->all(),
             );
+        } catch (ProviderOnboardingEligibilityException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+                ...$exception->context(),
+            ], 422);
         } catch (NiumProviderRequestException $exception) {
             return $this->safeNiumErrorResponse($exception);
         } catch (RuntimeException $exception) {

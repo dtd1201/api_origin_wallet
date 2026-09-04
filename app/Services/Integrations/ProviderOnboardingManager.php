@@ -13,12 +13,12 @@ class ProviderOnboardingManager
 {
     public function __construct(
         private readonly ProviderRegistry $registry,
+        private readonly ProviderOnboardingReadinessService $readinessService,
     ) {}
 
     public function syncUser(IntegrationProvider $provider, User $user): UserProviderAccount
     {
-        $this->ensureInternalKycVerified($user);
-        $this->ensureProviderSubmissionApproved($provider, $user);
+        $this->readinessService->assertReady($provider, $user);
 
         $providerAccount = $this->registry
             ->resolveOnboardingProvider($provider)
@@ -38,8 +38,6 @@ class ProviderOnboardingManager
         if ($user->profile === null) {
             throw new RuntimeException('User profile is required before linking provider account.');
         }
-
-        $this->ensureInternalKycVerified($user);
 
         $existingProviderAccount = $user->providerAccounts()
             ->where('provider_id', $provider->id)
@@ -73,7 +71,7 @@ class ProviderOnboardingManager
             );
         }
 
-        $this->ensureProviderSubmissionApproved($provider, $user);
+        $this->readinessService->assertReady($provider, $user);
 
         $onboarding = $this->registry
             ->resolveOnboardingProvider($provider)
@@ -97,8 +95,7 @@ class ProviderOnboardingManager
             throw new RuntimeException('User profile is required before completing provider onboarding.');
         }
 
-        $this->ensureInternalKycVerified($user);
-        $this->ensureProviderSubmissionApproved($provider, $user);
+        $this->readinessService->assertReady($provider, $user);
 
         $providerAccount = $user->providerAccounts()
             ->where('provider_id', $provider->id)
@@ -112,27 +109,6 @@ class ProviderOnboardingManager
         return $this->registry
             ->resolveOnboardingProvider($provider)
             ->completeOnboarding($provider, $user, $providerAccount, $payload);
-    }
-
-    private function ensureInternalKycVerified(User $user): void
-    {
-        $normalizedKycStatus = strtolower((string) $user->kyc_status);
-
-        if (! in_array($normalizedKycStatus, ['verified', 'approved'], true)) {
-            throw new RuntimeException('User internal KYC must be verified before provider onboarding.');
-        }
-    }
-
-    private function ensureProviderSubmissionApproved(IntegrationProvider $provider, User $user): void
-    {
-        $submission = KycProviderSubmission::query()
-            ->where('user_id', $user->id)
-            ->where('provider_id', $provider->id)
-            ->first();
-
-        if ($submission === null || ! in_array($submission->status, ['approved', 'submitted'], true)) {
-            throw new RuntimeException('Provider KYC submission must be approved internally before sending to this provider.');
-        }
     }
 
     private function markProviderSubmissionSubmitted(

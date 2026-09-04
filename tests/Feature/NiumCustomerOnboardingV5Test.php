@@ -10,6 +10,7 @@ use App\Models\KycDocument;
 use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
+use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
@@ -4368,11 +4369,28 @@ class NiumCustomerOnboardingV5Test extends TestCase
             "kyc/{$user->id}/passport-front.jpg",
             'safe-individual-file-bytes',
         );
+        $kycProfile->amlScreenings()->create([
+            'user_id' => $user->id,
+            'subject_type' => 'kyc_profile',
+            'subject_id' => $kycProfile->id,
+            'subject_name' => 'John Doe',
+            'subject_role' => 'individual',
+            'screening_provider' => 'authoritative',
+            'provider' => 'authoritative',
+            'status' => 'completed',
+            'screening_result' => 'clear',
+            'compliance_decision' => 'clear',
+            'risk_level' => 'low',
+            'completed_at' => now(),
+        ]);
         $user->kycProviderSubmissions()->create([
             'kyc_profile_id' => $kycProfile->id,
             'provider_id' => $provider->id,
             'status' => 'approved',
+            'reviewed_by_user_id' => $user->id,
+            'reviewed_at' => now(),
             'approved_at' => now(),
+            'metadata' => app(ComplianceEvidenceService::class)->approvalMetadata($kycProfile),
         ]);
 
         return $user;
@@ -4545,11 +4563,28 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'issuing_country_code' => 'SG',
             'metadata' => $this->availableFileMetadata(self::STAKEHOLDER_FILE_ID),
         ]);
+        $kycProfile->amlScreenings()->create([
+            'user_id' => $user->id,
+            'subject_type' => 'kyc_profile',
+            'subject_id' => $kycProfile->id,
+            'subject_name' => 'Acme Holdings Limited',
+            'subject_role' => 'business',
+            'screening_provider' => 'authoritative',
+            'provider' => 'authoritative',
+            'status' => 'completed',
+            'screening_result' => 'clear',
+            'compliance_decision' => 'clear',
+            'risk_level' => 'low',
+            'completed_at' => now(),
+        ]);
         $user->kycProviderSubmissions()->create([
             'kyc_profile_id' => $kycProfile->id,
             'provider_id' => $provider->id,
             'status' => 'approved',
+            'reviewed_by_user_id' => $user->id,
+            'reviewed_at' => now(),
             'approved_at' => now(),
+            'metadata' => app(ComplianceEvidenceService::class)->approvalMetadata($kycProfile),
         ]);
 
         return $user;
@@ -4599,6 +4634,9 @@ class NiumCustomerOnboardingV5Test extends TestCase
             ],
         ]);
         $user->profile()->update(['country_code' => 'HK']);
+        $user->kycProviderSubmissions()->where('provider_id', $provider->id)->update([
+            'metadata' => app(ComplianceEvidenceService::class)->approvalMetadata($profile->fresh()),
+        ]);
         $user->unsetRelation('kycProfile');
 
         return $user;

@@ -8,6 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\KycProviderSubmission;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
+use App\Services\Compliance\ComplianceEvidenceService;
 use App\Support\PrimaryProvider;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -66,6 +67,7 @@ class KycProviderSubmissionController extends Controller
         User $user,
         IntegrationProvider $provider,
         AmlScreeningService $amlScreeningService,
+        ComplianceEvidenceService $complianceEvidenceService,
     ): JsonResponse {
         $user = $this->resolveManageableUser($user)->load('kycProfile');
         abort_unless(PrimaryProvider::isPrimary($provider), 404);
@@ -85,7 +87,7 @@ class KycProviderSubmissionController extends Controller
             ], 422);
         }
 
-        $submission = DB::transaction(function () use ($request, $user, $provider, $validated): KycProviderSubmission {
+        $submission = DB::transaction(function () use ($request, $user, $provider, $validated, $complianceEvidenceService): KycProviderSubmission {
             $submission = KycProviderSubmission::query()->updateOrCreate(
                 [
                     'user_id' => $user->id,
@@ -101,7 +103,10 @@ class KycProviderSubmissionController extends Controller
                     'review_note' => $validated['review_note'] ?? null,
                     'rejection_reason' => null,
                     'failure_reason' => null,
-                    'metadata' => $validated['metadata'] ?? null,
+                    'metadata' => $complianceEvidenceService->approvalMetadata(
+                        $user->kycProfile,
+                        $validated['metadata'] ?? [],
+                    ),
                 ]
             );
 

@@ -7,6 +7,7 @@ use App\Data\Aml\AmlScreeningRequest;
 use App\Models\AmlScreening;
 use App\Models\KycProfile;
 use App\Models\User;
+use App\Services\Compliance\ComplianceEvidenceService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -15,12 +16,16 @@ use Throwable;
 
 class AmlScreeningService
 {
-    public function __construct(private readonly AmlScreeningProvider $provider) {}
+    public function __construct(
+        private readonly AmlScreeningProvider $provider,
+        private readonly ?ComplianceEvidenceService $complianceEvidenceService = null,
+    ) {}
 
     /** @return Collection<int, AmlScreening> */
     public function prepareProfile(KycProfile $profile): Collection
     {
         $profile->loadMissing(['user', 'relatedPersons']);
+        $this->evidenceService()->invalidateNiumRelease($profile, 'aml_screening_prepared');
         $profile->amlScreenings()->whereNull('superseded_at')->update(['superseded_at' => now()]);
 
         $screenings = collect([$this->createScreening(
@@ -67,6 +72,10 @@ class AmlScreeningService
 
     public function runScreening(AmlScreening $screening): AmlScreening
     {
+        if ($screening->kycProfile !== null) {
+            $this->evidenceService()->invalidateNiumRelease($screening->kycProfile, 'aml_screening_rerun');
+        }
+
         $screening->update([
             'provider' => $this->provider->name(),
             'screening_provider' => $this->provider->name(),
@@ -202,6 +211,14 @@ class AmlScreeningService
                 'review_note' => $note,
             ]);
         });
+
+        if ($screening->kycProfile !== null) {
+            $this->evidenceService()->invalidateNiumRelease(
+                $screening->kycProfile,
+                'aml_compliance_decision_changed',
+                $reviewer->id,
+            );
+        }
     }
 
     /** @param array<string, mixed> $summary */
@@ -220,5 +237,10 @@ class AmlScreeningService
             'match_count' => $matchCount,
             'categories' => $categories,
         ];
+    }
+
+    private function evidenceService(): ComplianceEvidenceService
+    {
+        return $this->complianceEvidenceService ?? app(ComplianceEvidenceService::class);
     }
 }
