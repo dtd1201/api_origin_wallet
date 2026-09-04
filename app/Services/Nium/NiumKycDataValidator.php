@@ -82,8 +82,19 @@ final class NiumKycDataValidator
         $this->assertCountry($payload['region'] ?? null, 'region');
         $region = (string) $payload['region'];
 
-        if (($payload['type'] ?? null) === 'corporate') {
-            $this->assertConstant($region, 'businessType', $payload['businessType'] ?? null, 'businessType');
+            if (($payload['type'] ?? null) === 'corporate') {
+                $businessType = $payload['businessType'] ?? null;
+
+                if (is_string($businessType)) {
+                    $businessType = strtoupper($businessType);
+                }
+
+                $this->assertConstant(
+                    $region,
+                    'businessType',
+                    $businessType,
+                    'businessType'
+                );
             $this->assertConstantList($region, 'industrySector', $payload['natureOfBusiness']['industryCodes'] ?? null, 'natureOfBusiness.industryCodes');
             $this->assertConstantList($region, 'countryOfOperation', $payload['natureOfBusiness']['operatingCountries'] ?? null, 'natureOfBusiness.operatingCountries');
             $this->assertConstantList($region, 'intendedUseOfAccount', $payload['expectedAccountUsage']['intendedUses'] ?? null, 'expectedAccountUsage.intendedUses');
