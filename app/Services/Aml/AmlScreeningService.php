@@ -166,15 +166,20 @@ class AmlScreeningService
             throw new RuntimeException('AML screening must be run before KYC/KYB approval.');
         }
 
-        if ($screenings->contains(fn (AmlScreening $screening) => $screening->status !== 'completed' || $screening->compliance_decision !== 'clear')) {
-            if (($this->stagingBypass ?? app(StagingAmlProviderUnavailableBypass::class))->applies($screenings)) {
-                return true;
-            }
+        $hasFailedClearance = $screenings->contains(
+            fn (AmlScreening $screening) => $screening->status !== 'completed'
+                || $screening->compliance_decision !== 'clear',
+        );
 
-            throw new RuntimeException('All AML screenings must be clear or manually cleared before KYC/KYB approval.');
+        if (! $hasFailedClearance) {
+            return false;
         }
 
-        return false;
+        if (($this->stagingBypass ?? app(StagingAmlProviderUnavailableBypass::class))->applies($screenings)) {
+            return true;
+        }
+
+        throw new RuntimeException('All AML screenings must be clear or manually cleared before KYC/KYB approval.');
     }
 
     /** @param array<string, scalar|null> $attributes */
