@@ -46,7 +46,7 @@ class ProviderAccountController extends Controller
                             ($integrationLink !== null && $integrationLink->is_active && filled($integrationLink->link_url))
                         );
                     $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
-                    $providerSubmissionApproved = in_array($kycProviderSubmission?->status, ['approved', 'submitted'], true);
+                    $providerSubmissionReady = in_array($kycProviderSubmission?->status, ['pending', 'submitted'], true);
 
                     return [
                         'provider' => $provider->summaryPayload(),
@@ -55,9 +55,9 @@ class ProviderAccountController extends Controller
                         'integration_request' => $integrationRequest,
                         'kyc_provider_submission' => $kycProviderSubmission,
                         'internal_kyc_verified' => $internalKycVerified,
-                        'provider_submission_approved' => $providerSubmissionApproved,
+                        'provider_submission_ready' => $providerSubmissionReady,
                         'link_available' => $linkAvailable,
-                        'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionApproved,
+                        'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionReady,
                         'can_request_connect' => ! $linkAvailable,
                         'request_pending' => $integrationRequest?->status === 'pending',
                     ];
@@ -90,7 +90,7 @@ class ProviderAccountController extends Controller
                 ($integrationLink !== null && $integrationLink->is_active && filled($integrationLink->link_url))
             );
         $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
-        $providerSubmissionApproved = in_array($kycProviderSubmission?->status, ['approved', 'submitted'], true);
+        $providerSubmissionReady = in_array($kycProviderSubmission?->status, ['pending', 'submitted'], true);
 
         if ($providerAccount === null) {
             return response()->json([
@@ -100,9 +100,9 @@ class ProviderAccountController extends Controller
                 'integration_request' => $integrationRequest,
                 'kyc_provider_submission' => $kycProviderSubmission,
                 'internal_kyc_verified' => $internalKycVerified,
-                'provider_submission_approved' => $providerSubmissionApproved,
+                'provider_submission_ready' => $providerSubmissionReady,
                 'link_available' => $linkAvailable,
-                'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionApproved,
+                'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionReady,
                 'can_request_connect' => ! $linkAvailable,
                 'request_pending' => $integrationRequest?->status === 'pending',
             ]);
@@ -115,9 +115,9 @@ class ProviderAccountController extends Controller
             'integration_request' => $integrationRequest,
             'kyc_provider_submission' => $kycProviderSubmission,
             'internal_kyc_verified' => $internalKycVerified,
-            'provider_submission_approved' => $providerSubmissionApproved,
+            'provider_submission_ready' => $providerSubmissionReady,
             'link_available' => $linkAvailable,
-            'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionApproved,
+            'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionReady,
             'can_request_connect' => ! $linkAvailable,
             'request_pending' => $integrationRequest?->status === 'pending',
         ]);

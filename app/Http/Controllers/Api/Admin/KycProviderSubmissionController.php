@@ -16,7 +16,7 @@ class KycProviderSubmissionController extends Controller
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'status' => ['sometimes', 'string', Rule::in(['pending', 'approved', 'submitted', 'rejected', 'failed'])],
+            'status' => ['sometimes', 'string', Rule::in(['pending', 'submitted', 'failed'])],
             'provider_code' => ['sometimes', 'string', Rule::in([PrimaryProvider::code()]), 'exists:integration_providers,code'],
         ]);
 

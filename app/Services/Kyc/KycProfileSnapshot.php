@@ -15,6 +15,7 @@ class KycProfileSnapshot
             'profile',
             'kycProfile.documents',
             'kycProfile.relatedPersons.documents',
+            'kycProfile.amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
             'kycProfile.amlScreenings.matches',
             'kycProfile.providerSubmissions.provider',
             'kycProfile.requirements',

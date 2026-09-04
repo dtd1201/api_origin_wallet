@@ -7,13 +7,16 @@ use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\User;
+use App\Services\Aml\AmlScreeningService;
 use App\Services\Currenxie\CurrenxiePayloadMapper;
+use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Support\PrimaryProvider;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use PHPUnit\Framework\Attributes\DataProvider;
-use Tests\Fixtures\RedirectOnboardingProvider;
+use Mockery;
 use Tests\Fixtures\FakeAmlScreeningProvider;
 use Tests\TestCase;
 
@@ -775,6 +778,7 @@ class InternalKycTest extends TestCase
         ]);
         $this->submitKycProfile($user);
         $this->runAmlForProfile($admin, $user);
+        $this->mockSuccessfulNiumOnboarding($user);
 
         $response = $this->withToken($this->issueTokenFor($admin))
             ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve", [
@@ -815,11 +819,74 @@ class InternalKycTest extends TestCase
             ->assertJsonPath('message', 'All AML screenings must be clear or manually cleared before KYC/KYB approval.');
 
         $this->runAmlForProfile($admin, $user);
+        $this->mockSuccessfulNiumOnboarding($user);
 
         $this->withToken($this->issueTokenFor($admin))
             ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
             ->assertOk()
             ->assertJsonPath('user.kyc_status', 'verified');
+    }
+
+    public function test_admin_kyc_responses_only_include_active_aml_screenings(): void
+    {
+        $admin = $this->createAdminUser();
+        $user = User::factory()->create([
+            'status' => 'pending',
+            'kyc_status' => 'pending',
+        ]);
+        $this->submitKycProfile($user);
+
+        $profile = $user->kycProfile()->firstOrFail();
+        $supersededIds = $profile->amlScreenings()->pluck('id')->sort()->values()->all();
+
+        app(AmlScreeningService::class)->prepareProfile($profile);
+        $this->runAmlForProfile($admin, $user);
+
+        $activeIds = $profile->amlScreenings()
+            ->whereNull('superseded_at')
+            ->pluck('id')
+            ->sort()
+            ->values()
+            ->all();
+
+        $this->assertNotEmpty($supersededIds);
+        $this->assertNotEmpty($activeIds);
+
+        $showResponse = $this->withToken($this->issueTokenFor($admin))
+            ->getJson("/api/admin/users/{$user->id}/kyc-profile")
+            ->assertOk();
+
+        $showIds = collect($showResponse->json('kyc_profile.aml_screenings'))
+            ->pluck('id')
+            ->sort()
+            ->values()
+            ->all();
+
+        $indexResponse = $this->withToken($this->issueTokenFor($admin))
+            ->getJson('/api/admin/kyc-submissions')
+            ->assertOk();
+        $indexedProfile = collect($indexResponse->json('data'))->firstWhere('id', $profile->id);
+        $indexIds = collect($indexedProfile['aml_screenings'] ?? [])
+            ->pluck('id')
+            ->sort()
+            ->values()
+            ->all();
+
+        $amlIndexResponse = $this->withToken($this->issueTokenFor($admin))
+            ->getJson("/api/admin/aml-screenings?user_id={$user->id}")
+            ->assertOk();
+        $amlIndexIds = collect($amlIndexResponse->json('data'))
+            ->pluck('id')
+            ->sort()
+            ->values()
+            ->all();
+
+        $this->assertSame($activeIds, $showIds);
+        $this->assertSame($activeIds, $indexIds);
+        $this->assertSame($activeIds, $amlIndexIds);
+        $this->assertEmpty(array_intersect($supersededIds, $showIds));
+        $this->assertEmpty(array_intersect($supersededIds, $indexIds));
+        $this->assertEmpty(array_intersect($supersededIds, $amlIndexIds));
     }
 
     public function test_potential_aml_match_blocks_kyc_approval_until_manual_clear(): void
@@ -831,7 +898,6 @@ class InternalKycTest extends TestCase
         ]);
         $this->submitKycProfile($user);
 
-        $screening = $user->fresh('kycProfile.amlScreenings')->kycProfile->amlScreenings->first();
         $this->app->instance(AmlScreeningProvider::class, new FakeAmlScreeningProvider('match'));
 
         $this->runAmlForProfile($admin, $user)
@@ -843,13 +909,17 @@ class InternalKycTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonPath('message', 'All AML screenings must be clear or manually cleared before KYC/KYB approval.');
 
-        $this->withToken($this->issueTokenFor($admin))
-            ->postJson("/api/admin/aml-screenings/{$screening->id}/clear", [
-                'review_note' => 'False positive after manual AML review.',
-            ])
-            ->assertOk()
-            ->assertJsonPath('aml_screening.status', 'completed')
-            ->assertJsonPath('aml_screening.compliance_decision', 'clear');
+        foreach ($user->kycProfile->amlScreenings()->whereNull('superseded_at')->get() as $activeScreening) {
+            $this->withToken($this->issueTokenFor($admin))
+                ->postJson("/api/admin/aml-screenings/{$activeScreening->id}/clear", [
+                    'review_note' => 'False positive after manual AML review.',
+                ])
+                ->assertOk()
+                ->assertJsonPath('aml_screening.status', 'completed')
+                ->assertJsonPath('aml_screening.compliance_decision', 'clear');
+        }
+
+        $this->mockSuccessfulNiumOnboarding($user);
 
         $this->withToken($this->issueTokenFor($admin))
             ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
@@ -923,143 +993,6 @@ class InternalKycTest extends TestCase
         ]);
     }
 
-    public function test_admin_can_approve_provider_kyc_submission_after_internal_kyc_is_verified(): void
-    {
-        config()->set('integrations.providers.hosted_provider.onboarding', RedirectOnboardingProvider::class);
-        config()->set('services.hosted_provider.base_url', 'https://api.hosted-provider.test');
-
-        $admin = $this->createAdminUser();
-        $user = User::factory()->create([
-            'status' => 'pending',
-            'kyc_status' => 'pending',
-        ]);
-        $provider = IntegrationProvider::query()->create([
-            'code' => 'HOSTED_PROVIDER',
-            'name' => 'Hosted Provider',
-            'status' => 'active',
-        ]);
-
-        $this->withToken($this->issueTokenFor($admin))
-            ->postJson("/api/admin/users/{$user->id}/kyc-profile/providers/{$provider->code}/approve")
-            ->assertUnprocessable()
-            ->assertJsonPath('message', 'User internal KYC must be verified before approving provider submission.');
-
-        $this->submitKycProfile($user);
-        $this->runAmlForProfile($admin, $user);
-        $this->withToken($this->issueTokenFor($admin))
-            ->postJson("/api/admin/users/{$user->id}/kyc-profile/approve")
-            ->assertOk();
-
-        $this->withToken($this->issueTokenFor($admin))
-            ->postJson("/api/admin/users/{$user->id}/kyc-profile/providers/{$provider->code}/approve", [
-                'review_note' => 'Approved to submit to Hosted Provider.',
-            ])
-            ->assertOk()
-            ->assertJsonPath('provider.code', 'HOSTED_PROVIDER')
-            ->assertJsonPath('kyc_provider_submission.status', 'approved')
-            ->assertJsonPath('kyc_provider_submission.reviewed_by_user_id', $admin->id);
-
-        $this->assertDatabaseHas('kyc_provider_submissions', [
-            'user_id' => $user->id,
-            'provider_id' => $provider->id,
-            'status' => 'approved',
-        ]);
-        $this->assertDatabaseHas('audit_logs', [
-            'user_id' => $admin->id,
-            'action' => 'kyc_provider_submission.approved',
-            'entity_type' => 'kyc_provider_submission',
-        ]);
-    }
-
-    public function test_admin_cannot_approve_corporate_provider_submission_without_nium_metadata(): void
-    {
-        $admin = $this->createAdminUser();
-        $user = User::factory()->create([
-            'status' => 'active',
-            'kyc_status' => 'verified',
-        ]);
-        $user->kycProfile()->create([
-            'status' => 'verified',
-            'applicant_type' => 'business',
-            'legal_name' => 'Incomplete Corporate Customer',
-            'business_name' => 'Incomplete Corporate Customer',
-            'registered_country_code' => 'US',
-            'address_line1' => '100 Main Street',
-            'city' => 'New York',
-            'country_code' => 'US',
-            'metadata' => [],
-        ]);
-        $provider = IntegrationProvider::query()->create([
-            'code' => 'nium',
-            'name' => 'Nium',
-            'status' => 'active',
-        ]);
-
-        $this->withToken($this->issueTokenFor($admin))
-            ->postJson("/api/admin/users/{$user->id}/kyc-profile/providers/{$provider->code}/approve")
-            ->assertUnprocessable()
-            ->assertJsonPath(
-                'message',
-                'Corporate KYC metadata is incomplete for Nium provider approval: registered_date, nium_business_type.',
-            );
-
-        $this->assertDatabaseMissing('kyc_provider_submissions', [
-            'user_id' => $user->id,
-            'provider_id' => $provider->id,
-            'status' => 'approved',
-        ]);
-    }
-
-    public function test_provider_onboarding_requires_verified_internal_kyc(): void
-    {
-        config()->set('integrations.providers.hosted_provider.onboarding', RedirectOnboardingProvider::class);
-        config()->set('services.hosted_provider.base_url', 'https://api.hosted-provider.test');
-
-        $user = User::factory()->create([
-            'kyc_status' => 'pending',
-        ]);
-        $user->profile()->create([
-            'user_type' => 'business',
-        ]);
-
-        $provider = IntegrationProvider::query()->create([
-            'code' => 'HOSTED_PROVIDER',
-            'name' => 'Hosted Provider',
-            'status' => 'active',
-        ]);
-
-        $this->withToken($this->issueTokenFor($user))
-            ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/link", [
-                'force' => true,
-            ])
-            ->assertUnprocessable()
-            ->assertJsonPath('message', 'User internal KYC must be verified before provider onboarding.');
-
-        $user->update(['kyc_status' => 'verified']);
-
-        $this->withToken($this->issueTokenFor($user))
-            ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/link", [
-                'force' => true,
-            ])
-            ->assertUnprocessable()
-            ->assertJsonPath('message', 'Provider KYC submission must be approved internally before sending to this provider.');
-
-        $this->approveProviderSubmission($user, $provider);
-
-        $this->withToken($this->issueTokenFor($user))
-            ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/link", [
-                'force' => true,
-            ])
-            ->assertOk()
-            ->assertJsonPath('onboarding.next_action', 'redirect_to_provider');
-
-        $this->assertDatabaseHas('kyc_provider_submissions', [
-            'user_id' => $user->id,
-            'provider_id' => $provider->id,
-            'status' => 'submitted',
-        ]);
-    }
-
     public function test_provider_payload_can_reuse_internal_kyc_snapshot(): void
     {
         $user = User::factory()->create([
@@ -1109,15 +1042,20 @@ class InternalKycTest extends TestCase
             ->assertOk();
     }
 
-    private function approveProviderSubmission(User $user, IntegrationProvider $provider): void
+    private function mockSuccessfulNiumOnboarding(User $user): void
     {
-        $user->kycProviderSubmissions()->updateOrCreate(
-            ['provider_id' => $provider->id],
-            [
-                'status' => 'approved',
-                'approved_at' => now(),
-            ],
+        $provider = IntegrationProvider::query()->firstOrCreate(
+            ['code' => PrimaryProvider::code()],
+            ['name' => 'Nium', 'status' => 'active'],
         );
+        $account = $user->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'status' => 'pending',
+            'provider_status' => 'pending',
+        ]);
+        $onboardingService = Mockery::mock(NiumCustomerOnboardingService::class);
+        $onboardingService->shouldReceive('syncUser')->once()->andReturn($account);
+        $this->app->instance(NiumCustomerOnboardingService::class, $onboardingService);
     }
 
     private function createAdminUser(): User

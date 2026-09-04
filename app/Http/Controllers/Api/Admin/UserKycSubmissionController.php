@@ -32,7 +32,15 @@ class UserKycSubmissionController extends Controller
         ]);
 
         $profiles = KycProfile::query()
-            ->with(['user', 'reviewedBy', 'documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches'])
+            ->with([
+                'user',
+                'reviewedBy',
+                'documents',
+                'relatedPersons.documents',
+                'requirements',
+                'amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
+                'amlScreenings.matches',
+            ])
             ->whereHas('user', fn (Builder $query) => $query->nonAdmin())
             ->when(
                 isset($validated['status']),
@@ -47,13 +55,14 @@ class UserKycSubmissionController extends Controller
     public function show(User $user): JsonResponse
     {
         $user = $this->resolveManageableUser($user)
-            ->load(
+            ->load([
                 'kycProfile.documents',
                 'kycProfile.relatedPersons.documents',
                 'kycProfile.requirements',
+                'kycProfile.amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
                 'kycProfile.amlScreenings.matches',
                 'kycProfile.reviewedBy',
-            );
+            ]);
 
         return response()->json([
             'user' => $user,
@@ -266,7 +275,15 @@ class UserKycSubmissionController extends Controller
                 'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
             ]);
 
-            return $kycProfile->fresh(['user', 'reviewedBy', 'documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches']);
+            return $kycProfile->fresh([
+                'user',
+                'reviewedBy',
+                'documents',
+                'relatedPersons.documents',
+                'requirements',
+                'amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
+                'amlScreenings.matches',
+            ]);
         });
 
         return response()->json([
@@ -367,7 +384,15 @@ class UserKycSubmissionController extends Controller
                 'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
             ]);
 
-            return $kycProfile->fresh(['user', 'reviewedBy', 'documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches']);
+            return $kycProfile->fresh([
+                'user',
+                'reviewedBy',
+                'documents',
+                'relatedPersons.documents',
+                'requirements',
+                'amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
+                'amlScreenings.matches',
+            ]);
         });
     }
 

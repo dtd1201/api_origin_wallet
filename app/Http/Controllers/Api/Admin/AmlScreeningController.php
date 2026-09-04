@@ -23,6 +23,7 @@ class AmlScreeningController extends Controller
 
         $screenings = AmlScreening::query()
             ->with(['user', 'kycProfile', 'matches', 'reviewedBy'])
+            ->whereNull('superseded_at')
             ->whereHas('user', fn (Builder $query) => $query->nonAdmin())
             ->when(
                 isset($validated['status']),

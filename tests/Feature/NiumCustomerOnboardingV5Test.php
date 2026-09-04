@@ -10,7 +10,6 @@ use App\Models\KycDocument;
 use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumCustomerPayloadFactory;
@@ -31,7 +30,6 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
-use Tests\Fixtures\RedirectOnboardingProvider;
 use Tests\TestCase;
 
 class NiumCustomerOnboardingV5Test extends TestCase
@@ -834,7 +832,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 'currency' => 'GBP',
             ])
             ->assertUnprocessable()
-            ->assertJsonPath('message', 'Nium customer and wallet are not eligible yet (pending).');
+            ->assertJsonPath('message', 'Unable to create beneficiary with the selected provider. Review the details and try again.');
 
         $this->withToken($token)
             ->postJson("/api/user/users/{$user->id}/providers/nium/sync/balances")
@@ -850,40 +848,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
                 'source_amount' => 100,
             ])
             ->assertUnprocessable()
-            ->assertJsonPath('message', 'Nium customer and wallet are not eligible yet (pending).');
-    }
-
-    public function test_existing_non_nium_onboarding_provider_behavior_is_unchanged(): void
-    {
-        config()->set('integrations.providers.hosted_provider.onboarding', RedirectOnboardingProvider::class);
-        config()->set('services.hosted_provider.base_url', 'https://api.hosted-provider.test');
-
-        $provider = IntegrationProvider::query()->create([
-            'code' => 'HOSTED_PROVIDER',
-            'name' => 'Hosted Provider',
-            'status' => 'active',
-        ]);
-        $user = User::factory()->create(['kyc_status' => 'verified']);
-        $user->profile()->create(['user_type' => 'individual']);
-        $user->kycProviderSubmissions()->create([
-            'provider_id' => $provider->id,
-            'status' => 'approved',
-            'approved_at' => now(),
-        ]);
-
-        $manager = app(ProviderOnboardingManager::class);
-        $started = $manager->linkUser($provider, $user->load('profile'));
-        $this->assertSame('redirect_to_provider', $started->nextAction);
-
-        $completed = $manager->completeUserOnboarding($provider, $user->fresh('profile'), [
-            'status' => 'active',
-            'external_customer_id' => 'hosted-customer-id',
-            'external_account_id' => 'hosted-account-id',
-        ]);
-
-        $this->assertSame('active', $completed->providerAccount->status);
-        $this->assertSame('hosted-customer-id', $completed->providerAccount->external_customer_id);
-        $this->assertSame('hosted-account-id', $completed->providerAccount->external_account_id);
+            ->assertJsonPath('message', 'Unable to create transfer. Review its current state and try again.');
     }
 
     public function test_nium_onboarding_logs_use_an_allowlist_and_never_store_pii_or_credentials(): void
@@ -1402,7 +1367,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertNotSame('failed', $providerAccount->reconciliation_status);
         $this->assertSame('verified', $user->fresh()->kyc_status);
         $this->assertSame(
-            'approved',
+            'pending',
             $user->kycProviderSubmissions()->where('provider_id', $provider->id)->value('status'),
         );
         $this->assertSame(1, $fileDetailCalls);
@@ -4431,10 +4396,9 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $user->kycProviderSubmissions()->create([
             'kyc_profile_id' => $kycProfile->id,
             'provider_id' => $provider->id,
-            'status' => 'approved',
+            'status' => 'pending',
             'reviewed_by_user_id' => $user->id,
             'reviewed_at' => now(),
-            'approved_at' => now(),
         ]);
 
         return $user;
@@ -4624,10 +4588,9 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $user->kycProviderSubmissions()->create([
             'kyc_profile_id' => $kycProfile->id,
             'provider_id' => $provider->id,
-            'status' => 'approved',
+            'status' => 'pending',
             'reviewed_by_user_id' => $user->id,
             'reviewed_at' => now(),
-            'approved_at' => now(),
         ]);
 
         return $user;

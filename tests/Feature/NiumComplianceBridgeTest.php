@@ -72,6 +72,55 @@ class NiumComplianceBridgeTest extends TestCase
         ]);
     }
 
+    public function test_superseded_aml_does_not_block_direct_nium_onboarding(): void
+    {
+        $provider = $this->provider();
+        $admin = User::factory()->create();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+        $profile = $this->profile($user, 'submitted');
+        $this->approvedDocument($profile, 'submitted');
+        $this->clearAml($profile);
+        $profile->amlScreenings()->create([
+            'user_id' => $user->id,
+            'subject_type' => 'kyc_profile',
+            'subject_id' => $profile->id,
+            'subject_name' => 'Historical Pending Customer',
+            'subject_role' => 'individual',
+            'screening_provider' => 'historical',
+            'provider' => 'historical',
+            'status' => 'pending',
+            'compliance_decision' => 'pending_review',
+            'risk_level' => 'unknown',
+            'superseded_at' => now(),
+        ]);
+        $account = $user->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'status' => 'pending',
+            'provider_status' => 'pending',
+        ]);
+        $onboardingService = Mockery::mock(NiumCustomerOnboardingService::class);
+        $onboardingService->shouldReceive('syncUser')->once()->andReturn($account);
+        $request = Request::create('/api/admin/users/'.$user->id.'/kyc-profile/approve', 'POST');
+        $request->setUserResolver(fn () => $admin);
+
+        $response = app(UserKycSubmissionController::class)->approve(
+            $request,
+            $user,
+            new AmlScreeningService(new FakeAmlScreeningProvider),
+            app(ComplianceEvidenceService::class),
+            app(ProviderOnboardingReadinessService::class),
+            $onboardingService,
+        );
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame('verified', $profile->fresh()->status);
+        $this->assertDatabaseHas('kyc_provider_submissions', [
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'status' => 'submitted',
+        ]);
+    }
+
     public function test_kyc_approval_rejects_blocking_compliance_state(): void
     {
         $provider = $this->provider();

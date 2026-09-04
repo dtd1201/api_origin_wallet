@@ -20,15 +20,7 @@ class ProviderOnboardingReadinessService
             ->first();
 
         if (! PrimaryProvider::isPrimary($provider)) {
-            if (! in_array(strtolower((string) $user->kyc_status), ['approved', 'verified'], true)) {
-                $this->reject($provider, $user, $submission, 'kyc_not_approved', 'internal_kyc', 'User internal KYC must be verified before provider onboarding.');
-            }
-
-            if ($submission === null || ! in_array($submission->status, ['approved', 'submitted'], true)) {
-                $this->reject($provider, $user, $submission, 'provider_release_not_approved', 'provider_release', 'Provider KYC submission must be approved internally before sending to this provider.');
-            }
-
-            return $submission;
+            $this->reject($provider, $user, $submission, 'unsupported_onboarding_provider', 'provider', 'Direct customer onboarding is currently available only for Nium.');
         }
 
         $profile = $user->kycProfile()
