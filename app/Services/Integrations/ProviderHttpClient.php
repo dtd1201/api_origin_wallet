@@ -484,7 +484,12 @@ class ProviderHttpClient implements ProviderClient
             'no_response_received' => $response === null,
             'external_outcome' => $response === null && $method !== 'GET' ? 'unknown_external_outcome' : null,
         ], static fn ($value): bool => $value !== null);
-
+        if ($response && $response->failed()) {
+            logger()->error('NIUM_RAW_ERROR_DEBUG', [
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+        }
         $attributes = [
             'provider_id' => $this->provider->id,
             'user_id' => $user?->id,
