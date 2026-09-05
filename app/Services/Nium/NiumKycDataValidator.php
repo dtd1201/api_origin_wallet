@@ -167,8 +167,7 @@ final class NiumKycDataValidator
                     $document['type']
                         ?? $document['documentType']
                         ?? $document['document_type']
-                        ?? data_get($document, 'metadata.nium_document_type')
-                        ?? null,
+                        ?? data_get($document, 'metadata.nium_document_type'),
                     "documents.{$index}.type"
                 );
             }
