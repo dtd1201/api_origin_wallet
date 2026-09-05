@@ -119,8 +119,19 @@ final class NiumKycDataValidator
                 throw new RuntimeException('businessRegistrationNumber: HK corporate registration number must be exactly 8 digits.');
             }
 
-            $registration = collect($payload['documents'] ?? [])->first(fn ($document): bool => is_array($document)
-                && ($document['type'] ?? null) === 'business_registration_doc');
+            $registration = collect($payload['documents'] ?? [])
+            ->first(fn ($document): bool =>
+                is_array($document)
+                && in_array(
+                    strtolower((string) ($document['type'] ?? null)),
+                    [
+                        'business_registration_doc',
+                        'business_registration',
+                        'certificate_of_incorporation',
+                    ],
+                    true
+                )
+            );
             $identificationNumber = is_array($registration) ? ($registration['identificationNumber'] ?? null) : null;
 
             if (! is_string($identificationNumber) || trim($identificationNumber) === '') {
