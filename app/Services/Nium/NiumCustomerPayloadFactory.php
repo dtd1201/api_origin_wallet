@@ -402,11 +402,7 @@ class NiumCustomerPayloadFactory
         }
 
         if ($addresses['isBusinessAddressSameAsRegisteredAddress']) {
-            if (array_key_exists('businessAddress', $addresses) && ! in_array($addresses['businessAddress'], [null, []], true)) {
-                throw new RuntimeException('hk_corporate_business_address_conflict');
-            }
-
-            return [true, null];
+            return [true, $this->address($profile)];
         }
 
         if (! array_key_exists('businessAddress', $addresses)) {

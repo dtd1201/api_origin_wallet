@@ -85,9 +85,10 @@ final class NiumHkCorporateV5Validator
         $this->assertCorporateAddress($addresses['registeredAddress'] ?? null, 'addresses.registeredAddress');
 
         if ($addresses['isBusinessAddressSameAsRegisteredAddress']) {
-            if (array_key_exists('businessAddress', $addresses)) {
-                throw new RuntimeException('hk_corporate_business_address_conflict');
-            }
+            $this->assertCorporateAddress(
+                $addresses['businessAddress'] ?? null,
+                'addresses.businessAddress'
+            );
 
             return;
         }
