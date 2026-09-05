@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Http\Controllers\Api\Admin\UserKycSubmissionController;
+use App\Jobs\Nium\ContinueNiumCustomerOnboardingJob;
 use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
@@ -17,11 +18,13 @@ use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Integrations\ProviderOnboardingReadinessService;
 use App\Services\Integrations\ProviderRegistry;
 use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Services\Nium\NiumKycDataValidator;
 use App\Services\Nium\NiumProviderRequestException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 use Mockery;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\Fixtures\FakeAmlScreeningProvider;
@@ -30,6 +33,61 @@ use Tests\TestCase;
 class NiumComplianceBridgeTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_kyc_approval_dispatches_automatic_nium_continuation_for_processing_documents(): void
+    {
+        Queue::fake();
+        $provider = $this->provider();
+        $admin = User::factory()->create();
+        $user = User::factory()->create(['status' => 'pending', 'kyc_status' => 'pending']);
+        $profile = $this->profile($user, 'submitted');
+        $profile->update([
+            'date_of_birth' => '1990-01-01',
+            'nationality_country_code' => 'TH',
+            'postal_code' => '10110',
+        ]);
+        $this->approvedDocument($profile, 'submitted')->update([
+            'issuing_country_code' => 'TH',
+        ]);
+        $this->clearAml($profile);
+        $account = $user->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'status' => 'pending',
+            'provider_status' => 'pending',
+        ]);
+        $onboardingService = Mockery::mock(NiumCustomerOnboardingService::class);
+        $onboardingService->shouldReceive('beginOnboarding')->once()->andReturn(new ProviderOnboardingResult(
+            providerAccount: $account,
+            status: 'pending',
+            nextAction: 'wait_for_document_processing',
+            message: 'Nium documents are processing.',
+            metadata: ['pending_document_count' => 1],
+        ));
+        $request = Request::create('/api/admin/users/'.$user->id.'/kyc-profile/approve', 'POST');
+        $request->setUserResolver(fn () => $admin);
+
+        $response = app(UserKycSubmissionController::class)->approve(
+            $request,
+            $user,
+            new AmlScreeningService(new FakeAmlScreeningProvider),
+            app(ComplianceEvidenceService::class),
+            app(ProviderOnboardingReadinessService::class),
+            $onboardingService,
+            app(NiumKycDataValidator::class),
+            app(\App\Services\Nium\NiumKycDataValidator::class),
+        );
+
+        $this->assertSame(202, $response->getStatusCode());
+        $this->assertSame(
+            'KYC profile approved. Nium onboarding workflow started and will continue automatically.',
+            $response->getData(true)['message'],
+        );
+        Queue::assertPushed(
+            ContinueNiumCustomerOnboardingJob::class,
+            fn (ContinueNiumCustomerOnboardingJob $job): bool => $job->userId === $user->id
+                && $job->providerId === $provider->id,
+        );
+    }
 
     public function test_kyc_approval_prepares_and_submits_nium_tracking(): void
     {
@@ -65,6 +123,7 @@ class NiumComplianceBridgeTest extends TestCase
             app(ComplianceEvidenceService::class),
             app(ProviderOnboardingReadinessService::class),
             $onboardingService,
+            app(\App\Services\Nium\NiumKycDataValidator::class),
         );
 
         $submission = KycProviderSubmission::query()->sole();
@@ -124,6 +183,7 @@ class NiumComplianceBridgeTest extends TestCase
             app(ComplianceEvidenceService::class),
             app(ProviderOnboardingReadinessService::class),
             $onboardingService,
+            app(\App\Services\Nium\NiumKycDataValidator::class),
         );
 
         $this->assertSame(200, $response->getStatusCode());
@@ -162,6 +222,7 @@ class NiumComplianceBridgeTest extends TestCase
                 app(ComplianceEvidenceService::class),
                 app(ProviderOnboardingReadinessService::class),
                 $onboardingService,
+                app(\App\Services\Nium\NiumKycDataValidator::class),
             );
             $this->fail('Expected KYC approval to be blocked.');
         } catch (HttpException $exception) {
@@ -208,6 +269,7 @@ class NiumComplianceBridgeTest extends TestCase
             app(ComplianceEvidenceService::class),
             app(ProviderOnboardingReadinessService::class),
             $onboardingService,
+            app(\App\Services\Nium\NiumKycDataValidator::class),
         );
 
         $this->assertSame(422, $response->getStatusCode());

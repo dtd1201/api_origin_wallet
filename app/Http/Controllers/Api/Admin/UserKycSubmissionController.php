@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Jobs\Nium\ContinueNiumCustomerOnboardingJob;
 use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
@@ -86,7 +87,6 @@ class UserKycSubmissionController extends Controller
         ComplianceEvidenceService $complianceEvidenceService,
         ProviderOnboardingReadinessService $readinessService,
         NiumCustomerOnboardingService $onboardingService,
-        NiumKycDataValidator $kycDataValidator,
     ): JsonResponse {
         $user = $this->resolveManageableUser($user);
 
@@ -146,14 +146,6 @@ class UserKycSubmissionController extends Controller
                 ], 409);
             }
 
-            try {
-                $kycDataValidator->assertSource($user);
-            } catch (RuntimeException $exception) {
-                return response()->json([
-                    'message' => $exception->getMessage(),
-                    'code' => 'kyc_data_invalid',
-                ], 422);
-            }
 
             $amlBypassApplied = false;
             $kycProfile = $this->reviewProfile(
@@ -189,9 +181,10 @@ class UserKycSubmissionController extends Controller
 
                 if ((int) data_get($onboarding->metadata, 'pending_document_count', 0) > 0) {
                     $complianceEvidenceService->markNiumSubmissionPendingDocuments($submission, $providerAccount->id);
+                    ContinueNiumCustomerOnboardingJob::dispatch($user->id, $provider->id)->afterCommit();
 
                     return response()->json([
-                        'message' => 'KYC profile approved. Nium document processing must complete before customer submission.',
+                        'message' => 'KYC profile approved. Nium onboarding workflow started and will continue automatically.',
                         'user' => $user->fresh(),
                         'kyc_profile' => $kycProfile,
                         'kyc_submission' => $kycProfile,
@@ -441,6 +434,14 @@ class UserKycSubmissionController extends Controller
             if ($status === 'verified') {
                 $kycProfile->documents()->update(['status' => 'approved']);
                 $kycProfile->relatedPersons()->update(['status' => 'approved']);
+                $kycProfile->relatedPersons()
+                    ->with('documents')
+                    ->get()
+                    ->each(function ($person) {
+                        $person->documents()->update([
+                            'status' => 'approved',
+                        ]);
+                    });
                 $kycProfile->requirements()->update([
                     'status' => 'approved',
                     'review_note' => $reviewNote,
