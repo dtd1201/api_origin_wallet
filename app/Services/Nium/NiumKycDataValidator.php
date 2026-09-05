@@ -280,6 +280,12 @@ final class NiumKycDataValidator
 
     private function assertConstant(string $region, string $category, mixed $value, string $path): void
     {
+        $record = NiumCorporateConstant::query()
+        ->where('region', $region)
+        ->where('customer_type', 'CORPORATE')
+        ->where('constant_type', $category)
+        ->first();
+
         $allowed = collect($record?->values ?? [])
             ->pluck('value')
             ->map(fn ($v) => strtolower((string) $v))
