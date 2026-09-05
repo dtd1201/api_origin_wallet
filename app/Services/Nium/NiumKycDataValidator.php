@@ -291,6 +291,12 @@ final class NiumKycDataValidator
             ->map(fn ($v) => strtolower((string) $v))
             ->toArray();
 
+        \Log::info('NIUM CONSTANT CHECK', [
+            'category' => $category,
+            'value' => $value,
+            'allowed' => $allowed,
+        ]);
+
         if (! is_string($value) || ! in_array(strtolower((string) $value), $allowed, true)) {
             throw new RuntimeException("{$path}: value was not returned by Nium category {$category}.");
         }
