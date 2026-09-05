@@ -234,6 +234,7 @@ class KycSubmissionController extends Controller
 
             foreach ($validated['related_persons'] ?? [] as $relatedPerson) {
                 $relatedPersonDocuments = $relatedPerson['documents'] ?? [];
+                $relatedPerson = $this->normalizeNiumCorporateRelatedPerson($relatedPerson);
                 $createdRelatedPerson = $kycProfile->relatedPersons()->create([
                     ...Arr::only($relatedPerson, $this->relatedPersonFields()),
                     'status' => 'submitted',
@@ -273,6 +274,34 @@ class KycSubmissionController extends Controller
             'kyc_profile' => $kycProfile,
             'kyc_submission' => $kycProfile,
         ], 202);
+    }
+
+    private function normalizeNiumCorporateRelatedPerson(array $person): array
+    {
+        $relationship = strtolower((string) ($person['relationship_type'] ?? ''));
+
+        $metadata = (array) ($person['metadata'] ?? []);
+
+        if ($relationship === 'authorized_representative') {
+            $metadata['positions'] = [
+                'REPRESENTATIVE',
+                'DIRECTOR',
+                'UBO',
+                'SHAREHOLDER',
+            ];
+        }
+
+        if ($relationship === 'beneficial_owner') {
+            $metadata['positions'] = [
+                'DIRECTOR',
+                'UBO',
+                'SHAREHOLDER',
+            ];
+        }
+
+        $person['metadata'] = $metadata;
+
+        return $person;
     }
 
     public function resubmitRequirement(
