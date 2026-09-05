@@ -185,8 +185,20 @@ class NiumCustomerPayloadFactory
                 : Arr::get($metadata, 'nium_v5_fields.website'),
             'addresses' => $this->filter([
                 'isBusinessAddressSameAsRegisteredAddress' => $addressRelationship,
-                'registeredAddress' => $registeredAddress,
-                'businessAddress' => $businessAddress,
+                'businessAddress' => [
+                    'addressLine1' => $profile->address_line1,
+                    'city' => $profile->city,
+                    'state' => $profile->state,
+                    'postcode' => $profile->postal_code,
+                    'country' => $profile->country_code,
+                ],
+                'registeredAddress' => [
+                    'addressLine1' => $profile->address_line1,
+                    'city' => $profile->city,
+                    'state' => $profile->state,
+                    'postcode' => $profile->postal_code,
+                    'country' => $profile->country_code,
+                ],
             ]),
             'applicant' => $applicantPayload,
             'stakeholders' => $this->stakeholders($profile, $applicant, $region === 'SG'),
