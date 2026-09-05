@@ -296,7 +296,19 @@ class NiumCustomerPayloadFactory
             ->values()
             ->all();
 
-        return $individuals === [] ? [] : ['individual' => $individuals];
+        return $this->filter([
+            'corporate' => [
+                'businessName' => $profile->business_name,
+                'registeredCountry' => strtoupper((string) $profile->registered_country_code),
+                'businessRegistrationNumber' => $profile->business_registration_number,
+                'positions' => [
+                    [
+                        'title' => 'director',
+                    ],
+                ],
+            ],
+            'individual' => $individuals,
+        ]);
     }
 
     private function documents(iterable $documents): array
