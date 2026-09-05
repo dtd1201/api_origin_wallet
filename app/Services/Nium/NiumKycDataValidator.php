@@ -161,10 +161,16 @@ final class NiumKycDataValidator
 
         foreach (($payload['documents'] ?? []) as $index => $document) {
             if (is_array($document)) {
-                $this->assertConstant($region, 'documentType', $document['documentType']
-                ?? $document['document_type']
-                ?? data_get($document, 'metadata.nium_document_type')
-                ?? null, "documents.{$index}.type");
+                $this->assertConstant(
+                    $region,
+                    'documentType',
+                    $document['type']
+                        ?? $document['documentType']
+                        ?? $document['document_type']
+                        ?? data_get($document, 'metadata.nium_document_type')
+                        ?? null,
+                    "documents.{$index}.type"
+                );
             }
         }
     }
