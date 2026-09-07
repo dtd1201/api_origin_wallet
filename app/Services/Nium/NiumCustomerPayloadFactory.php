@@ -185,14 +185,14 @@ class NiumCustomerPayloadFactory
                 : Arr::get($metadata, 'nium_v5_fields.website'),
             'addresses' => $this->filter([
                 'isBusinessAddressSameAsRegisteredAddress' => $addressRelationship,
-                'businessAddress' => [
+                'registeredAddress' => [
                     'addressLine1' => $profile->address_line1,
                     'city' => $profile->city,
                     'state' => $profile->state,
                     'postcode' => $profile->postal_code,
                     'country' => $profile->country_code,
                 ],
-                'registeredAddress' => [
+                'businessAddress' => [
                     'addressLine1' => $profile->address_line1,
                     'city' => $profile->city,
                     'state' => $profile->state,
@@ -282,6 +282,18 @@ class NiumCustomerPayloadFactory
     ): array {
         $individuals = $profile->relatedPersons
             ->reject(fn (KycRelatedPerson $person) => $person->is($applicant))
+            ->filter(function (KycRelatedPerson $person): bool {
+                $relationship = strtolower(str_replace(
+                    ['-', ' '],
+                    '_',
+                    trim((string) $person->relationship_type)
+                ));
+
+                return ! in_array($relationship, [
+                    'authorized_representative',
+                    'authorised_representative',
+                ], true);
+            })
             ->map(function (KycRelatedPerson $person) use ($normalizeNiumPositions): array {
                 return $this->person(
                     $person,
@@ -851,16 +863,26 @@ class NiumCustomerPayloadFactory
     private function corporateApplicant(KycProfile $profile): KycRelatedPerson
     {
         $applicant = $profile->relatedPersons->first(
-            fn (KycRelatedPerson $person) => in_array(strtolower((string) $person->relationship_type), [
-                'applicant', 'authorized_representative', 'authorised_representative',
-            ], true)
+            fn (KycRelatedPerson $person) => strtolower((string) $person->relationship_type) === 'applicant'
+                && $person->ownership_percentage !== null
+                && (float) $person->ownership_percentage > 0
         );
 
-        if ($applicant === null) {
-            throw new RuntimeException('A corporate Nium onboarding request requires an approved applicant or authorized representative.');
+        if ($applicant !== null) {
+            return $applicant;
         }
 
-        return $applicant;
+        $ubo = $profile->relatedPersons->first(
+            fn (KycRelatedPerson $person) => strtolower((string) $person->relationship_type) === 'beneficial_owner'
+                && $person->ownership_percentage !== null
+                && (float) $person->ownership_percentage > 0
+        );
+
+        if ($ubo === null) {
+            throw new RuntimeException('A corporate Nium onboarding request requires an approved applicant or beneficial owner.');
+        }
+
+        return $ubo;
     }
 
     private function requireAddressState(object $subject, string $path): void

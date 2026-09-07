@@ -36,6 +36,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
      */
     private function synchronizeUser(IntegrationProvider $provider, User $user): array
     {
+        $this->kycDataValidator->assertSource($user);
         $this->payloadFactory->validateRequiredSourceData($user);
         $providerAccount = $this->provisionProviderAccount($provider, $user);
 
