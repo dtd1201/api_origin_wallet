@@ -156,7 +156,13 @@ class NiumCustomerPayloadFactory
             [$addressRelationship, $businessAddress] = $this->sgCorporateAddressSources($profile);
         } elseif ($region === 'HK' && $kycType === 'full') {
             [$addressRelationship, $businessAddress] = $this->hkCorporateAddressSources($profile);
-            $hkApplicantPositions = $this->hkApplicantPositions($applicant);
+            $this->hkApplicantPositions($applicant);
+            $hkApplicantPositions = [
+                'REPRESENTATIVE',
+                'DIRECTOR',
+                'UBO',
+                'SHAREHOLDER',
+            ];
         }
 
         $applicantPayload = $this->person(
@@ -311,14 +317,12 @@ class NiumCustomerPayloadFactory
 
         return $this->filter([
             'corporate' => [
-                [
-                    'businessName' => $profile->business_name,
-                    'registeredCountry' => strtoupper((string) $profile->registered_country_code),
-                    'businessRegistrationNumber' => $profile->business_registration_number,
-                    'positions' => [
-                        [
-                            'title' => 'director',
-                        ],
+                'businessName' => $profile->business_name,
+                'registeredCountry' => strtoupper((string) $profile->registered_country_code),
+                'businessRegistrationNumber' => $profile->business_registration_number,
+                'positions' => [
+                    [
+                        'title' => 'director',
                     ],
                 ],
             ],
