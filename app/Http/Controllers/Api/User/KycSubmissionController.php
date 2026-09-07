@@ -225,7 +225,17 @@ class KycSubmissionController extends Controller
             $kycProfile->requirements()->delete();
 
             foreach ($validated['documents'] ?? [] as $document) {
-                $document = $this->preserveNiumDocumentMetadata($document, $existingDocuments, null);
+                $document = $this->preserveNiumDocumentMetadata(
+                    $document,
+                    $existingDocuments,
+                    null
+                );
+
+                $document = $this->normalizeCorporateDocumentNumber(
+                    $document,
+                    $validated
+                );
+
                 $kycProfile->documents()->create([
                     ...Arr::only($document, $this->documentFields()),
                     'status' => 'submitted',
@@ -274,6 +284,41 @@ class KycSubmissionController extends Controller
             'kyc_profile' => $kycProfile,
             'kyc_submission' => $kycProfile,
         ], 202);
+    }
+
+    private function normalizeCorporateDocumentNumber(
+        array $document,
+        array $validated
+    ): array {
+        if (($validated['applicant_type'] ?? null) !== 'business') {
+            return $document;
+        }
+
+        $brn = trim((string) ($validated['business_registration_number'] ?? ''));
+
+        if ($brn === '') {
+            return $document;
+        }
+
+        $type = strtolower((string) ($document['type'] ?? ''));
+
+        switch ($type) {
+
+            case 'business_registration':
+            case 'certificate_of_incorporation':
+                $document['document_number'] = $brn;
+                break;
+
+            case 'nnc1':
+                $document['document_number'] = 'NNC1-'.$brn;
+                break;
+
+            case 'nar1':
+                $document['document_number'] = 'NAR1-'.$brn;
+                break;
+        }
+
+        return $document;
     }
 
     private function normalizeNiumCorporateRelatedPerson(array $person): array
