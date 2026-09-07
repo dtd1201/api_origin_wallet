@@ -167,14 +167,14 @@ class NiumCustomerPayloadFactory
 
         $applicantPayload = $this->person(
             $applicant,
-            $user->email,
+            $applicant->email,
             (string) $user->phone,
             $hkApplicantPositions === null ? ['director'] : [],
             'nium_v5_fields.applicant.email',
             true,
-            normalizeNiumPositions: $region === 'SG',
-            positionsOverride: $hkApplicantPositions,
-            'applicant'
+            false,
+            $hkApplicantPositions,
+            'applicant',
         );
 
         $payload = $this->filter(array_merge($this->regionFields($profile, $region), [
@@ -312,6 +312,7 @@ class NiumCustomerPayloadFactory
                     'nium_v5_fields.stakeholders.individual[*].email',
                     false,
                     $normalizeNiumPositions,
+                    null,
                     'stakeholder',
                 );
             })
