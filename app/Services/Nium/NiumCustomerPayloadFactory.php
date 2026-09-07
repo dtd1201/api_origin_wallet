@@ -252,6 +252,7 @@ class NiumCustomerPayloadFactory
         bool $emailRequired,
         bool $normalizeNiumPositions = false,
         ?array $positionsOverride = null,
+        string $externalIdPrefix = 'person',
     ): array {
         [$firstName, $lastName] = $this->splitName($person->legal_name);
         $metadata = (array) ($person->metadata ?? []);
@@ -261,7 +262,7 @@ class NiumCustomerPayloadFactory
         );
 
         return $this->filter([
-            'externalId' => 'origin-wallet-person-'.$person->id,
+            'externalId' => 'origin-wallet-'.$externalIdPrefix.'-'.$person->id,
             'firstName' => $firstName,
             'lastName' => $lastName,
             'dateOfBirth' => $person->date_of_birth?->toDateString(),
