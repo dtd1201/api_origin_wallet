@@ -281,7 +281,8 @@ class NiumCustomerPayloadFactory
         bool $normalizeNiumPositions = false,
     ): array {
         $individuals = $profile->relatedPersons
-            ->reject(fn (KycRelatedPerson $person) => $person->is($applicant))
+            ->reject(fn (KycRelatedPerson $person) => $person->is($applicant)
+                && strtolower((string) $applicant->relationship_type) !== 'beneficial_owner')
             ->filter(function (KycRelatedPerson $person): bool {
                 $relationship = strtolower(str_replace(
                     ['-', ' '],
