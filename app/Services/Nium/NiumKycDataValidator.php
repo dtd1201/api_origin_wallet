@@ -31,10 +31,31 @@ final class NiumKycDataValidator
             );
             $registrationNumber = trim((string) $profile->business_registration_number);
 
-            if ($registrationDocument instanceof KycDocument
-                && trim((string) $registrationDocument->document_number) === ''
-                && $registrationNumber !== '') {
-                $registrationDocument->update(['document_number' => $registrationNumber]);
+            if ($registrationNumber !== '') {
+                foreach ($profile->documents as $document) {
+                    $type = strtolower(trim((string) $document->type));
+
+                    $documentNumber = match ($type) {
+                        'business_registration',
+                        'certificate_of_incorporation',
+                        'business_registration_doc'
+                            => $registrationNumber,
+
+                        'nnc1'
+                            => 'NNC1-'.$registrationNumber,
+
+                        'nar1'
+                            => 'NAR1-'.$registrationNumber,
+
+                        default => null,
+                    };
+
+                    if ($documentNumber !== null) {
+                        $document->update([
+                            'document_number' => $documentNumber,
+                        ]);
+                    }
+                }
             }
         }
 

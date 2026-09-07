@@ -368,18 +368,40 @@ class NiumCustomerPayloadFactory
         $documents = $this->documentResolver->profileDocuments($profile)
             ->reject(fn (KycDocument $document): bool => strtolower((string) $document->type) === 'proof_of_business_address')
             ->map(function (KycDocument $document) use ($profile): KycDocument {
-                if (
-                    strtolower(trim((string) $document->type)) === 'business_registration'
-                    && trim((string) $document->document_number) === ''
-                    && filled($profile->business_registration_number)
-                ) {
-                    $document->document_number = $profile->business_registration_number;
+                if (filled($profile->business_registration_number)) {
+                    $document->document_number = $this->normalizeCorporateDocumentNumber(
+                        $document,
+                        (string) $profile->business_registration_number
+                    );
                 }
 
                 return $document;
             });
 
         return $this->documents($documents);
+    }
+
+    private function normalizeCorporateDocumentNumber(
+        KycDocument $document,
+        string $businessRegistrationNumber
+    ): string {
+        $type = strtolower(trim((string) $document->type));
+
+        return match ($type) {
+            'business_registration',
+            'certificate_of_incorporation',
+            'business_registration_doc'
+                => $businessRegistrationNumber,
+
+            'nnc1'
+                => 'NNC1-'.$businessRegistrationNumber,
+
+            'nar1'
+                => 'NAR1-'.$businessRegistrationNumber,
+
+            default
+                => (string) $document->document_number,
+        };
     }
 
     private function address(object $subject): array
