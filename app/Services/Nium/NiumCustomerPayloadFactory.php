@@ -323,6 +323,7 @@ class NiumCustomerPayloadFactory
                     'nium_v5_fields.stakeholders.individual[*].email',
                     false,
                     $normalizeNiumPositions,
+                    null,
                     'stakeholder',
                 );
             })
