@@ -311,12 +311,14 @@ class NiumCustomerPayloadFactory
 
         return $this->filter([
             'corporate' => [
-                'businessName' => $profile->business_name,
-                'registeredCountry' => strtoupper((string) $profile->registered_country_code),
-                'businessRegistrationNumber' => $profile->business_registration_number,
-                'positions' => [
-                    [
-                        'title' => 'director',
+                [
+                    'businessName' => $profile->business_name,
+                    'registeredCountry' => strtoupper((string) $profile->registered_country_code),
+                    'businessRegistrationNumber' => $profile->business_registration_number,
+                    'positions' => [
+                        [
+                            'title' => 'director',
+                        ],
                     ],
                 ],
             ],
