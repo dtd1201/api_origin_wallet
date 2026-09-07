@@ -165,9 +165,20 @@ class NiumCustomerPayloadFactory
             ];
         }
 
+        // $applicantPayload = $this->person(
+        //     $applicant,
+        //     $user->email,
+        //     (string) $user->phone,
+        //     $hkApplicantPositions === null ? ['director'] : [],
+        //     'nium_v5_fields.applicant.email',
+        //     true,
+        //     normalizeNiumPositions: $region === 'SG',
+        //     positionsOverride: $hkApplicantPositions,
+        //     'applicant',
+        // );
         $applicantPayload = $this->person(
             $applicant,
-            $applicant->email,
+            $user->email,
             (string) $user->phone,
             $hkApplicantPositions === null ? ['director'] : [],
             'nium_v5_fields.applicant.email',
@@ -312,7 +323,6 @@ class NiumCustomerPayloadFactory
                     'nium_v5_fields.stakeholders.individual[*].email',
                     false,
                     $normalizeNiumPositions,
-                    null,
                     'stakeholder',
                 );
             })
