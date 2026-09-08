@@ -45,6 +45,11 @@ final class NiumPaymentIdService
             externalReference: 'account-'.$account->id,
         );
         $data = $response->json() ?? [];
+        logger()->error('NIUM_ASSIGN_RAW_DEBUG', [
+            'status' => $response->status(),
+            'body' => $response->body(),
+            'payload' => $payload,
+        ]);
         $paymentId = $data['uniquePaymentId'] ?? $data['payment_id'] ?? null;
 
         if (! $response->successful() || ! is_string($paymentId) || $paymentId === '' || strtoupper($paymentId) === 'INITIALIZED') {
