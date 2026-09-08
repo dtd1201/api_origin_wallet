@@ -45,7 +45,7 @@ final class NiumPaymentIdService
             externalReference: 'account-'.$account->id,
         );
         $data = $response->json() ?? [];
-        $paymentId = $data['uniquePaymentId'] ?? null;
+        $paymentId = $data['uniquePaymentId'] ?? $data['payment_id'] ?? null;
 
         if (! $response->successful() || ! is_string($paymentId) || $paymentId === '') {
             throw new RuntimeException('Nium Assign Payment ID failed.');

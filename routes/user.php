@@ -38,6 +38,7 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::post('users/{user}/provider-accounts/{provider}/link', [ProviderAccountController::class, 'link']);
     Route::post('users/{user}/provider-accounts/{provider}/complete', [ProviderAccountController::class, 'complete']);
     Route::post('users/{user}/provider-accounts/{provider}/request-connect', [ProviderAccountController::class, 'requestConnect']);
+    Route::post('users/{user}/provider-accounts/{provider}/virtual-account', [ProviderAccountController::class, 'assignVirtualAccount']);
     Route::post('users/{user}/providers/{provider}/sync/accounts', [ProviderDataSyncController::class, 'syncAccounts']);
     Route::post('users/{user}/providers/{provider}/sync/balances', [ProviderDataSyncController::class, 'syncBalances']);
     Route::post('users/{user}/providers/{provider}/sync/transactions', [ProviderDataSyncController::class, 'syncTransactions']);

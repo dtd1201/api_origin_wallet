@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
 use App\Models\NiumVirtualAccount;
 use App\Models\User;
@@ -11,6 +12,7 @@ use App\Services\Nium\NiumWebhookService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class NiumPaymentIdServiceTest extends TestCase
@@ -47,6 +49,66 @@ class NiumPaymentIdServiceTest extends TestCase
                     'accountType' => 'LOCAL',
                 ];
         });
+    }
+
+    public function test_user_can_assign_virtual_account_through_provider_account_endpoint(): void
+    {
+        [$provider, $user, $account] = $this->eligibleAccount();
+        Http::fake(['*' => Http::response([
+            'uniquePaymentId' => 'VA-API-123456',
+            'currencyCode' => 'USD',
+            'accountCategory' => 'SELF_FUNDING_ACCOUNT',
+            'accountType' => 'LOCAL',
+        ])]);
+
+        $response = $this->withToken($this->issueTokenFor($user))
+            ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/virtual-account", [
+                'currency' => 'USD',
+                'account_category' => 'SELF_FUNDING_ACCOUNT',
+                'account_type' => 'LOCAL',
+            ]);
+
+        $response
+            ->assertCreated()
+            ->assertJsonPath('virtual_account.user_provider_account_id', $account->id)
+            ->assertJsonPath('virtual_account.provider_payment_id', 'VA-API-123456')
+            ->assertJsonPath('virtual_account.currency', 'USD')
+            ->assertJsonPath('virtual_account.status', 'assigned');
+
+        $this->assertDatabaseHas('nium_virtual_accounts', [
+            'user_provider_account_id' => $account->id,
+            'provider_payment_id' => 'VA-API-123456',
+            'currency' => 'USD',
+            'status' => 'assigned',
+        ]);
+        $this->assertDatabaseHas('api_request_logs', [
+            'operation' => 'assign_payment_id',
+        ]);
+        Http::assertSent(fn ($request): bool => $request->data() === [
+            'currency' => 'USD',
+            'accountCategory' => 'SELF_FUNDING_ACCOUNT',
+            'accountType' => 'LOCAL',
+        ]);
+    }
+
+    public function test_virtual_account_endpoint_validates_nium_assignment_fields(): void
+    {
+        [$provider, $user] = $this->eligibleAccount();
+
+        $this->withToken($this->issueTokenFor($user))
+            ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/virtual-account", [
+                'currency' => 'US',
+                'account_category' => 'INVALID',
+                'account_type' => 'INVALID',
+                'bank_name' => str_repeat('x', 256),
+            ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'currency',
+                'account_category',
+                'account_type',
+                'bank_name',
+            ]);
     }
 
     public function test_va_assigned_webhook_is_idempotent_and_maps_customer_wallet_payment_id(): void
@@ -98,5 +160,19 @@ class NiumPaymentIdServiceTest extends TestCase
         ]);
 
         return [$provider, $user, $account];
+    }
+
+    private function issueTokenFor(User $user): string
+    {
+        $plainToken = Str::random(80);
+
+        ApiToken::query()->create([
+            'user_id' => $user->id,
+            'name' => 'test-token',
+            'token_hash' => hash('sha256', $plainToken),
+            'expires_at' => now()->addDay(),
+        ]);
+
+        return $plainToken;
     }
 }

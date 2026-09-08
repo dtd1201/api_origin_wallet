@@ -6,9 +6,11 @@ use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationRequest;
+use App\Models\UserProviderAccount;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingManager;
+use App\Services\Nium\NiumPaymentIdService;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
@@ -167,6 +169,49 @@ class ProviderAccountController extends Controller
             'integration_request' => $integrationRequest,
             'request_pending' => true,
         ], 202);
+    }
+
+    public function assignVirtualAccount(
+        Request $request,
+        User $user,
+        IntegrationProvider $provider,
+        NiumPaymentIdService $service,
+    ): JsonResponse {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
+        $validated = $request->validate([
+            'currency' => ['required', 'string', 'size:3', 'regex:/^[A-Za-z]{3}$/'],
+            'account_category' => ['required', 'string', 'in:SELF_FUNDING_ACCOUNT,COLLECTION_ACCOUNT,SELF_FUNDING_AND_COLLECTION_ACCOUNT'],
+            'account_type' => ['required', 'string', 'in:LOCAL,WIRES,LOCAL_AND_WIRES'],
+            'bank_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+        ]);
+
+        $account = UserProviderAccount::query()
+            ->where('user_id', $user->id)
+            ->where('provider_id', $provider->id)
+            ->latest('id')
+            ->firstOrFail();
+
+        try {
+            $virtualAccount = $service->assign(
+                $account,
+                $validated['currency'],
+                $validated['account_category'],
+                $validated['account_type'],
+                $validated['bank_name'] ?? null,
+            );
+        } catch (NiumProviderRequestException $exception) {
+            return $this->safeNiumErrorResponse($exception);
+        } catch (RuntimeException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => 'Virtual account assigned successfully.',
+            'virtual_account' => $virtualAccount,
+        ], 201);
     }
 
     public function link(
