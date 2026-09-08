@@ -30,6 +30,7 @@ final class NiumPaymentIdService
         $payload = array_filter([
             'currencyCode' => $currency,
             'accountCategory' => $accountCategory,
+            'accountType' => $accountType,
             'bankName' => $bankName,
         ], static fn ($value) => $value !== null && $value !== '');
         $response = $this->niumService->post(
