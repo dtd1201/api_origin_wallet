@@ -10,6 +10,7 @@ use App\Models\UserProviderAccount;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingManager;
+use App\Services\Nium\NiumPaymentIdBankResolver;
 use App\Services\Nium\NiumPaymentIdService;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Support\PrimaryProvider;
@@ -176,6 +177,7 @@ class ProviderAccountController extends Controller
         User $user,
         IntegrationProvider $provider,
         NiumPaymentIdService $service,
+        NiumPaymentIdBankResolver $bankResolver,
     ): JsonResponse {
         abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
@@ -183,7 +185,6 @@ class ProviderAccountController extends Controller
             'currency' => ['required', 'string', 'size:3', 'regex:/^[A-Za-z]{3}$/'],
             'account_category' => ['required', 'string', 'in:SELF_FUNDING_ACCOUNT,COLLECTION_ACCOUNT,SELF_FUNDING_AND_COLLECTION_ACCOUNT'],
             'account_type' => ['required', 'string', 'in:LOCAL,WIRES,LOCAL_AND_WIRES'],
-            'bank_name' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
         $account = UserProviderAccount::query()
@@ -198,7 +199,7 @@ class ProviderAccountController extends Controller
                 $validated['currency'],
                 $validated['account_category'],
                 $validated['account_type'],
-                $validated['bank_name'] ?? null,
+                $bankResolver->resolve($user, $validated['currency']),
             );
         } catch (NiumProviderRequestException $exception) {
             return $this->safeNiumErrorResponse($exception);

@@ -54,6 +54,10 @@ class NiumPaymentIdServiceTest extends TestCase
     public function test_user_can_assign_virtual_account_through_provider_account_endpoint(): void
     {
         [$provider, $user, $account] = $this->eligibleAccount();
+        $user->profile()->create([
+            'user_type' => 'business',
+            'country_code' => 'HK',
+        ]);
         Http::fake(['*' => Http::response([
             'uniquePaymentId' => 'VA-API-123456',
             'currencyCode' => 'USD',
@@ -88,6 +92,7 @@ class NiumPaymentIdServiceTest extends TestCase
             'currency' => 'USD',
             'accountCategory' => 'SELF_FUNDING_ACCOUNT',
             'accountType' => 'LOCAL',
+            'bankName' => 'DBS_HK',
         ]);
     }
 
@@ -100,14 +105,12 @@ class NiumPaymentIdServiceTest extends TestCase
                 'currency' => 'US',
                 'account_category' => 'INVALID',
                 'account_type' => 'INVALID',
-                'bank_name' => str_repeat('x', 256),
             ])
             ->assertUnprocessable()
             ->assertJsonValidationErrors([
                 'currency',
                 'account_category',
                 'account_type',
-                'bank_name',
             ]);
     }
 
