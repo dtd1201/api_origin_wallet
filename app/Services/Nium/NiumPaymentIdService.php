@@ -28,7 +28,7 @@ final class NiumPaymentIdService
             throw new RuntimeException('Invalid Nium Assign Payment ID currency, account category, or account type.');
         }
         $payload = array_filter([
-            'currencyCode' => $currency,
+            'currency' => $currency,
             'accountCategory' => $accountCategory,
             'accountType' => $accountType,
             'bankName' => $bankName,
