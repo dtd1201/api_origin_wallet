@@ -28,9 +28,8 @@ final class NiumPaymentIdService
             throw new RuntimeException('Invalid Nium Assign Payment ID currency, account category, or account type.');
         }
         $payload = array_filter([
-            'currency' => $currency,
+            'currencyCode' => $currency,
             'accountCategory' => $accountCategory,
-            'accountType' => $accountType,
             'bankName' => $bankName,
         ], static fn ($value) => $value !== null && $value !== '');
         $response = $this->niumService->post(
@@ -47,7 +46,7 @@ final class NiumPaymentIdService
         $data = $response->json() ?? [];
         $paymentId = $data['uniquePaymentId'] ?? $data['payment_id'] ?? null;
 
-        if (! $response->successful() || ! is_string($paymentId) || $paymentId === '') {
+        if (! $response->successful() || ! is_string($paymentId) || $paymentId === '' || strtoupper($paymentId) === 'INITIALIZED') {
             throw new RuntimeException('Nium Assign Payment ID failed.');
         }
 
