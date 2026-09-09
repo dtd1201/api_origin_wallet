@@ -52,20 +52,39 @@ final class NiumPaymentIdService
         ]);
         $paymentId = $data['uniquePaymentId'] ?? $data['payment_id'] ?? null;
 
-        if (! $response->successful() || ! is_string($paymentId) || $paymentId === '' || strtoupper($paymentId) === 'INITIALIZED') {
-            throw new RuntimeException('Nium Assign Payment ID failed.');
+        if (
+            ! $response->successful()
+            || ! is_string($paymentId)
+            || $paymentId === ''
+        ) {
+            throw new RuntimeException('Assign Payment ID failed.');
         }
 
-        return DB::transaction(fn () => NiumVirtualAccount::query()->updateOrCreate(
-            ['user_provider_account_id' => $account->id, 'provider_payment_id' => $paymentId],
-            [
-                'virtual_account_reference' => $paymentId,
-                'currency' => strtoupper((string) ($data['currencyCode'] ?? $currency)),
-                'account_category' => $data['accountCategory'] ?? $payload['accountCategory'],
-                'account_type' => $data['accountType'] ?? $payload['accountType'],
-                'status' => 'assigned',
-                'assigned_at' => now(),
-            ],
-        ));
+        $isPending = strtoupper($paymentId) === 'INITIALIZED';
+        $attributes = [
+            'user_provider_account_id' => $account->id,
+            'currency' => strtoupper((string) ($data['currencyCode'] ?? $currency)),
+            'account_category' => strtoupper((string) ($data['accountCategory'] ?? $payload['accountCategory'])),
+            'account_type' => strtoupper((string) ($data['accountType'] ?? $payload['accountType'])),
+        ];
+
+        return DB::transaction(function () use ($attributes, $isPending, $paymentId): NiumVirtualAccount {
+            $values = [
+                ...$attributes,
+                'provider_payment_id' => $isPending ? null : $paymentId,
+                'virtual_account_reference' => $isPending ? null : $paymentId,
+                'status' => $isPending ? 'pending' : 'assigned',
+                'assigned_at' => $isPending ? null : now(),
+            ];
+
+            if ($isPending) {
+                return NiumVirtualAccount::query()->create($values);
+            }
+
+            return NiumVirtualAccount::query()->updateOrCreate(
+                ['user_provider_account_id' => $attributes['user_provider_account_id'], 'provider_payment_id' => $paymentId],
+                $values,
+            );
+        });
     }
 }

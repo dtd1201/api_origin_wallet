@@ -313,25 +313,53 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         $account = $this->findCustomerProviderAccount($provider, $payload);
         $paymentId = $this->value($payload, ['uniquePaymentId', 'paymentId', 'virtualAccountNumber']);
         $currency = strtoupper((string) $this->value($payload, ['currencyCode', 'currency']));
+        $accountCategory = strtoupper((string) $this->value($payload, ['accountCategory']));
+        $accountType = strtoupper((string) $this->value($payload, ['accountType']));
 
         if ($account === null || ! filled($paymentId) || strlen($currency) !== 3) {
             throw new RuntimeException('Nium VA Assigned webhook is missing a mapped customer, payment ID, or currency.');
         }
 
-        NiumVirtualAccount::query()->updateOrCreate(
-            [
-                'user_provider_account_id' => $account->id,
-                'provider_payment_id' => (string) $paymentId,
-            ],
-            [
+        DB::transaction(function () use ($account, $accountCategory, $accountType, $currency, $payload, $paymentId): void {
+            $virtualAccount = null;
+
+            if ($accountType !== '') {
+                $virtualAccount = NiumVirtualAccount::query()
+                    ->where('user_provider_account_id', $account->id)
+                    ->where('currency', $currency)
+                    ->where('account_type', $accountType)
+                    ->where('status', 'pending')
+                    ->oldest('id')
+                    ->lockForUpdate()
+                    ->first();
+            }
+
+            if ($virtualAccount === null) {
+                NiumVirtualAccount::query()->updateOrCreate(
+                    [
+                        'user_provider_account_id' => $account->id,
+                        'provider_payment_id' => (string) $paymentId,
+                    ],
+                    [
+                        'virtual_account_reference' => (string) $paymentId,
+                        'currency' => $currency,
+                        'account_category' => $accountCategory !== '' ? $accountCategory : null,
+                        'account_type' => $accountType !== '' ? $accountType : null,
+                        'status' => 'assigned',
+                        'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
+                    ],
+                );
+
+                return;
+            }
+
+            $virtualAccount->update([
                 'virtual_account_reference' => (string) $paymentId,
-                'currency' => $currency,
-                'account_category' => $this->value($payload, ['accountCategory']),
-                'account_type' => $this->value($payload, ['accountType']),
+                'provider_payment_id' => (string) $paymentId,
                 'status' => 'assigned',
                 'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
-            ],
-        );
+            ]);
+        });
     }
 
     private function isVaAssigned(array $payload): bool
