@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\NiumVirtualAccount;
 use App\Models\Transaction;
@@ -189,6 +190,12 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
     ): void {
         $template = strtoupper((string) ($payload['template'] ?? ''));
 
+        if ($template === 'CARD_WALLET_FUNDING_WEBHOOK') {
+            $this->processFundingWebhook($provider, $payload);
+
+            return;
+        }
+
         if ($this->isVaAssigned($payload)) {
             $this->processVaAssigned($provider, $payload);
 
@@ -250,6 +257,43 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             $this->ledgerService->applyTransferTerminalStatus($transfer);
             $this->syncTransaction($provider, $transfer, $payload, $resource);
         }
+    }
+
+    private function processFundingWebhook(IntegrationProvider $provider, array $payload): void
+    {
+        $walletHashId = trim((string) ($payload['walletHashId'] ?? ''));
+        $currency = strtoupper(trim((string) ($payload['transactionCurrency'] ?? '')));
+        $walletBalance = $payload['walletBalance'] ?? null;
+
+        if ($walletHashId === '' || strlen($currency) !== 3 || ! is_numeric($walletBalance)) {
+            throw new RuntimeException('Nium funding webhook is missing a wallet ID, currency, or wallet balance.');
+        }
+
+        $account = UserProviderAccount::query()
+            ->where('provider_id', $provider->id)
+            ->where('external_account_id', $walletHashId)
+            ->latest('id')
+            ->first();
+
+        if ($account === null) {
+            throw new RuntimeException('Nium funding webhook could not map the wallet to a provider account.');
+        }
+
+        DB::transaction(function () use ($account, $currency, $provider, $walletBalance, $walletHashId): void {
+            Balance::query()->updateOrCreate(
+                [
+                    'provider_id' => $provider->id,
+                    'external_account_id' => $walletHashId,
+                    'currency' => $currency,
+                ],
+                [
+                    'user_id' => $account->user_id,
+                    'available_balance' => $walletBalance,
+                    'ledger_balance' => $walletBalance,
+                    'as_of' => now(),
+                ],
+            );
+        });
     }
 
     private function processCustomerLifecyclePayload(
@@ -588,13 +632,13 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     private function eventType(array $payload): string
     {
-        return (string) ($this->value($payload, [
-           'eventType',
-           'event_type',
-           'type',
-           'name',
-           'template',
-        ]) ?? 'nium.webhook');
+        foreach (['template', 'eventType'] as $key) {
+            if (filled($payload[$key] ?? null)) {
+                return (string) $payload[$key];
+            }
+        }
+
+        return 'nium.webhook';
     }
 
     private function resourcePayload(array $payload): array
