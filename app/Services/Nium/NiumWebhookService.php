@@ -280,19 +280,35 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         }
 
         DB::transaction(function () use ($account, $currency, $provider, $walletBalance, $walletHashId): void {
-            Balance::query()->updateOrCreate(
-                [
-                    'provider_id' => $provider->id,
-                    'external_account_id' => $walletHashId,
-                    'currency' => $currency,
-                ],
-                [
+            $attributes = [
+                'provider_id' => $provider->id,
+                'external_account_id' => $walletHashId,
+                'currency' => $currency,
+            ];
+            $balance = Balance::query()
+                ->where($attributes)
+                ->lockForUpdate()
+                ->first();
+
+            if ($balance !== null) {
+                $balance->update([
                     'user_id' => $account->user_id,
                     'available_balance' => $walletBalance,
-                    'ledger_balance' => $walletBalance,
+                    'ledger_balance' => bcadd((string) $walletBalance, (string) $balance->reserved_balance, 8),
                     'as_of' => now(),
-                ],
-            );
+                ]);
+
+                return;
+            }
+
+            Balance::query()->create([
+                ...$attributes,
+                'user_id' => $account->user_id,
+                'available_balance' => $walletBalance,
+                'ledger_balance' => bcadd((string) $walletBalance, '0', 8),
+                'reserved_balance' => 0,
+                'as_of' => now(),
+            ]);
         });
     }
 

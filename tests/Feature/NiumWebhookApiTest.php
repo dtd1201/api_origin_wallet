@@ -92,9 +92,9 @@ class NiumWebhookApiTest extends TestCase
             'provider_id' => $provider->id,
             'external_account_id' => $account->external_account_id,
             'currency' => 'USD',
-            'available_balance' => '100.00',
-            'ledger_balance' => '100.00',
-            'reserved_balance' => '25.00',
+            'available_balance' => '263474.00',
+            'ledger_balance' => '278474.00',
+            'reserved_balance' => '15000.00',
             'as_of' => now()->subHour(),
         ]);
         $payload = [
@@ -104,7 +104,7 @@ class NiumWebhookApiTest extends TestCase
             'customerHashId' => $account->external_customer_id,
             'transactionAmount' => '2000.00',
             'transactionCurrency' => 'USD',
-            'walletBalance' => '259474.0',
+            'walletBalance' => '260474.0',
         ];
 
         $this->withHeader('x-partner-key', 'nium-webhook-test-key')
@@ -119,9 +119,9 @@ class NiumWebhookApiTest extends TestCase
             'provider_id' => $provider->id,
             'external_account_id' => 'wallet-funding-001',
             'currency' => 'USD',
-            'available_balance' => '259474.00000000',
-            'ledger_balance' => '259474.00000000',
-            'reserved_balance' => '25.00000000',
+            'available_balance' => '260474.00000000',
+            'ledger_balance' => '275474.00000000',
+            'reserved_balance' => '15000.00000000',
         ]);
     }
 
