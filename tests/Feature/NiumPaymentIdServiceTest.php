@@ -187,6 +187,39 @@ class NiumPaymentIdServiceTest extends TestCase
         $this->assertSame('2026-09-09 08:30:00', $assigned->assigned_at->utc()->format('Y-m-d H:i:s'));
     }
 
+    public function test_real_nium_virtual_account_assigned_webhook_updates_existing_pending_record(): void
+    {
+        [$provider, , $account] = $this->eligibleAccount();
+        $pending = NiumVirtualAccount::query()->create([
+            'user_provider_account_id' => $account->id,
+            'currency' => 'USD',
+            'account_category' => 'COLLECTION_ACCOUNT',
+            'account_type' => 'LOCAL',
+            'status' => 'pending',
+        ]);
+        $payload = [
+            'eventId' => 'virtual-account-assigned-webhook-001',
+            'template' => 'VIRTUAL_ACCOUNT_ASSIGNED_WEBHOOK',
+            'customerHashId' => 'customer-test',
+            'walletHashId' => 'wallet-test',
+            'uniquePaymentId' => 'VA-REAL-NIUM-001',
+            'currencyCode' => 'USD',
+            'accountType' => 'LOCAL',
+        ];
+        $request = Request::create('/api/webhooks/providers/nium', 'POST', server: [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_X_PARTNER_KEY' => 'test-partner-key',
+        ], content: json_encode($payload, JSON_THROW_ON_ERROR));
+
+        $result = app(NiumWebhookService::class)->handleWebhook($provider, $request);
+
+        $this->assertFalse($result['duplicate'] ?? false);
+        $this->assertSame($pending->id, NiumVirtualAccount::query()->sole()->id);
+        $this->assertSame('VA-REAL-NIUM-001', $pending->fresh()->provider_payment_id);
+        $this->assertSame('assigned', $pending->fresh()->status);
+        $this->assertSame(1, NiumVirtualAccount::query()->count());
+    }
+
     public function test_va_assigned_webhook_updates_only_the_pending_record_with_matching_dimensions(): void
     {
         [$provider, , $account] = $this->eligibleAccount();

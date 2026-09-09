@@ -367,6 +367,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         return in_array(strtoupper((string) ($payload['template'] ?? $payload['eventType'] ?? '')), [
             'VA_ASSIGNED',
             'VIRTUAL_ACCOUNT_ASSIGNED',
+            'VIRTUAL_ACCOUNT_ASSIGNED_WEBHOOK',
         ], true);
     }
 
