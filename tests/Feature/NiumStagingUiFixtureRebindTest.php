@@ -7,12 +7,15 @@ use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserProviderAccount;
+use App\Services\Nium\NiumService;
 use App\Services\Nium\NiumStagingUiFixtureRebindService;
 use App\Services\Nium\NiumWebhookService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
+use Illuminate\Http\Client\Response;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Mockery;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -21,8 +24,6 @@ final class NiumStagingUiFixtureRebindTest extends TestCase
     use RefreshDatabase;
 
     private const OLD_CUSTOMER_ID = 'b4e39b04-08dc-4f03-810a-b96b60950ee1';
-
-    private const OLD_WALLET_ID = 'b005d6ca-ba6c-41d5-b379-d90d2b9be6bb';
 
     private const OLD_EXTERNAL_REFERENCE = 'old-customer-external-reference';
 
@@ -89,7 +90,7 @@ final class NiumStagingUiFixtureRebindTest extends TestCase
 
     public function test_wrong_authenticated_identifiers_are_rejected(): void
     {
-        $this->fakeCustomerGet(['walletHashId' => 'wrong-wallet-id']);
+        $this->fakeCustomerGet(['wallets' => [['walletHashId' => 'wrong-wallet-id']]]);
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('did not match');
@@ -134,6 +135,88 @@ final class NiumStagingUiFixtureRebindTest extends TestCase
         );
     }
 
+    public function test_missing_wallets_are_rejected(): void
+    {
+        $this->fakeCustomerGet([], ['wallets']);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('did not match');
+
+        $this->service()->rebind(NiumStagingUiFixtureRebindService::APPROVAL, 'missing wallets ticket');
+    }
+
+    public function test_empty_wallets_are_rejected(): void
+    {
+        $this->fakeCustomerGet(['wallets' => []]);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('did not match');
+
+        $this->service()->rebind(NiumStagingUiFixtureRebindService::APPROVAL, 'empty wallets ticket');
+    }
+
+    public function test_wrong_nested_wallet_identifier_is_rejected(): void
+    {
+        $this->fakeCustomerGet(['wallets' => [['walletHashId' => 'wrong-nested-wallet']]]);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('did not match');
+
+        $this->service()->rebind(NiumStagingUiFixtureRebindService::APPROVAL, 'wrong wallet ticket');
+    }
+
+    public function test_locked_fixture_state_change_during_get_is_rejected_without_mutation(): void
+    {
+        $this->fakeCustomerGet([], [], function (): void {
+            UserProviderAccount::query()->findOrFail(7)->update([
+                'external_customer_id' => 'changed-before-transaction',
+                'status' => 'under_review',
+            ]);
+        });
+
+        try {
+            $this->service()->rebind(NiumStagingUiFixtureRebindService::APPROVAL, 'changed state ticket');
+            $this->fail('Expected locked fixture state guard failure.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('pre-mutation state guard failed', $exception->getMessage());
+        }
+
+        $account = UserProviderAccount::query()->findOrFail(7);
+        $this->assertSame(self::OLD_EXTERNAL_REFERENCE, $account->external_reference);
+        $this->assertSame('changed-before-transaction', $account->external_customer_id);
+        $this->assertSame('under_review', $account->status);
+        $this->assertDatabaseMissing('audit_logs', ['action' => NiumStagingUiFixtureRebindService::AUDIT_ACTION]);
+    }
+
+    public function test_stale_evidence_log_is_not_accepted_for_current_execution(): void
+    {
+        ApiRequestLog::query()->create([
+            'provider_id' => 7,
+            'user_id' => 9,
+            'operation' => NiumStagingUiFixtureRebindService::EVIDENCE_OPERATION,
+            'request_method' => 'GET',
+            'request_url' => 'https://gateway.sandbox.nium.test/stale-evidence',
+            'response_status' => 200,
+            'response_body' => [],
+            'transport_outcome' => 'response_received',
+            'is_success' => true,
+        ]);
+        $mock = Mockery::mock(NiumService::class);
+        $mock->shouldReceive('clientId')->once()->andReturn('client-test');
+        $mock->shouldReceive('path')->once()->andReturn('/authenticated-customer-get');
+        $mock->shouldReceive('get')->once()->andReturn(new Response(new \GuzzleHttp\Psr7\Response(
+            200,
+            [],
+            json_encode($this->realCustomerPayload(), JSON_THROW_ON_ERROR),
+        )));
+        $this->app->instance(NiumService::class, $mock);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('did not match');
+
+        $this->service()->rebind(NiumStagingUiFixtureRebindService::APPROVAL, 'stale evidence ticket');
+    }
+
     public function test_duplicate_execution_is_rejected_without_second_get(): void
     {
         $this->fakeCustomerGet();
@@ -162,7 +245,7 @@ final class NiumStagingUiFixtureRebindTest extends TestCase
 
         $account = UserProviderAccount::query()->findOrFail(7);
         $this->assertSame(self::OLD_EXTERNAL_REFERENCE, $account->external_reference);
-        $this->assertSame(self::OLD_CUSTOMER_ID, $account->external_customer_id);
+        $this->assertSame(NiumStagingUiFixtureRebindService::CUSTOMER_HASH_ID, $account->external_customer_id);
         $this->assertDatabaseMissing('audit_logs', [
             'action' => NiumStagingUiFixtureRebindService::AUDIT_ACTION,
         ]);
@@ -242,39 +325,53 @@ final class NiumStagingUiFixtureRebindTest extends TestCase
             'id' => 7,
             'user_id' => 9,
             'provider_id' => 7,
-            'external_customer_id' => self::OLD_CUSTOMER_ID,
-            'external_account_id' => self::OLD_WALLET_ID,
+            'external_customer_id' => NiumStagingUiFixtureRebindService::CUSTOMER_HASH_ID,
+            'external_account_id' => NiumStagingUiFixtureRebindService::WALLET_HASH_ID,
             'external_reference' => self::OLD_EXTERNAL_REFERENCE,
-            'status' => 'under_review',
+            'status' => 'blocked',
             'provider_status' => 'pending',
             'provider_sub_status' => 'under_review',
-            'reconciliation_status' => 'pending',
-            'reconciliation_error' => 'old_customer_pending',
+            'reconciliation_status' => 'quarantined',
+            'reconciliation_error' => 'verified_identifier_mismatch',
             'security_conflict_at' => now()->subHour(),
             'security_conflict_reason' => 'external_reference_mismatch',
         ]);
     }
 
-    private function fakeCustomerGet(array $overrides = []): void
+    private function fakeCustomerGet(array $overrides = [], array $remove = [], ?callable $duringRequest = null): void
     {
-        $payload = array_replace([
-            'customerHashId' => NiumStagingUiFixtureRebindService::CUSTOMER_HASH_ID,
-            'walletHashId' => NiumStagingUiFixtureRebindService::WALLET_HASH_ID,
-            'externalId' => self::NEW_EXTERNAL_REFERENCE,
-            'status' => 'clear',
-            'subStatus' => null,
-        ], $overrides);
+        $payload = array_replace($this->realCustomerPayload(), $overrides);
 
-        Http::fake(function (HttpRequest $request) use ($payload) {
+        foreach ($remove as $key) {
+            unset($payload[$key]);
+        }
+
+        Http::fake(function (HttpRequest $request) use ($duringRequest, $payload) {
             $this->assertSame('GET', $request->method());
             $this->assertSame(
                 'https://gateway.sandbox.nium.test/api/v5/client/client-test/customer/'.NiumStagingUiFixtureRebindService::CUSTOMER_HASH_ID,
                 $request->url(),
             );
             $this->assertSame('test-key', $request->header('x-api-key')[0] ?? null);
+            if ($duringRequest !== null) {
+                $duringRequest();
+            }
 
             return Http::response($payload, 200);
         });
+    }
+
+    private function realCustomerPayload(): array
+    {
+        return [
+            'wallets' => [[
+                'walletHashId' => NiumStagingUiFixtureRebindService::WALLET_HASH_ID,
+            ]],
+            'customerHashId' => NiumStagingUiFixtureRebindService::CUSTOMER_HASH_ID,
+            'status' => 'clear',
+            'subStatus' => null,
+            'externalId' => self::NEW_EXTERNAL_REFERENCE,
+        ];
     }
 
     private function webhookRequest(array $payload, string $requestId): Request

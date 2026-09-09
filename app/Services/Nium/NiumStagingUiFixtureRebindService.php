@@ -5,6 +5,7 @@ namespace App\Services\Nium;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
 use App\Models\UserProviderAccount;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -32,6 +33,7 @@ final class NiumStagingUiFixtureRebindService
         private readonly NiumService $niumService,
         private readonly NiumProviderAccountStateService $stateService,
         private readonly NiumAuthenticatedStateProjector $stateProjector,
+        private readonly NiumSafeValueProjector $safeValues,
     ) {}
 
     public function rebind(string $approval, string $operatorContext): UserProviderAccount
@@ -55,6 +57,7 @@ final class NiumStagingUiFixtureRebindService
         }
 
         $account = $this->fixtureAccount();
+        $evidenceFloorId = (int) (ApiRequestLog::query()->max('id') ?? 0);
         $response = $this->niumService->get(
             path: $this->niumService->path(
                 (string) config('services.nium.customer_get_endpoint'),
@@ -71,6 +74,7 @@ final class NiumStagingUiFixtureRebindService
             ->where('provider_id', self::PROVIDER_ID)
             ->where('user_id', self::USER_ID)
             ->where('operation', self::EVIDENCE_OPERATION)
+            ->where('id', '>', $evidenceFloorId)
             ->latest('id')
             ->first();
 
@@ -79,6 +83,7 @@ final class NiumStagingUiFixtureRebindService
         return DB::transaction(function () use ($approval, $evidence, $operatorContext, $payload): UserProviderAccount {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->first();
             $this->assertFixtureAccount($account);
+            $this->assertLockedFixtureState($account);
 
             if ($this->auditExists()) {
                 throw new RuntimeException('Nium UI fixture rebind was already executed.');
@@ -157,17 +162,53 @@ final class NiumStagingUiFixtureRebindService
 
     private function assertAuthenticatedResponse(int $status, array $payload, ?ApiRequestLog $evidence): void
     {
+        $walletHashId = $this->walletHashId($payload);
+
         if ($status !== 200
             || strtolower(trim((string) ($payload['status'] ?? ''))) !== 'clear'
             || ! array_key_exists('subStatus', $payload)
             || $payload['subStatus'] !== null
             || ! hash_equals(self::CUSTOMER_HASH_ID, (string) ($payload['customerHashId'] ?? ''))
-            || ! hash_equals(self::WALLET_HASH_ID, (string) ($payload['walletHashId'] ?? ''))
+            || $walletHashId === null
+            || ! hash_equals(self::WALLET_HASH_ID, $walletHashId)
             || trim((string) ($payload['externalId'] ?? '')) === ''
             || ! $evidence instanceof ApiRequestLog
+            || (int) $evidence->provider_id !== self::PROVIDER_ID
+            || (int) $evidence->user_id !== self::USER_ID
+            || $evidence->operation !== self::EVIDENCE_OPERATION
+            || strtoupper((string) $evidence->request_method) !== 'GET'
             || (int) $evidence->response_status !== 200
-            || $evidence->is_success !== true) {
+            || $evidence->is_success !== true
+            || $evidence->transport_outcome !== 'response_received'
+            || ! hash_equals(
+                (string) $this->safeValues->fingerprint(self::CUSTOMER_HASH_ID),
+                (string) Arr::get((array) $evidence->response_body, 'customer_id_fingerprint'),
+            )
+            || ! hash_equals(
+                (string) $this->safeValues->fingerprint(self::WALLET_HASH_ID),
+                (string) Arr::get((array) $evidence->response_body, 'wallet_id_fingerprint'),
+            )) {
             throw new RuntimeException('Authenticated Nium customer GET did not match the approved clear fixture.');
+        }
+    }
+
+    private function walletHashId(array $payload): ?string
+    {
+        $walletHashId = $payload['walletHashId']
+            ?? Arr::get($payload, 'wallets.0.walletHashId')
+            ?? Arr::get($payload, 'walletHashIds.0');
+
+        return filled($walletHashId) ? (string) $walletHashId : null;
+    }
+
+    private function assertLockedFixtureState(UserProviderAccount $account): void
+    {
+        if (! hash_equals(self::CUSTOMER_HASH_ID, (string) $account->external_customer_id)
+            || ! hash_equals(self::WALLET_HASH_ID, (string) $account->external_account_id)
+            || $account->status !== 'blocked'
+            || $account->reconciliation_status !== 'quarantined'
+            || $account->reconciliation_error !== 'verified_identifier_mismatch') {
+            throw new RuntimeException('Nium UI fixture Account 7 locked pre-mutation state guard failed.');
         }
     }
 
