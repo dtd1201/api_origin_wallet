@@ -114,6 +114,87 @@ class NiumPaymentIdServiceTest extends TestCase
             ]);
     }
 
+    public function test_virtual_accounts_endpoint_returns_only_matching_provider_accounts_records(): void
+    {
+        [$provider, $user, $account] = $this->eligibleAccount();
+        $user->profile()->create([
+            'user_type' => 'business',
+            'country_code' => 'HK',
+        ]);
+        $assigned = NiumVirtualAccount::query()->create([
+            'user_provider_account_id' => $account->id,
+            'provider_payment_id' => 'VA-ASSIGNED-001',
+            'currency' => 'USD',
+            'account_type' => 'LOCAL',
+            'status' => 'assigned',
+        ]);
+        $pending = NiumVirtualAccount::query()->create([
+            'user_provider_account_id' => $account->id,
+            'currency' => 'EUR',
+            'account_type' => 'LOCAL',
+            'status' => 'pending',
+        ]);
+        $otherUser = User::factory()->create();
+        $otherAccount = $otherUser->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'status' => 'active',
+        ]);
+        NiumVirtualAccount::query()->create([
+            'user_provider_account_id' => $otherAccount->id,
+            'provider_payment_id' => 'VA-OTHER-USER',
+            'currency' => 'USD',
+            'account_type' => 'LOCAL',
+            'status' => 'assigned',
+        ]);
+        $otherProvider = IntegrationProvider::query()->create([
+            'code' => 'other-va-provider',
+            'name' => 'Other VA Provider',
+            'status' => 'active',
+        ]);
+        $otherProviderAccount = $user->providerAccounts()->create([
+            'provider_id' => $otherProvider->id,
+            'status' => 'active',
+        ]);
+        NiumVirtualAccount::query()->create([
+            'user_provider_account_id' => $otherProviderAccount->id,
+            'provider_payment_id' => 'VA-OTHER-PROVIDER',
+            'currency' => 'USD',
+            'account_type' => 'LOCAL',
+            'status' => 'assigned',
+        ]);
+
+        $response = $this->withToken($this->issueTokenFor($user))
+            ->getJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/virtual-accounts");
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.id', $pending->id)
+            ->assertJsonPath('data.0.status', 'pending')
+            ->assertJsonPath('data.1.id', $assigned->id)
+            ->assertJsonPath('data.1.status', 'assigned');
+        $this->assertNotContains('VA-OTHER-USER', $response->json('data.*.provider_payment_id'));
+        $this->assertNotContains('VA-OTHER-PROVIDER', $response->json('data.*.provider_payment_id'));
+    }
+
+    public function test_virtual_accounts_endpoint_rejects_non_primary_provider(): void
+    {
+        [, $user] = $this->eligibleAccount();
+        $user->profile()->create([
+            'user_type' => 'business',
+            'country_code' => 'HK',
+        ]);
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'other-provider',
+            'name' => 'Other Provider',
+            'status' => 'active',
+        ]);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->getJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/virtual-accounts")
+            ->assertNotFound();
+    }
+
     public function test_initialized_response_creates_pending_virtual_account_without_persisting_the_sentinel(): void
     {
         [, , $account] = $this->eligibleAccount();

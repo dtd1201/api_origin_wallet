@@ -172,6 +172,23 @@ class ProviderAccountController extends Controller
         ], 202);
     }
 
+    public function virtualAccounts(User $user, IntegrationProvider $provider): JsonResponse
+    {
+        abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
+        $account = UserProviderAccount::query()
+            ->where('user_id', $user->id)
+            ->where('provider_id', $provider->id)
+            ->latest('id')
+            ->first();
+
+        return response()->json([
+            'data' => $account?->niumVirtualAccounts()
+                ->latest('id')
+                ->get() ?? [],
+        ]);
+    }
+
     public function assignVirtualAccount(
         Request $request,
         User $user,

@@ -35,6 +35,7 @@ Route::post('users/{user}/identity-verification-sessions/{identityVerificationSe
 Route::middleware('profile.complete')->group(function (): void {
     Route::get('users/{user}/provider-accounts', [ProviderAccountController::class, 'index']);
     Route::get('users/{user}/provider-accounts/{provider}', [ProviderAccountController::class, 'show']);
+    Route::get('users/{user}/provider-accounts/{provider}/virtual-accounts', [ProviderAccountController::class, 'virtualAccounts']);
     Route::post('users/{user}/provider-accounts/{provider}/link', [ProviderAccountController::class, 'link']);
     Route::post('users/{user}/provider-accounts/{provider}/complete', [ProviderAccountController::class, 'complete']);
     Route::post('users/{user}/provider-accounts/{provider}/request-connect', [ProviderAccountController::class, 'requestConnect']);
