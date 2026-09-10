@@ -319,7 +319,7 @@ class NiumPostgresConcurrencyTest extends TestCase
         $beneficiary = Beneficiary::query()->create([
             'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'transfer-beneficiary',
             'beneficiary_type' => 'business', 'full_name' => 'Concurrent Payee', 'country_code' => 'HK',
-            'currency' => 'USD', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
+            'currency' => 'USD', 'payout_method' => 'SWIFT', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ]);
         $transfer = Transfer::query()->create([
             'transfer_no' => 'TRF-CONCURRENT', 'user_id' => $user->id, 'provider_id' => $provider->id,
@@ -386,7 +386,7 @@ class NiumPostgresConcurrencyTest extends TestCase
         $beneficiary = Beneficiary::query()->create([
             'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'balance-beneficiary',
             'beneficiary_type' => 'business', 'full_name' => 'Balance Payee', 'country_code' => 'HK',
-            'currency' => 'USD', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
+            'currency' => 'USD', 'payout_method' => 'SWIFT', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ]);
         $transfers = collect([1, 2])->map(fn (int $number): Transfer => Transfer::query()->create([
             'transfer_no' => "TRF-BALANCE-{$number}", 'user_id' => $user->id, 'provider_id' => $provider->id,
@@ -433,7 +433,7 @@ class NiumPostgresConcurrencyTest extends TestCase
         $beneficiary = Beneficiary::query()->create([
             'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'create-beneficiary',
             'beneficiary_type' => 'business', 'full_name' => 'Create Payee', 'country_code' => 'HK',
-            'currency' => 'USD', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
+            'currency' => 'USD', 'payout_method' => 'SWIFT', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ]);
         $token = $this->issueTokenFor($user);
         $payload = [

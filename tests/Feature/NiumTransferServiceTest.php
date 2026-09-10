@@ -84,6 +84,7 @@ class NiumTransferServiceTest extends TestCase
             'full_name' => 'HK Company',
             'country_code' => 'HK',
             'currency' => 'USD',
+            'payout_method' => 'SWIFT',
             'status' => 'active',
             'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ]);
@@ -805,7 +806,7 @@ class NiumTransferServiceTest extends TestCase
         $beneficiary = Beneficiary::query()->create([
             'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'beneficiary-test',
             'beneficiary_type' => 'business', 'full_name' => 'Test Payee', 'country_code' => 'HK',
-            'currency' => 'USD', 'status' => 'active',
+            'currency' => 'USD', 'payout_method' => 'SWIFT', 'status' => 'active',
             'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ]);
         $transfer = Transfer::query()->create(array_merge([

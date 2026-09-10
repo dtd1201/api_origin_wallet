@@ -421,10 +421,16 @@ final class NiumSafeValueProjector
             'external_id_fingerprint' => $this->fingerprint($payload['externalId'] ?? null),
             'customer_type' => $this->customerType($payload['type'] ?? null),
             'region' => $this->region($payload['region'] ?? null),
+            'payout_method' => $this->transferDiagnosticString($payload['payoutMethod'] ?? null),
+            'destination_country' => $this->region($payload['destinationCountry'] ?? null),
+            'destination_currency' => $this->transferDiagnosticString($payload['destinationCurrency'] ?? null),
         ], static fn ($value): bool => $value !== null), [
             'external_id_fingerprint' => 'fingerprint',
             'customer_type' => 'string',
             'region' => 'string',
+            'payout_method' => 'string',
+            'destination_country' => 'string',
+            'destination_currency' => 'string',
         ]);
     }
 
@@ -529,6 +535,7 @@ final class NiumSafeValueProjector
         $errorProjection = $this->errorProjection($errorValue);
         $customerId = $response['customerHashId'] ?? null;
         $walletId = $response['walletHashId'] ?? ($response['wallets'][0]['walletHashId'] ?? null);
+        $beneficiaryId = $response['beneficiaryHashId'] ?? $response['id'] ?? null;
         $transferId = $response['systemReferenceNumber'] ?? $response['system_reference_number'] ?? null;
         $paymentId = $response['paymentId'] ?? $response['payment_id'] ?? $response['uniquePaymentId'] ?? null;
         $redirectUrl = $response['redirectUrl'] ?? null;
@@ -558,6 +565,7 @@ final class NiumSafeValueProjector
             'wallet_id_present' => $this->isPresent($walletId),
             'customer_hash_id' => $successful ? $this->providerIdentifier($customerId) : null,
             'wallet_hash_id' => $successful ? $this->providerIdentifier($walletId) : null,
+            'beneficiary_id' => $successful ? $this->providerIdentifier($beneficiaryId) : null,
             'system_reference_number' => $successful ? $this->providerIdentifier($transferId) : null,
             'payment_id' => $successful ? $this->providerIdentifier($paymentId) : null,
             'customer_id_fingerprint' => $this->fingerprint($customerId),
@@ -584,6 +592,7 @@ final class NiumSafeValueProjector
             'wallet_id_present' => 'bool',
             'customer_hash_id' => 'string',
             'wallet_hash_id' => 'string',
+            'beneficiary_id' => 'string',
             'system_reference_number' => 'string',
             'payment_id' => 'string',
             'customer_id_fingerprint' => 'fingerprint',

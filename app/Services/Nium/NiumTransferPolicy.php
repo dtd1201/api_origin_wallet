@@ -11,7 +11,10 @@ use RuntimeException;
 
 final class NiumTransferPolicy
 {
-    public function __construct(private readonly NiumRegionResolver $regionResolver) {}
+    public function __construct(
+        private readonly NiumRegionResolver $regionResolver,
+        private readonly NiumBeneficiaryPayoutMethodResolver $payoutMethodResolver,
+    ) {}
 
     public const SOURCE_CURRENCY = 'USD';
 
@@ -115,8 +118,7 @@ final class NiumTransferPolicy
         if (strtolower((string) $beneficiary->status) !== 'active') {
             throw new RuntimeException('Nium beneficiary must be active.');
         }
-        $nium = (array) (($beneficiary->raw_data ?? [])['nium'] ?? []);
-        $payoutMethod = strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? ''));
+        $payoutMethod = $this->payoutMethodResolver->resolve($beneficiary);
         if (strtoupper((string) $beneficiary->country_code) !== 'HK'
             || strtoupper((string) $beneficiary->currency) !== self::DESTINATION_CURRENCY
             || $payoutMethod !== self::PAYOUT_METHOD) {

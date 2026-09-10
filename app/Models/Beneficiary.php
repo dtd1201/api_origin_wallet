@@ -24,6 +24,7 @@ class Beneficiary extends Model
         'phone',
         'country_code',
         'currency',
+        'payout_method',
         'bank_name',
         'bank_code',
         'branch_code',

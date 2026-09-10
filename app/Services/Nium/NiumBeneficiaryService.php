@@ -87,7 +87,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
             $beneficiary->update([
                 'status' => 'verification_failed',
-                'raw_data' => $this->safeOperationalData($responseData),
+                'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
             ]);
 
             throw new RuntimeException($responseData['message'] ?? 'Nium account verification failed.');
@@ -96,7 +96,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
         $beneficiary->update([
-            'raw_data' => $this->safeOperationalData($responseData),
+            'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
         ]);
     }
 
@@ -201,7 +201,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
                 ?? $nium['remitter_beneficiary_relationship']
                 ?? Arr::get($nium, 'beneficiary.remitterBeneficiaryRelationship'),
             'beneficiaryAccountNumber' => $beneficiary->account_number ?: $beneficiary->iban,
-           // 'beneficiaryBankAccountType' => $this->normalizeBankAccountType($nium['beneficiaryBankAccountType'] ?? $nium['beneficiary_bank_account_type'] ?? 'CHECKING'),
+            // 'beneficiaryBankAccountType' => $this->normalizeBankAccountType($nium['beneficiaryBankAccountType'] ?? $nium['beneficiary_bank_account_type'] ?? 'CHECKING'),
             'beneficiaryBankName' => $beneficiary->bank_name,
             'beneficiaryBankCode' => $beneficiary->bank_code,
             'beneficiaryIdentificationType' => $nium['beneficiaryIdentificationType'] ?? $nium['beneficiary_identification_type'] ?? null,
@@ -242,7 +242,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         if (! $response->successful() || ! filled($payload['beneficiaryHashId'] ?? $payload['id'] ?? $beneficiary->external_beneficiary_id)) {
             $beneficiary->update([
                 'status' => "{$action}_failed",
-                'raw_data' => $this->safeOperationalData($responseData),
+                'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
             ]);
 
             throw new RuntimeException($responseData['message'] ?? "{$provider->name} beneficiary {$action} failed.");
@@ -251,7 +251,8 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $beneficiary->update([
             'external_beneficiary_id' => $payload['beneficiaryHashId'] ?? $payload['id'] ?? $beneficiary->external_beneficiary_id,
             'status' => $this->normalizeBeneficiaryStatus($payload['status'] ?? 'ACTIVE'),
-            'raw_data' => $this->safeOperationalData($responseData),
+            'payout_method' => strtoupper((string) $requestPayload['payoutMethod']),
+            'raw_data' => $this->mergeSuccessfulWriteData($beneficiary, $responseData, $requestPayload),
         ]);
 
         return $beneficiary->fresh();
@@ -392,6 +393,23 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             'provider_error_code' => $data['code'] ?? $data['errorCode'] ?? null,
             'beneficiary_id' => $data['beneficiaryHashId'] ?? Arr::get($data, 'data.beneficiaryHashId'),
         ], static fn ($value) => $value !== null && $value !== '');
+    }
+
+    private function mergeSafeOperationalData(Beneficiary $beneficiary, array $responseData): array
+    {
+        return array_replace((array) ($beneficiary->raw_data ?? []), $this->safeOperationalData($responseData));
+    }
+
+    private function mergeSuccessfulWriteData(Beneficiary $beneficiary, array $responseData, array $requestPayload): array
+    {
+        $rawData = $this->mergeSafeOperationalData($beneficiary, $responseData);
+        $nium = (array) ($rawData['nium'] ?? []);
+        $nium['provider_verified'] = [
+            'payout_method' => strtoupper((string) $requestPayload['payoutMethod']),
+        ];
+        $rawData['nium'] = $nium;
+
+        return $rawData;
     }
 
     private function validateCorridor(Beneficiary $beneficiary): void

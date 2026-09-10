@@ -424,6 +424,7 @@ class CustomerTransferSecurityTest extends TestCase
             'full_name' => 'Customer Beneficiary',
             'country_code' => 'HK',
             'currency' => 'USD',
+            'payout_method' => 'SWIFT',
             'status' => 'active',
             'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ], $overrides));

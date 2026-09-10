@@ -65,7 +65,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             'currency' => 'INR',
             'bank_name' => 'HDFC',
             'bank_code' => 'HDFC0001234',
-            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC']],
+            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC', 'payoutMethod' => 'LOCAL']],
             'account_number' => '1234567890',
             'swift_bic' => 'HDFCINBB',
             'address_line1' => '1 Main St',
@@ -148,6 +148,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             'raw_data' => [
                 'nium' => [
                     'bankCodeType' => 'IFSC',
+                    'payoutMethod' => 'LOCAL',
                     'verify_before_create' => true,
                     'account_verification' => [
                         'routingInfo' => [
@@ -229,7 +230,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             'currency' => 'INR',
             'account_number' => '1234567890',
             'bank_code' => 'HDFC0001234',
-            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC']],
+            'raw_data' => ['nium' => ['bankCodeType' => 'IFSC', 'payoutMethod' => 'LOCAL']],
             'status' => 'pending',
         ]));
 
@@ -310,6 +311,7 @@ class NiumBeneficiaryServiceTest extends TestCase
             'currency' => 'INR',
             'account_number' => '1234567890',
             'external_beneficiary_id' => 'bnf_hash_123',
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']],
             'status' => 'active',
         ]);
 

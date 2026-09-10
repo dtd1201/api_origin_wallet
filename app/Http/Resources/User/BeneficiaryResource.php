@@ -19,6 +19,7 @@ class BeneficiaryResource extends JsonResource
             'phone' => $this->phone,
             'country_code' => $this->country_code,
             'currency' => $this->currency,
+            'payout_method' => $this->payout_method,
             'bank_name' => $this->bank_name,
             'bank_code' => $this->bank_code,
             'branch_code' => $this->branch_code,
