@@ -8,9 +8,12 @@ use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumTransferPolicy;
+use App\Services\Transfers\TransferClientReferenceIdempotency;
 use App\Services\Transfers\TransferEligibilityService;
 use App\Services\Wallet\TransferApprovalService;
 use App\Support\PrimaryProvider;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -42,16 +45,18 @@ class TransferController extends Controller
         User $user,
         TransferEligibilityService $eligibilityService,
         TransferApprovalService $approvalService,
+        NiumTransferPolicy $niumPolicy,
+        TransferClientReferenceIdempotency $idempotency,
     ): JsonResponse {
         $validated = $request->validate([
             'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
             'source_bank_account_id' => ['nullable', 'exists:bank_accounts,id'],
-            'beneficiary_id' => ['nullable', 'exists:beneficiaries,id'],
+            'beneficiary_id' => ['required', 'exists:beneficiaries,id'],
             'fx_quote_id' => ['nullable', 'exists:fx_quotes,id'],
             'transfer_type' => ['required', 'string', 'max:30'],
-            'source_currency' => ['required', 'string', 'size:3'],
-            'target_currency' => ['required', 'string', 'size:3'],
-            'source_amount' => ['required', 'numeric'],
+            'source_currency' => ['required', 'string', 'size:3', 'regex:/^[A-Z]{3}$/'],
+            'target_currency' => ['required', 'string', 'size:3', 'regex:/^[A-Z]{3}$/'],
+            'source_amount' => ['required', 'numeric', 'gt:0', 'decimal:0,8'],
             'target_amount' => ['nullable', 'numeric'],
             'fx_rate' => ['nullable', 'numeric'],
             'fee_amount' => ['nullable', 'numeric'],
@@ -61,6 +66,8 @@ class TransferController extends Controller
             'client_reference' => ['nullable', 'string', 'max:255'],
             'raw_data' => ['nullable', 'array'],
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'raw_data.source' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.flow' => ['sometimes', 'nullable', 'string', 'max:50'],
         ]);
 
         $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
@@ -88,6 +95,12 @@ class TransferController extends Controller
         try {
             $provider->assertSupportsCapability('transfer');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
+            if ($niumPolicy->appliesTo($provider)) {
+                if (! filled($validated['client_reference'] ?? null)) {
+                    throw ValidationException::withMessages(['client_reference' => 'Client reference is required for Nium transfers.']);
+                }
+                $validated = $niumPolicy->normalizeCreate($validated, $user, $provider, $beneficiary);
+            }
         } catch (Throwable $exception) {
             if ($exception instanceof ValidationException) {
                 throw $exception;
@@ -128,20 +141,37 @@ class TransferController extends Controller
             $validated['fee_currency'] = $validated['source_currency'];
         }
 
-        $transfer = DB::transaction(function () use ($approvalService, $user, $validated): Transfer {
-            $transfer = $user->transfers()->create([
-                ...$validated,
-                'transfer_no' => 'TRF-'.Str::upper(Str::random(12)),
-                'client_reference' => $validated['client_reference'] ?? 'OW-'.Str::uuid()->toString(),
-                'status' => 'draft',
-            ]);
+        $clientReference = $validated['client_reference'] ?? 'OW-'.Str::uuid()->toString();
+        $existing = $user->transfers()->where('provider_id', $provider->id)->where('client_reference', $clientReference)->first();
+        if ($existing !== null) {
+            return $this->idempotentCreateResponse($existing, $validated, $idempotency);
+        }
 
-            $transfer->update([
-                'status' => $approvalService->initialStatusFor($transfer),
-            ]);
+        try {
+            $transfer = DB::transaction(function () use ($approvalService, $user, $validated, $clientReference): Transfer {
+                $transfer = $user->transfers()->create([
+                    ...$validated,
+                    'transfer_no' => 'TRF-'.Str::upper(Str::random(12)),
+                    'client_reference' => $clientReference,
+                    'status' => 'draft',
+                ]);
 
-            return $transfer->fresh();
-        });
+                $transfer->update(['status' => $approvalService->initialStatusFor($transfer)]);
+
+                return $transfer->fresh();
+            });
+        } catch (QueryException $exception) {
+            if (! $idempotency->isExpectedUniqueViolation($exception)) {
+                throw $exception;
+            }
+
+            $existing = $user->transfers()->where('provider_id', $provider->id)->where('client_reference', $clientReference)->first();
+            if ($existing === null) {
+                throw $exception;
+            }
+
+            return $this->idempotentCreateResponse($existing, $validated, $idempotency);
+        }
 
         if ($fxQuote !== null) {
             $transfer->update([
@@ -162,6 +192,18 @@ class TransferController extends Controller
     private function decimal(mixed $value): string
     {
         return number_format((float) $value, 8, '.', '');
+    }
+
+    private function idempotentCreateResponse(
+        Transfer $existing,
+        array $validated,
+        TransferClientReferenceIdempotency $idempotency,
+    ): JsonResponse {
+        if (! $idempotency->matches($existing, $validated)) {
+            return response()->json(['message' => 'Client reference is already used for a different transfer request.'], 409);
+        }
+
+        return response()->json((new TransferResource($existing))->resolve());
     }
 
     public function submit(

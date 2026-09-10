@@ -3,38 +3,56 @@
 namespace Tests\Feature;
 
 use App\Models\ApiRequestLog;
+use App\Models\ApiToken;
 use App\Models\Balance;
 use App\Models\Beneficiary;
-use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
 use App\Models\KycProviderSubmission;
 use App\Models\KycRelatedPerson;
+use App\Models\LedgerEntry;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
+use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumHkSandboxFileStageRunner;
 use App\Services\Nium\NiumTransferService;
 use App\Services\Nium\NiumWebhookService;
 use Illuminate\Database\QueryException;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\DatabaseTruncation;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Tests\Concerns\SeedsNiumCorporateConstants;
 use Tests\TestCase;
 
 require_once __DIR__.'/../../scripts/nium/generate_hk_sandbox_documents.php';
 
 class NiumPostgresConcurrencyTest extends TestCase
 {
-    use DatabaseTruncation;
+    use DatabaseTruncation, SeedsNiumCorporateConstants;
 
     protected array $connectionsToTransact = [];
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        if (Schema::hasTable('transfers') && ! Schema::hasColumn('transfers', 'provider_status')) {
+            Schema::table('transfers', function (Blueprint $table): void {
+                $table->string('provider_status', 80)->nullable()->after('status');
+                $table->text('provider_status_detail')->nullable()->after('provider_status');
+            });
+        }
+    }
 
     public function test_hk_file_stage_atomic_claim_allows_only_one_runner_to_post(): void
     {
@@ -103,6 +121,8 @@ class NiumPostgresConcurrencyTest extends TestCase
             ]);
         }
 
+        $requestLogBaselineId = (int) (ApiRequestLog::query()->max('id') ?? 0);
+
         $this->runConcurrent(2, function (): void {
             $postCount = 0;
             Http::fake(function (HttpRequest $request) use (&$postCount) {
@@ -128,18 +148,21 @@ class NiumPostgresConcurrencyTest extends TestCase
             }
         });
 
-        $newLogs = ApiRequestLog::query()->where('id', '>', 56)->get();
+        $newLogs = ApiRequestLog::query()->where('id', '>', $requestLogBaselineId)->get();
         $this->assertCount(6, $newLogs);
         $this->assertCount(3, $newLogs->where('request_method', 'POST'));
         $this->assertCount(3, $newLogs->where('request_method', 'GET'));
-        $this->assertSame(5, ApiRequestLog::query()->where('operation', 'customer_create')->count());
+        $this->assertSame(5, ApiRequestLog::query()
+            ->where('provider_id', $provider->id)
+            ->where('operation', 'customer_create')
+            ->count());
         $this->assertSame(3, ApiRequestLog::query()
             ->where('provider_id', $provider->id)
-            ->where('user_id', 9)
+            ->where('user_id', $fixtureUser->id)
             ->where('operation', 'customer_create')
             ->where('request_method', 'POST')
             ->count());
-        $this->assertSame(3, KycDocument::query()->whereIn('id', [21, 22, 23])->get()
+        $this->assertSame(3, KycDocument::query()->where('kyc_profile_id', $profile->id)->get()
             ->pluck('metadata')->pluck('nium_file_id')->unique()->count());
 
         Storage::disk('kyc_private')->deleteDirectory('kyc/9/nium-v5-hk');
@@ -152,6 +175,7 @@ class NiumPostgresConcurrencyTest extends TestCase
         }
 
         $this->configureNium();
+        $this->seedNiumCorporateConstants();
         $barrier = tempnam(sys_get_temp_dir(), 'nium-create-race-');
         $transactionLevel = DB::transactionLevel();
         $provider = IntegrationProvider::query()->create([
@@ -281,9 +305,11 @@ class NiumPostgresConcurrencyTest extends TestCase
         config()->set('wallet.transfer_controls.require_admin_approval', false);
         $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
         $user = User::factory()->create(['kyc_status' => 'verified']);
+        $this->createApprovedHkCorporateKycProfile($user);
         $user->providerAccounts()->create([
             'provider_id' => $provider->id, 'external_customer_id' => 'transfer-customer',
             'external_account_id' => 'transfer-wallet', 'status' => 'active', 'provider_status' => 'clear',
+            'reconciliation_status' => 'reconciled',
             'customer_id_verified_at' => now(), 'wallet_id_verified_at' => now(), 'provider_ids_verified_at' => now(),
         ]);
         Balance::query()->create([
@@ -292,30 +318,21 @@ class NiumPostgresConcurrencyTest extends TestCase
         ]);
         $beneficiary = Beneficiary::query()->create([
             'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'transfer-beneficiary',
-            'beneficiary_type' => 'personal', 'full_name' => 'Concurrent Payee', 'country_code' => 'IN',
-            'currency' => 'INR', 'status' => 'active',
-        ]);
-        $quote = FxQuote::query()->create([
-            'user_id' => $user->id, 'provider_id' => $provider->id, 'quote_ref' => '114',
-            'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
-            'target_amount' => 830, 'net_rate' => 83, 'fee_amount' => 1, 'expires_at' => now()->addMinutes(5),
-            'raw_data' => [
-                'provider_fx_type' => 'lock_and_hold',
-                'audit_id' => '114',
-            ],
+            'beneficiary_type' => 'business', 'full_name' => 'Concurrent Payee', 'country_code' => 'HK',
+            'currency' => 'USD', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ]);
         $transfer = Transfer::query()->create([
             'transfer_no' => 'TRF-CONCURRENT', 'user_id' => $user->id, 'provider_id' => $provider->id,
-            'beneficiary_id' => $beneficiary->id, 'fx_quote_id' => $quote->id, 'transfer_type' => 'bank',
-            'source_currency' => 'USD', 'target_currency' => 'INR', 'source_amount' => 10,
-            'target_amount' => 830, 'fx_rate' => 83, 'fee_amount' => 1, 'status' => 'draft',
+            'beneficiary_id' => $beneficiary->id, 'transfer_type' => 'payout',
+            'source_currency' => 'USD', 'target_currency' => 'USD', 'source_amount' => 10,
+            'fee_amount' => 0, 'fee_currency' => 'USD', 'purpose_code' => 'IR01811', 'status' => 'draft',
         ]);
 
         $this->runConcurrent(2, function () use ($provider, $transfer): void {
             Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-CONCURRENT'])]);
 
             try {
-                app(NiumTransferService::class)->submitTransfer(
+                app(ProviderTransferManager::class)->submitTransfer(
                     IntegrationProvider::query()->findOrFail($provider->id),
                     Transfer::query()->findOrFail($transfer->id),
                 );
@@ -329,11 +346,12 @@ class NiumPostgresConcurrencyTest extends TestCase
         $this->assertNotEmpty($updated->provider_operation_key);
         $this->assertSame('RT-CONCURRENT', $updated->external_transfer_id);
         $this->assertSame(1, ApiRequestLog::query()->where('related_transfer_id', $transfer->id)->where('request_method', 'POST')->count());
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
 
         $operationKey = $updated->provider_operation_key;
 
         try {
-            app(NiumTransferService::class)->submitTransfer($provider, $updated);
+            app(ProviderTransferManager::class)->submitTransfer($provider, $updated);
             $this->fail('A completed concurrent submission must not be submitted again.');
         } catch (\RuntimeException) {
             // Expected: state validation rejects before provider HTTP.
@@ -341,6 +359,96 @@ class NiumPostgresConcurrencyTest extends TestCase
 
         $this->assertSame($operationKey, $updated->fresh()->provider_operation_key);
         $this->assertSame(1, ApiRequestLog::query()->where('related_transfer_id', $transfer->id)->where('request_method', 'POST')->count());
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
+    }
+
+    public function test_concurrent_transfers_cannot_reserve_beyond_one_available_balance(): void
+    {
+        if (DB::getDriverName() !== 'pgsql' || ! function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Requires PostgreSQL and pcntl.');
+        }
+
+        $this->configureNium();
+        config()->set('wallet.transfer_controls.require_admin_approval', false);
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        $user = User::factory()->create(['kyc_status' => 'verified']);
+        $this->createApprovedHkCorporateKycProfile($user);
+        $user->providerAccounts()->create([
+            'provider_id' => $provider->id, 'external_customer_id' => 'balance-customer',
+            'external_account_id' => 'balance-wallet', 'status' => 'active', 'provider_status' => 'clear',
+            'reconciliation_status' => 'reconciled', 'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(), 'provider_ids_verified_at' => now(),
+        ]);
+        Balance::query()->create([
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'currency' => 'USD',
+            'available_balance' => 100, 'ledger_balance' => 100, 'as_of' => now(),
+        ]);
+        $beneficiary = Beneficiary::query()->create([
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'balance-beneficiary',
+            'beneficiary_type' => 'business', 'full_name' => 'Balance Payee', 'country_code' => 'HK',
+            'currency' => 'USD', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
+        ]);
+        $transfers = collect([1, 2])->map(fn (int $number): Transfer => Transfer::query()->create([
+            'transfer_no' => "TRF-BALANCE-{$number}", 'user_id' => $user->id, 'provider_id' => $provider->id,
+            'beneficiary_id' => $beneficiary->id, 'transfer_type' => 'payout', 'source_currency' => 'USD',
+            'target_currency' => 'USD', 'source_amount' => 80, 'fee_amount' => 0, 'fee_currency' => 'USD',
+            'purpose_code' => 'IR01811', 'status' => 'draft',
+        ]));
+
+        $this->runConcurrent(2, function (int $worker) use ($provider, $transfers): void {
+            Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-BALANCE-'.$worker])]);
+            try {
+                app(ProviderTransferManager::class)->submitTransfer(
+                    IntegrationProvider::query()->findOrFail($provider->id),
+                    Transfer::query()->findOrFail($transfers[$worker]->id),
+                );
+            } catch (\RuntimeException) {
+                // Exactly one worker must lose after the locked balance is reduced by the winner.
+            }
+        });
+
+        $balance = Balance::query()->sole();
+        $this->assertSame('20.00000000', $balance->available_balance);
+        $this->assertSame('80.00000000', $balance->reserved_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
+        $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
+    }
+
+    public function test_concurrent_create_with_same_client_reference_is_idempotent_on_postgres(): void
+    {
+        if (DB::getDriverName() !== 'pgsql' || ! function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Requires PostgreSQL and pcntl.');
+        }
+
+        $this->configureNium();
+        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        $user = User::factory()->create(['kyc_status' => 'verified']);
+        $this->createApprovedHkCorporateKycProfile($user);
+        $user->providerAccounts()->create([
+            'provider_id' => $provider->id, 'external_customer_id' => 'create-customer',
+            'external_account_id' => 'create-wallet', 'status' => 'active', 'provider_status' => 'clear',
+            'reconciliation_status' => 'reconciled', 'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(), 'provider_ids_verified_at' => now(),
+        ]);
+        $beneficiary = Beneficiary::query()->create([
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'external_beneficiary_id' => 'create-beneficiary',
+            'beneficiary_type' => 'business', 'full_name' => 'Create Payee', 'country_code' => 'HK',
+            'currency' => 'USD', 'status' => 'active', 'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
+        ]);
+        $token = $this->issueTokenFor($user);
+        $payload = [
+            'provider_id' => $provider->id, 'beneficiary_id' => $beneficiary->id, 'transfer_type' => 'payout',
+            'source_currency' => 'USD', 'target_currency' => 'USD', 'source_amount' => '100.00000000',
+            'purpose_code' => 'IR01811', 'client_reference' => 'OW-CONCURRENT-CREATE',
+        ];
+
+        $this->runConcurrent(2, function () use ($token, $user, $payload): void {
+            $response = $this->withToken($token)
+                ->postJson("/api/user/users/{$user->id}/transfers", $payload);
+            $this->assertContains($response->status(), [200, 201]);
+        });
+
+        $this->assertSame(1, Transfer::query()->where('client_reference', 'OW-CONCURRENT-CREATE')->count());
     }
 
     public function test_submission_unknown_cannot_be_resubmitted_on_postgres(): void
@@ -422,6 +530,29 @@ class NiumPostgresConcurrencyTest extends TestCase
         ]);
     }
 
+    private function createApprovedHkCorporateKycProfile(User $user): void
+    {
+        $user->kycProfile()->create([
+            'status' => 'approved', 'applicant_type' => 'business', 'legal_name' => 'HK Corporate Customer',
+            'business_name' => 'HK Corporate Customer', 'registered_country_code' => 'HK',
+            'address_line1' => '1 Corporate Road', 'city' => 'Hong Kong', 'postal_code' => '999077',
+            'country_code' => 'HK', 'metadata' => ['nium_region' => 'HK'],
+        ]);
+    }
+
+    private function issueTokenFor(User $user): string
+    {
+        $plainToken = Str::random(80);
+        ApiToken::query()->create([
+            'user_id' => $user->id,
+            'name' => 'postgres-concurrency-test-token',
+            'token_hash' => hash('sha256', $plainToken),
+            'expires_at' => now()->addDay(),
+        ]);
+
+        return $plainToken;
+    }
+
     private function runConcurrent(int $workers, callable $callback): void
     {
         DB::disconnect();
@@ -434,7 +565,7 @@ class NiumPostgresConcurrencyTest extends TestCase
                 try {
                     DB::purge();
                     DB::reconnect();
-                    $callback();
+                    $callback($worker);
                     exit(0);
                 } catch (\Throwable) {
                     exit(1);

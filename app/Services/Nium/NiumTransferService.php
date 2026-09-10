@@ -19,30 +19,38 @@ class NiumTransferService implements TransferProvider
     public function __construct(
         private readonly NiumService $niumService,
         private readonly TransferEligibilityService $eligibilityService,
+        private readonly NiumTransferPolicy $policy,
     ) {}
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
-        $this->eligibilityService->ensureTransferCanBeSubmitted(
-            $transfer->loadMissing(['provider', 'user', 'beneficiary', 'sourceBankAccount'])
-        );
-        $this->ensureAuthoritativeQuote($transfer->loadMissing('fxQuote'));
-        $payload = $this->buildTransferPayload($transfer);
-        $providerIdentifiers = $this->providerAccountIdentifiers($transfer);
-
-        $transfer = DB::transaction(function () use ($transfer): Transfer {
+        [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use ($provider, $transfer): array {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
 
             if (! in_array($locked->status, ['draft', 'approval_required', 'approved'], true)) {
                 throw new RuntimeException('Transfer has already entered provider submission and cannot be submitted again.');
             }
 
+            $locked->load(['provider', 'user.kycProfile', 'beneficiary', 'sourceBankAccount', 'fxQuote']);
+            if ($locked->provider_id !== $provider->id) {
+                throw new RuntimeException('Transfer provider does not match the Nium submission provider.');
+            }
+            $this->eligibilityService->ensureTransferCanBeSubmitted($locked);
+            $this->ensureAuthoritativeQuote($locked);
+            $this->policy->assertTransfer($locked);
+            $payload = $this->buildTransferPayload($locked);
+            $providerIdentifiers = $this->providerAccountIdentifiers($locked);
+
             $locked->update([
                 'provider_operation_key' => $locked->provider_operation_key ?: 'nium-'.Str::uuid()->toString(),
                 'status' => 'submitting',
             ]);
 
-            return $locked->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount', 'fxQuote']);
+            return [
+                $locked->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount', 'fxQuote']),
+                $payload,
+                $providerIdentifiers,
+            ];
         });
 
         try {
@@ -176,10 +184,10 @@ class NiumTransferService implements TransferProvider
             'external_payment_id' => $statusPayload['paymentReferenceNumber'] ?? $statusPayload['payment_id'] ?? $transfer->external_payment_id,
             'status' => $status,
             'provider_status' => strtoupper(trim((string) (
-                 $statusPayload['status']
-                 ?? $statusPayload['subStatus']
-                 ?? ''
-             ))),
+                $statusPayload['status']
+                ?? $statusPayload['subStatus']
+                ?? ''
+            ))),
 
             'provider_status_detail' => $statusPayload['statusDetails'] ?? null,
             'failure_code' => $status === 'failed' ? 'provider_error' : null,
@@ -198,57 +206,7 @@ class NiumTransferService implements TransferProvider
 
     private function buildTransferPayload(Transfer $transfer): array
     {
-        $rawData = (array) ($transfer->raw_data ?? []);
-        $nium = (array) ($rawData['nium'] ?? []);
-        $beneficiaryNium = (array) (($transfer->beneficiary?->raw_data ?? [])['nium'] ?? []);
-        $payoutMethod = strtoupper(trim((string) (
-            Arr::get($nium, 'payout.payoutMethod')
-            ?? $nium['payoutMethod']
-            ?? $nium['payout_method']
-            ?? $beneficiaryNium['payoutMethod']
-            ?? $beneficiaryNium['payout_method']
-            ?? ''
-        )));
-
-        if (! filled($transfer->beneficiary?->external_beneficiary_id)) {
-            throw new RuntimeException('Nium transfer requires a synced beneficiary.');
-        }
-
-        $payload = [
-            'beneficiary' => [
-                'id' => $transfer->beneficiary->external_beneficiary_id,
-            ],
-            'payout' => array_filter([
-                'sourceAmount' => (float) $transfer->source_amount,
-                'sourceCurrency' => $transfer->source_currency,
-                'destinationAmount' => $transfer->target_amount !== null ? (float) $transfer->target_amount : null,
-                'destinationCurrency' => $transfer->target_currency,
-                'payoutMethod' => $payoutMethod,
-                'auditId' => $transfer->fxQuote?->quote_ref !== null ? (int) $transfer->fxQuote->quote_ref : null,
-                'scheduledPayoutDate' => $nium['payout']['scheduledPayoutDate'] ?? null,
-                'serviceTime' => $nium['payout']['serviceTime'] ?? null,
-                'tradeOrderID' => $nium['payout']['tradeOrderID'] ?? $transfer->reference_text,
-                'swiftFeeType' => $nium['payout']['swiftFeeType'] ?? null,
-                'preScreening' => $nium['payout']['preScreening'] ?? null,
-            ], static fn ($value) => $value !== null && $value !== ''),
-            'purposeCode' => $transfer->purpose_code,
-            'sourceOfFunds' => $nium['sourceOfFunds'] ?? $nium['source_of_funds'] ?? null,
-            'exemptionCode' => $nium['exemptionCode'] ?? $nium['exemption_code'] ?? null,
-            'customerComments' => $transfer->reference_text,
-            'ownPayment' => $nium['ownPayment'] ?? null,
-            'authenticationCode' => $nium['authenticationCode'] ?? null,
-            'deviceDetails' => $nium['deviceDetails'] ?? null,
-        ];
-
-        if (isset($nium['request']) && is_array($nium['request'])) {
-            $payload = array_replace_recursive($payload, $nium['request']);
-        }
-
-        if (strtoupper(trim((string) $transfer->source_currency)) === strtoupper(trim((string) $transfer->target_currency))) {
-            unset($payload['payout']['destinationAmount']);
-        }
-
-        $payload = array_filter($payload, static fn ($value) => $value !== null && $value !== '' && $value !== []);
+        $payload = array_filter($this->policy->providerPayload($transfer), static fn ($value) => $value !== null && $value !== '' && $value !== []);
         $this->validateTransferPayload($payload);
 
         return $payload;
@@ -260,12 +218,19 @@ class NiumTransferService implements TransferProvider
         $providerAccount = UserProviderAccount::query()
             ->where('user_id', $transfer->user_id)
             ->where('provider_id', $transfer->provider_id)
+            ->lockForUpdate()
             ->first();
 
         if (! $providerAccount instanceof UserProviderAccount
+            || $providerAccount->status !== 'active'
+            || strtolower((string) $providerAccount->provider_status) !== 'clear'
+            || $providerAccount->reconciliation_status !== 'reconciled'
+            || $providerAccount->security_conflict_at !== null
             || ! filled($providerAccount->external_customer_id)
-            || ! filled($providerAccount->external_account_id)) {
-            throw new RuntimeException('Nium transfer requires customer and wallet identifiers from the provider account.');
+            || ! filled($providerAccount->external_account_id)
+            || $providerAccount->customer_id_verified_at === null
+            || $providerAccount->wallet_id_verified_at === null) {
+            throw new RuntimeException('Nium provider account is not active, clear, reconciled, and identifier-verified.');
         }
 
         return [

@@ -4,11 +4,13 @@ namespace Tests\Feature;
 
 use App\Models\ApiToken;
 use App\Models\Balance;
+use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderQuoteManager;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumTransferPolicy;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Mockery\MockInterface;
@@ -44,16 +46,14 @@ class CustomerTransferSecurityTest extends TestCase
     {
         [$customer, $token, $provider] = $this->customer();
         $beneficiary = $this->beneficiary($customer, $provider);
-        $account = $this->bankAccount($customer, $provider);
 
         $this->withToken($token)
             ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
                 'beneficiary_id' => $beneficiary->id,
-                'source_bank_account_id' => $account->id,
             ]))
             ->assertCreated()
             ->assertJsonPath('beneficiary_id', $beneficiary->id)
-            ->assertJsonPath('source_bank_account_id', $account->id)
+            ->assertJsonPath('source_bank_account_id', null)
             ->assertJsonMissingPath('user_id')
             ->assertJsonMissingPath('raw_data');
 
@@ -203,6 +203,160 @@ class CustomerTransferSecurityTest extends TestCase
             ->assertJsonValidationErrors(['transfer_type', 'source_currency', 'target_currency', 'source_amount']);
     }
 
+    public function test_nium_create_is_authoritative_and_discards_client_provider_overrides(): void
+    {
+        [$customer, $token, $provider] = $this->customer();
+        $beneficiary = $this->beneficiary($customer, $provider);
+
+        $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
+                'beneficiary_id' => $beneficiary->id,
+                'target_amount' => 999,
+                'fx_rate' => 9,
+                'fee_amount' => 88,
+                'fee_currency' => 'EUR',
+                'raw_data' => [
+                    'source' => 'origin_wallet_web',
+                    'nium' => [
+                        'sourceOfFunds' => 'Malicious funds',
+                        'payout' => ['swiftFeeType' => 'OUR'],
+                        'request' => ['beneficiary' => ['id' => 'attacker-beneficiary']],
+                    ],
+                ],
+            ]))
+            ->assertCreated();
+
+        $transfer = Transfer::query()->sole();
+        $this->assertNull($transfer->source_bank_account_id);
+        $this->assertNull($transfer->fx_quote_id);
+        $this->assertNull($transfer->target_amount);
+        $this->assertNull($transfer->fx_rate);
+        $this->assertSame('0.00000000', $transfer->fee_amount);
+        $this->assertSame('USD', $transfer->fee_currency);
+        $this->assertSame('IR01811', $transfer->purpose_code);
+        $this->assertSame(['source' => 'origin_wallet_web'], $transfer->raw_data);
+    }
+
+    public function test_nium_create_is_idempotent_and_conflicts_on_different_payload(): void
+    {
+        [$customer, $token, $provider] = $this->customer();
+        $beneficiary = $this->beneficiary($customer, $provider);
+        $reference = 'OW-'.Str::uuid()->toString();
+        $payload = $this->transferPayload($provider, [
+            'beneficiary_id' => $beneficiary->id,
+            'client_reference' => $reference,
+        ]);
+
+        $first = $this->withToken($token)->postJson("/api/user/users/{$customer->id}/transfers", $payload)->assertCreated();
+        $second = $this->withToken($token)->postJson("/api/user/users/{$customer->id}/transfers", $payload)->assertOk();
+        $this->assertSame($first->json('id'), $second->json('id'));
+        $this->assertSame(1, Transfer::query()->count());
+
+        $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", [...$payload, 'source_amount' => '11.00'])
+            ->assertConflict();
+    }
+
+    public function test_nium_create_remains_idempotent_after_server_wallet_metadata_is_added(): void
+    {
+        [$customer, $token, $provider] = $this->customer();
+        $beneficiary = $this->beneficiary($customer, $provider);
+        $payload = $this->transferPayload($provider, [
+            'beneficiary_id' => $beneficiary->id,
+            'raw_data' => ['source' => 'origin_wallet_web'],
+        ]);
+
+        $first = $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", $payload)
+            ->assertCreated();
+        Transfer::query()->findOrFail($first->json('id'))->update([
+            'raw_data' => ['source' => 'origin_wallet_web', 'wallet' => ['hold_reference' => 'hold-1']],
+        ]);
+
+        $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", $payload)
+            ->assertOk()
+            ->assertJsonPath('id', $first->json('id'));
+    }
+
+    public function test_nium_policy_does_not_apply_to_non_nium_providers(): void
+    {
+        $provider = new IntegrationProvider([
+            'code' => 'other-provider',
+            'name' => 'Other Provider',
+            'status' => 'active',
+        ]);
+
+        $this->assertFalse(app(NiumTransferPolicy::class)->appliesTo($provider));
+    }
+
+    public function test_nium_customer_classification_uses_approved_kyc_profile_not_user_profile(): void
+    {
+        [$customer, $token, $provider] = $this->customer();
+        $customer->profile()->update(['user_type' => 'individual', 'country_code' => 'US']);
+        $beneficiary = $this->beneficiary($customer, $provider);
+
+        $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
+                'beneficiary_id' => $beneficiary->id,
+            ]))
+            ->assertCreated();
+
+        $customer->kycProfile()->update(['applicant_type' => 'individual']);
+        $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
+                'beneficiary_id' => $beneficiary->id,
+            ]))
+            ->assertUnprocessable();
+    }
+
+    public function test_nium_create_rejects_invalid_amount_precision_and_wallet_flow_accounts(): void
+    {
+        [$customer, $token, $provider] = $this->customer();
+        $beneficiary = $this->beneficiary($customer, $provider);
+        $account = $this->bankAccount($customer, $provider);
+
+        foreach ([
+            ['source_amount' => 0],
+            ['source_amount' => -1],
+            ['source_amount' => '1.123456789'],
+        ] as $override) {
+            $this->withToken($token)
+                ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
+                    'beneficiary_id' => $beneficiary->id,
+                    ...$override,
+                ]))
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors('source_amount');
+        }
+
+        $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
+                'beneficiary_id' => $beneficiary->id,
+                'source_bank_account_id' => $account->id,
+            ]))
+            ->assertUnprocessable();
+
+        $quote = FxQuote::query()->create([
+            'user_id' => $customer->id,
+            'provider_id' => $provider->id,
+            'quote_ref' => 'unsupported-nium-quote',
+            'source_currency' => 'USD',
+            'target_currency' => 'USD',
+            'source_amount' => '10.00000000',
+            'target_amount' => '10.00000000',
+            'net_rate' => '1.0000000000',
+            'fee_amount' => '0.00000000',
+            'expires_at' => now()->addMinute(),
+        ]);
+        $this->withToken($token)
+            ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
+                'beneficiary_id' => $beneficiary->id,
+                'fx_quote_id' => $quote->id,
+            ]))
+            ->assertUnprocessable();
+    }
+
     private function customer(?IntegrationProvider $provider = null): array
     {
         $this->configureNium();
@@ -211,13 +365,26 @@ class CustomerTransferSecurityTest extends TestCase
             ['name' => 'Nium', 'status' => 'active'],
         );
         $customer = User::factory()->create(['kyc_status' => 'verified']);
-        $customer->profile()->create(['user_type' => 'business']);
+        $customer->profile()->create(['user_type' => 'business', 'country_code' => 'HK']);
+        $customer->kycProfile()->create([
+            'status' => 'approved',
+            'applicant_type' => 'business',
+            'legal_name' => 'HK Corporate Customer',
+            'business_name' => 'HK Corporate Customer',
+            'registered_country_code' => 'HK',
+            'address_line1' => '1 Corporate Road',
+            'city' => 'Hong Kong',
+            'postal_code' => '999077',
+            'country_code' => 'HK',
+            'metadata' => ['nium_region' => 'HK'],
+        ]);
         $customer->providerAccounts()->create([
             'provider_id' => $provider->id,
             'external_customer_id' => 'customer-'.Str::random(12),
             'external_account_id' => 'wallet-'.Str::random(12),
             'status' => 'active',
             'provider_status' => 'CLEAR',
+            'reconciliation_status' => 'reconciled',
             'customer_id_verified_at' => now(),
             'wallet_id_verified_at' => now(),
         ]);
@@ -255,9 +422,10 @@ class CustomerTransferSecurityTest extends TestCase
             'external_beneficiary_id' => 'beneficiary-'.Str::random(12),
             'beneficiary_type' => 'business',
             'full_name' => 'Customer Beneficiary',
-            'country_code' => 'US',
+            'country_code' => 'HK',
             'currency' => 'USD',
             'status' => 'active',
+            'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ], $overrides));
     }
 
@@ -277,11 +445,13 @@ class CustomerTransferSecurityTest extends TestCase
         return $customer->transfers()->create(array_replace([
             'provider_id' => $provider->id,
             'transfer_no' => 'TRF-'.Str::upper(Str::random(12)),
-            'transfer_type' => 'bank',
+            'transfer_type' => 'payout',
             'source_currency' => 'USD',
             'target_currency' => 'USD',
             'source_amount' => '10.00000000',
             'fee_amount' => '0.00000000',
+            'fee_currency' => 'USD',
+            'purpose_code' => 'IR01811',
             'status' => 'draft',
         ], $overrides));
     }
@@ -290,10 +460,12 @@ class CustomerTransferSecurityTest extends TestCase
     {
         return array_replace([
             'provider_id' => $provider->id,
-            'transfer_type' => 'bank',
+            'transfer_type' => 'payout',
             'source_currency' => 'USD',
             'target_currency' => 'USD',
             'source_amount' => '10.00',
+            'purpose_code' => 'IR01811',
+            'client_reference' => 'OW-'.Str::uuid()->toString(),
         ], $overrides);
     }
 

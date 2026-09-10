@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\ApiRequestLog;
 use App\Models\ApiToken;
 use App\Models\AuditLog;
+use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\NiumRfiCase;
@@ -841,9 +842,20 @@ class NiumCustomerOnboardingV5Test extends TestCase
             ->assertUnprocessable()
             ->assertJsonPath('message', 'Nium customer and wallet are not eligible yet (pending).');
 
+        $beneficiary = Beneficiary::query()->create([
+            'user_id' => $user->id,
+            'provider_id' => $provider->id,
+            'beneficiary_type' => 'personal',
+            'full_name' => 'Blocked Transfer Beneficiary',
+            'country_code' => 'GB',
+            'currency' => 'GBP',
+            'status' => 'active',
+        ]);
+
         $this->withToken($token)
             ->postJson("/api/user/users/{$user->id}/transfers", [
                 'provider_id' => $provider->id,
+                'beneficiary_id' => $beneficiary->id,
                 'transfer_type' => 'payout',
                 'source_currency' => 'USD',
                 'target_currency' => 'GBP',
