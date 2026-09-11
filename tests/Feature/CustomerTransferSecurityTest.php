@@ -21,6 +21,14 @@ class CustomerTransferSecurityTest extends TestCase
 {
     use RefreshDatabase;
 
+    private function purposeCodesRoute(): array
+    {
+        return ['*' => \Illuminate\Http\Client\Response::fromPsrResponse(new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+            ['description' => 'General Goods Trades - Offline trade', 'purposeCode' => 'IR01811'],
+            ['description' => 'Medical Treatment', 'purposeCode' => 'IR004'],
+        ])))];
+    }
+
     public function test_creation_scopes_beneficiary_and_source_account_to_customer(): void
     {
         [$customer, $token, $provider] = $this->customer();
@@ -455,6 +463,7 @@ class CustomerTransferSecurityTest extends TestCase
             'fee_amount' => '0.00000000',
             'fee_currency' => 'USD',
             'purpose_code' => 'IR01811',
+            'reference_text' => 'INV-TEST-001',
             'status' => 'draft',
         ], $overrides));
     }
@@ -468,6 +477,7 @@ class CustomerTransferSecurityTest extends TestCase
             'target_currency' => 'USD',
             'source_amount' => '10.00',
             'purpose_code' => 'IR01811',
+            'reference_text' => 'INV-TEST-001',
             'client_reference' => 'OW-'.Str::uuid()->toString(),
         ], $overrides);
     }

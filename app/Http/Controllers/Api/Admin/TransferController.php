@@ -114,6 +114,7 @@ class TransferController extends Controller
         Request $request,
         Transfer $transfer,
         TransferApprovalService $approvalService,
+        ProviderTransferManager $providerTransferManager,
     ): JsonResponse {
         $validated = $request->validate([
             'note' => ['sometimes', 'nullable', 'string', 'max:2000'],
@@ -122,7 +123,7 @@ class TransferController extends Controller
         $before = $transfer->toArray();
 
         try {
-            $transfer = $approvalService->approve($transfer, $request->user(), $validated['note'] ?? null);
+            $transfer = $approvalService->approve($transfer, $request->user(), $validated['note'] ?? null, $providerTransferManager);
         } catch (RuntimeException $exception) {
             return response()->json([
                 'message' => $exception->getMessage(),

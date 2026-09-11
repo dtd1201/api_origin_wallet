@@ -5,6 +5,7 @@ namespace App\Services\Wallet;
 use App\Models\Transfer;
 use App\Models\TransferApproval;
 use App\Models\User;
+use App\Services\Integrations\ProviderTransferManager;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -51,15 +52,20 @@ class TransferApprovalService
         }
     }
 
-    public function approve(Transfer $transfer, User $approver, ?string $note = null): Transfer
+    public function approve(Transfer $transfer, User $approver, ?string $note = null, ?ProviderTransferManager $manager = null): Transfer
     {
-        return DB::transaction(function () use ($transfer, $approver, $note): Transfer {
+        $shouldAutoSubmit = false;
+        $approved = DB::transaction(function () use ($transfer, $approver, $note, &$shouldAutoSubmit): Transfer {
             $transfer = Transfer::query()
                 ->whereKey($transfer->id)
                 ->lockForUpdate()
                 ->firstOrFail();
 
             if ($transfer->status === 'approved') {
+                return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
+            }
+
+            if (in_array($transfer->status, ['pending', 'submitting', 'submission_unknown', 'failed'], true)) {
                 return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
             }
 
@@ -73,10 +79,18 @@ class TransferApprovalService
                 'note' => $note,
             ]);
 
+            $shouldAutoSubmit = $transfer->status === 'approval_required';
             $transfer->update(['status' => 'approved']);
 
             return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
         });
+
+        $approved->loadMissing('provider');
+        if ($shouldAutoSubmit && $manager !== null && strtolower((string) $approved->provider?->code) === 'nium') {
+            return $manager->submitTransfer($approved->provider, $approved->load(['user', 'beneficiary', 'sourceBankAccount']));
+        }
+
+        return $approved;
     }
 
     public function reject(Transfer $transfer, User $approver, ?string $note = null): Transfer
