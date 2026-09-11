@@ -398,6 +398,12 @@ class NiumCustomerPayloadFactory
                     );
                 }
 
+                if (strtoupper((string) (($profile->metadata ?? [])['nium_region'] ?? '')) === 'HK'
+                    && strtolower((string) $document->type) === 'ownership_structure') {
+                    $document->type = 'ownership_chart';
+                    $document->metadata = [...(array) $document->metadata, 'nium_document_type' => 'ownership_chart'];
+                }
+
                 return $document;
             });
 
@@ -1016,7 +1022,7 @@ class NiumCustomerPayloadFactory
         $types = $businessDocuments->map(fn (KycDocument $document): string => $this->documentType($document));
         $missing = [];
 
-        if (! $types->intersect(['business_registration', 'business_registration_doc', 'certificate_of_incorporation'])->count()) {
+        if (! $types->intersect(['business_registration', 'business_registration_doc'])->count()) {
             $missing[] = 'business_registration_doc';
         }
 
@@ -1032,7 +1038,7 @@ class NiumCustomerPayloadFactory
             $missing[] = 'proof_of_business';
         }
 
-        if (Arr::get((array) $profile->metadata, 'nium_v5_fields.isMultiLayeredCompany') === true && $types->intersect(['corporate_structure', 'ownership_chart'])->isEmpty()) {
+        if (Arr::get((array) $profile->metadata, 'nium_v5_fields.isMultiLayeredCompany') === true && $types->intersect(['ownership_structure', 'corporate_structure', 'ownership_chart'])->isEmpty()) {
             $missing[] = 'corporate_structure';
         }
 
@@ -1052,7 +1058,7 @@ class NiumCustomerPayloadFactory
 
         $businessRegistration = $businessDocuments->first(fn (KycDocument $document): bool => in_array(
             $this->documentType($document),
-            ['business_registration', 'business_registration_doc', 'certificate_of_incorporation'],
+            ['business_registration', 'business_registration_doc'],
             true,
         ));
 

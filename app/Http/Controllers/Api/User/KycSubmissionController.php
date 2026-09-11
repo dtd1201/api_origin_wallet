@@ -179,6 +179,21 @@ class KycSubmissionController extends Controller
         $this->applyHkCorporateBankAccountFallback($request);
         $validated = $request->validate($this->rules($request, $user, $regionResolver));
 
+        if ($request->input('applicant_type') === 'business'
+            && strtoupper((string) data_get($request->all(), 'metadata.nium_region')) === 'HK') {
+            $ubos = collect($validated['related_persons'] ?? [])
+                ->filter(fn (array $person): bool => in_array(strtolower((string) ($person['relationship_type'] ?? '')), ['beneficial_owner', 'ubo'], true));
+            if ($ubos->contains(fn (array $person): bool => ! is_numeric($person['ownership_percentage'] ?? null)
+                || (float) $person['ownership_percentage'] <= 0
+                || (float) $person['ownership_percentage'] > 100)) {
+                throw ValidationException::withMessages(['related_persons' => 'Each beneficial owner ownership percentage must be greater than 0 and no more than 100%.']);
+            }
+            $ownershipTotal = $ubos->sum(fn (array $person): float => (float) ($person['ownership_percentage'] ?? 0));
+            if ($ownershipTotal > 100) {
+                throw ValidationException::withMessages(['related_persons' => 'Total beneficial owner ownership cannot exceed 100%.']);
+            }
+        }
+
         if ($request->exists('metadata')) {
             $validated['metadata'] = (array) $request->input('metadata');
 
@@ -692,6 +707,18 @@ class KycSubmissionController extends Controller
             'related_persons.*.documents.*.metadata' => ['sometimes', 'array'],
             'metadata' => ['sometimes', 'array'],
             ...($isHkCorporate ? [
+                'metadata.business_website' => ['required', 'string', 'max:255', static function (string $attribute, mixed $value, Closure $fail): void {
+                    $parts = parse_url(trim((string) $value));
+                    if (filter_var(trim((string) $value), FILTER_VALIDATE_URL) === false
+                        || ! is_array($parts)
+                        || ! in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
+                        || empty($parts['host'])) {
+                        $fail('The business website must be an absolute HTTP or HTTPS URL with a hostname.');
+                    }
+                }],
+                'metadata.business_activity' => ['required', 'string', 'max:255', static function (string $attribute, mixed $value, Closure $fail): void {
+                    if (trim((string) $value) === '') $fail('Business activity cannot be blank.');
+                }],
                 'metadata.nium_region' => ['required', 'in:HK'],
                 'metadata.nium_kyc_type' => ['required', 'in:full'],
                 'documents.*.document_number' => [
@@ -948,13 +975,16 @@ class KycSubmissionController extends Controller
             throw ValidationException::withMessages(['documents' => 'HK private companies require a dated latest NAR1 or NNC1 filing.']);
         }
 
-        $registration = $documents->first(fn (array $document): bool => in_array(strtolower((string) ($document['type'] ?? '')), ['business_registration', 'certificate_of_incorporation'], true));
+        $registration = $documents->first(fn (array $document): bool => strtolower((string) ($document['type'] ?? '')) === 'business_registration');
         if (! is_array($registration) || empty($registration['issued_at'])) {
             throw ValidationException::withMessages(['documents' => 'The business registration document issue date is required.']);
         }
+        if (! $documents->contains(fn (array $document): bool => strtolower((string) ($document['type'] ?? '')) === 'certificate_of_incorporation')) {
+            throw ValidationException::withMessages(['documents' => 'A Certificate of Incorporation is required.']);
+        }
 
         if (data_get($validated, 'metadata.nium_v5_fields.isMultiLayeredCompany') === true
-            && ! $documents->contains(fn (array $document): bool => in_array(strtolower((string) ($document['type'] ?? '')), ['corporate_structure', 'ownership_chart'], true))) {
+            && ! $documents->contains(fn (array $document): bool => in_array(strtolower((string) ($document['type'] ?? '')), ['ownership_structure', 'corporate_structure', 'ownership_chart'], true))) {
             throw ValidationException::withMessages(['documents' => 'A corporate structure document is required for a multilayered company.']);
         }
 
@@ -1188,7 +1218,7 @@ class KycSubmissionController extends Controller
                 label: 'Ownership structure or shareholder register',
                 category: 'business',
                 type: 'document',
-                satisfied: $profileDocumentTypes->contains('ownership_structure'),
+                satisfied: $profileDocumentTypes->intersect(['ownership_structure', 'ownership_chart', 'corporate_structure'])->isNotEmpty(),
             );
             $requirements[] = $this->requirement(
                 key: 'account_opening_application_form',

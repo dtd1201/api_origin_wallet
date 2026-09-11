@@ -85,7 +85,7 @@ final class NiumKycDataValidator
 
         $document = $profile->documents->first(fn (KycDocument $document): bool => in_array(
             strtolower(trim((string) (($document->metadata ?? [])['nium_document_type'] ?? $document->type))),
-            ['business_registration', 'business_registration_doc', 'certificate_of_incorporation'],
+            ['business_registration', 'business_registration_doc'],
             true,
         ));
 
@@ -148,7 +148,6 @@ final class NiumKycDataValidator
                     [
                         'business_registration_doc',
                         'business_registration',
-                        'certificate_of_incorporation',
                     ],
                     true
                 )

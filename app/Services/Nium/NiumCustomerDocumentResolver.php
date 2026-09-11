@@ -34,7 +34,9 @@ class NiumCustomerDocumentResolver
     {
         return $this->selected(
             $profile->documents->whereNull('kyc_related_person_id'),
-        );
+        )->reject(fn (KycDocument $document): bool => $profile->applicant_type === 'business'
+            && strtoupper((string) (($profile->metadata ?? [])['nium_region'] ?? '')) === 'HK'
+            && strtolower(trim((string) $document->type)) === 'certificate_of_incorporation');
     }
 
     /**
