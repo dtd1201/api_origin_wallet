@@ -8,6 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumPurposeCodeService;
 use App\Services\Nium\NiumTransferPolicy;
 use App\Services\Transfers\TransferClientReferenceIdempotency;
 use App\Services\Transfers\TransferEligibilityService;
@@ -46,6 +47,7 @@ class TransferController extends Controller
         TransferEligibilityService $eligibilityService,
         TransferApprovalService $approvalService,
         NiumTransferPolicy $niumPolicy,
+        NiumPurposeCodeService $purposeCodes,
         TransferClientReferenceIdempotency $idempotency,
     ): JsonResponse {
         $validated = $request->validate([
@@ -96,10 +98,11 @@ class TransferController extends Controller
             $provider->assertSupportsCapability('transfer');
             $eligibilityService->ensureUserCanCreateForProvider($user, $provider);
             if ($niumPolicy->appliesTo($provider)) {
+                $authoritativePurposeCodes = $purposeCodes->supported($user);
                 if (! filled($validated['client_reference'] ?? null)) {
                     throw ValidationException::withMessages(['client_reference' => 'Client reference is required for Nium transfers.']);
                 }
-                $validated = $niumPolicy->normalizeCreate($validated, $user, $provider, $beneficiary);
+                $validated = $niumPolicy->normalizeCreate($validated, $user, $provider, $beneficiary, $authoritativePurposeCodes);
             }
         } catch (Throwable $exception) {
             if ($exception instanceof ValidationException) {

@@ -75,8 +75,9 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             'source_currency' => 'USD',
             'target_currency' => 'USD',
             'purpose_code' => 'IR01811',
+            'reference_text' => 'INV-123',
             'source_amount' => '25.00',
-        ], $user, $provider, $beneficiary->fresh());
+        ], $user, $provider, $beneficiary->fresh(), [['code' => 'IR01811', 'label' => 'Business']]);
         $this->addToAssertionCount(1);
 
         Http::assertSent(function ($request): bool {
@@ -115,7 +116,8 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             'source_currency' => 'USD',
             'target_currency' => 'USD',
             'purpose_code' => 'IR01811',
-        ], $user, $provider, $beneficiary);
+            'reference_text' => 'INV-123',
+        ], $user, $provider, $beneficiary, [['code' => 'IR01811', 'label' => 'Business']]);
     }
 
     public function test_failed_provider_create_does_not_verify_payout_method(): void
@@ -170,7 +172,8 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             'source_currency' => 'USD',
             'target_currency' => 'USD',
             'purpose_code' => 'IR01811',
-        ], $user, $provider, $beneficiary);
+            'reference_text' => 'INV-123',
+        ], $user, $provider, $beneficiary, [['code' => 'IR01811', 'label' => 'Business']]);
         $this->addToAssertionCount(1);
 
         $arguments = [

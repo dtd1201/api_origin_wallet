@@ -13,7 +13,7 @@ final class NiumPurposeCodeService
     public function supported(User $user): array
     {
         return Cache::remember(
-            'nium:purpose-codes:'.NiumTransferPolicy::PURPOSE_CODE,
+            'nium:purpose-codes',
             (int) config('services.nium.purpose_codes_cache_seconds', 3600),
             function () use ($user): array {
                 $response = $this->nium->get(
@@ -29,22 +29,20 @@ final class NiumPurposeCodeService
                 $payload = (array) $response->json();
                 $items = array_is_list($payload) ? $payload : ($payload['data'] ?? $payload['content'] ?? []);
 
+                $result = [];
                 foreach (is_array($items) ? $items : [] as $item) {
-                    if (! is_array($item) || ($item['purposeCode'] ?? null) !== NiumTransferPolicy::PURPOSE_CODE) {
+                    if (! is_array($item) || ! is_string($item['purposeCode'] ?? null) || ! is_string($item['description'] ?? null)) {
                         continue;
                     }
-
-                    $description = $item['description'] ?? null;
-                    if (is_string($description)
-                        && preg_match('/^[\pL\pN][\pL\pN .,&()\/-]{0,119}$/u', trim($description)) === 1) {
-                        return [[
-                            'code' => NiumTransferPolicy::PURPOSE_CODE,
-                            'label' => trim($description),
-                        ]];
+                    $code = trim($item['purposeCode']);
+                    $label = trim($item['description']);
+                    if ($code === '' || $label === '' || mb_strlen($code) > 100 || mb_strlen($label) > 255 || preg_match('/[\\p{C}]/u', $code.$label) === 1 || isset($result[$code])) {
+                        continue;
                     }
+                    $result[$code] = ['code' => $code, 'label' => $label];
                 }
 
-                return [];
+                return array_values($result);
             },
         );
     }

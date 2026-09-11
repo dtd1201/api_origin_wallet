@@ -41,7 +41,10 @@ class NiumPurposeCodeApiTest extends TestCase
             ['description' => 'Business payment', 'purposeCode' => 'IR01811'],
         ])]);
 
-        $expected = ['data' => [['code' => 'IR01811', 'label' => 'Business payment']]];
+        $expected = ['data' => [
+            ['code' => 'IR004', 'label' => 'Medical Treatment'],
+            ['code' => 'IR01811', 'label' => 'Business payment'],
+        ]];
         $this->withToken($token)->getJson("/api/user/users/{$user->id}/transfers/nium-purpose-codes")
             ->assertOk()
             ->assertExactJson($expected);

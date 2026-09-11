@@ -20,11 +20,13 @@ class NiumTransferService implements TransferProvider
         private readonly NiumService $niumService,
         private readonly TransferEligibilityService $eligibilityService,
         private readonly NiumTransferPolicy $policy,
+        private readonly NiumPurposeCodeService $purposeCodes,
     ) {}
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
-        [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use ($provider, $transfer): array {
+        $authoritativePurposeCodes = $this->purposeCodes->supported($transfer->user()->firstOrFail());
+        [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use ($provider, $transfer, $authoritativePurposeCodes): array {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
 
             if (! in_array($locked->status, ['draft', 'approval_required', 'approved'], true)) {
@@ -37,8 +39,8 @@ class NiumTransferService implements TransferProvider
             }
             $this->eligibilityService->ensureTransferCanBeSubmitted($locked);
             $this->ensureAuthoritativeQuote($locked);
-            $this->policy->assertTransfer($locked);
-            $payload = $this->buildTransferPayload($locked);
+            $this->policy->assertTransfer($locked, $authoritativePurposeCodes);
+            $payload = $this->buildTransferPayload($locked, $authoritativePurposeCodes);
             $providerIdentifiers = $this->providerAccountIdentifiers($locked);
 
             $locked->update([
@@ -204,9 +206,9 @@ class NiumTransferService implements TransferProvider
         return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
     }
 
-    private function buildTransferPayload(Transfer $transfer): array
+    private function buildTransferPayload(Transfer $transfer, array $authoritativePurposeCodes): array
     {
-        $payload = array_filter($this->policy->providerPayload($transfer), static fn ($value) => $value !== null && $value !== '' && $value !== []);
+        $payload = array_filter($this->policy->providerPayload($transfer, $authoritativePurposeCodes), static fn ($value) => $value !== null && $value !== '' && $value !== []);
         $this->validateTransferPayload($payload);
 
         return $payload;
