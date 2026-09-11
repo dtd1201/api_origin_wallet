@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\User\FxQuoteController;
 use App\Http\Controllers\Api\User\IdentityVerificationController;
 use App\Http\Controllers\Api\User\KycSubmissionController;
 use App\Http\Controllers\Api\User\NiumCorporateConstantsController;
+use App\Http\Controllers\Api\User\NiumPurposeCodeController;
 use App\Http\Controllers\Api\User\OverviewController;
 use App\Http\Controllers\Api\User\ProfileController;
 use App\Http\Controllers\Api\User\ProviderAccountController;
@@ -63,6 +64,7 @@ Route::middleware('profile.complete')->group(function (): void {
 
     Route::post('users/{user}/transfers', [TransferController::class, 'store']);
     Route::get('users/{user}/transfers', [TransferController::class, 'index']);
+    Route::get('users/{user}/transfers/nium-purpose-codes', NiumPurposeCodeController::class);
     Route::post('users/{user}/transfers/{transfer}/submit', [TransferController::class, 'submit']);
     Route::post('users/{user}/transfers/{transfer}/sync-status', [TransferController::class, 'syncStatus']);
     Route::post('users/{user}/transfers/{transfer}/cancel', [TransferController::class, 'cancel']);

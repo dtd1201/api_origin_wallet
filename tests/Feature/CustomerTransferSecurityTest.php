@@ -320,6 +320,8 @@ class CustomerTransferSecurityTest extends TestCase
             ['source_amount' => 0],
             ['source_amount' => -1],
             ['source_amount' => '1.123456789'],
+            ['source_amount' => 'aaaa'],
+            ['source_amount' => '12.3abc'],
         ] as $override) {
             $this->withToken($token)
                 ->postJson("/api/user/users/{$customer->id}/transfers", $this->transferPayload($provider, [
