@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
+use App\Models\KycDocument;
 use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
@@ -57,15 +58,23 @@ class NiumHkSubmitKycOneShotRunnerTest extends TestCase
         $this->assertSame('HK', $payload['region']);
         $this->assertSame($target, $payload['entityType']);
         $this->assertSame($referenceId, $payload['entityReferenceId']);
-        $this->assertFalse($payload['isResident']);
-        $this->assertSame('biometric_kyc', $payload['kycMode']);
+        if ($target === NiumHkSubmitKycOneShotRunner::STAKEHOLDER) {
+            $this->assertArrayNotHasKey('isResident', $payload);
+        } else {
+            $this->assertFalse($payload['isResident']);
+        }
+        $this->assertSame($target === NiumHkSubmitKycOneShotRunner::STAKEHOLDER ? 'manual_kyc' : 'biometric_kyc', $payload['kycMode']);
         $this->assertSame('passport', $payload['proofOfIdentityDocument'][0]['type']);
         $this->assertSame(self::PLACEHOLDER_IDENTITY, $payload['proofOfIdentityDocument'][0]['identificationNumber']);
         $this->assertSame('VN', $payload['proofOfIdentityDocument'][0]['issuanceCountry']);
         $this->assertSame('2099-12-31', $payload['proofOfIdentityDocument'][0]['expiryDate']);
-        $this->assertArrayNotHasKey('fileIds', $payload['proofOfIdentityDocument'][0]);
+        if ($target === NiumHkSubmitKycOneShotRunner::STAKEHOLDER) {
+            $this->assertSame(['11111111-1111-4111-8111-111111111111'], $payload['proofOfIdentityDocument'][0]['fileIds']);
+        } else {
+            $this->assertArrayNotHasKey('fileIds', $payload['proofOfIdentityDocument'][0]);
+        }
         $this->assertArrayNotHasKey('proofOfAddressDocument', $payload);
-        $this->assertDatabaseCount('kyc_documents', 0);
+        $this->assertDatabaseCount('kyc_documents', 1);
     }
 
     public function test_valid_applicant_metadata_passes_preflight(): void
@@ -469,8 +478,17 @@ class NiumHkSubmitKycOneShotRunnerTest extends TestCase
                 'relationship_type' => $relationship,
                 'status' => 'approved',
                 'legal_name' => 'Placeholder Person',
+                'residence_country_code' => 'VN',
                 'metadata' => ['nium_biometric_identity' => self::identityMetadata()],
             ]);
+            if ($id === 14) {
+                KycDocument::query()->forceCreate([
+                    'kyc_profile_id' => 9, 'kyc_related_person_id' => $id, 'type' => 'passport', 'status' => 'approved',
+                    'document_number' => self::PLACEHOLDER_IDENTITY, 'issuing_country_code' => 'VN', 'expires_at' => '2099-12-31',
+                    'file_url' => 'private://legacy-stakeholder-passport',
+                    'metadata' => ['nium_file_id' => '11111111-1111-4111-8111-111111111111', 'nium_file_state' => 'AVAILABLE'],
+                ]);
+            }
         }
 
         UserProviderAccount::query()->forceCreate(['id' => 4, 'user_id' => 4, 'provider_id' => 1]);

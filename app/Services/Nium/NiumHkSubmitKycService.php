@@ -64,8 +64,9 @@ final class NiumHkSubmitKycService
         }
 
         $body = $this->responseObject($response);
+        $responseUrl = $body['biometricUrl'] ?? $body['redirectUrl'] ?? null;
         $state = $this->validResponse($body, $context) ? 'accepted' : 'response_review';
-        $this->mark($context, $state, $response->status(), $body['redirectUrl'] ?? null, $body['referenceId'] ?? null);
+        $this->mark($context, $state, $response->status(), $responseUrl, $body['referenceId'] ?? null);
 
         return $state;
     }
@@ -247,7 +248,7 @@ final class NiumHkSubmitKycService
 
             data_set($metadata, 'nium_submit_kyc_attempts.'.$key, [
                 'state' => 'submitting',
-                'kyc_mode' => 'biometric_kyc',
+                'kyc_mode' => $context['entity_type'] === 'individual_stakeholder' ? 'manual_kyc' : 'biometric_kyc',
                 'entity_type' => $context['entity_type'], 'external_id' => $context['external_id'],
                 'webhook_id' => $context['event']->id,
                 'webhook_processed_at' => $context['event']->processed_at?->toISOString(),
@@ -267,7 +268,7 @@ final class NiumHkSubmitKycService
             $log = $this->attemptLog($context);
             data_set($metadata, 'nium_submit_kyc_attempts.'.$key, array_filter([
                 'state' => $state,
-                'kyc_mode' => 'biometric_kyc',
+                'kyc_mode' => $context['entity_type'] === 'individual_stakeholder' ? 'manual_kyc' : 'biometric_kyc',
                 'entity_type' => $context['entity_type'],
                 'external_id' => $context['external_id'],
                 'provider_http_status' => $httpStatus,
@@ -306,9 +307,10 @@ final class NiumHkSubmitKycService
             && ($externalReferenceRequest || $providerReference === $context['reference_id'])
             && (! isset($body['externalId']) || $body['externalId'] === $context['external_id'])
             && in_array($body['kycStatus'] ?? null, ['initiated', 'submitted'], true)
-            && ($body['kycMode'] ?? null) === 'biometric_kyc'
-            && is_string($body['redirectUrl'] ?? null)
-            && trim($body['redirectUrl']) !== '';
+            && ($body['kycMode'] ?? null) === ($context['entity_type'] === 'individual_stakeholder' ? 'manual_kyc' : 'biometric_kyc')
+            && ($context['entity_type'] === 'individual_stakeholder'
+                || ((is_string($body['biometricUrl'] ?? null) && trim($body['biometricUrl']) !== '')
+                    || (is_string($body['redirectUrl'] ?? null) && trim($body['redirectUrl']) !== '')));
     }
 
     private function responseObject(Response $response): array

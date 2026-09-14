@@ -225,6 +225,7 @@ class NiumHkStakeholderSubmitKycRetryOneShotRunnerTest extends TestCase
             'relationship_type' => 'beneficial_owner',
             'status' => 'approved',
             'legal_name' => 'Placeholder Person',
+            'residence_country_code' => 'VN',
             'metadata' => ['nium_biometric_identity' => [
                 'type' => 'passport',
                 'identification_number' => self::IDENTITY,

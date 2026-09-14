@@ -35,6 +35,8 @@ class NiumHkProductionSubmitKycTest extends TestCase
             $this->assertSame(1, $calls->count);
             $this->assertSame('applicant', $calls->payload['entityType']);
             $this->assertSame($context['reference'], $calls->payload['entityReferenceId']);
+            $this->assertSame('biometric_kyc', $calls->payload['kycMode']);
+            $this->assertArrayNotHasKey('fileIds', $calls->payload['proofOfIdentityDocument'][0]);
         }
     }
 
@@ -45,6 +47,39 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $this->assertSame('accepted', app(NiumHkSubmitKycService::class)->submit($context['event']));
         $this->assertSame('individual_stakeholder', $calls->payload['entityType']);
         $this->assertSame($context['reference'], $calls->payload['entityReferenceId']);
+        $this->assertSame('manual_kyc', $calls->payload['kycMode']);
+        $this->assertSame(['11111111-1111-4111-8111-111111111111'], $calls->payload['proofOfIdentityDocument'][0]['fileIds']);
+        $this->assertArrayNotHasKey('proofOfAddressDocument', $calls->payload);
+    }
+
+    public function test_stakeholder_missing_available_file_id_fails_before_post(): void
+    {
+        $context = $this->context('individual_stakeholder', 'origin-wallet-stakeholder-%d');
+        $document = $context['person']->documents()->firstOrFail();
+        $document->forceFill(['metadata' => ['nium_file_state' => 'PROCESSING']])->save();
+        $this->mockNoPost();
+        $this->expectException(RuntimeException::class);
+        app(NiumHkSubmitKycService::class)->submit($context['event']);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('invalidStakeholderExpiry')]
+    public function test_stakeholder_invalid_expiry_fails_before_post(?string $expiry): void
+    {
+        $context = $this->context('individual_stakeholder', 'origin-wallet-stakeholder-%d');
+        $document = $context['person']->documents()->firstOrFail();
+        if ($expiry === 'not-a-date') {
+            $document->getConnection()->table($document->getTable())->where('id', $document->id)->update(['expires_at' => $expiry]);
+        } else {
+            $document->forceFill(['expires_at' => $expiry])->save();
+        }
+        $this->mockNoPost();
+        $this->expectException(\RuntimeException::class);
+        app(NiumHkSubmitKycService::class)->submit($context['event']);
+    }
+
+    public static function invalidStakeholderExpiry(): array
+    {
+        return [[null], ['not-a-date'], ['2020-01-01']];
     }
 
     public function test_customer_awaiting_kyc_does_not_submit_without_entity_evidence(): void
@@ -145,6 +180,14 @@ class NiumHkProductionSubmitKycTest extends TestCase
         ];
     }
 
+    public function test_applicant_biometric_url_only_response_is_accepted(): void
+    {
+        $context = $this->context();
+        $body = $this->validResponse($context, ['biometricUrl' => 'https://biometric.test/session', 'redirectUrl' => null]);
+        $this->mockResponse($context, $body);
+        $this->assertSame('accepted', app(NiumHkSubmitKycService::class)->submit($context['event']));
+    }
+
     public function test_redirect_url_is_only_fingerprinted_in_new_service_persistence(): void
     {
         $context = $this->context();
@@ -218,7 +261,7 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $person->documents()->create([
             'kyc_profile_id' => $profile->id, 'type' => 'passport', 'status' => 'approved',
             'document_number' => 'P123', 'issuing_country_code' => 'HK', 'expires_at' => '2099-12-31',
-            'file_url' => 'private://passport',
+            'file_url' => 'private://passport', 'metadata' => ['nium_file_id' => '11111111-1111-4111-8111-111111111111', 'nium_file_state' => 'AVAILABLE'],
         ]);
         $account = UserProviderAccount::query()->create([
             'user_id' => $user->id, 'provider_id' => $provider->id, 'external_customer_id' => 'customer-'.$user->id,
@@ -246,7 +289,7 @@ class NiumHkProductionSubmitKycTest extends TestCase
 
     private function validResponse(array $context, array $overrides = []): array
     {
-        return array_merge(['kycStatus' => 'initiated', 'kycMode' => 'biometric_kyc',
+        return array_merge(['kycStatus' => 'initiated', 'kycMode' => $context['entityType'] === 'individual_stakeholder' ? 'manual_kyc' : 'biometric_kyc',
             'entityType' => $context['entityType'], 'referenceId' => $context['reference'],
             'externalId' => $context['external_id'], 'redirectUrl' => 'https://redirect.example.test/session'], $overrides);
     }

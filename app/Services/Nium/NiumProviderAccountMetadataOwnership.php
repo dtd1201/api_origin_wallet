@@ -85,7 +85,7 @@ final class NiumProviderAccountMetadataOwnership
 
         return array_filter([
             'state' => $this->safeString($attempt['state'] ?? null, 64),
-            'kyc_mode' => ($attempt['kyc_mode'] ?? null) === 'biometric_kyc' ? 'biometric_kyc' : null,
+            'kyc_mode' => in_array($attempt['kyc_mode'] ?? null, ['biometric_kyc', 'manual_kyc'], true) ? $attempt['kyc_mode'] : null,
             'provider_http_status' => $this->httpStatus($attempt['provider_http_status'] ?? null),
             'provider_reference_id' => $this->safeString($attempt['provider_reference_id'] ?? null, 128),
             'entity_type' => in_array($attempt['entity_type'] ?? null, ['applicant', 'individual_stakeholder'], true) ? $attempt['entity_type'] : null,

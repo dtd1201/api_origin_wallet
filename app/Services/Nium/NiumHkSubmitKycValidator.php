@@ -5,9 +5,46 @@ namespace App\Services\Nium;
 use Carbon\CarbonImmutable;
 use RuntimeException;
 use Throwable;
+use Illuminate\Support\Str;
 
 final class NiumHkSubmitKycValidator
 {
+    public function assertManualStakeholder(array $payload): void
+    {
+        $documents = $payload['proofOfIdentityDocument'] ?? null;
+        $document = is_array($documents) && array_is_list($documents) && count($documents) === 1 ? $documents[0] : null;
+        $expiry = $this->strictFutureDate($document['expiryDate'] ?? null);
+        if (($payload['region'] ?? null) !== 'HK'
+            || ($payload['entityType'] ?? null) !== 'individual_stakeholder'
+            || ($payload['kycMode'] ?? null) !== 'manual_kyc'
+            || ! is_string($payload['entityReferenceId'] ?? null) || trim($payload['entityReferenceId']) === ''
+            || ! is_array($document)
+            || ($document['type'] ?? null) !== 'passport'
+            || ! is_string($document['identificationNumber'] ?? null) || trim($document['identificationNumber']) === ''
+            || preg_match('/^[A-Z]{2}$/', (string) ($document['issuanceCountry'] ?? '')) !== 1
+            || $expiry === null
+            || ! is_array($document['fileIds'] ?? null) || count($document['fileIds']) !== 1
+            || ! Str::isUuid($document['fileIds'][0] ?? null)) {
+            throw new RuntimeException('Invalid Nium HK individual stakeholder manual KYC payload.');
+        }
+    }
+
+    private function strictFutureDate(mixed $value): ?CarbonImmutable
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+        try {
+            $date = CarbonImmutable::createFromFormat('!Y-m-d', $value);
+        } catch (Throwable) {
+            return null;
+        }
+        $errors = CarbonImmutable::getLastErrors();
+        return $date !== false && $date->format('Y-m-d') === $value
+            && ($errors === false || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))
+            && $date->isFuture() ? $date : null;
+    }
+
     public function assert(array $payload): void
     {
         if (($payload['region'] ?? null) !== 'HK'

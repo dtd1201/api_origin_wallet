@@ -5,6 +5,7 @@ namespace App\Services\Nium;
 use App\Models\KycRelatedPerson;
 use Carbon\CarbonImmutable;
 use RuntimeException;
+use Illuminate\Support\Str;
 use Throwable;
 
 final class NiumHkKycIdentityResolver
@@ -72,19 +73,24 @@ final class NiumHkKycIdentityResolver
         $number = trim((string) $document->document_number);
         $country = strtoupper(trim((string) $document->issuing_country_code));
         $residence = strtoupper(trim((string) $person->residence_country_code));
+        $expiryValue = $document->getRawOriginal('expires_at');
+        if (is_string($expiryValue) && preg_match('/^(\d{4}-\d{2}-\d{2}) 00:00:00$/', $expiryValue, $matches) === 1) {
+            $expiryValue = $matches[1];
+        }
+        $expiry = $this->exactDate($expiryValue);
         if (! in_array($type, ['passport', 'passport_front'], true)
             || $number === ''
             || preg_match('/^[A-Z]{2}$/', $country) !== 1
             || preg_match('/^[A-Z]{2}$/', $residence) !== 1
-            || $document->expires_at === null
-            || ! $document->expires_at->isFuture()) {
+            || $expiry === null || ! $expiry->isFuture()) {
             throw new RuntimeException('Approved passport identity document is invalid for HK biometric KYC.');
         }
-        if ($residence === 'HK') {
-            throw new RuntimeException('HK-resident biometric KYC requires an approved national ID document.');
-        }
+        $metadata = (array) $document->metadata;
+        $fileId = trim((string) ($metadata['nium_file_id'] ?? ''));
+        $fileState = strtoupper(trim((string) ($metadata['nium_file_state'] ?? '')));
         return ['type' => 'passport', 'identification_number' => $number, 'issuance_country' => $country,
-            'expiry_date' => $document->expires_at->toDateString(), 'is_resident' => $residence === 'HK'];
+            'expiry_date' => $expiryValue, 'is_resident' => $residence === 'HK',
+            'file_id' => Str::isUuid($fileId) && $fileState === 'AVAILABLE' ? $fileId : null];
     }
 
     private function materiallyConflicts(array $resolved, array $legacy): bool
