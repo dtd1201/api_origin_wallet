@@ -60,6 +60,22 @@ class NiumAuthenticatedStateProjector
             [],
         );
 
+        foreach ($this->nestedEntities($payload) as $entity) {
+            $reference = trim((string) ($entity['referenceId'] ?? ''));
+            if ($reference === '') {
+                continue;
+            }
+            $entityStates['ref_'.$this->safeValues->fingerprint($reference)] = array_filter([
+                'kyc_status' => $this->safeValues->kycStatus($entity['kycStatus'] ?? null),
+                'kyc_mode' => $this->safeValues->kycMode($entity['kycMode'] ?? null),
+                'entity_type' => $this->safeValues->entityType($entity['entityType'] ?? null),
+                'external_id' => filled($entity['externalId'] ?? null) ? (string) $entity['externalId'] : null,
+                'provider_reference_id' => $reference,
+                'source' => $source,
+                'updated_at' => now()->toISOString(),
+            ], static fn ($value) => $value !== null && $value !== '');
+        }
+
         if (isset($payload['kycStatus'])) {
             $entityKey = (string) (
                 $payload['referenceId']
@@ -111,6 +127,25 @@ class NiumAuthenticatedStateProjector
             'reconciled_at' => now(),
             'metadata' => $metadata,
         ];
+    }
+
+    private function nestedEntities(array $payload): array
+    {
+        $entities = [];
+        if (is_array($payload['applicant'] ?? null)) {
+            $entities[] = [...$payload['applicant'], 'entityType' => 'applicant'];
+        }
+        foreach ((array) Arr::get($payload, 'stakeholders.individual', []) as $entity) {
+            if (is_array($entity)) {
+                $entities[] = [...$entity, 'entityType' => 'individual_stakeholder'];
+            }
+        }
+        foreach ((array) Arr::get($payload, 'stakeholders.corporate', []) as $entity) {
+            if (is_array($entity)) {
+                $entities[] = [...$entity, 'entityType' => 'corporate'];
+            }
+        }
+        return $entities;
     }
 
     public function submissionUpdates(UserProviderAccount $providerAccount): array

@@ -1053,6 +1053,9 @@ final class NiumSafeValueProjector
                 'kyc_status' => $this->kycStatus($state['kyc_status'] ?? $state['kycStatus'] ?? null),
                 'kyc_mode' => $this->kycMode($state['kyc_mode'] ?? $state['kycMode'] ?? null),
                 'entity_type' => $this->entityType($state['entity_type'] ?? $state['entityType'] ?? null),
+                'external_id' => $this->safeIdentifier($state['external_id'] ?? $state['externalId'] ?? null),
+                'provider_reference_id' => $this->safeIdentifier($state['provider_reference_id'] ?? $state['referenceId'] ?? null),
+                'source' => $this->safeString($state['source'] ?? null, 96),
                 'updated_at' => $this->timestamp($state['updated_at'] ?? $state['updatedAt'] ?? null),
             ], static fn ($value): bool => $value !== null);
 
@@ -1078,6 +1081,17 @@ final class NiumSafeValueProjector
             && preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/', $value) === 1
                 ? $value
                 : null;
+    }
+
+    private function safeIdentifier(mixed $value): ?string
+    {
+        return is_string($value) && strlen($value) <= 128 && trim($value) !== '' && preg_match('/^[A-Za-z0-9._:-]+$/', trim($value)) === 1
+            ? trim($value) : null;
+    }
+
+    private function safeString(mixed $value, int $maximumLength): ?string
+    {
+        return is_string($value) && strlen($value) <= $maximumLength && trim($value) !== '' ? trim($value) : null;
     }
 
     private function strictBoolean(mixed $value): ?bool

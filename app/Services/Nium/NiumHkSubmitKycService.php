@@ -73,7 +73,25 @@ final class NiumHkSubmitKycService
     /** Submit every person entity created by the current HK Corporate Full payload. */
     public function submitAwaitingKyc(WebhookEvent $event): array
     {
-        return [];
+        $account = UserProviderAccount::query()->where('provider_id', $event->provider_id)
+            ->where('external_customer_id', (string) data_get($event->payload, 'customerHashId'))->firstOrFail();
+        $results = [];
+        foreach ((array) data_get($account->metadata, 'nium_entity_kyc_states', []) as $state) {
+            if (($state['kyc_status'] ?? null) !== 'kyc_required'
+                || ! in_array($state['entity_type'] ?? null, ['applicant', 'individual_stakeholder'], true)
+                || ! filled($state['external_id']) || ! filled($state['provider_reference_id'])) {
+                continue;
+            }
+            $synthetic = new WebhookEvent([
+                'provider_id' => $event->provider_id, 'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS',
+                'processing_status' => 'processed', 'processed_at' => $event->processed_at,
+                'external_resource_id' => $account->external_customer_id,
+                'payload' => ['customerHashId' => $account->external_customer_id, 'externalId' => $state['external_id'],
+                    'entityType' => $state['entity_type'], 'referenceId' => $state['provider_reference_id'], 'kycStatus' => 'kyc_required'],
+            ]);
+            $results[$state['provider_reference_id']] = $this->submit($synthetic);
+        }
+        return $results;
     }
 
     public function reconcileEntityWebhook(WebhookEvent $event): void
