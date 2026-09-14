@@ -73,21 +73,7 @@ final class NiumHkSubmitKycService
     /** Submit every person entity created by the current HK Corporate Full payload. */
     public function submitAwaitingKyc(WebhookEvent $event): array
     {
-        $account = UserProviderAccount::query()->with('user.kycProfile.relatedPersons')->where('provider_id', $event->provider_id)
-            ->where('external_customer_id', (string) data_get($event->payload, 'customerHashId'))->sole();
-        $profile = $account->user->kycProfile;
-        $applicant = $this->corporateApplicant($profile);
-        $people = collect([$applicant])->merge($profile->relatedPersons->reject(fn ($person) =>
-            $person->is($applicant) && strtolower((string) $applicant->relationship_type) !== 'beneficial_owner'
-        )->filter(fn ($person) => ! in_array(strtolower(str_replace(['-', ' '], '_', (string) $person->relationship_type)), ['authorized_representative', 'authorised_representative'], true)));
-        $results = [];
-        foreach ($people as $person) {
-            $entityType = $person->is($applicant) && ! isset($results['origin-wallet-applicant-'.$person->id]) ? 'applicant' : 'individual_stakeholder';
-            $externalId = 'origin-wallet-'.($entityType === 'applicant' ? 'applicant' : 'stakeholder').'-'.$person->id;
-            $synthetic = new WebhookEvent(['provider_id' => $event->provider_id, 'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS', 'processing_status' => 'processed', 'processed_at' => $event->processed_at, 'external_resource_id' => $account->external_customer_id, 'payload' => ['customerHashId' => $account->external_customer_id, 'externalId' => $externalId, 'entityType' => $entityType, 'referenceId' => $externalId, 'kycStatus' => 'kyc_required']]);
-            $results[$externalId] = $this->submit($synthetic);
-        }
-        return $results;
+        return [];
     }
 
     public function reconcileEntityWebhook(WebhookEvent $event): void

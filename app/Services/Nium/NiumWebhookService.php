@@ -383,11 +383,11 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         if ($event->event_type === 'CUSTOMER_STATUS_WEBHOOK'
             && ($payload['status'] ?? null) === 'pending'
             && ($payload['subStatus'] ?? null) === 'awaiting_kyc') {
-            SubmitNiumHkEntityKycJob::dispatch($event->id)->afterCommit();
+            // Customer-level awaiting_kyc is state evidence only; no provider write here.
         }
         if ($event->event_type === 'CUSTOMER_ENTITY_KYC_STATUS'
             && ($payload['kycStatus'] ?? null) === 'kyc_required') {
-            // Entity status is downstream evidence; it must not initiate the first submission.
+            SubmitNiumHkEntityKycJob::dispatch($event->id)->afterCommit();
         }
     }
 
