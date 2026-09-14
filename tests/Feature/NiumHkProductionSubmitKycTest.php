@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\Nium\SubmitNiumHkEntityKycJob;
+use App\Jobs\Nium\ContinueNiumCustomerOnboardingJob;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\KycProviderSubmission;
@@ -44,6 +45,65 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $this->assertSame('accepted', app(NiumHkSubmitKycService::class)->submit($context['event']));
         $this->assertSame('individual_stakeholder', $calls->payload['entityType']);
         $this->assertSame($context['reference'], $calls->payload['entityReferenceId']);
+    }
+
+    public function test_beneficial_owner_selected_as_applicant_produces_three_independent_entities(): void
+    {
+        $context = $this->context();
+        $context['person']->forceFill(['relationship_type' => 'beneficial_owner', 'ownership_percentage' => 60])->save();
+        $second = $context['profile']->relatedPersons()->create([
+            'relationship_type' => 'beneficial_owner', 'status' => 'approved', 'legal_name' => 'Second Owner',
+            'ownership_percentage' => 40, 'residence_country_code' => 'VN',
+        ]);
+        $second->documents()->create([
+            'kyc_profile_id' => $context['profile']->id, 'type' => 'passport', 'status' => 'approved',
+            'document_number' => 'P456', 'issuing_country_code' => 'VN', 'expires_at' => '2099-12-31',
+            'file_url' => 'private://passport-2',
+        ]);
+        $calls = new class { public array $payloads = []; };
+        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls): void {
+            $mock->shouldReceive('clientId')->andReturn('client');
+            $mock->shouldReceive('path')->andReturn('/submitKyc');
+            $mock->shouldReceive('post')->times(3)->andReturnUsing(function (...$arguments) use ($calls): Response {
+                $payload = $arguments[1]; $calls->payloads[] = $payload;
+                return new Response(new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                    'kycStatus' => 'initiated', 'kycMode' => 'biometric_kyc',
+                    'entityType' => $payload['entityType'], 'referenceId' => fake()->uuid(),
+                    'externalId' => $payload['entityReferenceId'], 'redirectUrl' => 'https://redirect.test/session',
+                ], JSON_THROW_ON_ERROR)));
+            });
+        });
+        $service = app(NiumHkSubmitKycService::class);
+        $event = $this->event($context, 'origin-wallet-applicant-'.$context['person']->id, $context['reference']);
+        $result = $service->submitAwaitingKyc($event);
+        $service->submitAwaitingKyc($event->fresh());
+        $this->assertCount(3, $calls->payloads);
+        $this->assertSame([
+            'origin-wallet-applicant-'.$context['person']->id,
+            'origin-wallet-stakeholder-'.$context['person']->id,
+            'origin-wallet-stakeholder-'.$second->id,
+        ], array_column($calls->payloads, 'entityReferenceId'));
+        $this->assertSame(['applicant', 'individual_stakeholder', 'individual_stakeholder'], array_column($calls->payloads, 'entityType'));
+        $this->assertCount(3, $result);
+        $attempts = (array) $context['account']->fresh()->metadata['nium_submit_kyc_attempts'];
+        $this->assertCount(3, $attempts);
+        $this->assertNotSame(array_keys($attempts)[0], array_keys($attempts)[1]);
+    }
+
+    public function test_downstream_entity_status_reconciles_existing_attempt_without_posting(): void
+    {
+        $context = $this->context();
+        $this->mockResponse($context, $this->validResponse($context));
+        $service = app(NiumHkSubmitKycService::class);
+        $service->submit($context['event']);
+        foreach (['submitted', 'verified', 'failed'] as $status) {
+            $event = $this->event($context, $context['external_id'], $context['reference']);
+            $event->forceFill(['payload' => [...$event->payload, 'kycStatus' => $status, 'referenceId' => 'provider-ref-1']])->save();
+            $service->reconcileEntityWebhook($event->fresh());
+        }
+        $attempt = collect((array) $context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->first();
+        $this->assertSame('failed', $attempt['entity_kyc_status']);
+        $this->assertSame('provider-ref-1', $attempt['provider_reference_id']);
     }
 
     public function test_duplicate_event_and_direct_reinvocation_are_harmless_no_ops(): void
@@ -158,6 +218,22 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $this->assertTrue($first->equalTo($second));
     }
 
+    public function test_continue_job_repairs_submitted_without_timestamp_and_preserves_it(): void
+    {
+        $context = $this->context();
+        $submission = KycProviderSubmission::query()->create([
+            'user_id' => $context['user']->id, 'provider_id' => $context['provider']->id,
+            'kyc_profile_id' => $context['profile']->id, 'provider_account_id' => $context['account']->id,
+            'status' => 'submitted', 'submitted_at' => null,
+        ]);
+        $job = new ContinueNiumCustomerOnboardingJob($context['user']->id, $context['provider']->id);
+        $job->handle(app(\App\Services\Nium\NiumCustomerDocumentPreparationService::class), app(\App\Services\Nium\NiumCustomerOnboardingService::class), app(ComplianceEvidenceService::class));
+        $first = $submission->fresh()->submitted_at;
+        $this->assertNotNull($first);
+        $job->handle(app(\App\Services\Nium\NiumCustomerDocumentPreparationService::class), app(\App\Services\Nium\NiumCustomerOnboardingService::class), app(ComplianceEvidenceService::class));
+        $this->assertTrue($first->equalTo($submission->fresh()->submitted_at));
+    }
+
     private function context(string $entityType = 'applicant', string $externalFormat = 'origin-wallet-applicant-%d'): array
     {
         $provider = IntegrationProvider::query()->firstOrCreate(
@@ -173,7 +249,7 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $person = $profile->relatedPersons()->create([
             'relationship_type' => $entityType === 'applicant' ? 'applicant' : 'beneficial_owner',
             'status' => 'approved', 'legal_name' => 'Test Person', 'ownership_percentage' => 100,
-            'residence_country_code' => 'HK',
+            'residence_country_code' => 'VN',
         ]);
         $person->documents()->create([
             'kyc_profile_id' => $profile->id, 'type' => 'passport', 'status' => 'approved',

@@ -326,6 +326,11 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             throw new RuntimeException('Nium customer webhook could not be mapped to an existing onboarding account.');
         }
         $source = 'nium_webhook_notification:'.strtolower((string) $payload['template']);
+        if (strtoupper((string) $payload['template']) === 'CUSTOMER_ENTITY_KYC_STATUS') {
+            app(NiumHkSubmitKycService::class)->reconcileEntityWebhook(
+                new WebhookEvent(['provider_id' => $provider->id, 'external_resource_id' => $payload['customerHashId'] ?? null, 'payload' => $payload]),
+            );
+        }
         $this->assertNotificationIdentifiersMatch($providerAccount, $payload, $source, $request);
         $providerAccount = $this->providerAccountStateService->applyRestrictiveNotification(
             $providerAccount,
@@ -375,9 +380,14 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
     {
         $payload = (array) $event->payload;
 
+        if ($event->event_type === 'CUSTOMER_STATUS_WEBHOOK'
+            && ($payload['status'] ?? null) === 'pending'
+            && ($payload['subStatus'] ?? null) === 'awaiting_kyc') {
+            SubmitNiumHkEntityKycJob::dispatch($event->id)->afterCommit();
+        }
         if ($event->event_type === 'CUSTOMER_ENTITY_KYC_STATUS'
             && ($payload['kycStatus'] ?? null) === 'kyc_required') {
-            SubmitNiumHkEntityKycJob::dispatch($event->id)->afterCommit();
+            // Entity status is downstream evidence; it must not initiate the first submission.
         }
     }
 

@@ -80,6 +80,9 @@ final class NiumHkKycIdentityResolver
             || ! $document->expires_at->isFuture()) {
             throw new RuntimeException('Approved passport identity document is invalid for HK biometric KYC.');
         }
+        if ($residence === 'HK') {
+            throw new RuntimeException('HK-resident biometric KYC requires an approved national ID document.');
+        }
         return ['type' => 'passport', 'identification_number' => $number, 'issuance_country' => $country,
             'expiry_date' => $document->expires_at->toDateString(), 'is_resident' => $residence === 'HK'];
     }

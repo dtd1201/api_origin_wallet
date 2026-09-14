@@ -28,6 +28,11 @@ final class SubmitNiumHkEntityKycJob implements ShouldBeUnique, ShouldQueue
 
     public function handle(NiumHkSubmitKycService $service): void
     {
-        $service->submit(WebhookEvent::query()->findOrFail($this->webhookEventId));
+        $event = WebhookEvent::query()->findOrFail($this->webhookEventId);
+        if ($event->event_type === 'CUSTOMER_STATUS_WEBHOOK') {
+            $service->submitAwaitingKyc($event);
+            return;
+        }
+        $service->submit($event);
     }
 }

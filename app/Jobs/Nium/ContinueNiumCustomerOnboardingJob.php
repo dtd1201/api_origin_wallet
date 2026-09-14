@@ -71,6 +71,13 @@ class ContinueNiumCustomerOnboardingJob implements ShouldBeUnique, ShouldQueue
             }
 
             if (filled($providerAccount->external_customer_id)) {
+                $submission = KycProviderSubmission::query()
+                    ->where('user_id', $user->id)
+                    ->where('provider_id', $provider->id)
+                    ->first();
+                if ($submission !== null && ($submission->status !== 'submitted' || $submission->submitted_at === null)) {
+                    $complianceEvidenceService->markNiumSubmissionSubmitted($submission, $providerAccount->id);
+                }
                 $this->logAttempt($attempt, 'customer_exists', 0);
 
                 return;
@@ -97,7 +104,7 @@ class ContinueNiumCustomerOnboardingJob implements ShouldBeUnique, ShouldQueue
                     ->where('provider_id', $provider->id)
                     ->first();
 
-                if ($submission !== null && $submission->status !== 'submitted') {
+                if ($submission !== null && ($submission->status !== 'submitted' || $submission->submitted_at === null)) {
                     $complianceEvidenceService->markNiumSubmissionSubmitted($submission, $providerAccount->id);
                 }
             }

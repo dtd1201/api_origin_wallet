@@ -65,9 +65,54 @@ final class NiumHkSubmitKycService
 
         $body = $this->responseObject($response);
         $state = $this->validResponse($body, $context) ? 'accepted' : 'response_review';
-        $this->mark($context, $state, $response->status(), $body['redirectUrl'] ?? null);
+        $this->mark($context, $state, $response->status(), $body['redirectUrl'] ?? null, $body['referenceId'] ?? null);
 
         return $state;
+    }
+
+    /** Submit every person entity created by the current HK Corporate Full payload. */
+    public function submitAwaitingKyc(WebhookEvent $event): array
+    {
+        $account = UserProviderAccount::query()->with('user.kycProfile.relatedPersons')->where('provider_id', $event->provider_id)
+            ->where('external_customer_id', (string) data_get($event->payload, 'customerHashId'))->sole();
+        $profile = $account->user->kycProfile;
+        $applicant = $this->corporateApplicant($profile);
+        $people = collect([$applicant])->merge($profile->relatedPersons->reject(fn ($person) =>
+            $person->is($applicant) && strtolower((string) $applicant->relationship_type) !== 'beneficial_owner'
+        )->filter(fn ($person) => ! in_array(strtolower(str_replace(['-', ' '], '_', (string) $person->relationship_type)), ['authorized_representative', 'authorised_representative'], true)));
+        $results = [];
+        foreach ($people as $person) {
+            $entityType = $person->is($applicant) && ! isset($results['origin-wallet-applicant-'.$person->id]) ? 'applicant' : 'individual_stakeholder';
+            $externalId = 'origin-wallet-'.($entityType === 'applicant' ? 'applicant' : 'stakeholder').'-'.$person->id;
+            $synthetic = new WebhookEvent(['provider_id' => $event->provider_id, 'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS', 'processing_status' => 'processed', 'processed_at' => $event->processed_at, 'external_resource_id' => $account->external_customer_id, 'payload' => ['customerHashId' => $account->external_customer_id, 'externalId' => $externalId, 'entityType' => $entityType, 'referenceId' => $externalId, 'kycStatus' => 'kyc_required']]);
+            $results[$externalId] = $this->submit($synthetic);
+        }
+        return $results;
+    }
+
+    public function reconcileEntityWebhook(WebhookEvent $event): void
+    {
+        $payload = (array) $event->payload;
+        $account = UserProviderAccount::query()->where('provider_id', $event->provider_id)
+            ->where('external_customer_id', (string) ($payload['customerHashId'] ?? $event->external_resource_id))->first();
+        if ($account === null) {
+            throw new RuntimeException('Nium entity webhook customer mapping is unknown.');
+        }
+        $metadata = (array) $account->metadata;
+        foreach ((array) ($metadata['nium_submit_kyc_attempts'] ?? []) as $key => $attempt) {
+            if (($attempt['entity_type'] ?? null) !== ($payload['entityType'] ?? null)
+                || ($attempt['external_id'] ?? null) !== ($payload['externalId'] ?? null)) {
+                continue;
+            }
+            $attempt['entity_kyc_status'] = $payload['kycStatus'] ?? null;
+            $attempt['entity_status_updated_at'] = now()->toISOString();
+            if (filled($payload['referenceId'] ?? null)) {
+                $attempt['provider_reference_id'] = (string) $payload['referenceId'];
+            }
+            $metadata['nium_submit_kyc_attempts'][$key] = $attempt;
+            $account->forceFill(['metadata' => $metadata])->save();
+            return;
+        }
     }
 
     private function context(WebhookEvent $event): array
@@ -182,7 +227,7 @@ final class NiumHkSubmitKycService
     {
         return DB::transaction(function () use ($context): bool {
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
-            $key = $this->attemptKey($context['reference_id']);
+            $key = $this->attemptKey($account->external_customer_id, $context['entity_type'], $context['external_id']);
             $metadata = (array) $account->metadata;
             $priorPost = ApiRequestLog::query()
                 ->where('provider_id', $account->provider_id)
@@ -199,6 +244,7 @@ final class NiumHkSubmitKycService
             data_set($metadata, 'nium_submit_kyc_attempts.'.$key, [
                 'state' => 'submitting',
                 'kyc_mode' => 'biometric_kyc',
+                'entity_type' => $context['entity_type'], 'external_id' => $context['external_id'],
                 'webhook_id' => $context['event']->id,
                 'webhook_processed_at' => $context['event']->processed_at?->toISOString(),
                 'updated_at' => now()->toISOString(),
@@ -208,17 +254,20 @@ final class NiumHkSubmitKycService
         }, 3);
     }
 
-    private function mark(array $context, string $state, ?int $httpStatus = null, mixed $redirectUrl = null): void
+    private function mark(array $context, string $state, ?int $httpStatus = null, mixed $redirectUrl = null, ?string $providerReference = null): void
     {
-        DB::transaction(function () use ($context, $state, $httpStatus, $redirectUrl): void {
+        DB::transaction(function () use ($context, $state, $httpStatus, $redirectUrl, $providerReference): void {
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
-            $key = $this->attemptKey($context['reference_id']);
+            $key = $this->attemptKey($account->external_customer_id, $context['entity_type'], $context['external_id']);
             $log = $this->attemptLog($context);
             data_set($metadata, 'nium_submit_kyc_attempts.'.$key, array_filter([
                 'state' => $state,
                 'kyc_mode' => 'biometric_kyc',
+                'entity_type' => $context['entity_type'],
+                'external_id' => $context['external_id'],
                 'provider_http_status' => $httpStatus,
+                'provider_reference_id' => $providerReference,
                 'redirect_url_fingerprint' => is_string($redirectUrl) && trim($redirectUrl) !== ''
                     ? substr(hash('sha256', $redirectUrl), 0, 16)
                     : null,
@@ -246,8 +295,11 @@ final class NiumHkSubmitKycService
 
     private function validResponse(array $body, array $context): bool
     {
+        $providerReference = trim((string) ($body['referenceId'] ?? ''));
+        $externalReferenceRequest = str_starts_with($context['reference_id'], 'origin-wallet-');
         return ($body['entityType'] ?? null) === $context['entity_type']
-            && ($body['referenceId'] ?? null) === $context['reference_id']
+            && $providerReference !== ''
+            && ($externalReferenceRequest || $providerReference === $context['reference_id'])
             && (! isset($body['externalId']) || $body['externalId'] === $context['external_id'])
             && in_array($body['kycStatus'] ?? null, ['initiated', 'submitted'], true)
             && ($body['kycMode'] ?? null) === 'biometric_kyc'
@@ -266,8 +318,8 @@ final class NiumHkSubmitKycService
         return is_array($body) && ! array_is_list($body) ? $body : [];
     }
 
-    private function attemptKey(string $referenceId): string
+    private function attemptKey(string $customerId, string $entityType, string $externalId): string
     {
-        return 'ref_'.substr(hash('sha256', $referenceId), 0, 16);
+        return 'entity_'.substr(hash('sha256', $customerId.'|'.$entityType.'|'.$externalId), 0, 24);
     }
 }

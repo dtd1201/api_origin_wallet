@@ -18,7 +18,7 @@ class NiumHkKycIdentityResolverTest extends TestCase
     #[DataProvider('eligiblePassports')]
     public function test_resolves_canonical_passport_documents(string $type, string $status): void
     {
-        $person = $this->person('HK');
+        $person = $this->person('VN');
         $this->passport($person, compact('type', 'status'));
 
         $identity = app(NiumHkKycIdentityResolver::class)->resolve($person->fresh());
@@ -27,7 +27,7 @@ class NiumHkKycIdentityResolverTest extends TestCase
         $this->assertSame('P1234567', $identity['identification_number']);
         $this->assertSame('GB', $identity['issuance_country']);
         $this->assertSame('2099-12-31', $identity['expiry_date']);
-        $this->assertTrue($identity['is_resident']);
+        $this->assertFalse($identity['is_resident']);
     }
 
     public static function eligiblePassports(): array
@@ -68,7 +68,7 @@ class NiumHkKycIdentityResolverTest extends TestCase
 
     public function test_superseded_passport_is_not_authoritative(): void
     {
-        $person = $this->person('HK');
+        $person = $this->person('VN');
         $old = $this->passport($person, ['document_number' => 'OLD']);
         $this->passport($person, ['document_number' => 'NEW', 'metadata' => ['previous_document_id' => $old->id]]);
         $this->assertSame('NEW', app(NiumHkKycIdentityResolver::class)->resolve($person->fresh())['identification_number']);
@@ -85,16 +85,16 @@ class NiumHkKycIdentityResolverTest extends TestCase
     public function test_equivalent_document_remains_authoritative_over_legacy_metadata(): void
     {
         $legacy = $this->legacyIdentity(['identification_number' => 'P1234567', 'issuance_country' => 'GB']);
-        $person = $this->person('HK', ['nium_biometric_identity' => $legacy]);
+        $person = $this->person('VN', ['nium_biometric_identity' => $legacy]);
         $this->passport($person);
         $identity = app(NiumHkKycIdentityResolver::class)->resolve($person->fresh());
         $this->assertSame('P1234567', $identity['identification_number']);
-        $this->assertTrue($identity['is_resident']);
+        $this->assertFalse($identity['is_resident']);
     }
 
     public function test_conflicting_document_and_legacy_metadata_fail_closed(): void
     {
-        $person = $this->person('HK', ['nium_biometric_identity' => $this->legacyIdentity()]);
+        $person = $this->person('VN', ['nium_biometric_identity' => $this->legacyIdentity()]);
         $this->passport($person);
         $this->expectException(RuntimeException::class);
         app(NiumHkKycIdentityResolver::class)->resolve($person->fresh());
