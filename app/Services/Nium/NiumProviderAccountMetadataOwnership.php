@@ -64,7 +64,7 @@ final class NiumProviderAccountMetadataOwnership
         $safe = [];
         foreach (array_slice($value, -20, null, true) as $key => $attempt) {
             if (! is_string($key)
-                || preg_match('/^ref_[a-f0-9]{16}$/', $key) !== 1
+                || preg_match('/^(?:ref_[a-f0-9]{16}|entity_[a-f0-9]{24})$/', $key) !== 1
                 || ! is_array($attempt)
                 || array_is_list($attempt)) {
                 continue;
@@ -87,6 +87,11 @@ final class NiumProviderAccountMetadataOwnership
             'state' => $this->safeString($attempt['state'] ?? null, 64),
             'kyc_mode' => ($attempt['kyc_mode'] ?? null) === 'biometric_kyc' ? 'biometric_kyc' : null,
             'provider_http_status' => $this->httpStatus($attempt['provider_http_status'] ?? null),
+            'provider_reference_id' => $this->safeString($attempt['provider_reference_id'] ?? null, 128),
+            'entity_type' => in_array($attempt['entity_type'] ?? null, ['applicant', 'individual_stakeholder'], true) ? $attempt['entity_type'] : null,
+            'external_id' => $this->safeString($attempt['external_id'] ?? null, 128),
+            'entity_kyc_status' => $this->safeString($attempt['entity_kyc_status'] ?? null, 64),
+            'entity_status_updated_at' => $this->timestamp($attempt['entity_status_updated_at'] ?? null),
             'redirect_url_fingerprint' => $this->fingerprint($attempt['redirect_url_fingerprint'] ?? null, 16),
             'submit_kyc_log_id' => $this->positiveInt($attempt['submit_kyc_log_id'] ?? null),
             'submit_kyc_log_at' => $this->timestamp($attempt['submit_kyc_log_at'] ?? null),
