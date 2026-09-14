@@ -47,16 +47,14 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $this->assertSame($context['reference'], $calls->payload['entityReferenceId']);
     }
 
-    public function test_hk_authorized_representative_and_two_owners_produce_three_eligible_entities(): void
+    public function test_hk_authorized_representative_is_not_applicant_and_owned_bo_is_duplicated(): void
     {
         $context = $this->context();
-        $context['person']->forceFill(['relationship_type' => 'authorized_representative', 'ownership_percentage' => null])->save();
-        $owners = collect([[60, 'P456'], [40, 'P789']])->map(function ($item) use ($context) {
-            $owner = $context['profile']->relatedPersons()->create(['relationship_type' => 'beneficial_owner', 'status' => 'approved', 'legal_name' => 'Owner '.$item[0], 'ownership_percentage' => $item[0], 'residence_country_code' => 'VN']);
-            $owner->documents()->create(['kyc_profile_id' => $context['profile']->id, 'type' => 'passport', 'status' => 'approved', 'document_number' => $item[1], 'issuing_country_code' => 'VN', 'expires_at' => '2099-12-31', 'file_url' => 'private://passport-'.$item[0]]);
-            return $owner;
-        });
-        $entityIds = ['origin-wallet-applicant-'.$context['person']->id, 'origin-wallet-stakeholder-'.$owners[0]->id, 'origin-wallet-stakeholder-'.$owners[1]->id];
+        $context['person']->forceFill(['relationship_type' => 'beneficial_owner', 'ownership_percentage' => 60])->save();
+        $representative = $context['profile']->relatedPersons()->create(['relationship_type' => 'authorized_representative', 'status' => 'approved', 'legal_name' => 'Representative', 'ownership_percentage' => null, 'residence_country_code' => 'VN']);
+        $owner = $context['profile']->relatedPersons()->create(['relationship_type' => 'beneficial_owner', 'status' => 'approved', 'legal_name' => 'Owner 40', 'ownership_percentage' => 40, 'residence_country_code' => 'VN']);
+        $owner->documents()->create(['kyc_profile_id' => $context['profile']->id, 'type' => 'passport', 'status' => 'approved', 'document_number' => 'P789', 'issuing_country_code' => 'VN', 'expires_at' => '2099-12-31', 'file_url' => 'private://passport-40']);
+        $entityIds = ['origin-wallet-applicant-'.$context['person']->id, 'origin-wallet-stakeholder-'.$context['person']->id, 'origin-wallet-stakeholder-'.$owner->id];
         $calls = new class { public array $payloads = []; };
         $this->mock(NiumService::class, function (MockInterface $mock) use ($calls): void {
             $mock->shouldReceive('clientId')->andReturn('client');
@@ -76,6 +74,7 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $service->submitAwaitingKyc($event->fresh());
         $this->assertCount(3, $calls->payloads);
         $this->assertSame($entityIds, array_column($calls->payloads, 'entityReferenceId'));
+        $this->assertNotContains('origin-wallet-applicant-'.$representative->id, array_column($calls->payloads, 'entityReferenceId'));
         $this->assertSame(['applicant', 'individual_stakeholder', 'individual_stakeholder'], array_column($calls->payloads, 'entityType'));
         $this->assertCount(3, $result);
         $attempts = (array) $context['account']->fresh()->metadata['nium_submit_kyc_attempts'];

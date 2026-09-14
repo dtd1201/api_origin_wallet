@@ -211,15 +211,6 @@ final class NiumHkSubmitKycService
     private function corporateApplicant(KycProfile $profile): KycRelatedPerson
     {
         $applicant = $profile->relatedPersons->first(fn (KycRelatedPerson $person): bool =>
-            strtolower((string) $person->relationship_type) === 'applicant');
-        $applicant ??= $profile->relatedPersons->first(fn (KycRelatedPerson $person): bool => in_array(
-            strtolower(str_replace(['-', ' '], '_', trim((string) $person->relationship_type))),
-            ['authorized_representative', 'authorised_representative'], true,
-        ));
-        if ($applicant !== null) {
-            return $applicant;
-        }
-        $applicant = $profile->relatedPersons->first(fn (KycRelatedPerson $person): bool =>
             strtolower((string) $person->relationship_type) === 'applicant'
             && $person->ownership_percentage !== null
             && (float) $person->ownership_percentage > 0);

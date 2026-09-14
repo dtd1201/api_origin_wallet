@@ -945,19 +945,6 @@ class NiumCustomerPayloadFactory
 
     private function corporateApplicant(KycProfile $profile): KycRelatedPerson
     {
-        if (strtoupper((string) (($profile->metadata ?? [])['nium_region'] ?? '')) === 'HK'
-            && strtolower((string) (($profile->metadata ?? [])['nium_kyc_type'] ?? '')) === 'full') {
-            $applicant = $profile->relatedPersons->first(fn (KycRelatedPerson $person) =>
-                strtolower((string) $person->relationship_type) === 'applicant');
-            $applicant ??= $profile->relatedPersons->first(fn (KycRelatedPerson $person) => in_array(
-                strtolower(str_replace(['-', ' '], '_', trim((string) $person->relationship_type))),
-                ['authorized_representative', 'authorised_representative'], true,
-            ));
-            if ($applicant !== null) {
-                return $applicant;
-            }
-        }
-
         $applicant = $profile->relatedPersons->first(
             fn (KycRelatedPerson $person) => strtolower((string) $person->relationship_type) === 'applicant'
                 && $person->ownership_percentage !== null
