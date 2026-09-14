@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Jobs\Nium\SubmitNiumHkEntityKycJob;
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\NiumVirtualAccount;
@@ -109,6 +110,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 'processed_at' => now(),
                 'error_message' => null,
             ]);
+            $this->dispatchEntityKyc($event->fresh());
         } catch (Throwable $exception) {
             $event->update([
                 'processing_status' => 'failed',
@@ -170,6 +172,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 'processed_at' => now(),
                 'error_message' => null,
             ]);
+            $this->dispatchEntityKyc($event->fresh());
         } catch (Throwable $exception) {
             $event->update([
                 'processing_status' => 'failed',
@@ -365,6 +368,16 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             );
 
             throw new RuntimeException('Nium customer reconciliation failed; access remains restricted.', previous: $exception);
+        }
+    }
+
+    private function dispatchEntityKyc(WebhookEvent $event): void
+    {
+        $payload = (array) $event->payload;
+
+        if ($event->event_type === 'CUSTOMER_ENTITY_KYC_STATUS'
+            && ($payload['kycStatus'] ?? null) === 'kyc_required') {
+            SubmitNiumHkEntityKycJob::dispatch($event->id)->afterCommit();
         }
     }
 

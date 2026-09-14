@@ -109,7 +109,7 @@ class ComplianceEvidenceService
         $submission->update([
             'status' => 'submitted',
             'provider_account_id' => $providerAccountId,
-            'submitted_at' => now(),
+            'submitted_at' => $submission->submitted_at ?? now(),
             'approved_at' => null,
             'failure_reason' => null,
         ]);

@@ -232,6 +232,13 @@ class NiumCustomerPayloadFactory
             $payload['applicantDeclarationTimeStamp'] = $payload['applicantDeclarationTimestamp'] ?? null;
             unset($payload['applicantDeclarationTimestamp']);
             $payload['tradeName'] = $this->requiredHkCorporateTradeName($profile);
+            unset($payload['applicant']['documents']);
+
+            foreach ($payload['stakeholders']['individual'] ?? [] as $index => $stakeholder) {
+                unset($payload['stakeholders']['individual'][$index]['documents']);
+            }
+
+            $this->assertHkCorporatePersonDocumentsSeparated($payload);
             $this->hkCorporateV5Validator->assert($profile, $payload);
         }
 
@@ -244,6 +251,19 @@ class NiumCustomerPayloadFactory
         }
 
         return $payload;
+    }
+
+    private function assertHkCorporatePersonDocumentsSeparated(array $payload): void
+    {
+        if (array_key_exists('documents', $payload['applicant'] ?? [])) {
+            throw new RuntimeException('Nium HK Corporate Full customer_create must not contain applicant identity documents.');
+        }
+
+        foreach ($payload['stakeholders']['individual'] ?? [] as $stakeholder) {
+            if (is_array($stakeholder) && array_key_exists('documents', $stakeholder)) {
+                throw new RuntimeException('Nium HK Corporate Full customer_create must not contain stakeholder identity documents.');
+            }
+        }
     }
 
     private function hkCorporateV5BusinessType(mixed $businessType): string

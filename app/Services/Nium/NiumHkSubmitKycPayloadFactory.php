@@ -17,13 +17,13 @@ final class NiumHkSubmitKycPayloadFactory
         $payload = [
             'region' => 'HK',
             'entityType' => $entityType,
-            'isResident' => false,
+            'isResident' => $identity['is_resident'],
             'entityReferenceId' => $referenceId,
             'kycMode' => 'biometric_kyc',
             'proofOfIdentityDocument' => [[
-                'type' => 'passport',
+                'type' => $identity['type'],
                 'identificationNumber' => $identity['identification_number'],
-                'issuanceCountry' => 'VN',
+                'issuanceCountry' => $identity['issuance_country'],
                 'expiryDate' => $identity['expiry_date'],
             ]],
         ];

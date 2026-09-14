@@ -12,7 +12,7 @@ final class NiumHkSubmitKycValidator
     {
         if (($payload['region'] ?? null) !== 'HK'
             || ! in_array($payload['entityType'] ?? null, ['applicant', 'individual_stakeholder'], true)
-            || ($payload['isResident'] ?? null) !== false
+            || ! is_bool($payload['isResident'] ?? null)
             || ! is_string($payload['entityReferenceId'] ?? null)
             || trim($payload['entityReferenceId']) === ''
             || ($payload['kycMode'] ?? null) !== 'biometric_kyc') {
@@ -42,7 +42,7 @@ final class NiumHkSubmitKycValidator
         if (($document['type'] ?? null) !== 'passport'
             || ! is_string($document['identificationNumber'] ?? null)
             || trim($document['identificationNumber']) === ''
-            || ($document['issuanceCountry'] ?? null) !== 'VN'
+            || preg_match('/^[A-Z]{2}$/', (string) ($document['issuanceCountry'] ?? '')) !== 1
             || ! $expiryIsExact
             || ! $expiry->isFuture()) {
             throw new RuntimeException('Invalid Nium HK biometric passport identity document.');
