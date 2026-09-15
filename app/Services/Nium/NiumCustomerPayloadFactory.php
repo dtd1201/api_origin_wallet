@@ -219,7 +219,11 @@ class NiumCustomerPayloadFactory
                 ],
             ]),
             'applicant' => $applicantPayload,
-            'stakeholders' => $this->stakeholders($profile, $applicant, $region === 'SG'),
+            'stakeholders' => $this->stakeholders(
+                $profile,
+                $applicant,
+                $region === 'SG' || ($region === 'HK' && $kycType === 'full'),
+            ),
             'documents' => $this->corporateDocuments($profile),
         ]));
 
