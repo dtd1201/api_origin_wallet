@@ -422,6 +422,47 @@ class NiumPaymentIdServiceTest extends TestCase
         ]);
     }
 
+    public function test_assign_rejects_non_nium_provider_account_when_user_has_current_eligible_nium_account(): void
+    {
+        [, $user] = $this->eligibleAccount();
+
+        $otherProvider = IntegrationProvider::query()->create([
+            'code' => 'other-payment-provider',
+            'name' => 'Other Payment Provider',
+            'status' => 'active',
+        ]);
+
+        $otherAccount = $user->providerAccounts()->create([
+            'provider_id' => $otherProvider->id,
+            'status' => 'active',
+        ]);
+
+        Http::fake();
+
+        try {
+            app(NiumPaymentIdService::class)->assign(
+                $otherAccount,
+                'USD',
+                'COLLECTION_ACCOUNT',
+                'LOCAL',
+            );
+
+            $this->fail('Expected non-current Nium provider account assignment to be rejected.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'The requested Nium provider account is not the current eligible account.',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+
+        $this->assertSame(
+            0,
+            NiumVirtualAccount::query()->count(),
+        );
+    }
+
     private function eligibleAccount(): array
     {
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
