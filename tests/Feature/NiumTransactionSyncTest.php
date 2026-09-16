@@ -200,6 +200,83 @@ class NiumTransactionSyncTest extends TestCase
         $this->assertSame($transfer->id, Transaction::query()->sole()->transfer_id);
     }
 
+
+    public function test_transaction_sync_infers_direction_from_transaction_type_before_amount_sign(): void
+    {
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
+        config()->set('services.nium.client_id', 'client-test');
+        config()->set('services.nium.auth', [
+            'mode' => 'header',
+            'header_name' => 'x-api-key',
+            'header_value' => 'test-key',
+        ]);
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
+        config()->set('services.nium.transaction_sync_page_size', 100);
+        config()->set('services.nium.transaction_sync_max_pages', 1);
+
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'nium',
+            'name' => 'Nium',
+            'status' => 'active',
+        ]);
+
+        $user = User::factory()->create();
+
+        $user->providerAccounts()->create([
+            'provider_id' => $provider->id,
+            'external_customer_id' => 'customer-direction-test',
+            'external_account_id' => 'wallet-direction-test',
+            'status' => 'active',
+            'provider_status' => 'clear',
+            'customer_id_verified_at' => now(),
+            'wallet_id_verified_at' => now(),
+            'provider_ids_verified_at' => now(),
+        ]);
+
+        Http::fake([
+            '*' => Http::response([
+                'content' => [
+                    [
+                        'transactionId' => 'txn-debit-direction',
+                        'transactionType' => 'Remittance_Debit_External',
+                        'currency' => 'USD',
+                        'amount' => 5000,
+                        'status' => 'COMPLETED',
+                        'dateTime' => now()->toISOString(),
+                    ],
+                    [
+                        'transactionId' => 'txn-credit-direction',
+                        'transactionType' => 'Wallet_Credit_Mode_Offline',
+                        'currency' => 'USD',
+                        'amount' => 2000,
+                        'status' => 'COMPLETED',
+                        'dateTime' => now()->toISOString(),
+                    ],
+                ],
+                'totalPages' => 1,
+            ], 200),
+        ]);
+
+        app(NiumDataSyncService::class)->syncTransactions($provider, $user);
+
+        $debit = Transaction::query()
+            ->where('external_transaction_id', 'txn-debit-direction')
+            ->sole();
+
+        $credit = Transaction::query()
+            ->where('external_transaction_id', 'txn-credit-direction')
+            ->sole();
+
+        $this->assertSame('Remittance_Debit_External', $debit->transaction_type);
+        $this->assertSame('debit', $debit->direction);
+        $this->assertSame('5000.00000000', $debit->amount);
+
+        $this->assertSame('Wallet_Credit_Mode_Offline', $credit->transaction_type);
+        $this->assertSame('credit', $credit->direction);
+        $this->assertSame('2000.00000000', $credit->amount);
+    }
+
     public function test_transaction_sync_is_bounded_paginated_deduplicated_and_checkpointed(): void
     {
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');

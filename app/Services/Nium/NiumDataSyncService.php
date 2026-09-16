@@ -362,10 +362,30 @@ class NiumDataSyncService implements DataSyncProvider
 
     private function direction(array $item, mixed $amount): string
     {
-        $direction = strtolower((string) $this->value($item, ['direction', 'debitCreditIndicator']));
+        $direction = strtolower(trim((string) $this->value(
+            $item,
+            ['direction', 'debitCreditIndicator']
+        )));
 
-        if (in_array($direction, ['credit', 'debit'], true)) {
-            return $direction;
+        if (in_array($direction, ['debit', 'outbound'], true)) {
+            return 'debit';
+        }
+
+        if (in_array($direction, ['credit', 'inbound'], true)) {
+            return 'credit';
+        }
+
+        $transactionType = strtolower((string) $this->value(
+            $item,
+            ['transactionType', 'type']
+        ));
+
+        if (str_contains($transactionType, 'debit')) {
+            return 'debit';
+        }
+
+        if (str_contains($transactionType, 'credit')) {
+            return 'credit';
         }
 
         return (float) $amount < 0 ? 'debit' : 'credit';
