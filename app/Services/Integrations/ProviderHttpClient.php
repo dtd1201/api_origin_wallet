@@ -97,10 +97,6 @@ class ProviderHttpClient implements ProviderClient
             };
         } catch (ConnectionException $exception) {
             if ($this->serviceConfigKey === 'nium') {
-                logger()->error('NIUM_REQUEST_RAW_DEBUG', [
-                    'url' => $url,
-                    'payload' => $payload,
-                ]);
                 $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
                 $this->logNiumRequest(
                     $user,

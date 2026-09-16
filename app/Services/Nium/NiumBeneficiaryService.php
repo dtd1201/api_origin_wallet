@@ -238,8 +238,12 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     ): Beneficiary {
         $responseData = $response->json() ?? ['raw' => $response->body()];
         $payload = $this->beneficiaryResponsePayload($responseData);
+        $providerBeneficiaryId = $payload['beneficiaryHashId'] ?? $payload['id'] ?? null;
+        $resolvedBeneficiaryId = $action === 'create'
+            ? $providerBeneficiaryId
+            : ($providerBeneficiaryId ?? $beneficiary->external_beneficiary_id);
 
-        if (! $response->successful() || ! filled($payload['beneficiaryHashId'] ?? $payload['id'] ?? $beneficiary->external_beneficiary_id)) {
+        if (! $response->successful() || ! filled($resolvedBeneficiaryId)) {
             $beneficiary->update([
                 'status' => "{$action}_failed",
                 'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
@@ -249,7 +253,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         }
 
         $beneficiary->update([
-            'external_beneficiary_id' => $payload['beneficiaryHashId'] ?? $payload['id'] ?? $beneficiary->external_beneficiary_id,
+            'external_beneficiary_id' => $resolvedBeneficiaryId,
             'status' => $this->normalizeBeneficiaryStatus($payload['status'] ?? 'ACTIVE'),
             'payout_method' => strtoupper((string) $requestPayload['payoutMethod']),
             'raw_data' => $this->mergeSuccessfulWriteData($beneficiary, $responseData, $requestPayload),
