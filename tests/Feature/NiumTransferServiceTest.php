@@ -392,7 +392,8 @@ class NiumTransferServiceTest extends TestCase
         );
 
         $this->assertSame('pending', $updated->status);
-        Http::assertSent(fn ($request): bool => ! array_key_exists('auditId', $request->data()['payout']));
+        Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
+            && ! array_key_exists('auditId', $request->data()['payout'] ?? []));
     }
 
     public function test_cross_currency_transfer_without_fx_lock_uses_live_transfer_money_contract(): void
@@ -409,7 +410,8 @@ class NiumTransferServiceTest extends TestCase
         );
 
         $this->assertSame('pending', $updated->status);
-        Http::assertSent(fn ($request): bool => ! array_key_exists('auditId', $request->data()['payout']));
+        Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
+            && ! array_key_exists('auditId', $request->data()['payout'] ?? []));
     }
 
     public function test_swift_transfer_requires_and_sends_configured_fee_type(): void
@@ -428,10 +430,11 @@ class NiumTransferServiceTest extends TestCase
 
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
-        Http::assertSent(fn ($request): bool => $request->data()['payout']['payoutMethod'] === 'SWIFT'
-            && $request->data()['payout']['swiftFeeType'] === 'SHA'
-            && $request->data()['purposeCode'] === 'IR01811'
-            && $request->data()['sourceOfFunds'] === 'Corporate Account');
+        Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
+            && ($request->data()['payout']['payoutMethod'] ?? null) === 'SWIFT'
+            && ($request->data()['payout']['swiftFeeType'] ?? null) === 'SHA'
+            && ($request->data()['purposeCode'] ?? null) === 'IR01811'
+            && ($request->data()['sourceOfFunds'] ?? null) === 'Corporate Account');
     }
 
     public function test_client_nium_request_cannot_override_authoritative_payload(): void
@@ -455,16 +458,20 @@ class NiumTransferServiceTest extends TestCase
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
         Http::assertSent(function ($request): bool {
+            if (! $this->isRemittancePost($request)) {
+                return false;
+            }
+
             $payload = $request->data();
 
-            return $payload['beneficiary']['id'] === 'beneficiary-test'
-                && $payload['payout']['sourceAmount'] === 10.0
-                && $payload['payout']['sourceCurrency'] === 'USD'
-                && $payload['payout']['destinationCurrency'] === 'USD'
-                && $payload['payout']['payoutMethod'] === 'SWIFT'
-                && $payload['payout']['swiftFeeType'] === 'SHA'
-                && $payload['purposeCode'] === 'IR01811'
-                && $payload['sourceOfFunds'] === 'Corporate Account';
+            return ($payload['beneficiary']['id'] ?? null) === 'beneficiary-test'
+                && ($payload['payout']['sourceAmount'] ?? null) === 10.0
+                && ($payload['payout']['sourceCurrency'] ?? null) === 'USD'
+                && ($payload['payout']['destinationCurrency'] ?? null) === 'USD'
+                && ($payload['payout']['payoutMethod'] ?? null) === 'SWIFT'
+                && ($payload['payout']['swiftFeeType'] ?? null) === 'SHA'
+                && ($payload['purposeCode'] ?? null) === 'IR01811'
+                && ($payload['sourceOfFunds'] ?? null) === 'Corporate Account';
         });
     }
 
@@ -682,7 +689,8 @@ class NiumTransferServiceTest extends TestCase
 
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-AUTHORITATIVE-FEE'])]);
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
-        Http::assertSent(fn ($request): bool => $request->data()['payout']['swiftFeeType'] === 'SHA');
+        Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
+            && ($request->data()['payout']['swiftFeeType'] ?? null) === 'SHA');
     }
 
     public function test_timeout_after_provider_acceptance_marks_unknown_and_never_posts_again(): void
@@ -720,8 +728,10 @@ class NiumTransferServiceTest extends TestCase
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer();
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-EVIDENCE-UNKNOWN'])]);
-        ApiRequestLog::creating(static function (): void {
-            throw new RuntimeException('Synthetic evidence persistence failure.');
+        ApiRequestLog::creating(static function (ApiRequestLog $log): void {
+            if ($log->operation === 'transfer_money') {
+                throw new RuntimeException('Synthetic evidence persistence failure.');
+            }
         });
 
         $unknown = app(NiumTransferService::class)->submitTransfer($provider, $transfer);

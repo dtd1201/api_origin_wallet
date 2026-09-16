@@ -12,6 +12,7 @@ use App\Services\Integrations\ProviderQuoteManager;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumTransferPolicy;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Mockery\MockInterface;
 use RuntimeException;
@@ -21,12 +22,19 @@ class CustomerTransferSecurityTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Http::fake($this->purposeCodesRoute());
+    }
+
     private function purposeCodesRoute(): array
     {
-        return ['*' => \Illuminate\Http\Client\Response::fromPsrResponse(new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+        return ['*api/v1/remittance/purposeCodes' => Http::response([
             ['description' => 'General Goods Trades - Offline trade', 'purposeCode' => 'IR01811'],
             ['description' => 'Medical Treatment', 'purposeCode' => 'IR004'],
-        ])))];
+        ])];
     }
 
     public function test_creation_scopes_beneficiary_and_source_account_to_customer(): void
