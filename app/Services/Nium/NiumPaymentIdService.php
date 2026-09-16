@@ -17,7 +17,16 @@ final class NiumPaymentIdService
     public function assign(UserProviderAccount $account, string $currency, string $accountCategory, string $accountType, ?string $bankName = null): NiumVirtualAccount
     {
         $account->loadMissing('user');
-        $this->accountStateService->assertEligible($account->user);
+
+        $eligibleAccount = $this->accountStateService->assertEligible($account->user);
+
+        if ((int) $eligibleAccount->id !== (int) $account->id) {
+            throw new RuntimeException(
+                'The requested Nium provider account is not the current eligible account.'
+            );
+        }
+
+        $account = $eligibleAccount;
         $currency = strtoupper($currency);
         $accountCategory = strtoupper($accountCategory);
         $accountType = strtoupper($accountType);
@@ -45,11 +54,6 @@ final class NiumPaymentIdService
             externalReference: 'account-'.$account->id,
         );
         $data = $response->json() ?? [];
-        logger()->error('NIUM_ASSIGN_RAW_DEBUG', [
-            'status' => $response->status(),
-            'body' => $response->body(),
-            'payload' => $payload,
-        ]);
         $paymentId = $data['uniquePaymentId'] ?? $data['payment_id'] ?? null;
 
         if (
