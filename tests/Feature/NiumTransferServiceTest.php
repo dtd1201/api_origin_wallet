@@ -340,6 +340,105 @@ class NiumTransferServiceTest extends TestCase
         $this->assertNotNull($updated->completed_at);
     }
 
+
+    public function test_manager_sync_does_not_commit_terminal_status_when_ledger_application_fails(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'status' => 'pending',
+            'external_transfer_id' => 'RT-MANUAL-ATOMIC',
+        ]);
+
+        Http::fake([
+            '*' => Http::response([
+                [
+                    'status' => 'COMPLETED',
+                    'paymentReferenceNumber' => 'PAY-MANUAL-ATOMIC',
+                    'lastUpdatedAt' => now()->toISOString(),
+                ],
+            ], 200),
+        ]);
+
+        try {
+            app(ProviderTransferManager::class)->syncTransferStatus(
+                $provider,
+                $transfer->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount'])
+            );
+
+            $this->fail('Ledger settlement failure must abort the terminal sync.');
+        } catch (RuntimeException) {
+            // The fixture has no reserved funds, so terminal settlement must fail.
+        }
+
+        $this->assertSame(
+            'pending',
+            $transfer->fresh()->status,
+            'Transfer status must not commit when manual-sync ledger settlement fails.'
+        );
+    }
+
+
+    public function test_manager_sync_rejects_conflicting_terminal_status_without_changing_ledger(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'external_transfer_id' => 'RT-TERMINAL-CONFLICT',
+        ]);
+
+        $ledger = app(LedgerService::class);
+        $ledger->reserveTransfer($transfer);
+
+        $transfer->update([
+            'status' => 'completed',
+            'completed_at' => now(),
+        ]);
+
+        $ledger->applyTransferTerminalStatus($transfer->fresh());
+
+        Http::fake([
+            '*' => Http::response([
+                [
+                    'status' => 'FAILED',
+                    'remarks' => 'Late conflicting provider status.',
+                    'lastUpdatedAt' => now()->addMinute()->toISOString(),
+                ],
+            ], 200),
+        ]);
+
+        try {
+            app(ProviderTransferManager::class)->syncTransferStatus(
+                $provider,
+                $transfer->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount'])
+            );
+
+            $this->fail('A conflicting terminal status must require reconciliation.');
+        } catch (RuntimeException) {
+            // Expected: completed funds must not be reclassified as failed automatically.
+        }
+
+        $fresh = $transfer->fresh();
+        $balance = Balance::query()->where('user_id', $transfer->user_id)->sole();
+
+        $this->assertSame('completed', $fresh->status);
+        $this->assertSame('990.00000000', $balance->available_balance);
+        $this->assertSame('990.00000000', $balance->ledger_balance);
+        $this->assertSame('0.00000000', $balance->reserved_balance);
+
+        $this->assertSame(
+            1,
+            LedgerEntry::query()
+                ->where('source_id', (string) $transfer->id)
+                ->where('entry_type', 'debit')
+                ->count()
+        );
+
+        $this->assertSame(
+            0,
+            LedgerEntry::query()
+                ->where('source_id', (string) $transfer->id)
+                ->where('entry_type', 'release')
+                ->count()
+        );
+    }
+
     public function test_same_transfer_submitted_twice_sends_one_provider_post(): void
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer();

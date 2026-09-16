@@ -125,6 +125,154 @@ class NiumWebhookApiTest extends TestCase
         ]);
     }
 
+
+    public function test_transfer_webhook_does_not_regress_terminal_state_to_pending(): void
+    {
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
+        config()->set('wallet.ledger.enabled', false);
+
+        $provider = $this->provider();
+        $transfer = $this->transfer($provider, 'NIUM-ORDER-1001');
+
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'eventId' => 'nium-order-completed-1001',
+                'eventType' => 'remittance.completed',
+                'data' => [
+                    'resource' => [
+                        'systemReferenceNumber' => 'NIUM-ORDER-1001',
+                        'transactionId' => 'NIUM-ORDER-TXN-1001',
+                        'status' => 'COMPLETED',
+                    ],
+                ],
+            ])
+            ->assertOk();
+
+        $this->assertSame('completed', $transfer->fresh()->status);
+
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'eventId' => 'nium-order-pending-1001',
+                'eventType' => 'remittance.updated',
+                'data' => [
+                    'resource' => [
+                        'systemReferenceNumber' => 'NIUM-ORDER-1001',
+                        'transactionId' => 'NIUM-ORDER-TXN-1001',
+                        'status' => 'PENDING',
+                    ],
+                ],
+            ])
+            ->assertOk();
+
+        $this->assertSame(
+            'completed',
+            $transfer->fresh()->status,
+            'A later-arriving non-terminal webhook must not regress a terminal transfer.'
+        );
+    }
+
+
+    public function test_transfer_webhook_ignores_older_non_terminal_status(): void
+    {
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
+        config()->set('wallet.ledger.enabled', false);
+
+        $provider = $this->provider();
+        $transfer = $this->transfer($provider, 'NIUM-ORDER-TIME-1001');
+
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'eventId' => 'nium-processing-newer-1001',
+                'eventType' => 'remittance.updated',
+                'data' => [
+                    'resource' => [
+                        'systemReferenceNumber' => 'NIUM-ORDER-TIME-1001',
+                        'transactionId' => 'NIUM-ORDER-TIME-TXN-1001',
+                        'status' => 'PROCESSING',
+                        'updatedAt' => '2026-09-16T10:05:00Z',
+                    ],
+                ],
+            ])
+            ->assertOk();
+
+        $fresh = $transfer->fresh();
+
+        $this->assertSame('pending', $fresh->status);
+        $this->assertSame(
+            '2026-09-16 10:05:00',
+            $fresh->provider_status_at?->utc()->format('Y-m-d H:i:s')
+        );
+
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'eventId' => 'nium-pending-older-1001',
+                'eventType' => 'remittance.updated',
+                'data' => [
+                    'resource' => [
+                        'systemReferenceNumber' => 'NIUM-ORDER-TIME-1001',
+                        'transactionId' => 'NIUM-ORDER-TIME-TXN-1001',
+                        'status' => 'PENDING',
+                        'updatedAt' => '2026-09-16T10:01:00Z',
+                    ],
+                ],
+            ])
+            ->assertOk();
+
+        $fresh = $transfer->fresh();
+
+        $this->assertSame(
+            '2026-09-16 10:05:00',
+            $fresh->provider_status_at?->utc()->format('Y-m-d H:i:s'),
+            'An older webhook must not replace the latest provider status timestamp.'
+        );
+
+        $this->assertSame(
+            'PROCESSING',
+            data_get($fresh->raw_data, 'last_webhook_payload.data.resource.status'),
+            'An older webhook must not overwrite the latest accepted provider payload.'
+        );
+    }
+
+    public function test_transfer_webhook_rolls_back_status_when_terminal_ledger_application_fails(): void
+    {
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
+        config()->set('wallet.ledger.enabled', true);
+
+        $provider = $this->provider();
+        $transfer = $this->transfer($provider, 'NIUM-ATOMIC-1001');
+
+        // Intentionally do not create a synced Balance.
+        // A completed transfer therefore cannot be settled by LedgerService.
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'eventId' => 'nium-atomic-completed-1001',
+                'eventType' => 'remittance.completed',
+                'data' => [
+                    'resource' => [
+                        'systemReferenceNumber' => 'NIUM-ATOMIC-1001',
+                        'transactionId' => 'NIUM-ATOMIC-TXN-1001',
+                        'status' => 'COMPLETED',
+                    ],
+                ],
+            ])
+            ->assertUnprocessable();
+
+        $this->assertSame(
+            'pending',
+            $transfer->fresh()->status,
+            'Transfer status must roll back when terminal ledger application fails.'
+        );
+
+        $this->assertDatabaseHas('webhook_events', [
+            'provider_id' => $provider->id,
+            'event_id' => 'nium-atomic-completed-1001',
+            'processing_status' => 'failed',
+        ]);
+    }
+
     private function provider(): IntegrationProvider
     {
         return IntegrationProvider::query()->create([

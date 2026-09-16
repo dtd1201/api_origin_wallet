@@ -4,8 +4,10 @@ namespace App\Services\Integrations;
 
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
+use App\Services\Integrations\Contracts\PreparedTransferStatusProvider;
 use App\Services\Transfers\TransferEligibilityService;
 use App\Services\Wallet\LedgerService;
+use Illuminate\Support\Facades\DB;
 use Throwable;
 
 class ProviderTransferManager
@@ -40,9 +42,31 @@ class ProviderTransferManager
 
     public function syncTransferStatus(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
-        $transfer = $this->registry
-            ->resolveTransferProvider($provider)
-            ->syncTransferStatus($provider, $transfer);
+        $transferProvider = $this->registry->resolveTransferProvider($provider);
+
+        if ($transferProvider instanceof PreparedTransferStatusProvider) {
+            // Provider I/O must remain outside the database transaction.
+            $prepared = $transferProvider->prepareTransferStatusSync($provider, $transfer);
+
+            return DB::transaction(function () use ($provider, $transfer, $transferProvider, $prepared): Transfer {
+                $locked = Transfer::query()
+                    ->whereKey($transfer->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                $updated = $transferProvider->applyPreparedTransferStatus(
+                    $provider,
+                    $locked,
+                    $prepared,
+                );
+
+                $this->ledgerService->applyTransferTerminalStatus($updated);
+
+                return $updated->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
+            });
+        }
+
+        $transfer = $transferProvider->syncTransferStatus($provider, $transfer);
 
         $this->ledgerService->applyTransferTerminalStatus($transfer);
 

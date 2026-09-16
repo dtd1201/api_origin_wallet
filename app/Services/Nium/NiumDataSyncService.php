@@ -178,10 +178,13 @@ class NiumDataSyncService implements DataSyncProvider
         DB::transaction(function () use ($items, $provider, $user, &$count): void {
             foreach ($items as $item) {
                 $externalTransactionId = $this->value($item, [
-                    'transactionHashId',
-                    'transaction_hash_id',
+                    // transactionId is shared by Nium transaction sync and
+                    // remittance webhooks, so use it as the canonical identity
+                    // whenever the provider supplies it.
                     'transactionId',
                     'transaction_id',
+                    'transactionHashId',
+                    'transaction_hash_id',
                     'systemReferenceNumber',
                     'system_reference_number',
                     'systemTraceAuditNumber',
@@ -234,6 +237,10 @@ class NiumDataSyncService implements DataSyncProvider
                             'provider_status' => $this->value($item, ['status']),
                             'settlement_status' => $this->value($item, ['settlementStatus']),
                             'compliance_status' => $this->value($item, ['complianceStatus']),
+                            'transaction_id' => $this->value($item, [
+                                'transactionId',
+                                'transaction_id',
+                            ]),
                             'transaction_hash_id' => $this->value($item, [
                                 'transactionHashId',
                                 'transaction_hash_id',

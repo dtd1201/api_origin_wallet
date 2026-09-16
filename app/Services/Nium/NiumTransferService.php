@@ -5,7 +5,7 @@ namespace App\Services\Nium;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\UserProviderAccount;
-use App\Services\Integrations\Contracts\TransferProvider;
+use App\Services\Integrations\Contracts\PreparedTransferStatusProvider;
 use App\Services\Transfers\TransferEligibilityService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Arr;
@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
 
-class NiumTransferService implements TransferProvider
+class NiumTransferService implements PreparedTransferStatusProvider
 {
     public function __construct(
         private readonly NiumService $niumService,
@@ -144,6 +144,20 @@ class NiumTransferService implements TransferProvider
 
     public function syncTransferStatus(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
+        $prepared = $this->prepareTransferStatusSync($provider, $transfer);
+
+        return DB::transaction(function () use ($provider, $transfer, $prepared): Transfer {
+            $locked = Transfer::query()
+                ->whereKey($transfer->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            return $this->applyPreparedTransferStatus($provider, $locked, $prepared);
+        });
+    }
+
+    public function prepareTransferStatusSync(IntegrationProvider $provider, Transfer $transfer): array
+    {
         $transfer->loadMissing(['provider', 'user', 'beneficiary', 'sourceBankAccount']);
 
         if (! filled($transfer->external_transfer_id)) {
@@ -170,34 +184,68 @@ class NiumTransferService implements TransferProvider
         }
 
         $statusPayload = $this->latestStatusPayload($responseData);
-        $status = $this->normalizeTransferStatus(
-            $statusPayload['status'] ?? $statusPayload['subStatus'] ?? null
-        );
 
-        $statusAt = $this->statusTimestamp($statusPayload);
-        $isOlder = $transfer->provider_status_at !== null && $statusAt !== null && $statusAt->lt($transfer->provider_status_at);
-        $isTerminal = in_array($transfer->status, ['completed', 'failed', 'cancelled'], true);
+        return [
+            'response_data' => $responseData,
+            'status_payload' => $statusPayload,
+            'status' => $this->normalizeTransferStatus(
+                $statusPayload['status'] ?? $statusPayload['subStatus'] ?? null
+            ),
+            'status_at' => $this->statusTimestamp($statusPayload),
+        ];
+    }
 
-        if ($isOlder || ($isTerminal && ! in_array($status, ['completed', 'failed', 'cancelled'], true))) {
+    public function applyPreparedTransferStatus(
+        IntegrationProvider $provider,
+        Transfer $transfer,
+        array $prepared,
+    ): Transfer {
+        $responseData = (array) ($prepared['response_data'] ?? []);
+        $statusPayload = (array) ($prepared['status_payload'] ?? []);
+        $status = (string) ($prepared['status'] ?? 'pending');
+        $statusAt = ($prepared['status_at'] ?? null) instanceof Carbon
+            ? $prepared['status_at']
+            : null;
+
+        $terminalStatuses = ['completed', 'failed', 'cancelled', 'rejected'];
+        $currentIsTerminal = in_array($transfer->status, $terminalStatuses, true);
+        $incomingIsTerminal = in_array($status, $terminalStatuses, true);
+
+        $isOlder = $transfer->provider_status_at !== null
+            && $statusAt !== null
+            && $statusAt->lt($transfer->provider_status_at);
+
+        if ($isOlder || ($currentIsTerminal && ! $incomingIsTerminal)) {
             return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         }
 
+        if ($currentIsTerminal && $incomingIsTerminal && $transfer->status !== $status) {
+            throw new RuntimeException(
+                'Nium transfer status conflicts with an existing terminal status.'
+            );
+        }
+
         $transfer->update([
-            'external_payment_id' => $statusPayload['paymentReferenceNumber'] ?? $statusPayload['payment_id'] ?? $transfer->external_payment_id,
+            'external_payment_id' => $statusPayload['paymentReferenceNumber']
+                ?? $statusPayload['payment_id']
+                ?? $transfer->external_payment_id,
             'status' => $status,
             'provider_status' => strtoupper(trim((string) (
                 $statusPayload['status']
                 ?? $statusPayload['subStatus']
                 ?? ''
             ))),
-
             'provider_status_detail' => $statusPayload['statusDetails'] ?? null,
             'failure_code' => $status === 'failed' ? 'provider_error' : null,
             'failure_reason' => $status === 'failed'
                 ? ($statusPayload['remarks'] ?? $responseData['message'] ?? $transfer->failure_reason)
                 : null,
             'completed_at' => in_array($status, ['completed', 'failed', 'cancelled'], true)
-                ? ($statusPayload['dateTime'] ?? $statusPayload['updatedAt'] ?? $statusPayload['lastUpdatedAt'] ?? $statusPayload['completedAt'] ?? now())
+                ? ($statusPayload['dateTime']
+                    ?? $statusPayload['updatedAt']
+                    ?? $statusPayload['lastUpdatedAt']
+                    ?? $statusPayload['completedAt']
+                    ?? now())
                 : $transfer->completed_at,
             'provider_status_at' => $statusAt ?? $transfer->provider_status_at,
             'raw_data' => $this->safeOperationalData($transfer, $statusPayload),

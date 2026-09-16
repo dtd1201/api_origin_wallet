@@ -219,47 +219,92 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     ?? $this->value($payload, ['status', 'eventStatus']),
                 $this->eventType($payload),
             );
+            $statusAt = $this->transferStatusTimestamp($resource, $payload);
 
-            $transfer->update([
-                'external_transfer_id' => $this->value($resource, [
-                    'systemReferenceNumber',
-                    'system_reference_number',
-                    'remittanceId',
-                    'remittance_id',
-                    'id',
-                ]) ?? $transfer->external_transfer_id,
-                'external_payment_id' => $this->value($resource, [
-                    'paymentId',
-                    'payment_id',
-                    'paymentReferenceNumber',
-                    'payment_reference_number',
-                ]) ?? $transfer->external_payment_id,
-                'status' => $status,
-                'failure_code' => $status === 'failed'
-                    ? (string) ($this->value($resource, ['code', 'failureCode', 'errorCode']) ?? 'provider_error')
-                    : null,
-                'failure_reason' => $status === 'failed'
-                    ? (string) ($this->value($resource, [
-                    'message',
-                    'remarks',
-                    'failureReason',
-                    'errorMessage',
-                    'reasonDescription',
-                    'reason',
-                    ]) ?? 'Nium transfer failed.')
-                    : null,
-                'completed_at' => in_array($status, ['completed', 'failed', 'cancelled'], true)
-                    ? ($this->value($resource, ['dateTime', 'updatedAt', 'completedAt']) ?? now())
-                    : $transfer->completed_at,
-                'raw_data' => array_merge($transfer->raw_data ?? [], [
-                    'last_webhook_payload' => $this->sensitiveDataSanitizer->sanitize($payload),
-                ]),
-            ]);
+            DB::transaction(function () use ($provider, $payload, $resource, $status, $statusAt, $transfer): void {
+                $locked = Transfer::query()
+                    ->whereKey($transfer->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
 
-            $transfer = $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
-            $this->ledgerService->applyTransferTerminalStatus($transfer);
-            $this->syncTransaction($provider, $transfer, $payload, $resource);
+                $terminalStatuses = ['completed', 'failed', 'cancelled', 'rejected'];
+                $currentIsTerminal = in_array($locked->status, $terminalStatuses, true);
+                $incomingIsTerminal = in_array($status, $terminalStatuses, true);
+
+                $currentStatusAt = $locked->provider_status_at !== null
+                    ? \Illuminate\Support\Carbon::parse($locked->provider_status_at)
+                    : null;
+
+                if (
+                    $currentStatusAt !== null
+                    && $statusAt !== null
+                    && $statusAt->lt($currentStatusAt)
+                ) {
+                    return;
+                }
+
+                // Once Origin has applied a terminal financial outcome, a later
+                // non-terminal webhook must never regress the transfer.
+                if ($currentIsTerminal && ! $incomingIsTerminal) {
+                    return;
+                }
+
+                // A conflicting terminal outcome cannot be applied automatically:
+                // the previous terminal outcome may already have settled or
+                // released funds and therefore requires reconciliation.
+                if ($currentIsTerminal && $incomingIsTerminal && $locked->status !== $status) {
+                    throw new RuntimeException(
+                        'Nium transfer webhook conflicts with an existing terminal status.'
+                    );
+                }
+
+                $locked->update([
+                    'external_transfer_id' => $this->value($resource, [
+                        'systemReferenceNumber',
+                        'system_reference_number',
+                        'remittanceId',
+                        'remittance_id',
+                        'id',
+                    ]) ?? $locked->external_transfer_id,
+                    'external_payment_id' => $this->value($resource, [
+                        'paymentId',
+                        'payment_id',
+                        'paymentReferenceNumber',
+                        'payment_reference_number',
+                    ]) ?? $locked->external_payment_id,
+                    'status' => $status,
+                    'failure_code' => $status === 'failed'
+                        ? (string) ($this->value($resource, ['code', 'failureCode', 'errorCode']) ?? 'provider_error')
+                        : null,
+                    'failure_reason' => $status === 'failed'
+                        ? (string) ($this->value($resource, [
+                            'message',
+                            'remarks',
+                            'failureReason',
+                            'errorMessage',
+                            'reasonDescription',
+                            'reason',
+                        ]) ?? 'Nium transfer failed.')
+                        : null,
+                    'completed_at' => in_array($status, ['completed', 'failed', 'cancelled'], true)
+                        ? ($this->value($resource, ['dateTime', 'updatedAt', 'completedAt']) ?? now())
+                        : $locked->completed_at,
+                    'provider_status_at' => $statusAt ?? $locked->provider_status_at,
+                    'raw_data' => array_merge($locked->raw_data ?? [], [
+                        'last_webhook_payload' => $this->sensitiveDataSanitizer->sanitize($payload),
+                    ]),
+                ]);
+
+                $updated = $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
+
+                // These operations intentionally remain inside the same DB
+                // transaction as the status transition. If ledger application
+                // fails, the transfer state must roll back as well.
+                $this->ledgerService->applyTransferTerminalStatus($updated);
+                $this->syncTransaction($provider, $updated, $payload, $resource);
+            });
         }
+
     }
 
     private function processFundingWebhook(IntegrationProvider $provider, array $payload): void
@@ -716,6 +761,34 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         }
 
         return null;
+    }
+
+    private function transferStatusTimestamp(
+        array $resource,
+        array $payload,
+    ): ?\Illuminate\Support\Carbon {
+        $value = $this->value($resource, [
+            'dateTime',
+            'updatedAt',
+            'lastUpdatedAt',
+            'completedAt',
+            'createdAt',
+        ]) ?? $this->value($payload, [
+            'eventTime',
+            'event_time',
+            'timestamp',
+            'createdAt',
+        ]);
+
+        if (! filled($value)) {
+            return null;
+        }
+
+        try {
+            return \Illuminate\Support\Carbon::parse((string) $value);
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     private function normalizeTransferStatus(mixed $status, string $eventType): string
