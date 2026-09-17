@@ -46,6 +46,7 @@ class UserKycSubmissionController extends Controller
                 'reviewedBy',
                 'documents',
                 'relatedPersons.documents',
+                'companyDirectors.documents',
                 'requirements',
                 'amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
                 'amlScreenings.matches',
@@ -67,6 +68,7 @@ class UserKycSubmissionController extends Controller
             ->load([
                 'kycProfile.documents',
                 'kycProfile.relatedPersons.documents',
+                'kycProfile.companyDirectors.documents',
                 'kycProfile.requirements',
                 'kycProfile.amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
                 'kycProfile.amlScreenings.matches',
@@ -118,7 +120,7 @@ class UserKycSubmissionController extends Controller
 
             if ($existingSubmission !== null) {
                 $kycProfile = $user->kycProfile()->with([
-                    'user', 'reviewedBy', 'documents', 'relatedPersons.documents', 'requirements',
+                    'user', 'reviewedBy', 'documents', 'relatedPersons.documents', 'companyDirectors.documents', 'requirements',
                     'amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
                     'amlScreenings.matches',
                 ])->firstOrFail();
@@ -376,6 +378,7 @@ class UserKycSubmissionController extends Controller
                 'reviewedBy',
                 'documents',
                 'relatedPersons.documents',
+                'companyDirectors.documents',
                 'requirements',
                 'amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
                 'amlScreenings.matches',
@@ -507,6 +510,7 @@ class UserKycSubmissionController extends Controller
                 'reviewedBy',
                 'documents',
                 'relatedPersons.documents',
+                'companyDirectors.documents',
                 'requirements',
                 'amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
                 'amlScreenings.matches',
