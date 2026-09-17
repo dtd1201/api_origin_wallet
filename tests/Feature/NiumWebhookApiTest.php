@@ -42,14 +42,13 @@ class NiumWebhookApiTest extends TestCase
         config()->set('wallet.ledger.enabled', false);
 
         $provider = $this->provider();
-        $reference = 'RT2794351662';
+        $reference = 'RT0519777774';
         $transfer = $this->transfer($provider, $reference);
 
         $this->withHeader('x-partner-key', 'nium-webhook-test-key')
             ->postJson('/api/webhooks/providers/nium', [
                 'template' => 'REMIT_TRANSACTION_COMPLETED_WEBHOOK',
                 'reason' => 'SUCCESS',
-                'reasonDescription' => 'Transfer completed successfully',
                 'systemReferenceNumber' => $reference,
             ])
             ->assertOk();
@@ -62,6 +61,10 @@ class NiumWebhookApiTest extends TestCase
         $this->assertSame($freshTransfer->id, $transaction->transfer_id);
         $this->assertSame($reference, $transaction->external_transaction_id);
         $this->assertSame('completed', $transaction->status);
+        $this->assertDatabaseHas('webhook_events', [
+            'provider_id' => $provider->id,
+            'processing_status' => 'processed',
+        ]);
     }
 
     public function test_nium_webhook_accepts_correct_static_partner_key_and_keeps_payout_flow(): void

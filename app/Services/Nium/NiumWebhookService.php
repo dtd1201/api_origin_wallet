@@ -597,10 +597,14 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             'payment_id',
             'systemReferenceNumber',
             'system_reference_number',
-            'remittanceId',
-            'remittance_id',
         ]);
         $externalTransactionId ??= $this->value($payload, [
+            'transactionId',
+            'transaction_id',
+            'paymentReferenceNumber',
+            'payment_reference_number',
+            'paymentId',
+            'payment_id',
             'systemReferenceNumber',
             'system_reference_number',
             'remittanceId',
