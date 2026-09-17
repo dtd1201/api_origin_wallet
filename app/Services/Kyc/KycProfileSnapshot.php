@@ -15,6 +15,7 @@ class KycProfileSnapshot
             'profile',
             'kycProfile.documents',
             'kycProfile.relatedPersons.documents',
+            'kycProfile.companyDirectors',
             'kycProfile.amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
             'kycProfile.amlScreenings.matches',
             'kycProfile.providerSubmissions.provider',
@@ -23,6 +24,7 @@ class KycProfileSnapshot
         $kycProfile = $user->kycProfile;
         $documents = [];
         $relatedPersons = [];
+        $companyDirectors = [];
         $amlScreenings = [];
         $providerSubmissions = [];
         $requirements = [];
@@ -59,6 +61,27 @@ class KycProfileSnapshot
                 ])
                 ->values()
                 ->all();
+            $companyDirectors = $kycProfile->companyDirectors
+                ->map(fn ($director) => [
+                    'id' => $director->id,
+                    'legal_name' => $director->legal_name,
+                    'date_of_birth' => $director->date_of_birth?->toDateString(),
+                    'nationality_country_code' => $director->nationality_country_code,
+                    'residence_country_code' => $director->residence_country_code,
+                    'position' => $director->position,
+                    'address' => [
+                        'line1' => $director->address_line1,
+                        'line2' => $director->address_line2,
+                        'city' => $director->city,
+                        'state' => $director->state,
+                        'postal_code' => $director->postal_code,
+                        'country_code' => $director->country_code,
+                    ],
+                    'metadata' => $director->metadata ?? [],
+                ])
+                ->values()
+                ->all();
+
             $providerSubmissions = $kycProfile->providerSubmissions
                 ->map(fn ($submission) => [
                     'provider_code' => $submission->provider?->code,
@@ -156,6 +179,7 @@ class KycProfileSnapshot
                 : null,
             'documents' => $documents,
             'related_persons' => $relatedPersons,
+            'company_directors' => $companyDirectors,
             'aml_screenings' => $amlScreenings,
             'provider_submissions' => $providerSubmissions,
             'requirements' => $requirements,

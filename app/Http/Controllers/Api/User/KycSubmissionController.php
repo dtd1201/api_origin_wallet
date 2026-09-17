@@ -54,6 +54,7 @@ class KycSubmissionController extends Controller
         $user->load(
             'kycProfile.documents',
             'kycProfile.relatedPersons.documents',
+            'kycProfile.companyDirectors',
             'kycProfile.requirements',
             'kycProfile.amlScreenings.matches',
             'kycProfile.reviewedBy',
@@ -279,6 +280,16 @@ class KycSubmissionController extends Controller
                 }
             }
 
+            if (array_key_exists('company_directors', $validated)) {
+                $kycProfile->companyDirectors()->delete();
+
+                foreach ($validated['company_directors'] as $director) {
+                    $kycProfile->companyDirectors()->create(
+                        Arr::only($director, $this->companyDirectorFields())
+                    );
+                }
+            }
+
             foreach ($this->buildRequirements($validated) as $requirement) {
                 $kycProfile->requirements()->create($requirement);
             }
@@ -290,7 +301,7 @@ class KycSubmissionController extends Controller
                 'kyc_status' => 'pending',
             ]);
 
-            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
+            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'companyDirectors', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
         });
 
         return response()->json([
@@ -548,7 +559,7 @@ class KycSubmissionController extends Controller
                 'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
             ]);
 
-            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
+            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'companyDirectors', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
         });
 
         return response()->json([
@@ -672,6 +683,20 @@ class KycSubmissionController extends Controller
             'documents.*.issued_at' => ['nullable', 'date'],
             'documents.*.expires_at' => ['nullable', 'date', 'after:today'],
             'documents.*.metadata' => ['sometimes', 'array'],
+            'company_directors' => ['exclude_unless:applicant_type,business', 'sometimes', 'array', 'max:20'],
+            'company_directors.*.legal_name' => ['required_with:company_directors', 'string', 'max:255'],
+            'company_directors.*.date_of_birth' => ['nullable', 'date', 'before:today'],
+            'company_directors.*.nationality_country_code' => ['nullable', 'string', 'size:2'],
+            'company_directors.*.residence_country_code' => ['nullable', 'string', 'size:2'],
+            'company_directors.*.position' => ['nullable', 'string', 'max:100'],
+            'company_directors.*.address_line1' => ['nullable', 'string', 'max:255'],
+            'company_directors.*.address_line2' => ['nullable', 'string', 'max:255'],
+            'company_directors.*.city' => ['nullable', 'string', 'max:100'],
+            'company_directors.*.state' => ['nullable', 'string', 'max:100'],
+            'company_directors.*.postal_code' => ['nullable', 'string', 'max:30'],
+            'company_directors.*.country_code' => ['nullable', 'string', 'size:2'],
+            'company_directors.*.metadata' => ['sometimes', 'array'],
+
             'related_persons' => ['sometimes', 'array'],
             'related_persons.*.relationship_type' => ['required_with:related_persons', 'string', 'max:50'],
             'related_persons.*.legal_name' => ['required_with:related_persons', 'string', 'max:255'],
@@ -1102,6 +1127,27 @@ class KycSubmissionController extends Controller
             'issuing_country_code',
             'issued_at',
             'expires_at',
+            'metadata',
+        ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function companyDirectorFields(): array
+    {
+        return [
+            'legal_name',
+            'date_of_birth',
+            'nationality_country_code',
+            'residence_country_code',
+            'position',
+            'address_line1',
+            'address_line2',
+            'city',
+            'state',
+            'postal_code',
+            'country_code',
             'metadata',
         ];
     }

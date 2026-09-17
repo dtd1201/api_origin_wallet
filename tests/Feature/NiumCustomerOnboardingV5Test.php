@@ -229,6 +229,61 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('submitted', $account->status);
     }
 
+    public function test_internal_company_directors_do_not_change_nium_customer_payload(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $externalReference = (string) Str::uuid();
+
+        $before = app(NiumCustomerPayloadFactory::class)
+            ->build($user, $externalReference);
+
+        $profile = $user->kycProfile()->firstOrFail();
+
+        $relatedPersonCountBefore = $profile->relatedPersons()->count();
+
+        $profile->companyDirectors()->createMany([
+            [
+                'legal_name' => 'Internal Director One',
+                'date_of_birth' => '1980-01-02',
+                'nationality_country_code' => 'GB',
+                'residence_country_code' => 'HK',
+                'position' => 'Director',
+                'country_code' => 'HK',
+            ],
+            [
+                'legal_name' => 'Internal Director Two',
+                'date_of_birth' => '1985-03-04',
+                'nationality_country_code' => 'HK',
+                'residence_country_code' => 'HK',
+                'position' => 'Director',
+                'country_code' => 'HK',
+            ],
+        ]);
+
+        $this->assertSame(2, $profile->companyDirectors()->count());
+        $this->assertSame($relatedPersonCountBefore, $profile->relatedPersons()->count());
+
+        // Force a clean model reload so this proves the Nium factory ignores
+        // the new internal relation rather than relying on a cached profile.
+        $user->unsetRelation('kycProfile');
+
+        $after = app(NiumCustomerPayloadFactory::class)
+            ->build($user, $externalReference);
+
+        $this->assertSame($before, $after);
+        $this->assertStringNotContainsString(
+            'Internal Director One',
+            json_encode($after, JSON_THROW_ON_ERROR)
+        );
+        $this->assertStringNotContainsString(
+            'Internal Director Two',
+            json_encode($after, JSON_THROW_ON_ERROR)
+        );
+
+        Http::assertNothingSent();
+    }
+
     public function test_fixture_v4_style_applicant_email_is_rejected_before_any_nium_http(): void
     {
         $provider = $this->provider();

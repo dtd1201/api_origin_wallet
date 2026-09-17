@@ -67,6 +67,11 @@ class KycProfile extends Model
         return $this->hasMany(KycRelatedPerson::class);
     }
 
+    public function companyDirectors(): HasMany
+    {
+        return $this->hasMany(KycCompanyDirector::class);
+    }
+
     public function requirements(): HasMany
     {
         return $this->hasMany(KycRequirement::class);

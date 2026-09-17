@@ -125,6 +125,93 @@ class InternalKycTest extends TestCase
         ]);
     }
 
+    public function test_business_profile_stores_multiple_internal_company_directors_without_touching_related_persons(): void
+    {
+        $user = User::factory()->create([
+            'status' => 'active',
+            'kyc_status' => 'unverified',
+        ]);
+
+        $payload = $this->businessKycPayload();
+        $payload['company_directors'] = [
+            [
+                'legal_name' => 'Internal Director One',
+                'date_of_birth' => '1980-01-02',
+                'nationality_country_code' => 'GB',
+                'residence_country_code' => 'US',
+                'position' => 'Director',
+                'address_line1' => '1 Main Street',
+                'city' => 'New York',
+                'state' => 'NY',
+                'postal_code' => '10001',
+                'country_code' => 'US',
+                'metadata' => [
+                    'source' => 'onboarding_form',
+                ],
+            ],
+            [
+                'legal_name' => 'Internal Director Two',
+                'date_of_birth' => '1985-03-04',
+                'nationality_country_code' => 'HK',
+                'residence_country_code' => 'HK',
+                'position' => 'Director',
+                'address_line1' => '2 Queen Road',
+                'city' => 'Hong Kong',
+                'country_code' => 'HK',
+            ],
+        ];
+
+        $response = $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload);
+
+        $response
+            ->assertAccepted()
+            ->assertJsonCount(2, 'kyc_profile.company_directors')
+            ->assertJsonPath('kyc_profile.company_directors.0.legal_name', 'Internal Director One')
+            ->assertJsonPath('kyc_profile.company_directors.1.legal_name', 'Internal Director Two');
+
+        $profile = $user->kycProfile()->firstOrFail();
+
+        $this->assertSame(2, $profile->companyDirectors()->count());
+
+        $this->assertDatabaseHas('kyc_company_directors', [
+            'kyc_profile_id' => $profile->id,
+            'legal_name' => 'Internal Director One',
+            'position' => 'Director',
+        ]);
+
+        $this->assertDatabaseHas('kyc_company_directors', [
+            'kyc_profile_id' => $profile->id,
+            'legal_name' => 'Internal Director Two',
+            'position' => 'Director',
+        ]);
+
+        $this->assertDatabaseMissing('kyc_related_persons', [
+            'kyc_profile_id' => $profile->id,
+            'relationship_type' => 'director',
+        ]);
+
+        $relatedPersonCount = $profile->relatedPersons()->count();
+
+        // Simulate an older client which does not know about company_directors.
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $this->businessKycPayload())
+            ->assertAccepted();
+
+        $profile->refresh();
+
+        // Internal directors must survive old-client submissions.
+        $this->assertSame(2, $profile->companyDirectors()->count());
+        $this->assertSame($relatedPersonCount, $profile->relatedPersons()->count());
+
+        $this->withToken($this->issueTokenFor($user))
+            ->getJson("/api/user/users/{$user->id}/kyc-profile")
+            ->assertOk()
+            ->assertJsonCount(2, 'kyc_profile.company_directors')
+            ->assertJsonPath('kyc_profile.company_directors.0.legal_name', 'Internal Director One')
+            ->assertJsonPath('kyc_profile.company_directors.1.legal_name', 'Internal Director Two');
+    }
+
     public function test_vietnam_related_person_subdivision_code_is_accepted(): void
     {
         Http::fake(fn () => Http::response([], 503));
