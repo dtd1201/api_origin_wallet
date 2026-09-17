@@ -218,6 +218,13 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 $this->value($resource, ['status', 'subStatus', 'paymentStatus'])
                     ?? $this->value($payload, ['status', 'eventStatus'])
             )));
+            if (
+                $providerStatus === ''
+                && $template === 'REMIT_TRANSACTION_COMPLETED_WEBHOOK'
+                && strtoupper(trim((string) ($payload['reason'] ?? ''))) === 'SUCCESS'
+            ) {
+                $providerStatus = 'COMPLETED';
+            }
             $status = $this->normalizeTransferStatus($providerStatus);
             $statusAt = $this->transferStatusTimestamp($resource, $payload);
 
@@ -298,11 +305,8 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
                 $updated = $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
 
-                // These operations intentionally remain inside the same DB
-                // transaction as the status transition. If ledger application
-                // fails, the transfer state must roll back as well.
-                $this->ledgerService->applyTransferTerminalStatus($updated);
                 $this->syncTransaction($provider, $updated, $payload, $resource);
+                $this->ledgerService->applyTransferTerminalStatus($updated);
             });
         }
 
@@ -591,6 +595,12 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             'payment_reference_number',
             'paymentId',
             'payment_id',
+            'systemReferenceNumber',
+            'system_reference_number',
+            'remittanceId',
+            'remittance_id',
+        ]);
+        $externalTransactionId ??= $this->value($payload, [
             'systemReferenceNumber',
             'system_reference_number',
             'remittanceId',
