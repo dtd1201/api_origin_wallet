@@ -591,6 +591,10 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             'payment_reference_number',
             'paymentId',
             'payment_id',
+            'systemReferenceNumber',
+            'system_reference_number',
+            'remittanceId',
+            'remittance_id',
         ]);
 
         if (! filled($externalTransactionId)) {
