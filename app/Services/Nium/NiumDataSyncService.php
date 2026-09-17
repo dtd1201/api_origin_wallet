@@ -228,7 +228,9 @@ class NiumDataSyncService implements DataSyncProvider
                         'fee_amount' => $this->numericValue($item, ['fee', 'feeAmount', 'markupAmount'], 0),
                         'description' => $this->value($item, ['description', 'remarks', 'narration']),
                         'reference_text' => $this->value($item, ['reference', 'clientReference', 'customerComments']),
-                        'status' => $this->normalizeTransactionStatus($this->value($item, ['status'])),
+                        'status' => $transfer !== null
+                            ? $this->normalizeTransactionStatus($transfer->status)
+                            : $this->normalizeTransactionStatus($this->value($item, ['status'])),
                         'booked_at' => $this->value($item, ['dateTime', 'createdAt', 'transactionDate']) ?? now(),
                         'value_date' => $this->value($item, ['valueDate', 'date']) ?? now(),
                         'raw_data' => array_filter([
