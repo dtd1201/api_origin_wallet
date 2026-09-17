@@ -148,6 +148,26 @@ class InternalKycTest extends TestCase
                 'metadata' => [
                     'source' => 'onboarding_form',
                 ],
+                'documents' => [
+                    [
+                        'type' => 'passport_front',
+                        'file_url' => 'https://example.test/internal-director-one-passport-front',
+                        'storage_disk' => 'kyc_private',
+                        'file_path' => 'kyc/internal/director-one-front.jpg',
+                        'original_name' => 'director-one-front.jpg',
+                        'mime_type' => 'image/jpeg',
+                        'file_size' => 12345,
+                        'file_hash' => 'internal-director-one-front-hash',
+                        'side' => 'front',
+                        'document_number' => 'DIR-ONE-001',
+                        'issuing_country_code' => 'GB',
+                        'issued_at' => '2020-01-01',
+                        'expires_at' => '2030-01-01',
+                        'metadata' => [
+                            'source' => 'origin_wallet_onboarding',
+                        ],
+                    ],
+                ],
             ],
             [
                 'legal_name' => 'Internal Director Two',
@@ -189,6 +209,21 @@ class InternalKycTest extends TestCase
         $this->assertDatabaseMissing('kyc_related_persons', [
             'kyc_profile_id' => $profile->id,
             'relationship_type' => 'director',
+        ]);
+
+        $directorOne = $profile->companyDirectors()
+            ->where('legal_name', 'Internal Director One')
+            ->firstOrFail();
+
+        $this->assertDatabaseHas('kyc_company_director_documents', [
+            'kyc_company_director_id' => $directorOne->id,
+            'type' => 'passport_front',
+            'document_number' => 'DIR-ONE-001',
+            'file_hash' => 'internal-director-one-front-hash',
+        ]);
+
+        $this->assertDatabaseMissing('kyc_documents', [
+            'file_hash' => 'internal-director-one-front-hash',
         ]);
 
         $relatedPersonCount = $profile->relatedPersons()->count();

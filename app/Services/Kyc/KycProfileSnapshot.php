@@ -15,7 +15,7 @@ class KycProfileSnapshot
             'profile',
             'kycProfile.documents',
             'kycProfile.relatedPersons.documents',
-            'kycProfile.companyDirectors',
+            'kycProfile.companyDirectors.documents',
             'kycProfile.amlScreenings' => fn ($query) => $query->whereNull('superseded_at'),
             'kycProfile.amlScreenings.matches',
             'kycProfile.providerSubmissions.provider',
@@ -78,6 +78,10 @@ class KycProfileSnapshot
                         'country_code' => $director->country_code,
                     ],
                     'metadata' => $director->metadata ?? [],
+                    'documents' => $director->documents
+                        ->map(fn ($document) => $this->documentSnapshot($document))
+                        ->values()
+                        ->all(),
                 ])
                 ->values()
                 ->all();

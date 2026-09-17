@@ -284,6 +284,85 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_internal_company_director_documents_are_excluded_from_nium_document_resolution(): void
+    {
+        $provider = $this->provider();
+        $user = $this->approvedCorporate($provider);
+        $profile = $user->kycProfile()->firstOrFail();
+
+        $profile->loadMissing([
+            'documents',
+            'relatedPersons.documents',
+        ]);
+
+        $resolver = app(\App\Services\Nium\NiumCustomerDocumentResolver::class);
+
+        $before = $resolver->forProfile($profile)
+            ->map(fn ($document) => [
+                'id' => (int) $document->id,
+                'type' => (string) $document->type,
+                'file_hash' => (string) $document->file_hash,
+            ])
+            ->values()
+            ->all();
+
+        $director = $profile->companyDirectors()->create([
+            'legal_name' => 'Internal Document Director',
+            'date_of_birth' => '1980-01-02',
+            'nationality_country_code' => 'GB',
+            'residence_country_code' => 'HK',
+            'position' => 'Director',
+            'country_code' => 'HK',
+        ]);
+
+        $director->documents()->create([
+            'type' => 'passport_front',
+            'status' => 'approved',
+            'file_url' => 'https://example.test/internal-director-passport',
+            'storage_disk' => 'kyc_private',
+            'file_path' => 'kyc/internal/director-passport.jpg',
+            'original_name' => 'director-passport.jpg',
+            'mime_type' => 'image/jpeg',
+            'file_size' => 12345,
+            'file_hash' => 'internal-director-nium-isolation-hash',
+            'side' => 'front',
+            'document_number' => 'INTERNAL-DIR-001',
+            'issuing_country_code' => 'GB',
+            'issued_at' => '2020-01-01',
+            'expires_at' => '2030-01-01',
+            'metadata' => [
+                'internal_only' => true,
+                'subject' => 'company_director_internal',
+            ],
+        ]);
+
+        $freshProfile = $profile->fresh([
+            'documents',
+            'relatedPersons.documents',
+            'companyDirectors.documents',
+        ]);
+
+        $after = $resolver->forProfile($freshProfile)
+            ->map(fn ($document) => [
+                'id' => (int) $document->id,
+                'type' => (string) $document->type,
+                'file_hash' => (string) $document->file_hash,
+            ])
+            ->values()
+            ->all();
+
+        $this->assertSame($before, $after);
+
+        $this->assertFalse(
+            collect($after)->contains(
+                fn (array $document): bool =>
+                    $document['file_hash'] === 'internal-director-nium-isolation-hash'
+            )
+        );
+
+        Http::assertNothingSent();
+    }
+
     public function test_fixture_v4_style_applicant_email_is_rejected_before_any_nium_http(): void
     {
         $provider = $this->provider();

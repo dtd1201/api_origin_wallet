@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class KycCompanyDirector extends Model
 {
@@ -37,5 +38,10 @@ class KycCompanyDirector extends Model
     public function kycProfile(): BelongsTo
     {
         return $this->belongsTo(KycProfile::class);
+    }
+
+    public function documents(): HasMany
+    {
+        return $this->hasMany(KycCompanyDirectorDocument::class);
     }
 }

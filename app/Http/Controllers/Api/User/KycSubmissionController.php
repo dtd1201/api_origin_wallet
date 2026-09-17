@@ -54,7 +54,7 @@ class KycSubmissionController extends Controller
         $user->load(
             'kycProfile.documents',
             'kycProfile.relatedPersons.documents',
-            'kycProfile.companyDirectors',
+            'kycProfile.companyDirectors.documents',
             'kycProfile.requirements',
             'kycProfile.amlScreenings.matches',
             'kycProfile.reviewedBy',
@@ -151,6 +151,17 @@ class KycSubmissionController extends Controller
         $document = $user->kycProfile?->documents()
             ->where('file_hash', $artifactHash)
             ->first();
+
+        if ($document === null && $user->kycProfile !== null) {
+            $document = \App\Models\KycCompanyDirectorDocument::query()
+                ->where('file_hash', $artifactHash)
+                ->whereHas(
+                    'companyDirector',
+                    fn ($query) => $query->where('kyc_profile_id', $user->kycProfile->id),
+                )
+                ->first();
+        }
+
         $disk = (string) ($document?->storage_disk ?: config('services.kyc.documents_disk', 'kyc_private'));
         $path = (string) ($document?->file_path ?: $this->uploadedDocumentPath($disk, $user, $artifactHash));
 
@@ -284,9 +295,18 @@ class KycSubmissionController extends Controller
                 $kycProfile->companyDirectors()->delete();
 
                 foreach ($validated['company_directors'] as $director) {
-                    $kycProfile->companyDirectors()->create(
+                    $directorDocuments = $director['documents'] ?? [];
+
+                    $createdDirector = $kycProfile->companyDirectors()->create(
                         Arr::only($director, $this->companyDirectorFields())
                     );
+
+                    foreach ($directorDocuments as $document) {
+                        $createdDirector->documents()->create([
+                            ...Arr::only($document, $this->documentFields()),
+                            'status' => 'submitted',
+                        ]);
+                    }
                 }
             }
 
@@ -301,7 +321,7 @@ class KycSubmissionController extends Controller
                 'kyc_status' => 'pending',
             ]);
 
-            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'companyDirectors', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
+            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'companyDirectors.documents', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
         });
 
         return response()->json([
@@ -559,7 +579,7 @@ class KycSubmissionController extends Controller
                 'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
             ]);
 
-            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'companyDirectors', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
+            return $kycProfile->fresh(['documents', 'relatedPersons.documents', 'companyDirectors.documents', 'requirements', 'amlScreenings.matches', 'reviewedBy']);
         });
 
         return response()->json([
@@ -696,6 +716,21 @@ class KycSubmissionController extends Controller
             'company_directors.*.postal_code' => ['nullable', 'string', 'max:30'],
             'company_directors.*.country_code' => ['nullable', 'string', 'size:2'],
             'company_directors.*.metadata' => ['sometimes', 'array'],
+            'company_directors.*.documents' => ['sometimes', 'array'],
+            'company_directors.*.documents.*.type' => ['required_with:company_directors.*.documents', 'string', 'max:100'],
+            'company_directors.*.documents.*.file_url' => ['required_with:company_directors.*.documents', 'url', 'max:2048'],
+            'company_directors.*.documents.*.storage_disk' => ['nullable', 'string', 'max:50'],
+            'company_directors.*.documents.*.file_path' => ['nullable', 'string', 'max:2048'],
+            'company_directors.*.documents.*.original_name' => ['nullable', 'string', 'max:255'],
+            'company_directors.*.documents.*.mime_type' => ['nullable', 'string', 'max:100'],
+            'company_directors.*.documents.*.file_size' => ['nullable', 'integer', 'min:0'],
+            'company_directors.*.documents.*.file_hash' => ['nullable', 'string', 'max:255'],
+            'company_directors.*.documents.*.side' => ['nullable', 'string', 'max:20'],
+            'company_directors.*.documents.*.document_number' => ['nullable', 'string', 'max:100'],
+            'company_directors.*.documents.*.issuing_country_code' => ['nullable', 'string', 'size:2'],
+            'company_directors.*.documents.*.issued_at' => ['nullable', 'date'],
+            'company_directors.*.documents.*.expires_at' => ['nullable', 'date', 'after:today'],
+            'company_directors.*.documents.*.metadata' => ['sometimes', 'array'],
 
             'related_persons' => ['sometimes', 'array'],
             'related_persons.*.relationship_type' => ['required_with:related_persons', 'string', 'max:50'],
