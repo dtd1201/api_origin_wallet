@@ -1,0 +1,62 @@
+diff --git a/app/Jobs/Nium/ContinueNiumCustomerOnboardingJob.php b/app/Jobs/Nium/ContinueNiumCustomerOnboardingJob.php
+index 23b5b5c..0a59775 100644
+--- a/app/Jobs/Nium/ContinueNiumCustomerOnboardingJob.php
++++ b/app/Jobs/Nium/ContinueNiumCustomerOnboardingJob.php
+@@ -142,27 +142,37 @@ private function retryDelay(int $attempt): int
+ 
+     private function logAttempt(int $attempt, string $state, int $pendingDocumentCount): void
+     {
+-        ApiRequestLog::query()->firstOrCreate(
+-            [
+-                'provider_id' => $this->providerId,
+-                'user_id' => $this->userId,
+-                'operation' => 'nium_customer_onboarding_continuation',
+-                'external_reference' => $this->continuationId.':'.$attempt,
+-            ],
+-            [
+-                'request_method' => 'QUEUE',
+-                'request_url' => 'queue://nium/customer-onboarding/continuation',
+-                'endpoint_path' => 'nium/customer-onboarding/continuation',
+-                'request_body' => [
+-                    'user_id' => $this->userId,
++        try {
++            ApiRequestLog::query()->firstOrCreate(
++                [
+                     'provider_id' => $this->providerId,
+-                    'attempt' => $attempt,
+-                    'state' => $state,
+-                    'pending_document_count' => $pendingDocumentCount,
++                    'user_id' => $this->userId,
++                    'operation' => 'nium_customer_onboarding_continuation',
++                    'external_reference' => $this->continuationId.':'.$attempt,
+                 ],
+-                'transport_outcome' => $state,
+-                'is_success' => in_array($state, ['customer_exists', 'customer_created'], true),
+-            ],
+-        );
++                [
++                    'request_method' => 'QUEUE',
++                    'request_url' => 'queue://nium/customer-onboarding/continuation',
++                    'endpoint_path' => 'nium/customer-onboarding/continuation',
++                    'request_body' => [
++                        'user_id' => $this->userId,
++                        'provider_id' => $this->providerId,
++                        'attempt' => $attempt,
++                        'state' => $state,
++                        'pending_document_count' => $pendingDocumentCount,
++                    ],
++                    'transport_outcome' => $state,
++                    'is_success' => in_array($state, ['customer_exists', 'customer_created'], true),
++                ],
++            );
++        } catch (Throwable $exception) {
++            logger()->warning('Failed to persist Nium onboarding continuation log.', [
++                'user_id' => $this->userId,
++                'provider_id' => $this->providerId,
++                'attempt' => $attempt,
++                'state' => $state,
++                'exception' => $exception::class,
++            ]);
++        }
+     }
+ }

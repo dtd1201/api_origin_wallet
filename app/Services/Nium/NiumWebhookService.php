@@ -214,14 +214,14 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         $transfer = $this->findTransfer($provider, $payload, $resource);
 
         if ($transfer !== null) {
-            $status = $this->normalizeTransferStatus(
+            $providerStatus = strtoupper(trim((string) (
                 $this->value($resource, ['status', 'subStatus', 'paymentStatus'])
-                    ?? $this->value($payload, ['status', 'eventStatus']),
-                $this->eventType($payload),
-            );
+                    ?? $this->value($payload, ['status', 'eventStatus'])
+            )));
+            $status = $this->normalizeTransferStatus($providerStatus);
             $statusAt = $this->transferStatusTimestamp($resource, $payload);
 
-            DB::transaction(function () use ($provider, $payload, $resource, $status, $statusAt, $transfer): void {
+            DB::transaction(function () use ($provider, $payload, $providerStatus, $resource, $status, $statusAt, $transfer): void {
                 $locked = Transfer::query()
                     ->whereKey($transfer->id)
                     ->lockForUpdate()
@@ -273,6 +273,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                         'payment_reference_number',
                     ]) ?? $locked->external_payment_id,
                     'status' => $status,
+                    'provider_status' => $providerStatus,
                     'failure_code' => $status === 'failed'
                         ? (string) ($this->value($resource, ['code', 'failureCode', 'errorCode']) ?? 'provider_error')
                         : null,
@@ -791,28 +792,14 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         }
     }
 
-    private function normalizeTransferStatus(mixed $status, string $eventType): string
+    private function normalizeTransferStatus(mixed $status): string
     {
-        $normalizedEvent = strtolower($eventType);
-
-        if (str_contains($normalizedEvent, 'cancel')) {
-            return 'cancelled';
-        }
-
-        if (str_contains($normalizedEvent, 'fail') || str_contains($normalizedEvent, 'reject') || str_contains($normalizedEvent, 'return')) {
-            return 'failed';
-        }
-
-        if (str_contains($normalizedEvent, 'paid') || str_contains($normalizedEvent, 'complete') || str_contains($normalizedEvent, 'success')) {
-            return 'completed';
-        }
-
         return match (strtoupper((string) $status)) {
             'PAID', 'SUCCESS', 'SUCCEEDED', 'COMPLETED' => 'completed',
             'FAILED', 'ERROR', 'REJECTED', 'RETURNED' => 'failed',
             'CANCELLED', 'CANCELED', 'VOIDED' => 'cancelled',
-            'PENDING', 'PROCESSING', 'IN_PROGRESS', 'ACCEPTED' => 'pending',
-            default => 'submitted',
+            'PENDING', 'PROCESSING', 'PG_PROCESSING', 'COMPLIANCE_COMPLETED', 'IN_PROGRESS', 'ACCEPTED' => 'pending',
+            default => 'pending',
         };
     }
 

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
+use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Models\WebhookEvent;
@@ -13,6 +14,26 @@ use Tests\TestCase;
 class NiumWebhookApiTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_compliance_completed_keeps_transfer_and_transaction_pending(): void
+    {
+        $this->assertWebhookTransferStatus('COMPLIANCE_COMPLETED', 'pending');
+    }
+
+    public function test_pg_processing_keeps_transfer_and_transaction_pending(): void
+    {
+        $this->assertWebhookTransferStatus('PG_PROCESSING', 'pending');
+    }
+
+    public function test_completed_updates_transfer_and_transaction_to_completed(): void
+    {
+        $this->assertWebhookTransferStatus('COMPLETED', 'completed');
+    }
+
+    public function test_failed_updates_transfer_and_transaction_to_failed(): void
+    {
+        $this->assertWebhookTransferStatus('FAILED', 'failed');
+    }
 
     public function test_nium_webhook_accepts_correct_static_partner_key_and_keeps_payout_flow(): void
     {
@@ -280,6 +301,43 @@ class NiumWebhookApiTest extends TestCase
             'name' => 'Nium',
             'status' => 'active',
         ]);
+    }
+
+    private function assertWebhookTransferStatus(string $providerStatus, string $expectedStatus): void
+    {
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
+        config()->set('wallet.ledger.enabled', false);
+
+        $provider = $this->provider();
+        $reference = 'NIUM-STATUS-'.str_replace('_', '-', $providerStatus);
+        $transactionId = 'NIUM-TXN-'.str_replace('_', '-', $providerStatus);
+        $transfer = $this->transfer($provider, $reference);
+
+        $response = $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'eventId' => 'nium-event-'.strtolower(str_replace('_', '-', $providerStatus)),
+                'eventType' => 'remittance.completed',
+                'data' => [
+                    'resource' => [
+                        'systemReferenceNumber' => $reference,
+                        'transactionId' => $transactionId,
+                        'status' => $providerStatus,
+                    ],
+                ],
+            ]);
+
+        $response->assertOk();
+
+        $freshTransfer = $transfer->fresh();
+        $transaction = Transaction::query()
+            ->where('external_transaction_id', $transactionId)
+            ->sole();
+
+        $this->assertSame($providerStatus, $freshTransfer->provider_status);
+        $this->assertSame($expectedStatus, $freshTransfer->status);
+        $this->assertSame($freshTransfer->id, $transaction->transfer_id);
+        $this->assertSame($expectedStatus, $transaction->status);
     }
 
     private function transfer(IntegrationProvider $provider, string $externalReference): Transfer
