@@ -50,9 +50,12 @@ final class NiumCorporateRfiService
 
             return array_filter([
                 'rfiHashId' => $rfiHashId,
-                'templateId' => $this->identifier($item['templateId'] ?? null),
+                'rfiTemplateId' => $this->identifier($item['rfiTemplateId'] ?? $item['templateId'] ?? null),
                 'referenceId' => $this->identifier($item['referenceId'] ?? null),
                 'caseId' => $this->identifier($item['caseId'] ?? null),
+                'clientId' => $this->identifier($item['clientId'] ?? null),
+                'region' => $this->identifier($item['region'] ?? null),
+                'requiredData' => $this->requiredData($item['requiredData'] ?? null),
                 'status' => $status,
             ], static fn (mixed $value): bool => $value !== null && $value !== '');
         }, $body['rfiTemplates']);
@@ -67,5 +70,28 @@ final class NiumCorporateRfiService
         $value = trim($value);
 
         return $value !== '' && strlen($value) <= 255 ? $value : null;
+    }
+
+    private function requiredData(mixed $value): array
+    {
+        if (! is_array($value) || ! array_is_list($value)) {
+            return [];
+        }
+
+        return array_values(array_filter(array_map(function (mixed $item): ?array {
+            if (! is_array($item) || array_is_list($item)) {
+                return null;
+            }
+            $field = $this->identifier($item['value'] ?? null);
+            if ($field === null) {
+                return null;
+            }
+
+            return array_filter([
+                'value' => $field,
+                'label' => $this->identifier($item['label'] ?? null),
+                'type' => $this->identifier($item['type'] ?? null),
+            ], static fn (mixed $entry): bool => $entry !== null && $entry !== '');
+        }, $value)));
     }
 }

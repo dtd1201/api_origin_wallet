@@ -3,7 +3,10 @@
 namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\IntegrationProvider;
 use App\Models\NiumRfiCase;
+use App\Models\UserProviderAccount;
+use App\Services\Nium\NiumCorporateRfiSubmissionService;
 use App\Services\Nium\NiumRfiWorkflowService;
 use App\Services\Nium\NiumTransactionRfiSubmissionService;
 use Illuminate\Http\JsonResponse;
@@ -15,6 +18,7 @@ final class NiumRfiCaseController extends Controller
     public function __construct(
         private readonly NiumRfiWorkflowService $workflow,
         private readonly NiumTransactionRfiSubmissionService $transactionSubmission,
+        private readonly NiumCorporateRfiSubmissionService $corporateSubmission,
     ) {}
 
     public function index(Request $request): JsonResponse
@@ -36,6 +40,7 @@ final class NiumRfiCaseController extends Controller
     public function show(NiumRfiCase $niumRfiCase): JsonResponse
     {
         $this->assertNiumCase($niumRfiCase);
+
         return response()->json($this->workflow->detailPayload($niumRfiCase));
     }
 
@@ -50,6 +55,7 @@ final class NiumRfiCaseController extends Controller
         ]);
         $this->assertNiumCase($niumRfiCase);
         $case = $this->workflow->saveFactualDraft($niumRfiCase, $validated['answers'], $validated['file_ids'] ?? [], (int) $request->user()->id);
+
         return response()->json($this->workflow->detailPayload($case));
     }
 
@@ -57,21 +63,25 @@ final class NiumRfiCaseController extends Controller
     {
         $this->assertNiumCase($niumRfiCase);
         $case = $this->workflow->approve($niumRfiCase, (int) $request->user()->id);
+
         return response()->json($this->workflow->detailPayload($case));
     }
 
     public function submit(NiumRfiCase $niumRfiCase): JsonResponse
     {
         $this->assertNiumCase($niumRfiCase);
-        $case = $this->transactionSubmission->submit($niumRfiCase);
+        $case = $niumRfiCase->scope === 'customer'
+            ? $this->corporateSubmission->submit($niumRfiCase)
+            : $this->transactionSubmission->submit($niumRfiCase);
+
         return response()->json($this->workflow->detailPayload($case));
     }
 
     private function assertNiumCase(NiumRfiCase $case): void
     {
         if (! $case->user_provider_account_id || ! $case->provider_id
-            || ! \App\Models\IntegrationProvider::query()->whereKey($case->provider_id)->whereRaw('LOWER(code) = ?', ['nium'])->exists()
-            || ! \App\Models\UserProviderAccount::query()->whereKey($case->user_provider_account_id)->where('provider_id', $case->provider_id)->exists()) {
+            || ! IntegrationProvider::query()->whereKey($case->provider_id)->whereRaw('LOWER(code) = ?', ['nium'])->exists()
+            || ! UserProviderAccount::query()->whereKey($case->user_provider_account_id)->where('provider_id', $case->provider_id)->exists()) {
             abort(404);
         }
     }

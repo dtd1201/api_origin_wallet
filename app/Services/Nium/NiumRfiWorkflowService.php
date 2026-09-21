@@ -51,12 +51,17 @@ final class NiumRfiWorkflowService
         unset($answer);
         if ($case->scope === 'transaction') {
             $this->validateTransactionAnswers($case, $answers, $fileIds);
+        } else {
+            $this->validateCorporateAnswers($case, $answers, $fileIds);
         }
-        $resolvedFileIds = $case->scope === 'transaction'
+        $usesLocalDocumentIds = $case->scope === 'transaction'
+            || collect($fileIds)->every(static fn (mixed $id): bool => is_string($id) && preg_match('/^[1-9][0-9]*$/', $id) === 1);
+        $resolvedFileIds = $usesLocalDocumentIds
             ? $this->resolveTransactionDocuments($case, $fileIds)
             : $this->resolveFactualFileIds($case, $fileIds);
 
         $case->update(['response_draft' => $answers, 'supporting_file_ids' => $resolvedFileIds, 'submission_state' => 'draft']);
+
         return $case->fresh();
     }
 
@@ -66,6 +71,7 @@ final class NiumRfiWorkflowService
             throw new RuntimeException('Nium RFI cannot be approved without a factual response draft.');
         }
         $case->update(['approved_by' => $adminUserId, 'approved_at' => now(), 'submission_state' => 'approved']);
+
         return $case->fresh();
     }
 
@@ -84,13 +90,9 @@ final class NiumRfiWorkflowService
                 throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Transaction RFI response contract is not configured.');
             }
         } else {
-            if (collect($contract)->contains(fn ($value) => blank($value))) {
-                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact response endpoint and body are not confirmed.');
-            }
-            if (! in_array(strtoupper((string) $contract[1]), ['POST', 'PUT'], true)
-                || preg_match('/^[A-Za-z0-9._-]{1,80}$/', (string) $contract[2]) !== 1
-                || preg_match('/^[A-Za-z0-9._-]{1,80}$/', (string) $contract[3]) !== 1) {
-                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: configured contract evidence is invalid.');
+            $officialEndpoint = '/api/v1/client/{clientHashId}/corporate/rfi';
+            if ($contract[0] !== $officialEndpoint || strtoupper((string) $contract[1]) !== 'POST') {
+                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Corporate RFI response contract is not configured.');
             }
         }
 
@@ -100,6 +102,9 @@ final class NiumRfiWorkflowService
                 && ($locked->status !== 'requested'
                     || strtoupper(trim((string) data_get($locked->evidence, 'rfiStatus'))) !== 'RFI_REQUESTED')) {
                 throw new RuntimeException('Transaction RFI submission requires the latest authoritative RFI_REQUESTED status.');
+            }
+            if ($locked->scope === 'customer' && $locked->status !== 'requested') {
+                throw new RuntimeException('Corporate RFI submission requires the latest authoritative requested status.');
             }
             if ($locked->submission_state !== 'approved' || $locked->approved_at === null) {
                 throw new RuntimeException('Nium RFI submission requires separate human approval and an unclaimed case.');
@@ -113,6 +118,7 @@ final class NiumRfiWorkflowService
                     'claimed_at' => now()->toISOString(),
                 ]),
             ]);
+
             return $locked->fresh();
         });
     }
@@ -142,8 +148,7 @@ final class NiumRfiWorkflowService
     public function reconcileCustomerEvidence(
         UserProviderAccount $account,
         ?array $authoritativeRfis = null,
-    ): void
-    {
+    ): void {
         $providerSubStatus = strtolower(trim((string) $account->provider_sub_status));
         $providerStatus = strtolower(trim((string) $account->provider_status));
 
@@ -185,7 +190,10 @@ final class NiumRfiWorkflowService
                             'rfiHashId' => $providerRfi['rfiHashId'],
                             'caseId' => $providerRfi['caseId'] ?? null,
                             'referenceId' => $providerRfi['referenceId'] ?? null,
-                            'templateId' => $providerRfi['templateId'] ?? null,
+                            'rfiTemplateId' => $providerRfi['rfiTemplateId'] ?? null,
+                            'clientId' => $providerRfi['clientId'] ?? null,
+                            'region' => $providerRfi['region'] ?? null,
+                            'requiredData' => $providerRfi['requiredData'] ?? null,
                             'rfiStatus' => $providerRfi['status'],
                         ], static fn (mixed $value): bool => $value !== null && $value !== '')),
                         'reconciled_at' => now(),
@@ -197,7 +205,7 @@ final class NiumRfiWorkflowService
                             'rfi_hash_id' => $providerRfi['rfiHashId'],
                             'case_id' => $providerRfi['caseId'] ?? null,
                             'reference_id' => $providerRfi['referenceId'] ?? null,
-                            'template_id' => $providerRfi['templateId'] ?? null,
+                            'template_id' => $providerRfi['rfiTemplateId'] ?? null,
                             'source' => 'authoritative_provider_rfi_fetch',
                             'recorded_at' => now()->toISOString(),
                         ], static fn (mixed $value): bool => $value !== null && $value !== '');
@@ -317,6 +325,7 @@ final class NiumRfiWorkflowService
             }
             $resolved[] = ['document_id' => $document->id, 'file_id_fingerprint' => hash('sha256', $fileId), 'provider_file_id' => $fileId];
         }
+
         return $resolved;
     }
 
@@ -361,13 +370,46 @@ final class NiumRfiWorkflowService
         }
     }
 
+    private function validateCorporateAnswers(NiumRfiCase $case, array $answers, array $fileIds): void
+    {
+        $requested = collect((array) data_get($case->evidence, 'requiredData', []))
+            ->pluck('value')->filter(static fn (mixed $value): bool => is_string($value))
+            ->map(static fn (string $value): string => trim($value))->unique()->values()->all();
+        $seen = [];
+        foreach ($answers as $answer) {
+            $field = trim((string) $answer['questionId']);
+            if ($requested !== [] && ! in_array($field, $requested, true)) {
+                throw new RuntimeException('Corporate RFI draft contains an unrequested response field.');
+            }
+            if (isset($seen[$field]) || $answer['answer'] === '' || $answer['answer'] === []) {
+                throw new RuntimeException('Corporate RFI draft contains an empty or duplicate response field.');
+            }
+            if ($this->containsDocumentData($answer['answer'])) {
+                throw new RuntimeException('Raw or encoded document data cannot be persisted in a Corporate RFI draft.');
+            }
+            $seen[$field] = true;
+        }
+
+        $requestsDocuments = collect((array) data_get($case->evidence, 'requiredData', []))->contains(
+            static fn (mixed $required): bool => is_array($required)
+                && strtoupper(trim((string) ($required['type'] ?? ''))) === 'DOCUMENT',
+        );
+        if ($requested !== [] && $fileIds !== [] && ! $requestsDocuments) {
+            throw new RuntimeException('Corporate RFI draft contains unrequested supporting documents.');
+        }
+        if ($requested !== [] && $requestsDocuments && $fileIds === []) {
+            throw new RuntimeException('Corporate RFI draft requires an approved factual supporting document.');
+        }
+    }
+
     private function resolveTransactionDocuments(NiumRfiCase $case, array $documentIds): array
     {
+        $scopeLabel = $case->scope === 'customer' ? 'Corporate RFI' : 'Transaction RFI';
         if ($documentIds === []) {
             return [];
         }
         if (count($documentIds) > 4) {
-            throw new RuntimeException('Transaction RFI supports at most four documents.');
+            throw new RuntimeException("{$scopeLabel} supports at most four documents.");
         }
 
         $account = UserProviderAccount::query()->with('user.kycProfile')->findOrFail($case->user_provider_account_id);
@@ -375,7 +417,7 @@ final class NiumRfiWorkflowService
         $totalBytes = 0;
         foreach ($documentIds as $documentId) {
             if (! is_string($documentId) || preg_match('/^[1-9][0-9]*$/', $documentId) !== 1) {
-                throw new RuntimeException('Transaction RFI supporting document ID is invalid.');
+                throw new RuntimeException("{$scopeLabel} supporting document ID is invalid.");
             }
             $document = KycDocument::query()
                 ->whereKey((int) $documentId)
@@ -393,11 +435,11 @@ final class NiumRfiWorkflowService
                 || $document->storage_disk !== 'kyc_private'
                 || blank($document->file_path) || str_starts_with((string) $document->file_path, '/')
                 || str_contains((string) $document->file_path, '..') || blank($document->original_name)) {
-                throw new RuntimeException('Transaction RFI supporting document is not approved factual owned evidence.');
+                throw new RuntimeException("{$scopeLabel} supporting document is not approved factual owned evidence.");
             }
             $totalBytes += $size;
             if ($totalBytes >= 10 * 1024 * 1024) {
-                throw new RuntimeException('Transaction RFI supporting documents must total less than 10 MB.');
+                throw new RuntimeException("{$scopeLabel} supporting documents must total less than 10 MB.");
             }
             $resolved[] = [
                 'document_id' => $document->id,
@@ -436,6 +478,7 @@ final class NiumRfiWorkflowService
                 return true;
             }
         }
+
         return false;
     }
 }
