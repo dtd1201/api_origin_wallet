@@ -101,6 +101,57 @@ class NiumWebhookApiTest extends TestCase
         ]);
     }
 
+    public function test_returned_template_with_only_system_reference_marks_transfer_failed(): void
+    {
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
+        config()->set('wallet.ledger.enabled', false);
+
+        $provider = $this->provider();
+        $reference = 'RT-RETURNED-TEMPLATE';
+        $transfer = $this->transfer($provider, $reference);
+
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'template' => 'REMIT_TRANSACTION_RETURNED_WEBHOOK',
+                'systemReferenceNumber' => $reference,
+            ])
+            ->assertOk();
+
+        $freshTransfer = $transfer->fresh();
+        $transaction = Transaction::query()->sole();
+
+        $this->assertSame('failed', $freshTransfer->status);
+        $this->assertSame('RETURNED', $freshTransfer->provider_status);
+        $this->assertSame('failed', $transaction->status);
+    }
+
+    public function test_rejected_template_with_only_system_reference_marks_transfer_failed(): void
+    {
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
+        config()->set('wallet.ledger.enabled', false);
+
+        $provider = $this->provider();
+        $reference = 'RT-REJECTED-TEMPLATE';
+        $transfer = $this->transfer($provider, $reference);
+
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'template' => 'REMIT_TRANSACTION_REJECTED_WEBHOOK',
+                'reason' => 'INSUFFICIENT_FUNDS',
+                'systemReferenceNumber' => $reference,
+            ])
+            ->assertOk();
+
+        $freshTransfer = $transfer->fresh();
+        $transaction = Transaction::query()->sole();
+
+        $this->assertSame('failed', $freshTransfer->status);
+        $this->assertSame('REJECTED', $freshTransfer->provider_status);
+        $this->assertSame('failed', $transaction->status);
+    }
+
     public function test_nium_webhook_accepts_correct_static_partner_key_and_keeps_payout_flow(): void
     {
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
