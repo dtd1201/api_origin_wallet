@@ -76,6 +76,27 @@ class ReconcileNiumTransfersCommandTest extends TestCase
             'services.nium.transfer_reconciliation_limit',
             50
         );
+
+        config()->set(
+            'services.nium.transfer_reconciliation_enabled',
+            true
+        );
+    }
+
+    public function test_disabled_reconciliation_exits_without_provider_http(): void
+    {
+        config()->set(
+            'services.nium.transfer_reconciliation_enabled',
+            false
+        );
+
+        Http::fake();
+
+        $this->artisan('nium:reconcile-transfers')
+            ->expectsOutput('Nium transfer reconciliation is disabled.')
+            ->assertExitCode(0);
+
+        Http::assertNothingSent();
     }
 
     public function test_batch_reconciliation_completes_pending_transfer_and_settles_ledger(): void

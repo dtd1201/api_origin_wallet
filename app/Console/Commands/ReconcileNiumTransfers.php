@@ -21,6 +21,12 @@ class ReconcileNiumTransfers extends Command
         ProviderTransferManager $manager,
         SensitiveDataSanitizer $sanitizer,
     ): int {
+        if (! (bool) config('services.nium.transfer_reconciliation_enabled', false)) {
+            $this->info('Nium transfer reconciliation is disabled.');
+
+            return self::SUCCESS;
+        }
+
         $provider = IntegrationProvider::query()
             ->whereRaw('LOWER(code) = ?', ['nium'])
             ->first();
