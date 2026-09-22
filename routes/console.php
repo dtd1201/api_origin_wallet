@@ -397,3 +397,9 @@ if ((bool) config('services.nium.transfer_reconciliation_enabled', false)) {
         ->everyFiveMinutes()
         ->withoutOverlapping(10);
 }
+
+if ((bool) config('services.nium.wallet_data_sync_enabled', false)) {
+    Schedule::command('nium:sync-wallet-data')
+        ->everyTenMinutes()
+        ->withoutOverlapping(15);
+}
