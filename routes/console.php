@@ -391,3 +391,9 @@ if ((bool) config('services.bank_rate_sources.enabled', true)) {
         ->everyFiveMinutes()
         ->withoutOverlapping();
 }
+
+if ((bool) config('services.nium.transfer_reconciliation_enabled', false)) {
+    Schedule::command('nium:reconcile-transfers')
+        ->everyFiveMinutes()
+        ->withoutOverlapping(10);
+}

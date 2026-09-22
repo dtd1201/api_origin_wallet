@@ -131,6 +131,8 @@ return [
         'account_verification_endpoint' => env('NIUM_ACCOUNT_VERIFICATION_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/accountVerification'),
         'transfer_endpoint' => env('NIUM_TRANSFER_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance'),
         'transfer_status_endpoint' => env('NIUM_TRANSFER_STATUS_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance/{systemReferenceNumber}/audit'),
+        'transfer_reconciliation_enabled' => env('NIUM_TRANSFER_RECONCILIATION_ENABLED', false),
+        'transfer_reconciliation_limit' => (int) env('NIUM_TRANSFER_RECONCILIATION_LIMIT', 50),
         'webhook_secret' => env('NIUM_WEBHOOK_SECRET'),
         'webhook_signature_header' => env('NIUM_WEBHOOK_SIGNATURE_HEADER'),
         'webhook_signature_algorithm' => env('NIUM_WEBHOOK_SIGNATURE_ALGORITHM', 'sha256'),
