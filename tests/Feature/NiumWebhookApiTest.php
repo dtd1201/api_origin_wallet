@@ -67,6 +67,40 @@ class NiumWebhookApiTest extends TestCase
         ]);
     }
 
+    public function test_paid_template_with_only_system_reference_creates_completed_transaction(): void
+    {
+        config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
+        config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
+        config()->set('wallet.ledger.enabled', false);
+
+        $provider = $this->provider();
+        $reference = 'RT3214523828';
+        $transfer = $this->transfer($provider, $reference);
+
+        $this->withHeader('x-partner-key', 'nium-webhook-test-key')
+            ->postJson('/api/webhooks/providers/nium', [
+                'template' => 'REMIT_TRANSACTION_PAID_WEBHOOK',
+                'systemReferenceNumber' => $reference,
+            ])
+            ->assertOk();
+
+        $freshTransfer = $transfer->fresh();
+        $transaction = Transaction::query()->sole();
+
+        $this->assertSame('completed', $freshTransfer->status);
+        $this->assertSame('PAID', $freshTransfer->provider_status);
+        $this->assertNotNull($freshTransfer->completed_at);
+        $this->assertSame($freshTransfer->id, $transaction->transfer_id);
+        $this->assertSame($reference, $transaction->external_transaction_id);
+        $this->assertSame('completed', $transaction->status);
+
+        $this->assertDatabaseHas('webhook_events', [
+            'provider_id' => $provider->id,
+            'event_type' => 'REMIT_TRANSACTION_PAID_WEBHOOK',
+            'processing_status' => 'processed',
+        ]);
+    }
+
     public function test_nium_webhook_accepts_correct_static_partner_key_and_keeps_payout_flow(): void
     {
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');

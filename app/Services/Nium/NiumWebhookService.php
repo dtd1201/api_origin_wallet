@@ -218,12 +218,15 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 $this->value($resource, ['status', 'subStatus', 'paymentStatus'])
                     ?? $this->value($payload, ['status', 'eventStatus'])
             )));
-            if (
-                $providerStatus === ''
-                && $template === 'REMIT_TRANSACTION_COMPLETED_WEBHOOK'
-                && strtoupper(trim((string) ($payload['reason'] ?? ''))) === 'SUCCESS'
-            ) {
-                $providerStatus = 'COMPLETED';
+            if ($providerStatus === '') {
+                if ($template === 'REMIT_TRANSACTION_PAID_WEBHOOK') {
+                    $providerStatus = 'PAID';
+                } elseif (
+                    $template === 'REMIT_TRANSACTION_COMPLETED_WEBHOOK'
+                    && strtoupper(trim((string) ($payload['reason'] ?? ''))) === 'SUCCESS'
+                ) {
+                    $providerStatus = 'COMPLETED';
+                }
             }
             $status = $this->normalizeTransferStatus($providerStatus);
             $statusAt = $this->transferStatusTimestamp($resource, $payload);
