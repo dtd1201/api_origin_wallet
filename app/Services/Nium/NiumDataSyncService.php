@@ -79,7 +79,7 @@ class NiumDataSyncService implements DataSyncProvider
                     'balance',
                     'amount',
                 ]);
-                $ledger = $this->numericValue($item, [
+                $providerLedger = $this->numericValue($item, [
                     'ledgerBalance',
                     'ledger_balance',
                     'currentBalance',
@@ -87,7 +87,7 @@ class NiumDataSyncService implements DataSyncProvider
                     'balance',
                     'amount',
                 ], $available);
-                $reserved = $this->numericValue($item, [
+                $providerReserved = $this->numericValue($item, [
                     'reservedBalance',
                     'reserved_balance',
                     'withHoldingBalance',
@@ -105,6 +105,28 @@ class NiumDataSyncService implements DataSyncProvider
                     ->lockForUpdate()
                     ->first();
 
+                // reserved_balance is owned by Origin's transfer ledger.
+                // Provider-side reserved/blocked amounts are informational only.
+                $localReserved = $existing?->reserved_balance ?? 0;
+                $localAvailable = $available ?? ($existing?->available_balance ?? 0);
+                $localLedger = bcadd(
+                    (string) $localAvailable,
+                    (string) $localReserved,
+                    8
+                );
+
+                $rawData = array_merge(
+                    (array) ($existing?->raw_data ?? []),
+                    array_filter([
+                        'wallet_id' => $externalAccountId,
+                        'currency' => $currency,
+                        'provider_status' => $this->value($item, ['status']),
+                        'provider_available_balance' => $available,
+                        'provider_ledger_balance' => $providerLedger,
+                        'provider_reserved_balance' => $providerReserved,
+                    ], static fn ($value) => $value !== null && $value !== '')
+                );
+
                 Balance::query()->updateOrCreate(
                     [
                         'provider_id' => $provider->id,
@@ -113,15 +135,11 @@ class NiumDataSyncService implements DataSyncProvider
                     ],
                     [
                         'user_id' => $user->id,
-                        'available_balance' => $available,
-                        'ledger_balance' => $ledger,
-                        'reserved_balance' => $reserved ?? ($existing?->reserved_balance ?? 0),
+                        'available_balance' => $localAvailable,
+                        'ledger_balance' => $localLedger,
+                        'reserved_balance' => $localReserved,
                         'as_of' => $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']) ?? now(),
-                        'raw_data' => array_filter([
-                            'wallet_id' => $externalAccountId,
-                            'currency' => $currency,
-                            'provider_status' => $this->value($item, ['status']),
-                        ], static fn ($value) => $value !== null && $value !== ''),
+                        'raw_data' => $rawData,
                     ],
                 );
 
