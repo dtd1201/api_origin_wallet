@@ -184,6 +184,7 @@ class ProviderAccountController extends Controller
 
         return response()->json([
             'data' => $account?->niumVirtualAccounts()
+                ->with('detail')
                 ->latest('id')
                 ->get() ?? [],
         ]);

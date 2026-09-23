@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class NiumVirtualAccount extends Model
 {
@@ -30,4 +31,10 @@ class NiumVirtualAccount extends Model
     {
         return $this->belongsTo(UserProviderAccount::class, 'user_provider_account_id');
     }
+
+    public function detail(): HasOne
+    {
+        return $this->hasOne(NiumVirtualAccountDetail::class);
+    }
+
 }

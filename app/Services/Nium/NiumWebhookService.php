@@ -6,6 +6,7 @@ use App\Jobs\Nium\SubmitNiumHkEntityKycJob;
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\NiumVirtualAccount;
+use App\Models\NiumVirtualAccountDetail;
 use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\UserProviderAccount;
@@ -503,6 +504,20 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 'status' => 'assigned',
                 'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
             ]);
+
+
+            NiumVirtualAccountDetail::updateOrCreate(
+                [
+                    'nium_virtual_account_id' => $virtualAccount->id,
+                ],
+                [
+                    'account_name' => $payload['accountName'] ?? null,
+                    'bank_name' => $payload['fullBankName'] ?? null,
+                    'bank_address' => $payload['bankAddress'] ?? null,
+                    'routing_code_type' => $payload['routingCodeType1'] ?? null,
+                    'routing_code_value' => $payload['routingCodeValue1'] ?? null,
+                ],
+            );
         });
     }
 
