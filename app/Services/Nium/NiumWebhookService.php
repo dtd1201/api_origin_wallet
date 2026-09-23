@@ -480,7 +480,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             }
 
             if ($virtualAccount === null) {
-                NiumVirtualAccount::query()->updateOrCreate(
+                $createdVirtualAccount = NiumVirtualAccount::query()->updateOrCreate(
                     [
                         'user_provider_account_id' => $account->id,
                         'provider_payment_id' => (string) $paymentId,
@@ -492,6 +492,19 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                         'account_type' => $accountType !== '' ? $accountType : null,
                         'status' => 'assigned',
                         'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
+                    ],
+                );
+
+                NiumVirtualAccountDetail::updateOrCreate(
+                    [
+                        'nium_virtual_account_id' => $createdVirtualAccount->id,
+                    ],
+                    [
+                        'account_name' => $payload['accountName'] ?? null,
+                        'bank_name' => $payload['fullBankName'] ?? null,
+                        'bank_address' => $payload['bankAddress'] ?? null,
+                        'routing_code_type' => $payload['routingCodeType1'] ?? null,
+                        'routing_code_value' => $payload['routingCodeValue1'] ?? null,
                     ],
                 );
 
