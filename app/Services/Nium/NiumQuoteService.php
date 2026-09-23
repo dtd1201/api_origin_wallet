@@ -23,7 +23,7 @@ class NiumQuoteService implements QuoteProvider
         ];
         $response = $this->niumService->get(
             path: $this->niumService->path(
-                (string) config('services.nium.quote_endpoint'),
+                (string) config('services.nium.payout_fx_lock_endpoint'),
                 [
                     'client' => $this->niumService->clientId(),
                     'customer' => $this->niumService->customerId($user),

@@ -290,6 +290,59 @@ class NiumSmokeTestCommandTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_full_readiness_keeps_modern_quote_and_payout_fx_lock_endpoints_separate_without_http(): void
+    {
+        $this->configurePhaseOne();
+
+        config()->set(
+            'services.nium.quote_endpoint',
+            '/api/v1/client/{clientHashId}/quotes',
+        );
+
+        config()->set(
+            'services.nium.payout_fx_lock_endpoint',
+            '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate',
+        );
+
+        config()->set(
+            'services.nium.quote_fetch_endpoint',
+            '/api/v1/client/{clientHashId}/quotes/{quoteId}',
+        );
+
+        config()->set(
+            'services.nium.conversion_endpoint',
+            '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/conversions',
+        );
+
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test', ['--full' => true]);
+
+        $this->assertSame(0, $exitCode);
+        Http::assertNothingSent();
+    }
+
+    public function test_full_readiness_rejects_payout_fx_lock_endpoint_using_modern_quote_contract_without_http(): void
+    {
+        $this->configurePhaseOne();
+
+        config()->set(
+            'services.nium.payout_fx_lock_endpoint',
+            '/api/v1/client/{clientHashId}/quotes',
+        );
+
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test', ['--full' => true]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            'NIUM_PAYOUT_FX_LOCK_ENDPOINT',
+            Artisan::output(),
+        );
+        Http::assertNothingSent();
+    }
+
     private function configurePhaseOne(): void
     {
         IntegrationProvider::query()->firstOrCreate(
