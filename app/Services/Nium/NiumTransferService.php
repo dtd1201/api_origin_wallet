@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\UserProviderAccount;
@@ -21,12 +22,22 @@ class NiumTransferService implements PreparedTransferStatusProvider
         private readonly TransferEligibilityService $eligibilityService,
         private readonly NiumTransferPolicy $policy,
         private readonly NiumPurposeCodeService $purposeCodes,
+        private readonly NiumPayoutFxLockService $payoutFxLockService,
     ) {}
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
         $authoritativePurposeCodes = $this->purposeCodes->supported($transfer->user()->firstOrFail());
-        [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use ($provider, $transfer, $authoritativePurposeCodes): array {
+
+        // Provider I/O must remain outside the transfer row-lock transaction.
+        $preparedFxQuote = $this->preparePayoutFxLockIfRequired($provider, $transfer);
+
+        [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use (
+            $provider,
+            $transfer,
+            $authoritativePurposeCodes,
+            $preparedFxQuote,
+        ): array {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
 
             if (! in_array($locked->status, ['draft', 'approval_required', 'approved'], true)) {
@@ -38,6 +49,11 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 throw new RuntimeException('Transfer provider does not match the Nium submission provider.');
             }
             $this->eligibilityService->ensureTransferCanBeSubmitted($locked);
+
+            if ($preparedFxQuote !== null) {
+                $this->attachPreparedPayoutFxLock($locked, $preparedFxQuote);
+            }
+
             $this->ensureAuthoritativeQuote($locked);
             $this->policy->assertTransfer($locked, $authoritativePurposeCodes);
             $payload = $this->buildTransferPayload($locked, $authoritativePurposeCodes);
@@ -252,6 +268,113 @@ class NiumTransferService implements PreparedTransferStatusProvider
         ]);
 
         return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
+    }
+
+    private function preparePayoutFxLockIfRequired(
+        IntegrationProvider $provider,
+        Transfer $transfer,
+    ): ?FxQuote {
+        $candidate = Transfer::query()
+            ->with([
+                'provider',
+                'user.kycProfile',
+                'beneficiary',
+                'sourceBankAccount',
+                'fxQuote',
+            ])
+            ->findOrFail($transfer->id);
+
+        if (! in_array($candidate->status, ['draft', 'approval_required', 'approved'], true)) {
+            throw new RuntimeException(
+                'Transfer has already entered provider submission and cannot acquire a payout FX lock.'
+            );
+        }
+
+        if ($candidate->provider_id !== $provider->id) {
+            throw new RuntimeException(
+                'Transfer provider does not match the Nium submission provider.'
+            );
+        }
+
+        // This performs local submission/approval/balance validation only.
+        // No Nium HTTP is performed here.
+        $this->eligibilityService->ensureTransferCanBeSubmitted($candidate);
+
+        $sourceCurrency = strtoupper(trim((string) $candidate->source_currency));
+        $targetCurrency = strtoupper(trim((string) $candidate->target_currency));
+
+        if ($sourceCurrency === $targetCurrency) {
+            return null;
+        }
+
+        // Existing server-side payout FX lock will be validated later.
+        if ($candidate->fx_quote_id !== null) {
+            return null;
+        }
+
+        // Fail closed later in NiumTransferPolicy without making FX HTTP.
+        if (! (bool) config('services.nium.payout_fx_enabled', false)) {
+            return null;
+        }
+
+        if ($sourceCurrency !== NiumTransferPolicy::SOURCE_CURRENCY) {
+            throw new RuntimeException(
+                'Nium payout FX currently requires USD as the source currency.'
+            );
+        }
+
+        if ($candidate->beneficiary === null
+            || strtoupper(trim((string) $candidate->beneficiary->currency)) !== $targetCurrency) {
+            throw new RuntimeException(
+                'Nium payout FX beneficiary currency must match the transfer destination currency.'
+            );
+        }
+
+        return $this->payoutFxLockService->createLock(
+            $provider,
+            $candidate->user,
+            $sourceCurrency,
+            $targetCurrency,
+            (float) $candidate->source_amount,
+        );
+    }
+
+    private function attachPreparedPayoutFxLock(
+        Transfer $transfer,
+        FxQuote $quote,
+    ): void {
+        if ($transfer->fx_quote_id !== null) {
+            throw new RuntimeException(
+                'Transfer already has an FX quote and cannot attach another payout FX lock.'
+            );
+        }
+
+        if ($quote->expires_at === null || $quote->expires_at->isPast()) {
+            throw new RuntimeException(
+                'Prepared Nium payout FX lock has expired.'
+            );
+        }
+
+        if (($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
+            || ! is_numeric($quote->quote_ref)
+            || ! is_numeric($quote->net_rate)
+            || $quote->user_id !== $transfer->user_id
+            || $quote->provider_id !== $transfer->provider_id
+            || strtoupper((string) $quote->source_currency) !== strtoupper((string) $transfer->source_currency)
+            || strtoupper((string) $quote->target_currency) !== strtoupper((string) $transfer->target_currency)
+            || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')) {
+            throw new RuntimeException(
+                'Prepared Nium payout FX lock does not match the authoritative transfer.'
+            );
+        }
+
+        $transfer->update([
+            'fx_quote_id' => $quote->id,
+            'fx_rate' => $quote->net_rate,
+        ]);
+
+        $transfer->unsetRelation('fxQuote');
+        $transfer->load('fxQuote');
     }
 
     private function buildTransferPayload(Transfer $transfer, array $authoritativePurposeCodes): array

@@ -478,6 +478,8 @@ class NiumTransferServiceTest extends TestCase
 
     public function test_same_currency_transfer_does_not_require_fx_lock(): void
     {
+        config()->set('services.nium.payout_fx_enabled', true);
+
         [$provider, $transfer] = $this->makeSubmittableTransfer([
             'target_currency' => 'USD',
             'fx_quote_id' => null,
@@ -493,6 +495,10 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('pending', $updated->status);
         Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
             && ! array_key_exists('auditId', $request->data()['payout'] ?? []));
+
+        Http::assertNotSent(fn ($request): bool =>
+            str_contains($request->url(), '/lockExchangeRate')
+        );
     }
 
     public function test_same_currency_transfer_without_fx_lock_uses_live_transfer_money_contract(): void
@@ -511,6 +517,78 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('pending', $updated->status);
         Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
             && ! array_key_exists('auditId', $request->data()['payout'] ?? []));
+    }
+
+    public function test_cross_currency_transfer_acquires_fresh_payout_fx_lock_before_remittance(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+        config()->set(
+            'services.nium.payout_fx_lock_endpoint',
+            '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate',
+        );
+
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+
+        $transfer->beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        Http::fake([
+            ...$this->purposeCodesRoute(),
+
+            'https://gateway.sandbox.nium.test/api/v1/client/client_hash_test/customer/customer-test/wallet/wallet-test/lockExchangeRate*'
+                => Http::response([
+                    'audit_id' => 778,
+                    'fx_hold_id' => 'hold-auto-778',
+                    'fx_rate' => '0.915',
+                    'hold_expiry_at' => now()->addMinutes(10)->toISOString(),
+                    'status' => 'ACTIVE',
+                ], 200),
+
+            '*' => Http::response([
+                'systemReferenceNumber' => 'RT-AUTO-FX',
+            ], 200),
+        ]);
+
+        $updated = app(NiumTransferService::class)->submitTransfer(
+            $provider,
+            $transfer->fresh([
+                'provider',
+                'user',
+                'beneficiary',
+                'fxQuote',
+            ]),
+        );
+
+        $this->assertSame('pending', $updated->status);
+
+        $persisted = Transfer::query()
+            ->with('fxQuote')
+            ->findOrFail($transfer->id);
+
+        $this->assertNotNull($persisted->fx_quote_id);
+        $this->assertSame('0.9150000000', $persisted->fx_rate);
+        $this->assertSame('778', $persisted->fxQuote->quote_ref);
+        $this->assertSame(
+            'payout_fx_lock',
+            $persisted->fxQuote->raw_data['provider_fx_type'],
+        );
+
+        Http::assertSent(fn ($request): bool =>
+            $request->method() === 'GET'
+            && str_contains($request->url(), '/lockExchangeRate')
+        );
+
+        Http::assertSent(fn ($request): bool =>
+            $this->isRemittancePost($request)
+            && ($request->data()['payout']['sourceCurrency'] ?? null) === 'USD'
+            && ($request->data()['payout']['destinationCurrency'] ?? null) === 'EUR'
+            && ($request->data()['payout']['auditId'] ?? null) === 778
+        );
     }
 
     public function test_cross_currency_transfer_with_authoritative_payout_fx_lock_sends_audit_id(): void
@@ -811,6 +889,10 @@ class NiumTransferServiceTest extends TestCase
             app(NiumTransferService::class)->submitTransfer($provider, $transfer);
         } finally {
             $this->assertNoRemittancePost();
+
+            Http::assertNotSent(fn ($request): bool =>
+                str_contains($request->url(), '/lockExchangeRate')
+            );
         }
     }
 
@@ -1096,6 +1178,325 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('990.00000000', $balance->available_balance);
         $this->assertSame('10.00000000', $balance->reserved_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
+    }
+
+    public function test_manager_releases_hold_when_payout_fx_lock_fails_before_remittance(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+        config()->set(
+            'services.nium.payout_fx_lock_endpoint',
+            '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate',
+        );
+
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+
+        $transfer->beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        Http::fake(function ($request) {
+            if (str_contains($request->url(), '/purposeCodes')) {
+                return Http::response([
+                    [
+                        'description' => 'General Goods Trades - Offline trade',
+                        'purposeCode' => 'IR01811',
+                    ],
+                ]);
+            }
+
+            if ($request->method() === 'GET'
+                && str_contains($request->url(), '/lockExchangeRate')) {
+                return Http::response([
+                    'message' => 'FX lock unavailable.',
+                ], 503);
+            }
+
+            return Http::response([
+                'systemReferenceNumber' => 'MUST-NOT-BE-CALLED',
+            ], 200);
+        });
+
+        try {
+            app(ProviderTransferManager::class)->submitTransfer(
+                $provider,
+                $transfer->fresh([
+                    'provider',
+                    'user',
+                    'beneficiary',
+                    'sourceBankAccount',
+                ]),
+            );
+
+            $this->fail('FX lock failure must abort before remittance submission.');
+        } catch (RuntimeException) {
+            // Manager must release the wallet hold.
+        }
+
+        $balance = Balance::query()
+            ->where('user_id', $transfer->user_id)
+            ->sole();
+
+        $persisted = Transfer::query()->findOrFail($transfer->id);
+
+        $this->assertSame('1000.00000000', $balance->available_balance);
+        $this->assertSame('0.00000000', $balance->reserved_balance);
+
+        $this->assertNull($persisted->fx_quote_id);
+        $this->assertNull($persisted->fx_rate);
+
+        $this->assertSame(
+            1,
+            LedgerEntry::query()
+                ->where('source_id', (string) $transfer->id)
+                ->where('entry_type', 'hold')
+                ->count(),
+        );
+
+        $this->assertSame(
+            1,
+            LedgerEntry::query()
+                ->where('source_id', (string) $transfer->id)
+                ->where('entry_type', 'release')
+                ->count(),
+        );
+
+        $this->assertSame(0, \App\Models\FxQuote::query()->count());
+
+        Http::assertSent(fn ($request): bool =>
+            $request->method() === 'GET'
+            && str_contains($request->url(), '/lockExchangeRate')
+        );
+
+        $this->assertNoRemittancePost();
+    }
+
+    public function test_manager_preserves_hold_and_fx_lock_when_remittance_outcome_is_unknown(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+        config()->set(
+            'services.nium.payout_fx_lock_endpoint',
+            '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate',
+        );
+
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+
+        $transfer->beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        $remittanceAttempts = 0;
+
+        Http::fake(function ($request) use (&$remittanceAttempts) {
+            if (str_contains($request->url(), '/purposeCodes')) {
+                return Http::response([
+                    [
+                        'description' => 'General Goods Trades - Offline trade',
+                        'purposeCode' => 'IR01811',
+                    ],
+                ]);
+            }
+
+            if ($request->method() === 'GET'
+                && str_contains($request->url(), '/lockExchangeRate')) {
+                return Http::response([
+                    'audit_id' => 779,
+                    'fx_hold_id' => 'hold-unknown-779',
+                    'fx_rate' => '0.915',
+                    'hold_expiry_at' => now()->addMinutes(10)->toISOString(),
+                    'status' => 'ACTIVE',
+                ], 200);
+            }
+
+            if ($request->method() === 'POST'
+                && str_ends_with(
+                    (string) parse_url($request->url(), PHP_URL_PATH),
+                    '/remittance',
+                )) {
+                $remittanceAttempts++;
+
+                throw new ConnectionException(
+                    'Timed out after provider may have accepted remittance.'
+                );
+            }
+
+            return Http::response([], 500);
+        });
+
+        $unknown = app(ProviderTransferManager::class)->submitTransfer(
+            $provider,
+            $transfer->fresh([
+                'provider',
+                'user',
+                'beneficiary',
+                'sourceBankAccount',
+            ]),
+        );
+
+        $this->assertSame('submission_unknown', $unknown->status);
+
+        $balance = Balance::query()
+            ->where('user_id', $transfer->user_id)
+            ->sole();
+
+        $persisted = Transfer::query()
+            ->with('fxQuote')
+            ->findOrFail($transfer->id);
+
+        $this->assertSame('990.00000000', $balance->available_balance);
+        $this->assertSame('10.00000000', $balance->reserved_balance);
+
+        $this->assertNotNull($persisted->fx_quote_id);
+        $this->assertSame('0.9150000000', $persisted->fx_rate);
+        $this->assertSame('779', $persisted->fxQuote->quote_ref);
+        $this->assertSame(
+            'payout_fx_lock',
+            $persisted->fxQuote->raw_data['provider_fx_type'],
+        );
+
+        $this->assertSame(
+            0,
+            LedgerEntry::query()
+                ->where('source_id', (string) $transfer->id)
+                ->where('entry_type', 'release')
+                ->count(),
+        );
+
+        $this->assertCount(
+            1,
+            collect(Http::recorded())->filter(
+                fn ($pair) =>
+                    $pair[0]->method() === 'GET'
+                    && str_contains($pair[0]->url(), '/lockExchangeRate')
+            ),
+        );
+
+        $this->assertSame(1, $remittanceAttempts);
+    }
+
+    public function test_submission_unknown_retry_does_not_create_second_fx_lock_or_remittance(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+        config()->set(
+            'services.nium.payout_fx_lock_endpoint',
+            '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate',
+        );
+
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+
+        $transfer->beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        $remittanceAttempts = 0;
+
+        Http::fake(function ($request) use (&$remittanceAttempts) {
+            if (str_contains($request->url(), '/purposeCodes')) {
+                return Http::response([
+                    [
+                        'description' => 'General Goods Trades - Offline trade',
+                        'purposeCode' => 'IR01811',
+                    ],
+                ]);
+            }
+
+            if ($request->method() === 'GET'
+                && str_contains($request->url(), '/lockExchangeRate')) {
+                return Http::response([
+                    'audit_id' => 780,
+                    'fx_hold_id' => 'hold-retry-780',
+                    'fx_rate' => '0.915',
+                    'hold_expiry_at' => now()->addMinutes(10)->toISOString(),
+                    'status' => 'ACTIVE',
+                ], 200);
+            }
+
+            if ($request->method() === 'POST'
+                && str_ends_with(
+                    (string) parse_url($request->url(), PHP_URL_PATH),
+                    '/remittance',
+                )) {
+                $remittanceAttempts++;
+
+                throw new ConnectionException(
+                    'Unknown remittance submission outcome.'
+                );
+            }
+
+            return Http::response([], 500);
+        });
+
+        $manager = app(ProviderTransferManager::class);
+
+        $unknown = $manager->submitTransfer(
+            $provider,
+            $transfer->fresh([
+                'provider',
+                'user',
+                'beneficiary',
+                'sourceBankAccount',
+            ]),
+        );
+
+        $this->assertSame('submission_unknown', $unknown->status);
+        $this->assertSame(1, \App\Models\FxQuote::query()->count());
+
+        try {
+            $manager->submitTransfer(
+                $provider,
+                $unknown->fresh([
+                    'provider',
+                    'user',
+                    'beneficiary',
+                    'sourceBankAccount',
+                ]),
+            );
+
+            $this->fail(
+                'submission_unknown transfer must never retry provider submission.'
+            );
+        } catch (RuntimeException) {
+            // Status validation must stop the retry before provider I/O.
+        }
+
+        $this->assertSame(1, \App\Models\FxQuote::query()->count());
+
+        $this->assertCount(
+            1,
+            collect(Http::recorded())->filter(
+                fn ($pair) =>
+                    $pair[0]->method() === 'GET'
+                    && str_contains($pair[0]->url(), '/lockExchangeRate')
+            ),
+        );
+
+        $this->assertSame(1, $remittanceAttempts);
+
+        $balance = Balance::query()
+            ->where('user_id', $transfer->user_id)
+            ->sole();
+
+        $this->assertSame('990.00000000', $balance->available_balance);
+        $this->assertSame('10.00000000', $balance->reserved_balance);
+
+        $this->assertSame(
+            0,
+            LedgerEntry::query()
+                ->where('source_id', (string) $transfer->id)
+                ->where('entry_type', 'release')
+                ->count(),
+        );
     }
 
     public function test_current_terminal_policy_settles_completed_and_releases_failed_or_cancelled(): void
