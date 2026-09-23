@@ -42,7 +42,17 @@ class TransferResource extends JsonResource
             'source_bank_account' => $this->whenLoaded('sourceBankAccount', fn () => $this->sourceBankAccount
                 ? (new BankAccountResource($this->sourceBankAccount))->resolve($request)
                 : null),
-            'transactions' => $this->whenLoaded('transactions', fn () => TransactionResource::collection($this->transactions)->resolve($request)),
+            'transactions' => $this->whenLoaded('transactions', fn () => collect(
+                TransactionResource::collection($this->transactions)->resolve($request)
+            )->map(function (array $transaction): array {
+                unset(
+                    $transaction['user_id'],
+                    $transaction['external_transaction_id'],
+                    $transaction['raw_data'],
+                );
+
+                return $transaction;
+            })->values()->all()),
         ];
     }
 

@@ -75,7 +75,18 @@ class IntegrationProvider extends Model
 
     public function supportsQuotes(): bool
     {
-        return isset($this->integrationConfig()['quote']);
+        if (! isset($this->integrationConfig()['quote'])) {
+            return false;
+        }
+
+        if (strtolower((string) $this->code) === 'nium') {
+            $config = $this->serviceConfig();
+
+            return (bool) ($config['payout_fx_enabled'] ?? false)
+                || (bool) ($config['wallet_fx_enabled'] ?? false);
+        }
+
+        return true;
     }
 
     public function supportsTransfers(): bool

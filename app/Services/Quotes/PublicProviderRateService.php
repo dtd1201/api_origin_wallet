@@ -269,6 +269,7 @@ class PublicProviderRateService
                 'conversionSchedule' => 'immediate',
                 'lockPeriod' => '5_mins',
                 'executionType' => 'at_conversion_time',
+                'quoteIntent' => 'INDICATIVE',
             ],
         );
         $responseData = $this->successfulJson($response, 'Nium quote preview failed.');
@@ -279,10 +280,10 @@ class PublicProviderRateService
             targetCurrency: $targetCurrency,
             sourceAmount: $quote['sourceAmount'] ?? $quote['sellAmount'] ?? $sourceAmount,
             targetAmount: $quote['destinationAmount'] ?? $quote['buyAmount'] ?? null,
-            midRate: $quote['midRate'] ?? $quote['mid_rate'] ?? $quote['exchangeRate'] ?? null,
-            netRate: $quote['fxRate'] ?? $quote['rate'] ?? $quote['exchangeRate'] ?? null,
+            midRate: $quote['exchangeRate'] ?? $quote['midRate'] ?? $quote['mid_rate'] ?? null,
+            netRate: $quote['netExchangeRate'] ?? $quote['fxRate'] ?? $quote['rate'] ?? $quote['exchangeRate'] ?? null,
             feeAmount: $quote['feeAmount'] ?? $quote['fee'] ?? 0,
-            expiresAt: $quote['expiresAt'] ?? $quote['quoteExpiry'] ?? now()->addMinutes(15)->toISOString(),
+            expiresAt: $quote['expiryTime'] ?? $quote['expiresAt'] ?? $quote['quoteExpiry'] ?? now()->addMinutes(15)->toISOString(),
         );
     }
 

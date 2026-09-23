@@ -17,50 +17,88 @@ class NiumQuoteService implements QuoteProvider
 
     public function createQuote(IntegrationProvider $provider, User $user, array $payload): FxQuote
     {
+        if (! (bool) config('services.nium.payout_fx_enabled', false)) {
+            throw new RuntimeException('Nium payout FX is not enabled.');
+        }
+
+        $sourceCurrency = strtoupper(trim((string) ($payload['source_currency'] ?? '')));
+        $targetCurrency = strtoupper(trim((string) ($payload['target_currency'] ?? '')));
+        $sourceAmount = (float) ($payload['source_amount'] ?? 0);
+
+        if (strlen($sourceCurrency) !== 3
+            || strlen($targetCurrency) !== 3
+            || $sourceCurrency === $targetCurrency
+            || $sourceAmount <= 0) {
+            throw new RuntimeException('Nium FX quote requires a valid cross-currency pair and positive source amount.');
+        }
+
         $requestPayload = [
-            'sourceCurrency' => strtoupper((string) $payload['source_currency']),
-            'destinationCurrency' => strtoupper((string) $payload['target_currency']),
+            'sourceCurrencyCode' => $sourceCurrency,
+            'destinationCurrencyCode' => $targetCurrency,
+            'sourceAmount' => $sourceAmount,
+            'customerHashId' => $this->niumService->customerId($user),
+            'quoteType' => 'payout',
+            'conversionSchedule' => 'immediate',
+            'executionType' => 'manual',
+            'lockPeriod' => '5_mins',
+            'quoteIntent' => 'EXECUTABLE',
         ];
-        $response = $this->niumService->get(
+
+        $response = $this->niumService->post(
             path: $this->niumService->path(
-                (string) config('services.nium.payout_fx_lock_endpoint'),
+                (string) config('services.nium.quote_endpoint'),
                 [
                     'client' => $this->niumService->clientId(),
-                    'customer' => $this->niumService->customerId($user),
-                    'wallet' => $this->niumService->walletId($user),
                 ],
             ),
-            query: $requestPayload,
+            payload: $requestPayload,
             user: $user,
+            operation: 'create_fx_quote',
         );
 
         $responseData = $response->json() ?? ['raw' => $response->body()];
-        $auditId = $responseData['audit_id'] ?? $responseData['auditId'] ?? null;
 
-        if (! $response->successful() || ! is_numeric($auditId) || ! filled($responseData['hold_expiry_at'] ?? $responseData['holdExpiryAt'] ?? null)) {
-            throw new RuntimeException($responseData['message'] ?? 'Nium exchange-rate lock failed.');
+        $quoteId = $responseData['id'] ?? null;
+        $expiresAt = $responseData['expiryTime'] ?? null;
+
+        if (! $response->successful() || ! filled($quoteId) || ! filled($expiresAt)) {
+            throw new RuntimeException($responseData['message'] ?? 'Nium executable FX quote failed.');
         }
 
-        $rate = $responseData['fx_rate'] ?? $responseData['fxRate'] ?? null;
+        $midRate = $responseData['exchangeRate'] ?? null;
+        $netRate = $responseData['netExchangeRate'] ?? $midRate;
+
+        $resolvedSourceAmount = is_numeric($responseData['sourceAmount'] ?? null)
+            ? (float) $responseData['sourceAmount']
+            : $sourceAmount;
+
+        $targetAmount = is_numeric($responseData['destinationAmount'] ?? null)
+            ? (float) $responseData['destinationAmount']
+            : (is_numeric($netRate) ? $resolvedSourceAmount * (float) $netRate : 0);
 
         return DB::transaction(fn () => FxQuote::create([
             'user_id' => $user->id,
             'provider_id' => $provider->id,
-            'quote_ref' => (string) $auditId,
-            'source_currency' => $payload['source_currency'],
-            'target_currency' => $payload['target_currency'],
-            'source_amount' => $payload['source_amount'],
-            'target_amount' => is_numeric($rate) ? (float) $payload['source_amount'] * (float) $rate : 0,
-            'mid_rate' => $responseData['ecb_fx_rate'] ?? $responseData['ecbFxRate'] ?? null,
-            'net_rate' => $rate,
+            'quote_ref' => (string) $quoteId,
+            'source_currency' => $sourceCurrency,
+            'target_currency' => $targetCurrency,
+            'source_amount' => $resolvedSourceAmount,
+            'target_amount' => $targetAmount,
+            'mid_rate' => is_numeric($midRate) ? $midRate : null,
+            'net_rate' => is_numeric($netRate) ? $netRate : null,
             'fee_amount' => 0,
-            'expires_at' => $responseData['hold_expiry_at'] ?? $responseData['holdExpiryAt'],
+            'expires_at' => $expiresAt,
             'raw_data' => array_filter([
-                'provider_fx_type' => 'lock_and_hold',
-                'audit_id' => (string) $auditId,
-                'fx_hold_id' => $responseData['fx_hold_id'] ?? $responseData['fxHoldId'] ?? null,
+                'provider_fx_type' => 'modern_quote',
+                'provider_quote_id' => (string) $quoteId,
+                'quote_type' => $responseData['quoteType'] ?? 'payout',
+                'quote_intent' => $responseData['quoteIntent'] ?? 'EXECUTABLE',
+                'conversion_schedule' => $responseData['conversionSchedule'] ?? 'immediate',
+                'execution_type' => $responseData['executionType'] ?? 'manual',
+                'lock_period' => $responseData['lockPeriod'] ?? '5_mins',
+                'markup_rate' => $responseData['markupRate'] ?? null,
+                'client_markup_rate' => $responseData['clientMarkupRate'] ?? null,
                 'provider_request_id' => $responseData['requestId'] ?? $responseData['request_id'] ?? null,
-                'provider_status' => $responseData['status'] ?? null,
             ], static fn ($value) => $value !== null && $value !== ''),
         ]));
     }

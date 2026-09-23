@@ -188,6 +188,8 @@ class CustomerTransferSecurityTest extends TestCase
         $beneficiary = $this->beneficiary($customer, $provider);
         $transfer = $this->transfer($customer, $provider, ['beneficiary_id' => $beneficiary->id]);
 
+        config()->set('services.nium.payout_fx_enabled', true);
+
         $this->mock(ProviderQuoteManager::class, function (MockInterface $mock): void {
             $mock->shouldReceive('createQuote')->once()
                 ->andThrow(new RuntimeException('SECRET_QUOTE_PROVIDER_URL_AND_REQUEST_ID'));
