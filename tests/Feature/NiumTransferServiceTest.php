@@ -973,6 +973,7 @@ class NiumTransferServiceTest extends TestCase
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response([
             'status' => 'ACCEPTED',
             'message' => 'Transfer accepted.',
+            'paymentId' => 'PAY-UNKNOWN-WITHOUT-SYSTEM-REF',
         ], 200)]);
 
         $updated = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
@@ -980,6 +981,43 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('submission_unknown', $updated->status);
         $this->assertSame('provider_submission_unknown', $updated->failure_code);
         $this->assertNull($updated->external_transfer_id);
+        $this->assertSame(
+            'PAY-UNKNOWN-WITHOUT-SYSTEM-REF',
+            $updated->external_payment_id
+        );
+    }
+
+    public function test_uncertain_provider_response_preserves_authoritative_references_for_reconciliation(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+
+        Http::fake([
+            ...$this->purposeCodesRoute(),
+            '*' => Http::response([
+                'status' => 'PROCESSING',
+                'systemReferenceNumber' => 'RT-UNKNOWN-503',
+                'paymentId' => 'PAY-UNKNOWN-503',
+            ], 503),
+        ]);
+
+        $updated = app(NiumTransferService::class)->submitTransfer(
+            $provider,
+            $transfer
+        );
+
+        $this->assertSame('submission_unknown', $updated->status);
+        $this->assertSame(
+            'provider_submission_unknown',
+            $updated->failure_code
+        );
+        $this->assertSame(
+            'RT-UNKNOWN-503',
+            $updated->external_transfer_id
+        );
+        $this->assertSame(
+            'PAY-UNKNOWN-503',
+            $updated->external_payment_id
+        );
     }
 
     public function test_successful_transfer_reference_remains_compatible_with_lifecycle_webhook(): void

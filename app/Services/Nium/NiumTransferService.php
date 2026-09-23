@@ -102,8 +102,18 @@ class NiumTransferService implements PreparedTransferStatusProvider
             ?? $responseData['systemReferenceNumber']
             ?? null;
 
+        $paymentId = $responseData['payment_id']
+            ?? $responseData['paymentId']
+            ?? null;
+
         if (in_array($response->status(), [408, 429], true) || $response->serverError()) {
             $transfer->update([
+                'external_transfer_id' => filled($systemReferenceNumber)
+                    ? $systemReferenceNumber
+                    : $transfer->external_transfer_id,
+                'external_payment_id' => filled($paymentId)
+                    ? $paymentId
+                    : $transfer->external_payment_id,
                 'status' => 'submission_unknown',
                 'failure_code' => 'provider_submission_unknown',
                 'failure_reason' => 'Provider submission outcome is unknown; do not retry the POST.',
@@ -126,6 +136,9 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
         if (! filled($systemReferenceNumber)) {
             $transfer->update([
+                'external_payment_id' => filled($paymentId)
+                    ? $paymentId
+                    : $transfer->external_payment_id,
                 'status' => 'submission_unknown',
                 'failure_code' => 'provider_submission_unknown',
                 'failure_reason' => 'Provider accepted the request without an authoritative transfer reference; do not retry the POST.',
@@ -135,7 +148,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
             return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         }
 
-        return DB::transaction(function () use ($transfer, $responseData, $systemReferenceNumber): Transfer {
+        return DB::transaction(function () use ($transfer, $responseData, $systemReferenceNumber, $paymentId): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
 
             if (
@@ -147,7 +160,9 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
             $locked->update([
                 'external_transfer_id' => $systemReferenceNumber,
-                'external_payment_id' => $responseData['payment_id'] ?? $responseData['paymentId'] ?? $transfer->external_payment_id,
+                'external_payment_id' => filled($paymentId)
+                    ? $paymentId
+                    : $transfer->external_payment_id,
                 'status' => 'pending',
                 'submitted_at' => now(),
                 'provider_status_at' => now(),
