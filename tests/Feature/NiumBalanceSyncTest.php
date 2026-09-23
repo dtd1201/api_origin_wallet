@@ -147,5 +147,40 @@ class NiumBalanceSyncTest extends TestCase
                 'provider_ledger_balance'
             )
         );
+
+        // Simulate a stale provider snapshot that has not yet reflected
+        // Origin's local transfer hold. The sync must not restore locally
+        // reserved funds to spendable balance.
+        Http::fake(fn () => Http::response([
+            'balances' => [[
+                'walletHashId' => 'wallet-balance-test',
+                'currency' => 'USD',
+                'availableBalance' => '1000.00',
+                'ledgerBalance' => '1000.00',
+                'reservedBalance' => '0.00',
+                'status' => 'ACTIVE',
+                'updatedAt' => now()->toISOString(),
+            ]],
+        ], 200));
+
+        app(NiumDataSyncService::class)
+            ->syncBalances($provider, $user);
+
+        $balance->refresh();
+
+        $this->assertSame(
+            '990.00000000',
+            $balance->available_balance
+        );
+
+        $this->assertSame(
+            '1000.00000000',
+            $balance->ledger_balance
+        );
+
+        $this->assertSame(
+            '10.00000000',
+            $balance->reserved_balance
+        );
     }
 }
