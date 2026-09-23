@@ -25,6 +25,7 @@ Artisan::command(
     {--live : Perform the authenticated Get Client request}
     {--client-capabilities : Print only the safe Get Client capability projection}
     {--compliance-callback : Also validate the separate transaction compliance callback configuration}
+    {--full : Validate the complete Nium production-readiness endpoint configuration}
     {--sync : Run account, balance, and transaction sync for the user}
     {--quote : Create a test quote for the user}
     {--source-currency=USD : Quote sell currency}
@@ -58,6 +59,14 @@ Artisan::command(
             $configurationErrors[] = 'NIUM_BASE_URL must be a safe HTTPS origin without credentials, query, or fragment.';
         }
 
+        $isProduction = app()->environment('production')
+            || strtolower((string) config('app.env')) === 'production';
+        $baseUrlHost = strtolower((string) ($baseUrlParts['host'] ?? ''));
+
+        if ($isProduction && str_contains($baseUrlHost, 'sandbox')) {
+            $configurationErrors[] = 'Production must not use a Nium sandbox base URL.';
+        }
+
         if (strtolower((string) config('services.nium.auth.mode', '')) !== 'header') {
             $configurationErrors[] = 'NIUM_AUTH_MODE must be header.';
         }
@@ -74,6 +83,25 @@ Artisan::command(
             $configurationErrors[] = 'NIUM_CLIENT_ID is required.';
         }
 
+        if ($this->option('full')) {
+            $regulatoryRegion = strtoupper(trim((string) config('services.nium.regulatory_region', '')));
+
+            if ($regulatoryRegion === '') {
+                $configurationErrors[] = 'NIUM_REGULATORY_REGION is required for full production readiness.';
+            }
+
+            $customerRfiMethod = strtoupper(trim((string) config('services.nium.customer_rfi_response_method', '')));
+            $transactionRfiMethod = strtoupper(trim((string) config('services.nium.transaction_rfi_response_method', '')));
+
+            if ($customerRfiMethod !== 'POST') {
+                $configurationErrors[] = 'NIUM_CUSTOMER_RFI_RESPONSE_METHOD must be POST.';
+            }
+
+            if ($transactionRfiMethod !== 'POST') {
+                $configurationErrors[] = 'NIUM_TRANSACTION_RFI_RESPONSE_METHOD must be POST.';
+            }
+        }
+
         if (strtolower(trim($webhookHeaderName)) !== 'x-partner-key') {
             $configurationErrors[] = 'NIUM_WEBHOOK_STATIC_HEADER_NAME must be x-partner-key.';
         }
@@ -88,6 +116,28 @@ Artisan::command(
             'NIUM_CUSTOMER_GET_ENDPOINT' => ['customer_get_endpoint', ['clientHashId', 'customerHashId']],
             'NIUM_CUSTOMER_LIST_ENDPOINT' => ['customer_list_endpoint', ['clientHashId']],
         ];
+
+        if ($this->option('full')) {
+            $endpointRequirements += [
+                'NIUM_FILE_CREATE_ENDPOINT' => ['file_create_endpoint', ['clientHashId']],
+                'NIUM_FILE_DETAILS_ENDPOINT' => ['file_details_endpoint', ['clientHashId', 'fileId']],
+                'NIUM_CUSTOMER_SUBMIT_KYC_ENDPOINT' => ['customer_submit_kyc_endpoint', ['clientHashId', 'customerHashId']],
+                'NIUM_WALLET_BALANCE_ENDPOINT' => ['wallet_balance_endpoint', ['clientHashId', 'customerHashId', 'walletHashId']],
+                'NIUM_WALLET_TRANSACTIONS_ENDPOINT' => ['wallet_transactions_endpoint', ['clientHashId', 'customerHashId', 'walletHashId']],
+                'NIUM_ASSIGN_PAYMENT_ID_ENDPOINT' => ['assign_payment_id_endpoint', ['clientHashId', 'customerHashId', 'walletHashId']],
+                'NIUM_QUOTE_ENDPOINT' => ['quote_endpoint', ['clientHashId', 'customerHashId', 'walletHashId']],
+                'NIUM_BENEFICIARY_ENDPOINT' => ['beneficiary_endpoint', ['clientHashId', 'customerHashId']],
+                'NIUM_PURPOSE_CODES_ENDPOINT' => ['purpose_codes_endpoint', []],
+                'NIUM_SUPPORTED_CORRIDORS_ENDPOINT' => ['supported_corridors_endpoint', ['clientHashId']],
+                'NIUM_BENEFICIARY_VALIDATION_SCHEMA_ENDPOINT' => ['beneficiary_validation_schema_endpoint', ['clientHashId', 'customerHashId', 'currencyCode']],
+                'NIUM_TRANSFER_ENDPOINT' => ['transfer_endpoint', ['clientHashId', 'customerHashId', 'walletHashId']],
+                'NIUM_TRANSFER_STATUS_ENDPOINT' => ['transfer_status_endpoint', ['clientHashId', 'customerHashId', 'walletHashId', 'systemReferenceNumber']],
+                'NIUM_CUSTOMER_RFI_FETCH_ENDPOINT' => ['customer_rfi_fetch_endpoint', ['clientHashId']],
+                'NIUM_CUSTOMER_RFI_RESPONSE_ENDPOINT' => ['customer_rfi_response_endpoint', ['clientHashId']],
+                'NIUM_TRANSACTION_RFI_FETCH_ENDPOINT' => ['transaction_rfi_fetch_endpoint', ['clientHashId', 'customerHashId', 'walletHashId']],
+                'NIUM_TRANSACTION_RFI_RESPONSE_ENDPOINT' => ['transaction_rfi_response_endpoint', ['clientHashId', 'customerHashId', 'walletHashId', 'authCode']],
+            ];
+        }
 
         foreach ($endpointRequirements as $environmentName => [$configKey, $requiredPlaceholders]) {
             $endpoint = trim((string) config('services.nium.'.$configKey, ''));
@@ -107,7 +157,11 @@ Artisan::command(
                 || str_contains($withoutPlaceholders, '}')
                 || $placeholders !== $requiredPlaceholders
             ) {
-                $configurationErrors[] = $environmentName.' must be a safe relative path using exactly: '.implode(', ', $requiredPlaceholders).'.';
+                $placeholderText = $requiredPlaceholders === []
+                    ? 'no placeholders'
+                    : 'exactly: '.implode(', ', $requiredPlaceholders);
+
+                $configurationErrors[] = $environmentName.' must be a safe relative path using '.$placeholderText.'.';
             }
         }
 
@@ -147,7 +201,7 @@ Artisan::command(
             return Command::FAILURE;
         }
 
-        if ($this->option('compliance-callback')) {
+        if ($this->option('compliance-callback') || $this->option('full')) {
             $complianceHeaderName = (string) config('services.nium.compliance_callback.static_header_name', '');
             $complianceHeaderValue = (string) config('services.nium.compliance_callback.static_header_value', '');
 
@@ -184,7 +238,11 @@ Artisan::command(
                 return Command::FAILURE;
             }
 
-            $this->info('Nium onboarding configuration validation passed. No outbound request was made.');
+            $this->info(
+                $this->option('full')
+                    ? 'Nium full production-readiness configuration validation passed. No outbound request was made.'
+                    : 'Nium onboarding configuration validation passed. No outbound request was made.'
+            );
 
             return Command::SUCCESS;
         }

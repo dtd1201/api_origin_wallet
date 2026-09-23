@@ -219,6 +219,77 @@ class NiumSmokeTestCommandTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'GET');
     }
 
+    public function test_full_readiness_validates_extended_nium_endpoints_without_http(): void
+    {
+        $this->configurePhaseOne();
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test', ['--full' => true]);
+
+        $this->assertSame(0, $exitCode);
+        $this->assertStringContainsString(
+            'full production-readiness configuration validation passed',
+            Artisan::output(),
+        );
+        Http::assertNothingSent();
+    }
+
+    public function test_full_readiness_fails_when_extended_endpoint_is_missing_without_http(): void
+    {
+        $this->configurePhaseOne();
+        config()->set('services.nium.transfer_status_endpoint', '');
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test', ['--full' => true]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('NIUM_TRANSFER_STATUS_ENDPOINT', Artisan::output());
+        Http::assertNothingSent();
+    }
+
+    public function test_production_rejects_sandbox_nium_base_url_without_http(): void
+    {
+        $this->configurePhaseOne();
+        config()->set('app.env', 'production');
+        config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test');
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            'Production must not use a Nium sandbox base URL.',
+            Artisan::output(),
+        );
+        Http::assertNothingSent();
+    }
+
+    public function test_full_readiness_requires_regulatory_region_without_http(): void
+    {
+        $this->configurePhaseOne();
+        config()->set('services.nium.regulatory_region', '');
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test', ['--full' => true]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('NIUM_REGULATORY_REGION', Artisan::output());
+        Http::assertNothingSent();
+    }
+
+    public function test_full_readiness_requires_rfi_post_methods_without_http(): void
+    {
+        $this->configurePhaseOne();
+        config()->set('services.nium.customer_rfi_response_method', 'GET');
+        Http::fake();
+
+        $exitCode = Artisan::call('nium:smoke-test', ['--full' => true]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('NIUM_CUSTOMER_RFI_RESPONSE_METHOD must be POST', Artisan::output());
+        Http::assertNothingSent();
+    }
+
     private function configurePhaseOne(): void
     {
         IntegrationProvider::query()->firstOrCreate(
@@ -238,5 +309,10 @@ class NiumSmokeTestCommandTest extends TestCase
         config()->set('services.nium.customer_list_endpoint', '/api/v5/client/{clientHashId}/customers');
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'webhook-static-secret');
+        config()->set('services.nium.compliance_callback.static_header_name', 'x-partner-key');
+        config()->set('services.nium.compliance_callback.static_header_value', 'compliance-static-secret');
+        config()->set('services.nium.regulatory_region', 'HK');
+        config()->set('services.nium.customer_rfi_response_method', 'POST');
+        config()->set('services.nium.transaction_rfi_response_method', 'POST');
     }
 }
