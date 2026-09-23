@@ -9,15 +9,38 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('transfers', function (Blueprint $table): void {
-            $table->string('provider_status', 60)->nullable()->after('status');
-            $table->text('provider_status_detail')->nullable()->after('provider_status');
+            if (! Schema::hasColumn('transfers', 'provider_status')) {
+                $table->string('provider_status', 60)->nullable();
+            }
+
+            if (! Schema::hasColumn('transfers', 'provider_status_detail')) {
+                $table->text('provider_status_detail')->nullable();
+            }
+
+            if (! Schema::hasColumn('transfers', 'provider_status_at')) {
+                $table->timestamp('provider_status_at')->nullable();
+            }
         });
     }
 
     public function down(): void
     {
         Schema::table('transfers', function (Blueprint $table): void {
-            $table->dropColumn(['provider_status', 'provider_status_detail']);
+            $columns = [];
+
+            foreach ([
+                'provider_status',
+                'provider_status_detail',
+                'provider_status_at',
+            ] as $column) {
+                if (Schema::hasColumn('transfers', $column)) {
+                    $columns[] = $column;
+                }
+            }
+
+            if ($columns !== []) {
+                $table->dropColumn($columns);
+            }
         });
     }
 };
