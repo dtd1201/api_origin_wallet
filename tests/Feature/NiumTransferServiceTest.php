@@ -495,7 +495,7 @@ class NiumTransferServiceTest extends TestCase
             && ! array_key_exists('auditId', $request->data()['payout'] ?? []));
     }
 
-    public function test_cross_currency_transfer_without_fx_lock_uses_live_transfer_money_contract(): void
+    public function test_same_currency_transfer_without_fx_lock_uses_live_transfer_money_contract(): void
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer([
             'fx_quote_id' => null,
@@ -511,6 +511,161 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('pending', $updated->status);
         Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
             && ! array_key_exists('auditId', $request->data()['payout'] ?? []));
+    }
+
+    public function test_cross_currency_transfer_with_authoritative_payout_fx_lock_sends_audit_id(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_rate' => '0.9150000000',
+        ]);
+
+        $transfer->beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        $quote = \App\Models\FxQuote::query()->create([
+            'user_id' => $transfer->user_id,
+            'provider_id' => $provider->id,
+            'quote_ref' => '112',
+            'source_currency' => 'USD',
+            'target_currency' => 'EUR',
+            'source_amount' => '10.00000000',
+            'target_amount' => '9.15000000',
+            'mid_rate' => '0.9200000000',
+            'net_rate' => '0.9150000000',
+            'fee_amount' => '0.00000000',
+            'expires_at' => now()->addMinutes(10),
+            'raw_data' => [
+                'provider_fx_type' => 'payout_fx_lock',
+                'audit_id' => '112',
+            ],
+        ]);
+
+        $transfer->update([
+            'fx_quote_id' => $quote->id,
+        ]);
+
+        Http::fake([
+            ...$this->purposeCodesRoute(),
+            '*' => Http::response([
+                'systemReferenceNumber' => 'RT-FX-AUDIT',
+            ]),
+        ]);
+
+        $updated = app(NiumTransferService::class)->submitTransfer(
+            $provider,
+            $transfer->fresh([
+                'provider',
+                'user',
+                'beneficiary',
+                'fxQuote',
+            ]),
+        );
+
+        $this->assertSame('pending', $updated->status);
+
+        Http::assertSent(fn ($request): bool =>
+            $this->isRemittancePost($request)
+            && ($request->data()['payout']['sourceCurrency'] ?? null) === 'USD'
+            && ($request->data()['payout']['destinationCurrency'] ?? null) === 'EUR'
+            && ($request->data()['payout']['auditId'] ?? null) === 112
+        );
+    }
+
+    public function test_cross_currency_transfer_with_fx_enabled_but_without_lock_is_rejected(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_quote_id' => null,
+            'fx_rate' => null,
+        ]);
+
+        $transfer->beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        Http::fake([
+            ...$this->purposeCodesRoute(),
+            '*' => Http::response([]),
+        ]);
+
+        $this->expectException(RuntimeException::class);
+
+        try {
+            app(NiumTransferService::class)->submitTransfer(
+                $provider,
+                $transfer->fresh([
+                    'provider',
+                    'user',
+                    'beneficiary',
+                    'fxQuote',
+                ]),
+            );
+        } finally {
+            $this->assertNoRemittancePost();
+        }
+    }
+
+    public function test_modern_executable_quote_cannot_be_used_as_payout_audit_id(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_rate' => '0.9150000000',
+        ]);
+
+        $transfer->beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        $quote = \App\Models\FxQuote::query()->create([
+            'user_id' => $transfer->user_id,
+            'provider_id' => $provider->id,
+            'quote_ref' => 'quote_exec_123',
+            'source_currency' => 'USD',
+            'target_currency' => 'EUR',
+            'source_amount' => '10.00000000',
+            'target_amount' => '9.15000000',
+            'mid_rate' => '0.9200000000',
+            'net_rate' => '0.9150000000',
+            'fee_amount' => '0.00000000',
+            'expires_at' => now()->addMinutes(10),
+            'raw_data' => [
+                'provider_fx_type' => 'modern_quote',
+                'provider_quote_id' => 'quote_exec_123',
+            ],
+        ]);
+
+        $transfer->update([
+            'fx_quote_id' => $quote->id,
+        ]);
+
+        Http::fake([
+            ...$this->purposeCodesRoute(),
+            '*' => Http::response([]),
+        ]);
+
+        $this->expectException(RuntimeException::class);
+
+        try {
+            app(NiumTransferService::class)->submitTransfer(
+                $provider,
+                $transfer->fresh([
+                    'provider',
+                    'user',
+                    'beneficiary',
+                    'fxQuote',
+                ]),
+            );
+        } finally {
+            $this->assertNoRemittancePost();
+        }
     }
 
     public function test_swift_transfer_requires_and_sends_configured_fee_type(): void

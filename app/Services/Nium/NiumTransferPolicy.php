@@ -31,11 +31,25 @@ final class NiumTransferPolicy
         return strtolower(trim((string) $provider->code)) === 'nium';
     }
 
-    public function normalizeCreate(array $validated, User $user, IntegrationProvider $provider, Beneficiary $beneficiary, array $authoritativePurposeCodes): array
-    {
-        $this->assertCustomerAndBeneficiary($user, $provider, $beneficiary);
+    public function normalizeCreate(
+        array $validated,
+        User $user,
+        IntegrationProvider $provider,
+        Beneficiary $beneficiary,
+        array $authoritativePurposeCodes,
+    ): array {
+        $targetCurrency = strtoupper(trim((string) ($validated['target_currency'] ?? '')));
+
         $this->rejectUnsupportedCreateValues($validated);
+        $this->assertCustomerAndBeneficiary(
+            $user,
+            $provider,
+            $beneficiary,
+            $targetCurrency,
+        );
+
         $purpose = trim((string) ($validated['purpose_code'] ?? ''));
+
         if (! $this->purposeIsSupported($purpose, $authoritativePurposeCodes)) {
             throw new RuntimeException('Unsupported Nium purpose_code.');
         }
@@ -44,10 +58,14 @@ final class NiumTransferPolicy
             ...$validated,
             'reference_text' => trim((string) ($validated['reference_text'] ?? '')),
             'source_bank_account_id' => null,
+
+            // Nium payout FX locks are authoritative and are attached
+            // server-side at submission time, never accepted from the client.
             'fx_quote_id' => null,
+
             'transfer_type' => 'payout',
             'source_currency' => self::SOURCE_CURRENCY,
-            'target_currency' => self::DESTINATION_CURRENCY,
+            'target_currency' => $targetCurrency,
             'target_amount' => null,
             'fx_rate' => null,
             'fee_amount' => 0,
@@ -63,79 +81,165 @@ final class NiumTransferPolicy
         $user = $transfer->user;
         $beneficiary = $transfer->beneficiary;
 
-        if (! $provider instanceof IntegrationProvider || ! $user instanceof User || ! $beneficiary instanceof Beneficiary) {
-            throw new RuntimeException('Nium transfer is missing its authoritative user, provider, or beneficiary.');
+        if (! $provider instanceof IntegrationProvider
+            || ! $user instanceof User
+            || ! $beneficiary instanceof Beneficiary) {
+            throw new RuntimeException(
+                'Nium transfer is missing its authoritative user, provider, or beneficiary.'
+            );
         }
 
-        $this->assertCustomerAndBeneficiary($user, $provider, $beneficiary);
+        $sourceCurrency = strtoupper(trim((string) $transfer->source_currency));
+        $targetCurrency = strtoupper(trim((string) $transfer->target_currency));
+        $crossCurrency = $sourceCurrency !== $targetCurrency;
 
-        if ($transfer->source_bank_account_id !== null || $transfer->fx_quote_id !== null) {
-            throw new RuntimeException('Nium USD wallet transfers do not accept a bank account or FX quote.');
+        $this->assertCustomerAndBeneficiary(
+            $user,
+            $provider,
+            $beneficiary,
+            $targetCurrency,
+        );
+
+        if ($transfer->source_bank_account_id !== null) {
+            throw new RuntimeException(
+                'Nium wallet transfers do not accept a source bank account.'
+            );
         }
 
         if ($transfer->transfer_type !== 'payout'
-            || strtoupper((string) $transfer->source_currency) !== self::SOURCE_CURRENCY
-            || strtoupper((string) $transfer->target_currency) !== self::DESTINATION_CURRENCY
+            || $sourceCurrency !== self::SOURCE_CURRENCY
             || $transfer->target_amount !== null
-            || $transfer->fx_rate !== null
             || (float) $transfer->fee_amount !== 0.0
             || strtoupper((string) $transfer->fee_currency) !== self::SOURCE_CURRENCY
-            || ! $this->purposeIsSupported(trim((string) $transfer->purpose_code), $authoritativePurposeCodes)
+            || ! $this->purposeIsSupported(
+                trim((string) $transfer->purpose_code),
+                $authoritativePurposeCodes,
+            )
             || ! filled(trim((string) $transfer->reference_text))
             || mb_strlen(trim((string) $transfer->reference_text)) > 255) {
-            throw new RuntimeException('Transfer does not match the supported Nium HK USD SWIFT policy.');
+            throw new RuntimeException(
+                'Transfer does not match the supported Nium HK SWIFT payout policy.'
+            );
+        }
+
+        if (! $crossCurrency) {
+            if ($targetCurrency !== self::DESTINATION_CURRENCY
+                || $transfer->fx_quote_id !== null
+                || $transfer->fx_rate !== null) {
+                throw new RuntimeException(
+                    'Nium same-currency USD transfers must not contain an FX lock.'
+                );
+            }
+
+            return;
+        }
+
+        if (! (bool) config('services.nium.payout_fx_enabled', false)) {
+            throw new RuntimeException('Nium payout FX is not enabled.');
+        }
+
+        if ($transfer->fx_quote_id === null || ! is_numeric($transfer->fx_rate)) {
+            throw new RuntimeException(
+                'Nium cross-currency payout requires an authoritative payout FX lock.'
+            );
         }
     }
 
-    public function providerPayload(Transfer $transfer, array $authoritativePurposeCodes): array
-    {
+    public function providerPayload(
+        Transfer $transfer,
+        array $authoritativePurposeCodes,
+    ): array {
         $this->assertTransfer($transfer, $authoritativePurposeCodes);
 
+        $sourceCurrency = strtoupper((string) $transfer->source_currency);
+        $targetCurrency = strtoupper((string) $transfer->target_currency);
+        $crossCurrency = $sourceCurrency !== $targetCurrency;
+
+        $payout = [
+            'sourceAmount' => (float) $transfer->source_amount,
+            'sourceCurrency' => self::SOURCE_CURRENCY,
+            'destinationCurrency' => $targetCurrency,
+            'payoutMethod' => self::PAYOUT_METHOD,
+            'tradeOrderID' => $transfer->reference_text,
+            'swiftFeeType' => self::SWIFT_FEE_TYPE,
+        ];
+
+        if ($crossCurrency) {
+            $quote = $transfer->fxQuote;
+
+            if ($quote === null
+                || ($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
+                || ! is_numeric($quote->quote_ref)) {
+                throw new RuntimeException(
+                    'Nium cross-currency payout requires an authoritative payout FX audit ID.'
+                );
+            }
+
+            $payout['auditId'] = (int) $quote->quote_ref;
+        }
+
         return [
-            'beneficiary' => ['id' => $transfer->beneficiary->external_beneficiary_id],
-            'payout' => [
-                'sourceAmount' => (float) $transfer->source_amount,
-                'sourceCurrency' => self::SOURCE_CURRENCY,
-                'destinationCurrency' => self::DESTINATION_CURRENCY,
-                'payoutMethod' => self::PAYOUT_METHOD,
-                'tradeOrderID' => $transfer->reference_text,
-                'swiftFeeType' => self::SWIFT_FEE_TYPE,
+            'beneficiary' => [
+                'id' => $transfer->beneficiary->external_beneficiary_id,
             ],
+            'payout' => $payout,
             'purposeCode' => $transfer->purpose_code,
             'sourceOfFunds' => self::SOURCE_OF_FUNDS,
             'customerComments' => $transfer->reference_text,
         ];
     }
 
-    private function purposeIsSupported(string $code, array $authoritativePurposeCodes): bool
-    {
-        return $code !== '' && collect($authoritativePurposeCodes)->contains('code', $code);
+    private function purposeIsSupported(
+        string $code,
+        array $authoritativePurposeCodes,
+    ): bool {
+        return $code !== ''
+            && collect($authoritativePurposeCodes)->contains('code', $code);
     }
 
-    private function assertCustomerAndBeneficiary(User $user, IntegrationProvider $provider, Beneficiary $beneficiary): void
-    {
+    private function assertCustomerAndBeneficiary(
+        User $user,
+        IntegrationProvider $provider,
+        Beneficiary $beneficiary,
+        string $targetCurrency,
+    ): void {
         $user->loadMissing('kycProfile');
         $profile = $user->kycProfile;
+
         if (! $profile instanceof KycProfile
             || strtolower((string) $profile->status) !== 'approved'
             || strtolower((string) $profile->applicant_type) !== 'business'
             || $this->customerRegion($profile) !== 'HK') {
-            throw new RuntimeException('Nium transfers currently require an HK corporate customer.');
+            throw new RuntimeException(
+                'Nium transfers currently require an HK corporate customer.'
+            );
         }
-        if ($beneficiary->user_id !== $user->id || $beneficiary->provider_id !== $provider->id) {
-            throw new RuntimeException('Nium beneficiary does not belong to the transfer user and provider.');
+
+        if ($beneficiary->user_id !== $user->id
+            || $beneficiary->provider_id !== $provider->id) {
+            throw new RuntimeException(
+                'Nium beneficiary does not belong to the transfer user and provider.'
+            );
         }
+
         if (strtolower((string) $beneficiary->status) !== 'active') {
             throw new RuntimeException('Nium beneficiary must be active.');
         }
+
         $payoutMethod = $this->payoutMethodResolver->resolve($beneficiary);
+
         if (strtoupper((string) $beneficiary->country_code) !== 'HK'
-            || strtoupper((string) $beneficiary->currency) !== self::DESTINATION_CURRENCY
+            || strtoupper((string) $beneficiary->currency) !== $targetCurrency
             || $payoutMethod !== self::PAYOUT_METHOD) {
-            throw new RuntimeException('Nium beneficiary does not match the supported HK USD SWIFT corridor.');
+            throw new RuntimeException(
+                'Nium beneficiary does not match the requested HK SWIFT payout corridor.'
+            );
         }
+
         if (! filled($beneficiary->external_beneficiary_id)) {
-            throw new RuntimeException('Nium transfer requires a synced beneficiary.');
+            throw new RuntimeException(
+                'Nium transfer requires a synced beneficiary.'
+            );
         }
     }
 
@@ -153,37 +257,56 @@ final class NiumTransferPolicy
 
     private function rejectUnsupportedCreateValues(array $values): void
     {
-        $expected = [
-            'transfer_type' => 'payout',
-            'source_currency' => self::SOURCE_CURRENCY,
-            'target_currency' => self::DESTINATION_CURRENCY,
-            'purpose_code' => null,
-        ];
-        foreach ($expected as $field => $value) {
-            if ($field === 'purpose_code') {
-                if (! is_string($values[$field] ?? null) || trim($values[$field]) === '') {
-                    throw new RuntimeException('Nium purpose_code is required.');
-                }
-
-                continue;
-            }
-            if (strtoupper((string) ($values[$field] ?? '')) !== strtoupper($value)) {
-                throw new RuntimeException("Unsupported Nium {$field}.");
-            }
+        if (strtolower(trim((string) ($values['transfer_type'] ?? ''))) !== 'payout') {
+            throw new RuntimeException('Unsupported Nium transfer_type.');
         }
+
+        if (strtoupper(trim((string) ($values['source_currency'] ?? ''))) !== self::SOURCE_CURRENCY) {
+            throw new RuntimeException('Unsupported Nium source_currency.');
+        }
+
+        $targetCurrency = strtoupper(trim((string) ($values['target_currency'] ?? '')));
+
+        if (strlen($targetCurrency) !== 3) {
+            throw new RuntimeException('Unsupported Nium target_currency.');
+        }
+
+        if ($targetCurrency !== self::DESTINATION_CURRENCY
+            && ! (bool) config('services.nium.payout_fx_enabled', false)) {
+            throw new RuntimeException('Nium payout FX is not enabled.');
+        }
+
+        if (! is_string($values['purpose_code'] ?? null)
+            || trim((string) $values['purpose_code']) === '') {
+            throw new RuntimeException('Nium purpose_code is required.');
+        }
+
         if (! filled(trim((string) ($values['reference_text'] ?? '')))) {
             throw new RuntimeException('Nium reference_text is required.');
         }
-        if (filled($values['source_bank_account_id'] ?? null) || filled($values['fx_quote_id'] ?? null)) {
-            throw new RuntimeException('Nium USD wallet transfers do not accept a bank account or FX quote.');
+
+        if (filled($values['source_bank_account_id'] ?? null)) {
+            throw new RuntimeException(
+                'Nium wallet transfers do not accept a source bank account.'
+            );
+        }
+
+        if (filled($values['fx_quote_id'] ?? null)) {
+            throw new RuntimeException(
+                'Nium payout FX locks are acquired by the server at submission time.'
+            );
         }
     }
 
     private function safeClientMetadata(array $rawData): array
     {
         return array_filter([
-            'source' => isset($rawData['source']) ? substr((string) $rawData['source'], 0, 50) : null,
-            'flow' => isset($rawData['flow']) ? substr((string) $rawData['flow'], 0, 50) : null,
+            'source' => isset($rawData['source'])
+                ? substr((string) $rawData['source'], 0, 50)
+                : null,
+            'flow' => isset($rawData['flow'])
+                ? substr((string) $rawData['flow'], 0, 50)
+                : null,
         ], static fn (mixed $value): bool => filled($value));
     }
 }

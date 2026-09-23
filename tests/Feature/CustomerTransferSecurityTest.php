@@ -328,6 +328,41 @@ class CustomerTransferSecurityTest extends TestCase
             ->assertUnprocessable();
     }
 
+    public function test_nium_create_allows_cross_currency_draft_when_payout_fx_is_enabled_without_client_quote(): void
+    {
+        [$customer, $token, $provider] = $this->customer();
+
+        config()->set('services.nium.payout_fx_enabled', true);
+
+        $beneficiary = $this->beneficiary($customer, $provider);
+        $beneficiary->update([
+            'currency' => 'EUR',
+        ]);
+
+        $response = $this->withToken($token)
+            ->postJson(
+                "/api/user/users/{$customer->id}/transfers",
+                $this->transferPayload($provider, [
+                    'beneficiary_id' => $beneficiary->id,
+                    'source_currency' => 'USD',
+                    'target_currency' => 'EUR',
+                    'fx_quote_id' => null,
+                    'fx_rate' => null,
+                    'target_amount' => null,
+                ]),
+            )
+            ->assertCreated()
+            ->assertJsonPath('source_currency', 'USD')
+            ->assertJsonPath('target_currency', 'EUR');
+
+        $transfer = Transfer::query()->findOrFail($response->json('id'));
+
+        $this->assertNull($transfer->fx_quote_id);
+        $this->assertNull($transfer->fx_rate);
+        $this->assertNull($transfer->target_amount);
+        $this->assertSame('USD', $transfer->fee_currency);
+    }
+
     public function test_nium_create_rejects_invalid_amount_precision_and_wallet_flow_accounts(): void
     {
         [$customer, $token, $provider] = $this->customer();

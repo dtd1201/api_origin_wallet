@@ -380,14 +380,15 @@ class NiumTransferService implements PreparedTransferStatusProvider
             throw new RuntimeException('Nium exchange-rate lock has expired.');
         }
 
-        if (($quote->raw_data['provider_fx_type'] ?? null) !== 'lock_and_hold'
+        if (($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
             || ! is_numeric($quote->quote_ref)
             || $quote->user_id !== $transfer->user_id
             || $quote->provider_id !== $transfer->provider_id
             || strtoupper($quote->source_currency) !== strtoupper($transfer->source_currency)
             || strtoupper($quote->target_currency) !== strtoupper($transfer->target_currency)
-            || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')) {
-            throw new RuntimeException('Nium FX quote ownership, corridor, or amount does not match the transfer.');
+            || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')
+            || number_format((float) $quote->net_rate, 10, '.', '') !== number_format((float) $transfer->fx_rate, 10, '.', '')) {
+            throw new RuntimeException('Nium payout FX lock ownership, corridor, amount, or rate does not match the transfer.');
         }
     }
 }
