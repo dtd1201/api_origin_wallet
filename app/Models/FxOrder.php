@@ -14,6 +14,7 @@ class FxOrder extends Model
         'order_no',
         'user_id',
         'provider_id',
+        'fx_quote_id',
         'source_currency',
         'target_currency',
         'source_amount',
@@ -52,4 +53,11 @@ class FxOrder extends Model
     {
         return $this->belongsTo(IntegrationProvider::class, 'provider_id');
     }
+
+
+    public function quote(): BelongsTo
+    {
+        return $this->belongsTo(FxQuote::class, 'fx_quote_id');
+    }
+
 }

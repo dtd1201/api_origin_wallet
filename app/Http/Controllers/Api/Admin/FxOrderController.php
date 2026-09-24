@@ -23,7 +23,11 @@ class FxOrderController extends Controller
         ]);
 
         $orders = FxOrder::query()
-            ->with(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status'])
+            ->with([
+                'user:id,email,phone,full_name,status,kyc_status',
+                'provider:id,code,name,logo_url,status',
+                'quote',
+            ])
             ->when(
                 filled($validated['status'] ?? null),
                 fn ($query) => $query->where('status', $validated['status'])
@@ -45,7 +49,11 @@ class FxOrderController extends Controller
     public function show(FxOrder $fxOrder): JsonResponse
     {
         return response()->json(
-            $fxOrder->load(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status'])
+            $fxOrder->load([
+                'user:id,email,phone,full_name,status,kyc_status',
+                'provider:id,code,name,logo_url,status',
+                'quote',
+            ])
         );
     }
 
@@ -68,7 +76,11 @@ class FxOrderController extends Controller
 
             $fxOrder->update($payload);
 
-            $fxOrder = $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status']);
+            $fxOrder = $fxOrder->fresh([
+                'user:id,email,phone,full_name,status,kyc_status',
+                'provider:id,code,name,logo_url,status',
+                'quote',
+            ]);
             $this->recordAdminAudit($request, 'fx_order.updated', 'fx_order', $fxOrder->id, $before, $fxOrder->toArray());
 
             return $fxOrder;
@@ -97,7 +109,11 @@ class FxOrderController extends Controller
                 'cancelled_at' => null,
             ]);
 
-            $fxOrder = $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status']);
+            $fxOrder = $fxOrder->fresh([
+                'user:id,email,phone,full_name,status,kyc_status',
+                'provider:id,code,name,logo_url,status',
+                'quote',
+            ]);
             $this->recordAdminAudit($request, 'fx_order.confirmed', 'fx_order', $fxOrder->id, $before, $fxOrder->toArray());
 
             return $fxOrder;
@@ -124,7 +140,11 @@ class FxOrderController extends Controller
                 'cancelled_at' => now(),
             ]);
 
-            $fxOrder = $fxOrder->fresh(['user:id,email,phone,full_name,status,kyc_status', 'provider:id,code,name,logo_url,status']);
+            $fxOrder = $fxOrder->fresh([
+                'user:id,email,phone,full_name,status,kyc_status',
+                'provider:id,code,name,logo_url,status',
+                'quote',
+            ]);
             $this->recordAdminAudit($request, 'fx_order.rejected', 'fx_order', $fxOrder->id, $before, $fxOrder->toArray());
 
             return $fxOrder;
