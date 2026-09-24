@@ -37,6 +37,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         private readonly NiumCustomerOnboardingService $customerOnboardingService,
         private readonly NiumRfiWorkflowService $rfiWorkflowService,
         private readonly NiumCorporateRfiService $corporateRfiService,
+        private readonly NiumVirtualAccountDetailService $virtualAccountDetailService,
     ) {}
 
     public function handleWebhook(IntegrationProvider $provider, Request $request): array
@@ -465,7 +466,14 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             throw new RuntimeException('Nium VA Assigned webhook is missing a mapped customer, payment ID, or currency.');
         }
 
-        DB::transaction(function () use ($account, $accountCategory, $accountType, $currency, $payload, $paymentId): void {
+        $virtualAccount = DB::transaction(function () use (
+            $account,
+            $accountCategory,
+            $accountType,
+            $currency,
+            $payload,
+            $paymentId
+        ): NiumVirtualAccount {
             $virtualAccount = null;
 
             if ($accountType !== '') {
@@ -480,7 +488,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             }
 
             if ($virtualAccount === null) {
-                $createdVirtualAccount = NiumVirtualAccount::query()->updateOrCreate(
+                $virtualAccount = NiumVirtualAccount::query()->updateOrCreate(
                     [
                         'user_provider_account_id' => $account->id,
                         'provider_payment_id' => (string) $paymentId,
@@ -494,44 +502,23 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                         'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
                     ],
                 );
-
-                NiumVirtualAccountDetail::updateOrCreate(
-                    [
-                        'nium_virtual_account_id' => $createdVirtualAccount->id,
-                    ],
-                    [
-                        'account_name' => $payload['accountName'] ?? null,
-                        'bank_name' => $payload['fullBankName'] ?? null,
-                        'bank_address' => $payload['bankAddress'] ?? null,
-                        'routing_code_type' => $payload['routingCodeType1'] ?? null,
-                        'routing_code_value' => $payload['routingCodeValue1'] ?? null,
-                    ],
-                );
-
-                return;
+            } else {
+                $virtualAccount->update([
+                    'virtual_account_reference' => (string) $paymentId,
+                    'provider_payment_id' => (string) $paymentId,
+                    'status' => 'assigned',
+                    'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
+                ]);
             }
 
-            $virtualAccount->update([
-                'virtual_account_reference' => (string) $paymentId,
-                'provider_payment_id' => (string) $paymentId,
-                'status' => 'assigned',
-                'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
-            ]);
-
-
-            NiumVirtualAccountDetail::updateOrCreate(
-                [
-                    'nium_virtual_account_id' => $virtualAccount->id,
-                ],
-                [
-                    'account_name' => $payload['accountName'] ?? null,
-                    'bank_name' => $payload['fullBankName'] ?? null,
-                    'bank_address' => $payload['bankAddress'] ?? null,
-                    'routing_code_type' => $payload['routingCodeType1'] ?? null,
-                    'routing_code_value' => $payload['routingCodeValue1'] ?? null,
-                ],
-            );
+            return $virtualAccount->fresh();
         });
+
+        try {
+            $this->virtualAccountDetailService->sync($virtualAccount);
+        } catch (Throwable $e) {
+            report($e);
+        }
     }
 
     private function isVaAssigned(array $payload): bool
