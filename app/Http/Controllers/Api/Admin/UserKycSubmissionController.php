@@ -42,7 +42,9 @@ class UserKycSubmissionController extends Controller
 
         $profiles = KycProfile::query()
             ->with([
-                'user',
+                'user.providerAccounts' => function ($query) {
+                    $query->where('provider_id', 7);
+                },
                 'reviewedBy',
                 'documents',
                 'relatedPersons.documents',
@@ -59,7 +61,18 @@ class UserKycSubmissionController extends Controller
             ->latest('submitted_at')
             ->paginate(15);
 
-        return response()->json($profiles);
+        return response()->json(
+            $profiles->through(function ($profile) {
+                $account = $profile->user?->providerAccounts?->first();
+
+                return array_merge($profile->toArray(), [
+                    'provider_status' => $account?->provider_status,
+                    'provider_sub_status' => $account?->provider_sub_status,
+                    'rfi_status' => $account?->rfi_status,
+                    'odd_status' => $account?->odd_status,
+                ]);
+            })
+        );
     }
 
     public function show(User $user): JsonResponse
