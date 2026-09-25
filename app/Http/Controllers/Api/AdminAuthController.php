@@ -73,7 +73,10 @@ class AdminAuthController extends Controller
         ]);
 
         return response()->json(
-            $this->apiAuthService->resendLogin($validated['email'])
+            $this->apiAuthService->resendLogin(
+                $validated['email'],
+                adminOnly: true,
+            )
         );
     }
 

@@ -46,6 +46,86 @@ class AuthVerificationSecurityTest extends TestCase
         $this->assertDatabaseCount('api_tokens', 1);
     }
 
+    public function test_user_can_resend_login_verification_code(): void
+    {
+        $user = User::factory()->create([
+            'email' => 'resend-user@example.com',
+            'full_name' => 'Resend User',
+        ]);
+
+        $firstLogin = $this->startLogin($user);
+        $firstCode = $firstLogin->json('verification_code');
+
+        PendingLogin::query()
+            ->where('email', $user->email)
+            ->update([
+                'verification_sent_at' => now()->subSeconds(121),
+            ]);
+
+        $response = $this->postJson('/api/auth/login/resend', [
+            'email' => $user->email,
+        ]);
+
+        $response
+            ->assertAccepted()
+            ->assertJsonPath('email', $user->email)
+            ->assertJsonPath('expires_in_minutes', 15)
+            ->assertJsonPath('resend_cooldown_seconds', 120)
+            ->assertJsonStructure([
+                'message',
+                'email',
+                'expires_in_minutes',
+                'resend_cooldown_seconds',
+                'verification_code',
+            ]);
+
+        $newCode = $response->json('verification_code');
+
+        $this->assertNotSame($firstCode, $newCode);
+
+        $pending = PendingLogin::query()
+            ->where('email', $user->email)
+            ->firstOrFail();
+
+        $this->assertNull($pending->verification_code);
+        $this->assertTrue(Hash::check($newCode, $pending->verification_code_hash));
+        $this->assertFalse(Hash::check($firstCode, $pending->verification_code_hash));
+
+        Mail::assertSent(
+            \App\Mail\LoginVerificationCodeMail::class,
+            function (\App\Mail\LoginVerificationCodeMail $mail) use ($user, $newCode): bool {
+                return $mail->hasTo($user->email)
+                    && $mail->verificationCode === $newCode;
+            }
+        );
+
+        $this->postJson('/api/auth/login/verify', [
+            'email' => $user->email,
+            'verification_code' => $newCode,
+        ])->assertOk()
+            ->assertJsonPath('message', 'Login successful.');
+    }
+
+    public function test_user_login_resend_is_blocked_during_cooldown(): void
+    {
+        $user = User::factory()->create([
+            'email' => 'resend-cooldown@example.com',
+        ]);
+
+        $this->startLogin($user);
+
+        $response = $this->postJson('/api/auth/login/resend', [
+            'email' => $user->email,
+        ]);
+
+        $response
+            ->assertStatus(429)
+            ->assertJsonPath(
+                'message',
+                'Please wait before requesting another verification code.'
+            );
+    }
+
     public function test_wrong_code_increments_attempts_and_records_security_events(): void
     {
         config()->set('auth.verification.suspicious_attempt_threshold', 2);

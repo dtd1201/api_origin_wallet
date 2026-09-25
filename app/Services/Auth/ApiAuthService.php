@@ -75,9 +75,9 @@ class ApiAuthService
         return $response;
     }
 
-    public function resendLogin(string $email): array
+    public function resendLogin(string $email, bool $adminOnly = false): array
     {
-        $result = DB::transaction(function () use ($email): array {
+        $result = DB::transaction(function () use ($email, $adminOnly): array {
             $pendingLogin = PendingLogin::query()
                 ->with('user')
                 ->where('email', $email)
@@ -90,7 +90,7 @@ class ApiAuthService
 
             $user = $pendingLogin->user;
 
-            if (! $user->isAdmin()) {
+            if ($adminOnly && ! $user->isAdmin()) {
                 abort(403, 'This account is not allowed to access admin.');
             }
 

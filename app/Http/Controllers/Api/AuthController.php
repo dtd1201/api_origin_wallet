@@ -129,6 +129,21 @@ class AuthController extends Controller
         ]);
     }
 
+    public function resendLogin(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'email' => ['required', 'email'],
+        ]);
+
+        return response()->json(
+            $this->apiAuthService->resendLogin(
+                $validated['email'],
+                adminOnly: false,
+            ),
+            202
+        );
+    }
+
     public function forgotPassword(Request $request): JsonResponse
     {
         $validated = $request->validate([

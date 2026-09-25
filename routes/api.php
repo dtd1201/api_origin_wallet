@@ -36,6 +36,7 @@ Route::prefix('auth')->group(function (): void {
         ->name('auth.register.activate');
     Route::post('login', [AuthController::class, 'login']);
     Route::post('login/verify', [AuthController::class, 'verifyLogin']);
+    Route::post('login/resend', [AuthController::class, 'resendLogin']);
     Route::post('forgot-password', [AuthController::class, 'forgotPassword']);
     Route::post('reset-password', [AuthController::class, 'resetPassword']);
     Route::post('google', [AuthController::class, 'googleLogin']);
