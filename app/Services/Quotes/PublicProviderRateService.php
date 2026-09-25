@@ -3,6 +3,8 @@
 namespace App\Services\Quotes;
 
 use App\Models\IntegrationProvider;
+use App\Models\FxQuote;
+use App\Models\User;
 use App\Services\Nium\NiumService;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\Client\Response;
@@ -148,7 +150,7 @@ class PublicProviderRateService
         }
 
         try {
-            $quote = $this->liveQuote($provider, $sourceCurrency, $targetCurrency, $sourceAmount);
+            $quote = $this->liveQuote($provider, $user, $sourceCurrency, $targetCurrency, $sourceAmount);
 
             return [
                 ...$base,
@@ -166,6 +168,7 @@ class PublicProviderRateService
 
     private function liveQuote(
         IntegrationProvider $provider,
+        User $user,
         string $sourceCurrency,
         string $targetCurrency,
         float $sourceAmount,
@@ -173,7 +176,13 @@ class PublicProviderRateService
         $providerCode = strtolower($provider->code);
 
         return match ($providerCode) {
-            'nium' => $this->niumQuote($sourceCurrency, $targetCurrency, $sourceAmount),
+            'nium' => $this->niumQuote(
+                $provider,
+                $user,
+                $sourceCurrency,
+                $targetCurrency,
+                $sourceAmount,
+            ),
             default => throw new RuntimeException('Public quote preview is not implemented for this provider.'),
         };
     }
@@ -254,7 +263,13 @@ class PublicProviderRateService
         ];
     }
 
-    private function niumQuote(string $sourceCurrency, string $targetCurrency, float $sourceAmount): array
+    private function niumQuote(
+        IntegrationProvider $provider,
+        User $user,
+        string $sourceCurrency,
+        string $targetCurrency,
+        float $sourceAmount,
+    ): array
     {
         $response = $this->niumService->post(
             path: $this->niumService->path(
@@ -275,7 +290,7 @@ class PublicProviderRateService
         $responseData = $this->successfulJson($response, 'Nium quote preview failed.');
         $quote = $this->niumQuotePayload($responseData);
 
-        return $this->quotePayload(
+        $payload = $this->quotePayload(
             sourceCurrency: $sourceCurrency,
             targetCurrency: $targetCurrency,
             sourceAmount: $quote['sourceAmount'] ?? $quote['sellAmount'] ?? $sourceAmount,
@@ -285,6 +300,28 @@ class PublicProviderRateService
             feeAmount: $quote['feeAmount'] ?? $quote['fee'] ?? 0,
             expiresAt: $quote['expiryTime'] ?? $quote['expiresAt'] ?? $quote['quoteExpiry'] ?? now()->addMinutes(15)->toISOString(),
         );
+
+        $fxQuote = DB::transaction(function () use ($user, $provider, $payload, $quote) {
+            return FxQuote::create([
+                'user_id' => $user->id,
+                'provider_id' => $provider->id,
+                'quote_ref' => $quote['id'] ?? $quote['quoteId'] ?? uniqid('nium_'),
+                'source_currency' => $payload['source_currency'],
+                'target_currency' => $payload['target_currency'],
+                'source_amount' => $payload['source_amount'],
+                'target_amount' => $payload['target_amount'],
+                'mid_rate' => $payload['mid_rate'],
+                'net_rate' => $payload['net_rate'],
+                'fee_amount' => $payload['fee_amount'],
+                'expires_at' => $payload['expires_at'],
+                'raw_data' => $quote,
+            ]);
+        });
+
+        return [
+            ...$payload,
+            'id' => $fxQuote->id,
+        ];
     }
 
     private function quotePayload(
