@@ -33,6 +33,7 @@ class PublicProviderRateController extends Controller
             targetCurrency: (string) ($validated['target_currency'] ?? 'VND'),
             sourceAmount: (float) ($validated['source_amount'] ?? 1000),
             audience: $audience,
+            user: $request->user(),
         );
     }
 }

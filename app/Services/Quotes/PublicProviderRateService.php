@@ -26,6 +26,7 @@ class PublicProviderRateService
         string $targetCurrency,
         float $sourceAmount,
         string $audience = 'public',
+        ?User $user = null,
     ): array {
         $sourceCurrency = strtoupper($sourceCurrency);
         $targetCurrency = strtoupper($targetCurrency);
@@ -39,6 +40,7 @@ class PublicProviderRateService
             $targetCurrency,
             number_format($sourceAmount, 8, '.', ''),
             $audience,
+            $user?->id ?? 'guest',
         ]);
 
         return Cache::remember($cacheKey, now()->addSeconds($cacheTtl), function () use (
@@ -47,6 +49,7 @@ class PublicProviderRateService
             $sourceAmount,
             $cacheTtl,
             $audience,
+            $user,
         ): array {
             $providers = IntegrationProvider::query()
                 ->where('code', PrimaryProvider::code())
@@ -61,6 +64,7 @@ class PublicProviderRateService
                         $targetCurrency,
                         $sourceAmount,
                         $audience,
+                        $user,
                     ))
                     ->values()
                     ->all(),
@@ -82,6 +86,7 @@ class PublicProviderRateService
         string $targetCurrency,
         float $sourceAmount,
         string $audience,
+        ?User $user = null,
     ): array {
         $base = [
             'provider' => [
@@ -150,6 +155,10 @@ class PublicProviderRateService
         }
 
         try {
+            if ($user === null) {
+                throw new RuntimeException('Authenticated user is required for live FX quote.');
+            }
+
             $quote = $this->liveQuote($provider, $user, $sourceCurrency, $targetCurrency, $sourceAmount);
 
             return [
