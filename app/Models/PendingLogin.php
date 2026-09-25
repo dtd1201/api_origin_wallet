@@ -15,6 +15,7 @@ class PendingLogin extends Model
         'verification_attempts',
         'locked_until',
         'last_attempt_at',
+        'verification_sent_at',
         'expires_at',
     ];
 
@@ -24,6 +25,7 @@ class PendingLogin extends Model
             'expires_at' => 'datetime',
             'locked_until' => 'datetime',
             'last_attempt_at' => 'datetime',
+            'verification_sent_at' => 'datetime',
         ];
     }
 

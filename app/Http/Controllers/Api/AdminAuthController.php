@@ -66,6 +66,17 @@ class AdminAuthController extends Controller
         ]);
     }
 
+    public function resendLogin(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'email' => ['required', 'email'],
+        ]);
+
+        return response()->json(
+            $this->apiAuthService->resendLogin($validated['email'])
+        );
+    }
+
     public function me(Request $request): JsonResponse
     {
         /** @var User $user */

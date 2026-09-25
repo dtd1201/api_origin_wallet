@@ -59,6 +59,7 @@ Route::middleware('auth.token')
 Route::prefix('admin/auth')->group(function (): void {
     Route::post('login', [AdminAuthController::class, 'login']);
     Route::post('login/verify', [AdminAuthController::class, 'verifyLogin']);
+    Route::post('login/resend', [AdminAuthController::class, 'resendLogin']);
 
     Route::middleware(['auth.token', 'auth.admin'])->group(function (): void {
         Route::post('logout', [AdminAuthController::class, 'logout']);

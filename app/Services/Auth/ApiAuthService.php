@@ -46,6 +46,7 @@ class ApiAuthService
                     'verification_attempts' => 0,
                     'locked_until' => null,
                     'last_attempt_at' => null,
+                    'verification_sent_at' => now(),
                     'expires_at' => now()->addMinutes(15),
                 ]
             );
@@ -69,6 +70,72 @@ class ApiAuthService
 
         if ((bool) config('mail.expose_verification_code', false)) {
             $response['verification_code'] = $verificationCode;
+        }
+
+        return $response;
+    }
+
+    public function resendLogin(string $email): array
+    {
+        $result = DB::transaction(function () use ($email): array {
+            $pendingLogin = PendingLogin::query()
+                ->with('user')
+                ->where('email', $email)
+                ->lockForUpdate()
+                ->first();
+
+            if ($pendingLogin === null || $pendingLogin->user === null) {
+                abort(422, 'No pending login found for this email.');
+            }
+
+            $user = $pendingLogin->user;
+
+            if (! $user->isAdmin()) {
+                abort(403, 'This account is not allowed to access admin.');
+            }
+
+            if (
+                $pendingLogin->verification_sent_at !== null
+                && $pendingLogin->verification_sent_at->addSeconds(120)->isFuture()
+            ) {
+                abort(429, 'Please wait before requesting another verification code.');
+            }
+
+            $verificationCode = $this->generateVerificationCode();
+
+            $pendingLogin->update([
+                'verification_code' => null,
+                'verification_code_hash' => Hash::make($verificationCode),
+                'verification_attempts' => 0,
+                'locked_until' => null,
+                'last_attempt_at' => null,
+                'verification_sent_at' => now(),
+                'expires_at' => now()->addMinutes(15),
+            ]);
+
+            Mail::to($user->email)->send(
+                new LoginVerificationCodeMail(
+                    fullName: (string) ($user->full_name ?? ''),
+                    verificationCode: $verificationCode,
+                    expiresInMinutes: 15,
+                )
+            );
+
+            return [
+                'email' => $user->email,
+                'verification_code' => $verificationCode,
+            ];
+        });
+
+        $response = [
+            'message' => 'A new verification code has been sent to your email.',
+            'email' => $result['email'],
+            'expires_in_minutes' => 15,
+            'resend_cooldown_seconds' => 120,
+        ];
+
+        if ((bool) config('mail.expose_verification_code', false)) {
+            $response['verification_code'] = $result['verification_code'];
         }
 
         return $response;
