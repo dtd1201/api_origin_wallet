@@ -3,9 +3,8 @@
 namespace App\Services\Quotes;
 
 use App\Models\IntegrationProvider;
-use App\Models\FxQuote;
 use App\Models\User;
-use App\Services\Nium\NiumService;
+use App\Services\Integrations\ProviderQuoteManager;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
@@ -16,7 +15,7 @@ use RuntimeException;
 class PublicProviderRateService
 {
     public function __construct(
-        private readonly NiumService $niumService,
+        private readonly ProviderQuoteManager $providerQuoteManager,
         private readonly ManagedExchangeRateService $managedExchangeRateService,
         private readonly PublicProviderRateCache $rateCache,
     ) {}
@@ -278,57 +277,27 @@ class PublicProviderRateService
         string $sourceCurrency,
         string $targetCurrency,
         float $sourceAmount,
-    ): array
-    {
-        $response = $this->niumService->post(
-            path: $this->niumService->path(
-                (string) config('services.nium.quote_endpoint'),
-                ['client' => $this->niumService->clientId()],
-            ),
+    ): array {
+        $fxQuote = $this->providerQuoteManager->createQuote(
+            provider: $provider,
+            user: $user,
             payload: [
-                'sourceCurrencyCode' => $sourceCurrency,
-                'destinationCurrencyCode' => $targetCurrency,
-                'sourceAmount' => $sourceAmount,
-                'quoteType' => 'payout',
-                'conversionSchedule' => 'immediate',
-                'lockPeriod' => '5_mins',
-                'executionType' => 'at_conversion_time',
-                'quoteIntent' => 'INDICATIVE',
+                'source_currency' => $sourceCurrency,
+                'target_currency' => $targetCurrency,
+                'source_amount' => $sourceAmount,
             ],
         );
-        $responseData = $this->successfulJson($response, 'Nium quote preview failed.');
-        $quote = $this->niumQuotePayload($responseData);
-
-        $payload = $this->quotePayload(
-            sourceCurrency: $sourceCurrency,
-            targetCurrency: $targetCurrency,
-            sourceAmount: $quote['sourceAmount'] ?? $quote['sellAmount'] ?? $sourceAmount,
-            targetAmount: $quote['destinationAmount'] ?? $quote['buyAmount'] ?? null,
-            midRate: $quote['exchangeRate'] ?? $quote['midRate'] ?? $quote['mid_rate'] ?? null,
-            netRate: $quote['netExchangeRate'] ?? $quote['fxRate'] ?? $quote['rate'] ?? $quote['exchangeRate'] ?? null,
-            feeAmount: $quote['feeAmount'] ?? $quote['fee'] ?? 0,
-            expiresAt: $quote['expiryTime'] ?? $quote['expiresAt'] ?? $quote['quoteExpiry'] ?? now()->addMinutes(15)->toISOString(),
-        );
-
-        $fxQuote = DB::transaction(function () use ($user, $provider, $payload, $quote) {
-            return FxQuote::create([
-                'user_id' => $user->id,
-                'provider_id' => $provider->id,
-                'quote_ref' => $quote['id'] ?? $quote['quoteId'] ?? uniqid('nium_'),
-                'source_currency' => $payload['source_currency'],
-                'target_currency' => $payload['target_currency'],
-                'source_amount' => $payload['source_amount'],
-                'target_amount' => $payload['target_amount'],
-                'mid_rate' => $payload['mid_rate'],
-                'net_rate' => $payload['net_rate'],
-                'fee_amount' => $payload['fee_amount'],
-                'expires_at' => $payload['expires_at'],
-                'raw_data' => $quote,
-            ]);
-        });
 
         return [
-            ...$payload,
+            'source_currency' => $fxQuote->source_currency,
+            'target_currency' => $fxQuote->target_currency,
+            'source_amount' => $fxQuote->source_amount,
+            'target_amount' => $fxQuote->target_amount,
+            'mid_rate' => $fxQuote->mid_rate,
+            'net_rate' => $fxQuote->net_rate,
+            'fee_amount' => $fxQuote->fee_amount,
+            'expires_at' => $fxQuote->expires_at,
+            'quoted_at' => $fxQuote->created_at?->toISOString(),
             'id' => $fxQuote->id,
         ];
     }
