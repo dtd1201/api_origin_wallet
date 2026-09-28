@@ -25,21 +25,6 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class KycSubmissionController extends Controller
 {
-    private const HK_CORPORATE_BANK_ACCOUNT_FALLBACK = [
-        'bankCode' => '016',
-        'bankName' => 'DBS Bank (Hong Kong) Limited',
-        'currency' => 'USD',
-        'accountName' => 'DBS TEST COMPANY LIMITED',
-        'bankCountry' => 'HK',
-        'routingCodes' => [
-            [
-                'type' => 'SWIFT',
-                'value' => 'DHBKHKHH',
-            ],
-        ],
-        'accountNumber' => '999999999',
-    ];
-
     private const SG_CORPORATE_BUSINESS_ADDRESS_KEYS = [
         'address_line1',
         'address_line2',
@@ -188,7 +173,6 @@ class KycSubmissionController extends Controller
         NiumRegionResolver $regionResolver,
     ): JsonResponse {
         $this->validateNiumRegionInput($request, $regionResolver);
-        $this->applyHkCorporateBankAccountFallback($request);
         $validated = $request->validate($this->rules($request, $user, $regionResolver));
 
         if ($request->input('applicant_type') === 'business'
@@ -229,6 +213,25 @@ class KycSubmissionController extends Controller
         }
 
         $validated = $this->enrichHkCorporateFullContract($request, $validated);
+
+        // Bank code and branch code are retained internally for the KYC profile,
+        // but are not part of the Nium customer_create payload.
+        if (($validated['applicant_type'] ?? null) === 'business'
+            && strtoupper((string) data_get($validated, 'metadata.nium_region')) === 'HK') {
+            $metadata = (array) ($validated['metadata'] ?? []);
+
+            if (array_key_exists('bankCode', $validated)) {
+                data_set($metadata, 'nium_v5_fields.bankCode', $validated['bankCode']);
+            }
+
+            if (array_key_exists('branchCode', $validated)) {
+                data_set($metadata, 'nium_v5_fields.branchCode', $validated['branchCode']);
+            }
+
+            $validated['metadata'] = $metadata;
+
+            unset($validated['bankCode'], $validated['branchCode']);
+        }
 
         $validated = $this->attachBusinessRegistryVerification($validated, $businessRegistryVerificationService);
 
@@ -682,6 +685,8 @@ class KycSubmissionController extends Controller
                 : ['nullable', 'string', 'max:100'],
             'tax_id' => ['nullable', 'string', 'max:100'],
             'registered_country_code' => ['required_if:applicant_type,business', 'nullable', 'string', 'size:2'],
+            'bankCode' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'branchCode' => ['sometimes', 'nullable', 'string', 'max:50'],
             'address_line1' => ['required', 'string', 'max:255'],
             'address_line2' => ['nullable', 'string', 'max:255'],
             'city' => ['required', 'string', 'max:100'],
@@ -1058,51 +1063,6 @@ class KycSubmissionController extends Controller
         ]);
 
         return $validated;
-    }
-
-    private function applyHkCorporateBankAccountFallback(Request $request): void
-    {
-        if (
-            $request->input('applicant_type') !== 'business'
-            || strtoupper((string) $request->input('metadata.nium_region')) !== 'HK'
-            || strtolower((string) $request->input('metadata.nium_kyc_type')) !== 'full'
-        ) {
-            return;
-        }
-
-        $fields = $request->input('metadata.nium_v5_fields');
-
-        if (! is_array($fields)) {
-            return;
-        }
-
-        $bankAccountDetails = $fields['bankAccountDetails'] ?? null;
-
-        if (array_key_exists('bankAccountDetails', $fields) && ! $this->isEmptyBankAccountPlaceholder($bankAccountDetails)) {
-            return;
-        }
-
-        $metadata = (array) $request->input('metadata', []);
-        data_set($metadata, 'nium_v5_fields.bankAccountDetails', self::HK_CORPORATE_BANK_ACCOUNT_FALLBACK);
-        $request->merge(['metadata' => $metadata]);
-    }
-
-    private function isEmptyBankAccountPlaceholder(mixed $details): bool
-    {
-        if (! is_array($details)) {
-            return false;
-        }
-
-        $routingValues = collect($details['routingCodes'] ?? [])
-            ->filter(fn (mixed $routingCode): bool => is_array($routingCode))
-            ->pluck('value');
-
-        return collect([
-            $details['accountName'] ?? null,
-            $details['accountNumber'] ?? null,
-            $details['bankName'] ?? null,
-            ...$routingValues,
-        ])->every(fn (mixed $value): bool => ! is_string($value) || trim($value) === '');
     }
 
     private function preserveNiumDocumentMetadata(array $document, $existingDocuments, ?string $relationshipType): array
