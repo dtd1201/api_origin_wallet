@@ -1043,7 +1043,9 @@ class NiumCustomerPayloadFactory
     private function validateHkCorporateDocumentSources(KycProfile $profile): void
     {
         $businessDocuments = $this->documentResolver->profileDocuments($profile);
-        $types = $businessDocuments->map(fn (KycDocument $document): string => $this->documentType($document));
+        $types = $businessDocuments
+            ->map(fn (KycDocument $document): string => $this->documentType($document))
+            ->toBase();
         $missing = [];
 
         if (! $types->intersect(['business_registration', 'business_registration_doc'])->count()) {
