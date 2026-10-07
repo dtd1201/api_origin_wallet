@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
 use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Kyc\BusinessRegistryVerificationService;
+use App\Services\Nium\NiumCurrentBiometricKyc;
 use App\Services\Nium\NiumRegionResolver;
 use App\Support\KycAuditProjection;
 use Closure;
@@ -34,7 +35,7 @@ class KycSubmissionController extends Controller
         'country_code',
     ];
 
-    public function show(User $user): JsonResponse
+    public function show(User $user, NiumCurrentBiometricKyc $currentBiometricKyc): JsonResponse
     {
         $user->load(
             'kycProfile.documents',
@@ -49,6 +50,7 @@ class KycSubmissionController extends Controller
             'kyc_status' => $user->kyc_status,
             'kyc_profile' => $user->kycProfile,
             'kyc_submission' => $user->kycProfile,
+            'biometric_kyc' => $currentBiometricKyc->forUser($user),
         ]);
     }
 

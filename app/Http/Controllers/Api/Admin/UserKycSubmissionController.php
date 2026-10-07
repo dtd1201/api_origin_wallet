@@ -14,6 +14,7 @@ use App\Services\Aml\StagingAmlProviderUnavailableBypass;
 use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingReadinessService;
+use App\Services\Nium\NiumCurrentBiometricKyc;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumHkManualSubmitKycService;
 use App\Services\Nium\NiumProviderRequestException;
@@ -111,7 +112,7 @@ class UserKycSubmissionController extends Controller
         );
     }
 
-    public function show(User $user): JsonResponse
+    public function show(User $user, NiumCurrentBiometricKyc $currentBiometricKyc): JsonResponse
     {
         $user = $this->resolveManageableUser($user)
             ->load([
@@ -128,6 +129,7 @@ class UserKycSubmissionController extends Controller
             'user' => $user,
             'kyc_profile' => $user->kycProfile,
             'kyc_submission' => $user->kycProfile,
+            'biometric_kyc' => $currentBiometricKyc->forUser($user),
         ]);
     }
 
