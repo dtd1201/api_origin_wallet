@@ -27,12 +27,25 @@ class NiumSafeValueProjectorTest extends TestCase
         $this->assertSame('individual_stakeholder', $projection['entity_type']);
         $this->assertSame('7609d9d1-9d37-4e08-9197-602d792f7a2e', $projection['reference_id']);
         $this->assertSame(substr(hash('sha256', $externalId), 0, 16), $projection['external_id_fingerprint']);
-        $this->assertTrue($projection['redirect_url_present']);
-        $this->assertSame(substr(hash('sha256', $redirectUrl), 0, 16), $projection['redirect_url_fingerprint']);
+        $this->assertTrue($projection['biometric_url_present']);
+        $this->assertSame(substr(hash('sha256', $redirectUrl), 0, 16), $projection['biometric_url_fingerprint']);
 
         $serialized = json_encode($projection, JSON_THROW_ON_ERROR);
         $this->assertStringNotContainsString($redirectUrl, $serialized);
         $this->assertStringNotContainsString('TEST-IDENTITY-MUST-NOT-SURVIVE', $serialized);
+    }
+
+    public function test_biometric_url_takes_priority_and_is_never_projected_raw(): void
+    {
+        $biometricUrl = 'https://sandbox.example.test/kyc/real-sensitive-token';
+        $projection = app(NiumSafeValueProjector::class)->apiResponseBody([
+            'biometricUrl' => $biometricUrl,
+            'redirectUrl' => 'https://sandbox.example.test/kyc/fallback-token',
+        ], 200);
+
+        $this->assertTrue($projection['biometric_url_present']);
+        $this->assertSame(substr(hash('sha256', $biometricUrl), 0, 16), $projection['biometric_url_fingerprint']);
+        $this->assertStringNotContainsString($biometricUrl, json_encode($projection, JSON_THROW_ON_ERROR));
     }
 
     public function test_provider_errors_preserve_structured_non_pii_evidence_for_every_item(): void

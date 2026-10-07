@@ -538,9 +538,9 @@ final class NiumSafeValueProjector
         $beneficiaryId = $response['beneficiaryHashId'] ?? $response['id'] ?? null;
         $transferId = $response['systemReferenceNumber'] ?? $response['system_reference_number'] ?? null;
         $paymentId = $response['paymentId'] ?? $response['payment_id'] ?? $response['uniquePaymentId'] ?? null;
-        $redirectUrl = $response['redirectUrl'] ?? null;
-        $redirectUrlPresent = array_key_exists('redirectUrl', $response)
-            ? $this->isPresent($redirectUrl)
+        $biometricUrl = $response['biometricUrl'] ?? $response['redirectUrl'] ?? null;
+        $biometricUrlPresent = array_key_exists('biometricUrl', $response) || array_key_exists('redirectUrl', $response)
+            ? $this->isPresent($biometricUrl)
             : null;
         $successful = ($this->safeHttpStatus($httpStatus) ?? 0) >= 200
             && ($this->safeHttpStatus($httpStatus) ?? 0) < 300;
@@ -554,8 +554,10 @@ final class NiumSafeValueProjector
             'entity_type' => $this->entityType($response['entityType'] ?? null),
             'reference_id' => $this->providerIdentifier($response['referenceId'] ?? null),
             'external_id_fingerprint' => $this->fingerprint($response['externalId'] ?? null),
-            'redirect_url_present' => $redirectUrlPresent,
-            'redirect_url_fingerprint' => $this->safeOpaqueFingerprint($redirectUrl),
+            'biometric_url_present' => $biometricUrlPresent,
+            'biometric_url_fingerprint' => $this->safeOpaqueFingerprint($biometricUrl),
+            'redirect_url_present' => $biometricUrlPresent,
+            'redirect_url_fingerprint' => $this->safeOpaqueFingerprint($biometricUrl),
             ...$errorProjection,
             'error_field_fingerprint' => $this->fingerprint($error['field'] ?? null),
             'error_path_fingerprint' => $this->fingerprint($error['path'] ?? null),
@@ -579,6 +581,8 @@ final class NiumSafeValueProjector
             'entity_type' => 'string',
             'reference_id' => 'string',
             'external_id_fingerprint' => 'fingerprint',
+            'biometric_url_present' => 'bool',
+            'biometric_url_fingerprint' => 'fingerprint',
             'redirect_url_present' => 'bool',
             'redirect_url_fingerprint' => 'fingerprint',
             'error_code' => 'string',

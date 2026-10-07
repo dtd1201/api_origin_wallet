@@ -67,4 +67,21 @@ class UserProviderAccount extends Model
     {
         return $this->hasMany(NiumVirtualAccount::class);
     }
+
+    public function toArray(): array
+    {
+        $attributes = parent::toArray();
+        $attempts = $attributes['metadata']['nium_submit_kyc_attempts'] ?? null;
+
+        if (is_array($attempts)) {
+            foreach ($attempts as $key => $attempt) {
+                if (is_array($attempt)) {
+                    unset($attempt['biometric_url']);
+                    $attributes['metadata']['nium_submit_kyc_attempts'][$key] = $attempt;
+                }
+            }
+        }
+
+        return $attributes;
+    }
 }

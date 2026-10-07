@@ -117,6 +117,9 @@ Route::get('users/{user}/kyc-profile', [UserKycSubmissionController::class, 'sho
 Route::post('users/{user}/kyc-profile/approve', [UserKycSubmissionController::class, 'approve'])
     ->middleware('permission:kyc.approve')
     ->name('users.kyc-profile.approve');
+Route::post('users/{user}/kyc-profile/submit-kyc', [UserKycSubmissionController::class, 'submitKyc'])
+    ->middleware('permission:kyc.approve')
+    ->name('users.kyc-profile.submit-kyc');
 Route::post('users/{user}/kyc-profile/reject', [UserKycSubmissionController::class, 'reject'])
     ->middleware('permission:kyc.reject')
     ->name('users.kyc-profile.reject');

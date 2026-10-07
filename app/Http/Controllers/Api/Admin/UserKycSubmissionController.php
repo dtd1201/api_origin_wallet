@@ -15,7 +15,7 @@ use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingReadinessService;
 use App\Services\Nium\NiumCustomerOnboardingService;
-use App\Services\Nium\NiumKycDataValidator;
+use App\Services\Nium\NiumHkManualSubmitKycService;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Support\KycAuditProjection;
 use App\Support\PrimaryProvider;
@@ -34,6 +34,30 @@ use Throwable;
 
 class UserKycSubmissionController extends Controller
 {
+    public function submitKyc(User $user, NiumHkManualSubmitKycService $submitKycService): JsonResponse
+    {
+        $user = $this->resolveManageableUser($user);
+
+        try {
+            $attempt = $submitKycService->submit($user);
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        $successful = in_array($attempt['state'] ?? null, ['accepted', 'response_review'], true);
+
+        return response()->json([
+            'message' => $successful
+                ? 'Nium Submit KYC completed.'
+                : 'Nium Submit KYC did not complete successfully.',
+            'kyc_status' => $attempt['kyc_status'] ?? null,
+            'kyc_mode' => $attempt['kyc_mode'] ?? null,
+            'reference_id' => $attempt['provider_reference_id'] ?? null,
+            'biometric_url' => $attempt['biometric_url'] ?? null,
+            'state' => $attempt['state'] ?? null,
+        ], $successful ? 200 : 502);
+    }
+
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -160,7 +184,6 @@ class UserKycSubmissionController extends Controller
                     'code' => 'nium_onboarding_retry_not_allowed',
                 ], 409);
             }
-
 
             $amlBypassApplied = false;
             $kycProfile = $this->reviewProfile(
