@@ -43,7 +43,7 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'externalId' => $context['external_id'],
             'kycMode' => 'BIOMETRIC_KYC',
             'kycStatus' => 'initiated',
-            'referenceId' => 'nium-reference-123',
+            'referenceId' => $context['provider_reference_id'],
         ]);
 
         $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
@@ -53,9 +53,9 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertStringContainsString('/submitKyc', $calls->path);
         $this->assertSame('applicant', $calls->payload['entityType']);
         $this->assertSame('biometric_kyc', $calls->payload['kycMode']);
-        $this->assertStringStartsWith('origin-wallet-manual-', $calls->payload['entityReferenceId']);
+        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
         $this->assertSame($biometricUrl, $result['biometric_url']);
-        $this->assertSame('nium-reference-123', $result['provider_reference_id']);
+        $this->assertSame($context['provider_reference_id'], $result['provider_reference_id']);
         $this->assertSame('accepted', $result['state']);
         $this->assertSame('applicant', $result['entity_type']);
         $this->assertSame($context['external_id'], $result['external_id']);
@@ -64,6 +64,9 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $attempts = $context['account']->fresh()->metadata['nium_submit_kyc_attempts'];
         $attempt = collect($attempts)->sole();
         $this->assertTrue($attempt['manual_admin_action']);
+        $this->assertStringStartsWith('origin-wallet-manual-', $attempt['manual_reference_id']);
+        $this->assertNotSame($calls->payload['entityReferenceId'], $attempt['manual_reference_id']);
+        $this->assertSame($attempt['manual_reference_id'], $calls->externalReference);
         $this->assertSame($biometricUrl, $attempt['biometric_url']);
         $this->assertSame(substr(hash('sha256', $biometricUrl), 0, 16), $attempt['biometric_url_fingerprint']);
         $this->assertStringNotContainsString($biometricUrl, json_encode($context['account']->fresh()->toArray(), JSON_THROW_ON_ERROR));
@@ -150,13 +153,14 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'metadata' => [],
         ]);
         $externalId = 'origin-wallet-applicant-'.$person->id;
+        $providerReferenceId = '7205cfe0-bf31-415e-b07d-e911b7e9d58e';
         $account->forceFill(['metadata' => [
             'nium_entity_kyc_states' => [
                 'ref_applicant' => [
                     'entity_type' => 'applicant',
                     'external_id' => $externalId,
                     'kyc_status' => 'kyc_required',
-                    'provider_reference_id' => '7205cfe0-bf31-415e-b07d-e911b7e9d58e',
+                    'provider_reference_id' => $providerReferenceId,
                     'updated_at' => now()->toISOString(),
                 ],
             ],
@@ -175,7 +179,10 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'processed_at' => now(),
         ]);
 
-        return compact('provider', 'user', 'profile', 'person', 'account', 'externalId') + ['external_id' => $externalId];
+        return compact('provider', 'user', 'profile', 'person', 'account', 'externalId') + [
+            'external_id' => $externalId,
+            'provider_reference_id' => $providerReferenceId,
+        ];
     }
 
     private function mockResponse(array $context, array $body): object
@@ -187,6 +194,8 @@ final class NiumHkManualSubmitKycTest extends TestCase
             public string $path = '';
 
             public array $payload = [];
+
+            public string $externalReference = '';
         };
 
         $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $body): void {
@@ -200,11 +209,12 @@ final class NiumHkManualSubmitKycTest extends TestCase
                 $calls->count++;
                 $calls->path = $arguments[0];
                 $calls->payload = $arguments[1];
+                $calls->externalReference = $arguments[5];
                 ApiRequestLog::query()->create([
                     'provider_id' => $context['provider']->id,
                     'user_id' => $context['user']->id,
                     'operation' => 'submit_kyc',
-                    'external_reference' => $arguments[4],
+                    'external_reference' => $arguments[5],
                     'request_method' => 'POST',
                     'request_url' => '/safe/submitKyc',
                     'response_status' => 200,

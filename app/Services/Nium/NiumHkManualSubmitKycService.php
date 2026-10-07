@@ -117,7 +117,9 @@ final class NiumHkManualSubmitKycService
             throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
         }
 
-        $externalId = trim((string) $entities->sole()['external_id']);
+        $entity = $entities->sole();
+        $externalId = trim((string) $entity['external_id']);
+        $entityReferenceId = trim((string) $entity['provider_reference_id']);
         if (preg_match('/^origin-wallet-(?:person|applicant)-(\d+)$/', $externalId, $matches) !== 1) {
             throw new RuntimeException('No verified Nium applicant entity is available for manual Submit KYC.');
         }
@@ -139,7 +141,8 @@ final class NiumHkManualSubmitKycService
             'entity_type' => 'applicant',
             'external_id' => $externalId,
             'reference_id' => $referenceId,
-            'payload' => $this->payloadFactory->build($person, 'applicant', $referenceId),
+            'entity_reference_id' => $entityReferenceId,
+            'payload' => $this->payloadFactory->build($person, 'applicant', $entityReferenceId),
         ];
     }
 
@@ -165,6 +168,7 @@ final class NiumHkManualSubmitKycService
                 'kyc_mode' => 'biometric_kyc',
                 'entity_type' => $context['entity_type'],
                 'external_id' => $context['external_id'],
+                'manual_reference_id' => $context['reference_id'],
                 'manual_admin_action' => true,
                 'updated_at' => now()->toISOString(),
             ]);
@@ -193,6 +197,7 @@ final class NiumHkManualSubmitKycService
                 'kyc_mode' => is_string($kycMode) ? strtolower($kycMode) : 'biometric_kyc',
                 'entity_type' => is_string($entityType) ? strtolower($entityType) : $context['entity_type'],
                 'external_id' => is_string($externalId) ? $externalId : $context['external_id'],
+                'manual_reference_id' => $context['reference_id'],
                 'provider_http_status' => $httpStatus,
                 'provider_reference_id' => is_string($providerReference) ? $providerReference : null,
                 'biometric_url' => $biometricUrl,
