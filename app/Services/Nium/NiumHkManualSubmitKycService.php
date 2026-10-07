@@ -119,7 +119,6 @@ final class NiumHkManualSubmitKycService
 
         $entity = $entities->sole();
         $externalId = trim((string) $entity['external_id']);
-        $entityReferenceId = trim((string) $entity['provider_reference_id']);
         if (preg_match('/^origin-wallet-(?:person|applicant)-(\d+)$/', $externalId, $matches) !== 1) {
             throw new RuntimeException('No verified Nium applicant entity is available for manual Submit KYC.');
         }
@@ -135,6 +134,7 @@ final class NiumHkManualSubmitKycService
         }
 
         $referenceId = 'origin-wallet-manual-'.Str::uuid();
+        $entityReferenceId = (string) Str::uuid();
 
         return [
             'account' => $account,

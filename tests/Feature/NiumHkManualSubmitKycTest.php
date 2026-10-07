@@ -43,7 +43,7 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'externalId' => $context['external_id'],
             'kycMode' => 'BIOMETRIC_KYC',
             'kycStatus' => 'initiated',
-            'referenceId' => $context['provider_reference_id'],
+            'referenceId' => 'manual-provider-response-reference',
         ]);
 
         $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
@@ -53,9 +53,11 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertStringContainsString('/submitKyc', $calls->path);
         $this->assertSame('applicant', $calls->payload['entityType']);
         $this->assertSame('biometric_kyc', $calls->payload['kycMode']);
-        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
+        $this->assertTrue(Str::isUuid($calls->payload['entityReferenceId']));
+        $this->assertNotSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
+        $this->assertStringStartsNotWith('origin-wallet-manual-', $calls->payload['entityReferenceId']);
         $this->assertSame($biometricUrl, $result['biometric_url']);
-        $this->assertSame($context['provider_reference_id'], $result['provider_reference_id']);
+        $this->assertSame('manual-provider-response-reference', $result['provider_reference_id']);
         $this->assertSame('accepted', $result['state']);
         $this->assertSame('applicant', $result['entity_type']);
         $this->assertSame($context['external_id'], $result['external_id']);
