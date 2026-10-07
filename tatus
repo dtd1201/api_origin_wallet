@@ -1,0 +1,128 @@
+[1mdiff --git a/app/Services/Nium/NiumHkManualSubmitKycService.php b/app/Services/Nium/NiumHkManualSubmitKycService.php[m
+[1mindex c93ddb8..f9bc047 100644[m
+[1m--- a/app/Services/Nium/NiumHkManualSubmitKycService.php[m
+[1m+++ b/app/Services/Nium/NiumHkManualSubmitKycService.php[m
+[36m@@ -119,6 +119,7 @@[m [mprivate function context(User $user): array[m
+ [m
+         $entity = $entities->sole();[m
+         $externalId = trim((string) $entity['external_id']);[m
+[32m+[m[32m        $entityReferenceId = trim((string) $entity['provider_reference_id']);[m
+         if (preg_match('/^origin-wallet-(?:person|applicant)-(\d+)$/', $externalId, $matches) !== 1) {[m
+             throw new RuntimeException('No verified Nium applicant entity is available for manual Submit KYC.');[m
+         }[m
+[36m@@ -134,7 +135,6 @@[m [mprivate function context(User $user): array[m
+         }[m
+ [m
+         $referenceId = 'origin-wallet-manual-'.Str::uuid();[m
+[31m-        $entityReferenceId = (string) Str::uuid();[m
+ [m
+         return [[m
+             'account' => $account,[m
+[1mdiff --git a/tests/Feature/NiumHkManualSubmitKycTest.php b/tests/Feature/NiumHkManualSubmitKycTest.php[m
+[1mindex 44d829c..d610dcc 100644[m
+[1m--- a/tests/Feature/NiumHkManualSubmitKycTest.php[m
+[1m+++ b/tests/Feature/NiumHkManualSubmitKycTest.php[m
+[36m@@ -43,7 +43,7 @@[m [mpublic function test_manual_submit_uses_metadata_applicant_without_entity_webhoo[m
+             'externalId' => $context['external_id'],[m
+             'kycMode' => 'BIOMETRIC_KYC',[m
+             'kycStatus' => 'initiated',[m
+[31m-            'referenceId' => 'manual-provider-response-reference',[m
+[32m+[m[32m            'referenceId' => $context['provider_reference_id'],[m
+         ]);[m
+ [m
+         $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);[m
+[36m@@ -53,11 +53,10 @@[m [mpublic function test_manual_submit_uses_metadata_applicant_without_entity_webhoo[m
+         $this->assertStringContainsString('/submitKyc', $calls->path);[m
+         $this->assertSame('applicant', $calls->payload['entityType']);[m
+         $this->assertSame('biometric_kyc', $calls->payload['kycMode']);[m
+[31m-        $this->assertTrue(Str::isUuid($calls->payload['entityReferenceId']));[m
+[31m-        $this->assertNotSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);[m
+[32m+[m[32m        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);[m
+         $this->assertStringStartsNotWith('origin-wallet-manual-', $calls->payload['entityReferenceId']);[m
+         $this->assertSame($biometricUrl, $result['biometric_url']);[m
+[31m-        $this->assertSame('manual-provider-response-reference', $result['provider_reference_id']);[m
+[32m+[m[32m        $this->assertSame($context['provider_reference_id'], $result['provider_reference_id']);[m
+         $this->assertSame('accepted', $result['state']);[m
+         $this->assertSame('applicant', $result['entity_type']);[m
+         $this->assertSame($context['external_id'], $result['external_id']);[m
+[36m@@ -67,7 +66,7 @@[m [mpublic function test_manual_submit_uses_metadata_applicant_without_entity_webhoo[m
+         $attempt = collect($attempts)->sole();[m
+         $this->assertTrue($attempt['manual_admin_action']);[m
+         $this->assertStringStartsWith('origin-wallet-manual-', $attempt['manual_reference_id']);[m
+[31m-        $this->assertNotSame($calls->payload['entityReferenceId'], $attempt['manual_reference_id']);[m
+[32m+[m[32m        $this->assertNotSame($calls->payload['entityReferenceId'], $calls->externalReference);[m
+         $this->assertSame($attempt['manual_reference_id'], $calls->externalReference);[m
+         $this->assertSame($biometricUrl, $attempt['biometric_url']);[m
+         $this->assertSame(substr(hash('sha256', $biometricUrl), 0, 16), $attempt['biometric_url_fingerprint']);[m
+[36m@@ -115,6 +114,28 @@[m [mpublic function test_success_without_url_is_preserved_without_fabricating_one():[m
+         $this->assertArrayNotHasKey('biometric_url', $attempt);[m
+     }[m
+ [m
+[32m+[m[32m    public function test_failed_manual_submit_attempt_is_recorded_with_internal_reference(): void[m
+[32m+[m[32m    {[m
+[32m+[m[32m        $context = $this->context();[m
+[32m+[m[32m        $calls = $this->mockResponse($context, [[m
+[32m+[m[32m            'errorCode' => 'invalid_input',[m
+[32m+[m[32m            'errors' => [['code' => 'invalid_input', 'field' => 'entityReferenceId']],[m
+[32m+[m[32m        ], 400);[m
+[32m+[m
+[32m+[m[32m        $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);[m
+[32m+[m
+[32m+[m[32m        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);[m
+[32m+[m[32m        $this->assertStringStartsWith('origin-wallet-manual-', $calls->externalReference);[m
+[32m+[m[32m        $this->assertSame('rejected', $result['state']);[m
+[32m+[m[32m        $this->assertSame(400, $result['provider_http_status']);[m
+[32m+[m
+[32m+[m[32m        $attempt = collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole();[m
+[32m+[m[32m        $this->assertSame('rejected', $attempt['state']);[m
+[32m+[m[32m        $this->assertSame(400, $attempt['provider_http_status']);[m
+[32m+[m[32m        $this->assertSame($calls->externalReference, $attempt['manual_reference_id']);[m
+[32m+[m[32m        $this->assertArrayNotHasKey('biometric_url', $attempt);[m
+[32m+[m[32m    }[m
+[32m+[m
+     private function context(): array[m
+     {[m
+         $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);[m
+[36m@@ -187,7 +208,7 @@[m [mprivate function context(): array[m
+         ];[m
+     }[m
+ [m
+[31m-    private function mockResponse(array $context, array $body): object[m
+[32m+[m[32m    private function mockResponse(array $context, array $body, int $status = 200): object[m
+     {[m
+         $calls = new class[m
+         {[m
+[36m@@ -200,14 +221,14 @@[m [mprivate function mockResponse(array $context, array $body): object[m
+             public string $externalReference = '';[m
+         };[m
+ [m
+[31m-        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $body): void {[m
+[32m+[m[32m        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $body, $status): void {[m
+             $mock->shouldReceive('clientId')->andReturn('client-id');[m
+             $mock->shouldReceive('path')->once()->andReturnUsing(function (string $template, array $values) use ($context): string {[m
+                 $this->assertSame($context['account']->external_customer_id, $values['customer']);[m
+ [m
+                 return "/api/v5/client/{$values['client']}/customer/{$values['customer']}/submitKyc";[m
+             });[m
+[31m-            $mock->shouldReceive('post')->once()->andReturnUsing(function (...$arguments) use ($calls, $context, $body): Response {[m
+[32m+[m[32m            $mock->shouldReceive('post')->once()->andReturnUsing(function (...$arguments) use ($calls, $context, $body, $status): Response {[m
+                 $calls->count++;[m
+                 $calls->path = $arguments[0];[m
+                 $calls->payload = $arguments[1];[m
+[36m@@ -219,12 +240,12 @@[m [mprivate function mockResponse(array $context, array $body): object[m
+                     'external_reference' => $arguments[5],[m
+                     'request_method' => 'POST',[m
+                     'request_url' => '/safe/submitKyc',[m
+[31m-                    'response_status' => 200,[m
+[31m-                    'response_body' => app(NiumSafeValueProjector::class)->apiResponseBody($body, 200),[m
+[31m-                    'is_success' => true,[m
+[32m+[m[32m                    'response_status' => $status,[m
+[32m+[m[32m                    'response_body' => app(NiumSafeValueProjector::class)->apiResponseBody($body, $status),[m
+[32m+[m[32m                    'is_success' => $status >= 200 && $status < 300,[m
+                 ]);[m
+ [m
+[31m-                return new Response(new \GuzzleHttp\Psr7\Response(200, [], json_encode($body, JSON_THROW_ON_ERROR)));[m
+[32m+[m[32m                return new Response(new \GuzzleHttp\Psr7\Response($status, [], json_encode($body, JSON_THROW_ON_ERROR)));[m
+             });[m
+         });[m
+ [m

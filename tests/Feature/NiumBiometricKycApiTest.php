@@ -90,7 +90,7 @@ class NiumBiometricKycApiTest extends TestCase
         $user = User::factory()->create();
         $url = 'https://idv.nium.com/retry-session';
         $this->createNiumAccount($user, [
-            'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', $url),
+            'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', $url, 'retry'),
         ], [$this->entity('retry')]);
 
         $this->withToken($this->issueTokenFor($user))
@@ -104,7 +104,7 @@ class NiumBiometricKycApiTest extends TestCase
     {
         $user = User::factory()->create();
         $this->createNiumAccount($user, [
-            'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', null),
+            'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', null, 'retry'),
         ], [$this->entity('retry')]);
 
         $this->withToken($this->issueTokenFor($user))
@@ -116,13 +116,23 @@ class NiumBiometricKycApiTest extends TestCase
     public function test_mismatched_applicant_or_reference_returns_null(): void
     {
         foreach ([
-            $this->entity('retry', externalId: 'origin-wallet-applicant-other'),
-            $this->entity('retry', referenceId: 'reference-other'),
-        ] as $entity) {
+            ['externalId' => 'origin-wallet-applicant-other', 'referenceId' => 'reference-current'],
+            ['externalId' => 'origin-wallet-applicant-current', 'referenceId' => 'reference-other'],
+        ] as $identifiers) {
             $user = User::factory()->create();
-            $this->createNiumAccount($user, [
-                'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', 'https://idv.nium.com/wrong-applicant'),
-            ], [$entity]);
+            $account = $this->createNiumAccount($user, [
+                'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', null, 'retry'),
+            ]);
+            $this->recordCustomerGet($account, [
+                'customerHashId' => $account->external_customer_id,
+                'applicant' => [
+                    ...$identifiers,
+                    'entityType' => 'applicant',
+                    'kycMode' => 'biometric_kyc',
+                    'kycStatus' => 'retry',
+                    'biometricUrl' => 'https://idv.nium.com/wrong-applicant',
+                ],
+            ]);
 
             $this->withToken($this->issueTokenFor($user))
                 ->getJson("/api/user/users/{$user->id}/kyc-profile")
@@ -134,13 +144,16 @@ class NiumBiometricKycApiTest extends TestCase
     public function test_matching_persisted_customer_get_supplies_url_removed_from_attempt(): void
     {
         $user = User::factory()->create();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
         $url = 'https://idv.nium.com/customer-get-retry-session';
         $account = $this->createNiumAccount($user, [
-            'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', null),
-        ], [$this->entity('retry')]);
+            'current' => $this->attempt('accepted', '2026-10-02T00:00:00Z', null, 'retry'),
+        ]);
         $this->recordCustomerGet($account, [
             'customerHashId' => $account->external_customer_id,
             'applicant' => [
+                'entityType' => 'applicant',
                 'externalId' => 'origin-wallet-applicant-current',
                 'referenceId' => 'reference-current',
                 'kycMode' => 'biometric_kyc',
@@ -154,9 +167,15 @@ class NiumBiometricKycApiTest extends TestCase
             ->assertOk()
             ->assertJsonPath('biometric_kyc.status', 'retry')
             ->assertJsonPath('biometric_kyc.url', $url);
+
+        $this->withToken($this->issueTokenFor($admin))
+            ->getJson("/api/admin/users/{$user->id}/kyc-profile")
+            ->assertOk()
+            ->assertJsonPath('biometric_kyc.status', 'retry')
+            ->assertJsonPath('biometric_kyc.url', $url);
     }
 
-    private function createNiumAccount(User $user, array $attempts, array $entities): UserProviderAccount
+    private function createNiumAccount(User $user, array $attempts, array $entities = []): UserProviderAccount
     {
         $provider = IntegrationProvider::query()->firstOrCreate(
             ['code' => 'nium'],
@@ -174,12 +193,13 @@ class NiumBiometricKycApiTest extends TestCase
         ]);
     }
 
-    private function attempt(string $state, string $updatedAt, ?string $url): array
+    private function attempt(string $state, string $updatedAt, ?string $url, string $status = 'initiated'): array
     {
         return [
             'state' => $state,
-            'kyc_status' => 'initiated',
+            'entity_kyc_status' => $status,
             'kyc_mode' => 'biometric_kyc',
+            'entity_type' => 'applicant',
             'external_id' => 'origin-wallet-applicant-current',
             'biometric_url' => $url,
             'biometric_url_fingerprint' => $url === null ? null : hash('sha256', $url),
