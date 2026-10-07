@@ -37,25 +37,37 @@ class UserKycSubmissionController extends Controller
     public function submitKyc(User $user, NiumHkManualSubmitKycService $submitKycService): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
+        $submitLock = Cache::lock("manual-nium-submit-kyc:{$user->id}", 120);
 
-        try {
-            $attempt = $submitKycService->submit($user);
-        } catch (RuntimeException $exception) {
-            return response()->json(['message' => $exception->getMessage()], 422);
+        if (! $submitLock->get()) {
+            return response()->json([
+                'message' => 'Manual Nium Submit KYC is already being processed for this customer.',
+                'code' => 'manual_nium_submit_kyc_in_progress',
+            ], 409);
         }
 
-        $successful = in_array($attempt['state'] ?? null, ['accepted', 'response_review'], true);
+        try {
+            try {
+                $attempt = $submitKycService->submit($user);
+            } catch (RuntimeException $exception) {
+                return response()->json(['message' => $exception->getMessage()], 422);
+            }
 
-        return response()->json([
-            'message' => $successful
-                ? 'Nium Submit KYC completed.'
-                : 'Nium Submit KYC did not complete successfully.',
-            'kyc_status' => $attempt['kyc_status'] ?? null,
-            'kyc_mode' => $attempt['kyc_mode'] ?? null,
-            'reference_id' => $attempt['provider_reference_id'] ?? null,
-            'biometric_url' => $attempt['biometric_url'] ?? null,
-            'state' => $attempt['state'] ?? null,
-        ], $successful ? 200 : 502);
+            $successful = in_array($attempt['state'] ?? null, ['accepted', 'response_review'], true);
+
+            return response()->json([
+                'message' => $successful
+                    ? 'Nium Submit KYC completed.'
+                    : 'Nium Submit KYC did not complete successfully.',
+                'kyc_status' => $attempt['kyc_status'] ?? null,
+                'kyc_mode' => $attempt['kyc_mode'] ?? null,
+                'reference_id' => $attempt['provider_reference_id'] ?? null,
+                'biometric_url' => $attempt['biometric_url'] ?? null,
+                'state' => $attempt['state'] ?? null,
+            ], $successful ? 200 : 502);
+        } finally {
+            $submitLock->release();
+        }
     }
 
     public function index(Request $request): JsonResponse

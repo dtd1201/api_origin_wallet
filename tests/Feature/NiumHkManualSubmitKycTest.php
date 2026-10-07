@@ -32,22 +32,23 @@ final class NiumHkManualSubmitKycTest extends TestCase
             ->assertForbidden();
     }
 
-    public function test_manual_submit_uses_existing_customer_and_persists_real_biometric_url(): void
+    public function test_manual_submit_uses_metadata_applicant_without_entity_webhook_and_persists_real_biometric_url(): void
     {
         $context = $this->context();
         $biometricUrl = 'https://verify.example.test/real-nium-session-token';
         $calls = $this->mockResponse($context, [
             'biometricUrl' => $biometricUrl,
             'customerHashId' => $context['account']->external_customer_id,
-            'entityType' => 'applicant',
+            'entityType' => 'APPLICANT',
             'externalId' => $context['external_id'],
-            'kycMode' => 'biometric_kyc',
+            'kycMode' => 'BIOMETRIC_KYC',
             'kycStatus' => 'initiated',
             'referenceId' => 'nium-reference-123',
         ]);
 
         $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
 
+        $this->assertDatabaseMissing('webhook_events', ['event_type' => 'CUSTOMER_ENTITY_KYC_STATUS']);
         $this->assertSame(1, $calls->count);
         $this->assertStringContainsString('/submitKyc', $calls->path);
         $this->assertSame('applicant', $calls->payload['entityType']);
@@ -55,6 +56,10 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertStringStartsWith('origin-wallet-manual-', $calls->payload['entityReferenceId']);
         $this->assertSame($biometricUrl, $result['biometric_url']);
         $this->assertSame('nium-reference-123', $result['provider_reference_id']);
+        $this->assertSame('accepted', $result['state']);
+        $this->assertSame('applicant', $result['entity_type']);
+        $this->assertSame($context['external_id'], $result['external_id']);
+        $this->assertSame('biometric_kyc', $result['kyc_mode']);
 
         $attempts = $context['account']->fresh()->metadata['nium_submit_kyc_attempts'];
         $attempt = collect($attempts)->sole();
@@ -142,19 +147,29 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'customer_id_verified_at' => now(),
             'reconciliation_status' => 'reconciled',
             'status' => 'pending',
+            'metadata' => [],
         ]);
         $externalId = 'origin-wallet-applicant-'.$person->id;
+        $account->forceFill(['metadata' => [
+            'nium_entity_kyc_states' => [
+                'ref_applicant' => [
+                    'entity_type' => 'applicant',
+                    'external_id' => $externalId,
+                    'kyc_status' => 'kyc_required',
+                    'provider_reference_id' => '7205cfe0-bf31-415e-b07d-e911b7e9d58e',
+                    'updated_at' => now()->toISOString(),
+                ],
+            ],
+        ]])->save();
         WebhookEvent::query()->create([
             'provider_id' => $provider->id,
             'event_id' => (string) Str::uuid(),
-            'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS',
+            'event_type' => 'CUSTOMER_STATUS_WEBHOOK',
             'external_resource_id' => $account->external_customer_id,
             'payload' => [
                 'customerHashId' => $account->external_customer_id,
-                'externalId' => $externalId,
-                'entityType' => 'applicant',
-                'referenceId' => (string) Str::uuid(),
-                'kycStatus' => 'kyc_required',
+                'status' => 'pending',
+                'subStatus' => 'awaiting_kyc',
             ],
             'processing_status' => 'processed',
             'processed_at' => now(),

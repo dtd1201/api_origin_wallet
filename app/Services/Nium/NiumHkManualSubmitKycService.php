@@ -7,7 +7,6 @@ use App\Models\KycProfile;
 use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use App\Models\WebhookEvent;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
@@ -106,19 +105,19 @@ final class NiumHkManualSubmitKycService
             throw new RuntimeException('The existing Nium customer is not eligible for manual HK Submit KYC.');
         }
 
-        $entity = WebhookEvent::query()
-            ->where('provider_id', $account->provider_id)
-            ->where('event_type', 'CUSTOMER_ENTITY_KYC_STATUS')
-            ->where('external_resource_id', $account->external_customer_id)
-            ->where('processing_status', 'processed')
-            ->whereNotNull('processed_at')
-            ->latest('processed_at')
-            ->latest('id')
-            ->get()
-            ->first(fn (WebhookEvent $event): bool => ($event->payload['entityType'] ?? null) === 'applicant'
-                && filled($event->payload['externalId'] ?? null));
+        $entities = collect((array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []))
+            ->filter(fn (mixed $entity): bool => is_array($entity)
+                && ($entity['entity_type'] ?? null) === 'applicant'
+                && ($entity['kyc_status'] ?? null) === 'kyc_required'
+                && filled($entity['external_id'] ?? null)
+                && filled($entity['provider_reference_id'] ?? null))
+            ->values();
 
-        $externalId = trim((string) ($entity?->payload['externalId'] ?? ''));
+        if ($entities->count() !== 1) {
+            throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
+        }
+
+        $externalId = trim((string) $entities->sole()['external_id']);
         if (preg_match('/^origin-wallet-(?:person|applicant)-(\d+)$/', $externalId, $matches) !== 1) {
             throw new RuntimeException('No verified Nium applicant entity is available for manual Submit KYC.');
         }
@@ -190,9 +189,9 @@ final class NiumHkManualSubmitKycService
             $log = $this->attemptLog($context);
             $attempt = array_filter([
                 'state' => $state,
-                'kyc_status' => is_string($kycStatus) ? $kycStatus : null,
-                'kyc_mode' => is_string($kycMode) ? $kycMode : 'biometric_kyc',
-                'entity_type' => is_string($entityType) ? $entityType : $context['entity_type'],
+                'kyc_status' => is_string($kycStatus) ? strtolower($kycStatus) : null,
+                'kyc_mode' => is_string($kycMode) ? strtolower($kycMode) : 'biometric_kyc',
+                'entity_type' => is_string($entityType) ? strtolower($entityType) : $context['entity_type'],
                 'external_id' => is_string($externalId) ? $externalId : $context['external_id'],
                 'provider_http_status' => $httpStatus,
                 'provider_reference_id' => is_string($providerReference) ? $providerReference : null,
@@ -228,11 +227,11 @@ final class NiumHkManualSubmitKycService
 
     private function validResponse(array $body, array $context): bool
     {
-        return ($body['entityType'] ?? null) === $context['entity_type']
+        return strtolower((string) ($body['entityType'] ?? '')) === $context['entity_type']
             && filled($body['referenceId'] ?? null)
             && (! isset($body['externalId']) || $body['externalId'] === $context['external_id'])
-            && in_array($body['kycStatus'] ?? null, ['initiated', 'submitted'], true)
-            && ($body['kycMode'] ?? null) === 'biometric_kyc';
+            && in_array(strtolower((string) ($body['kycStatus'] ?? '')), ['initiated', 'submitted'], true)
+            && strtolower((string) ($body['kycMode'] ?? '')) === 'biometric_kyc';
     }
 
     private function responseObject(Response $response): array
