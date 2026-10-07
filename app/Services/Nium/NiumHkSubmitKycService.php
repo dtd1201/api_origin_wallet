@@ -19,6 +19,7 @@ final class NiumHkSubmitKycService
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumHkSubmitKycPayloadFactory $payloadFactory,
+        private readonly NiumSubmitKycBiometricUrlResolver $biometricUrlResolver,
     ) {}
 
     public function submit(WebhookEvent $event): string
@@ -65,6 +66,17 @@ final class NiumHkSubmitKycService
 
         $body = $this->responseObject($response);
         $responseUrl = $body['biometricUrl'] ?? $body['redirectUrl'] ?? null;
+        if ($context['entity_type'] === 'applicant'
+            && (! is_string($responseUrl) || trim($responseUrl) === '')) {
+            $responseUrl = $this->biometricUrlResolver->resolve(
+                $context['account'],
+                $context['external_id'],
+                $context['reference_id'],
+            );
+            if ($responseUrl !== null) {
+                $body['biometricUrl'] = $responseUrl;
+            }
+        }
         $state = $this->validResponse($body, $context) ? 'accepted' : 'response_review';
         $this->mark($context, $state, $response->status(), $responseUrl, $body['referenceId'] ?? null);
 
@@ -273,6 +285,12 @@ final class NiumHkSubmitKycService
                 'external_id' => $context['external_id'],
                 'provider_http_status' => $httpStatus,
                 'provider_reference_id' => $providerReference,
+                'biometric_url' => is_string($redirectUrl) && trim($redirectUrl) !== ''
+                    ? $redirectUrl
+                    : null,
+                'biometric_url_fingerprint' => is_string($redirectUrl) && trim($redirectUrl) !== ''
+                    ? substr(hash('sha256', $redirectUrl), 0, 16)
+                    : null,
                 'redirect_url_fingerprint' => is_string($redirectUrl) && trim($redirectUrl) !== ''
                     ? substr(hash('sha256', $redirectUrl), 0, 16)
                     : null,

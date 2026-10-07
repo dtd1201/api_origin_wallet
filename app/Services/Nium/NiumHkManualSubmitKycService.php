@@ -20,6 +20,7 @@ final class NiumHkManualSubmitKycService
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumHkSubmitKycPayloadFactory $payloadFactory,
+        private readonly NiumSubmitKycBiometricUrlResolver $biometricUrlResolver,
     ) {}
 
     public function submit(User $user): array
@@ -63,6 +64,13 @@ final class NiumHkManualSubmitKycService
         $body = $this->responseObject($response);
         $biometricUrl = $body['biometricUrl'] ?? $body['redirectUrl'] ?? null;
         $biometricUrl = is_string($biometricUrl) && trim($biometricUrl) !== '' ? $biometricUrl : null;
+        if ($biometricUrl === null) {
+            $biometricUrl = $this->biometricUrlResolver->resolve(
+                $context['account'],
+                $context['external_id'],
+                $context['entity_reference_id'],
+            );
+        }
         $state = $this->validResponse($body, $context) ? 'accepted' : 'response_review';
 
         return $this->finish(

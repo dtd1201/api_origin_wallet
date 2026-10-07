@@ -2,16 +2,18 @@
 
 namespace Tests\Feature;
 
-use App\Jobs\Nium\SubmitNiumHkEntityKycJob;
 use App\Jobs\Nium\ContinueNiumCustomerOnboardingJob;
+use App\Jobs\Nium\SubmitNiumHkEntityKycJob;
+use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\KycProviderSubmission;
-use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Compliance\ComplianceEvidenceService;
+use App\Services\Nium\NiumCustomerDocumentPreparationService;
+use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumHkSubmitKycService;
 use App\Services\Nium\NiumService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -62,7 +64,7 @@ class NiumHkProductionSubmitKycTest extends TestCase
         app(NiumHkSubmitKycService::class)->submit($context['event']);
     }
 
-    #[\PHPUnit\Framework\Attributes\DataProvider('invalidStakeholderExpiry')]
+    #[DataProvider('invalidStakeholderExpiry')]
     public function test_stakeholder_invalid_expiry_fails_before_post(?string $expiry): void
     {
         $context = $this->context('individual_stakeholder', 'origin-wallet-stakeholder-%d');
@@ -73,7 +75,7 @@ class NiumHkProductionSubmitKycTest extends TestCase
             $document->forceFill(['expires_at' => $expiry])->save();
         }
         $this->mockNoPost();
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(RuntimeException::class);
         app(NiumHkSubmitKycService::class)->submit($context['event']);
     }
 
@@ -184,20 +186,85 @@ class NiumHkProductionSubmitKycTest extends TestCase
     {
         $context = $this->context();
         $body = $this->validResponse($context, ['biometricUrl' => 'https://biometric.test/session', 'redirectUrl' => null]);
-        $this->mockResponse($context, $body);
+        $calls = $this->mockResponse($context, $body);
         $this->assertSame('accepted', app(NiumHkSubmitKycService::class)->submit($context['event']));
+        $this->assertSame(1, $calls->count);
+        $this->assertSame(0, $calls->getCount);
     }
 
-    public function test_redirect_url_is_only_fingerprinted_in_new_service_persistence(): void
+    public function test_missing_submit_url_is_retrieved_from_matching_customer_applicant_without_resubmission(): void
+    {
+        $context = $this->context();
+        $biometricUrl = 'https://idv.nium.test/prod/jumio/start?referenceNumber=exact-session';
+        $calls = $this->mockResponseWithCustomerFallback(
+            $context,
+            $this->validResponse($context, ['biometricUrl' => null, 'redirectUrl' => null]),
+            [
+                'customerHashId' => $context['account']->external_customer_id,
+                'status' => 'pending',
+                'subStatus' => 'awaiting_kyc',
+                'applicant' => [
+                    'externalId' => $context['external_id'],
+                    'referenceId' => $context['reference'],
+                    'kycMode' => 'biometric_kyc',
+                    'kycStatus' => 'initiated',
+                    'biometricUrl' => $biometricUrl,
+                ],
+            ],
+        );
+
+        $this->assertSame('accepted', app(NiumHkSubmitKycService::class)->submit($context['event']));
+        $this->assertSame(1, $calls->postCount);
+        $this->assertSame(1, $calls->getCount);
+
+        $attempt = collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole();
+        $this->assertSame($biometricUrl, $attempt['biometric_url']);
+        $this->assertSame(substr(hash('sha256', $biometricUrl), 0, 16), $attempt['biometric_url_fingerprint']);
+        $this->assertStringNotContainsString(
+            $biometricUrl,
+            json_encode($context['account']->fresh()->toArray(), JSON_THROW_ON_ERROR),
+        );
+    }
+
+    public function test_customer_retrieval_does_not_associate_a_different_applicant_url(): void
+    {
+        $context = $this->context();
+        $otherUrl = 'https://idv.nium.test/session-for-another-applicant';
+        $calls = $this->mockResponseWithCustomerFallback(
+            $context,
+            $this->validResponse($context, ['biometricUrl' => null, 'redirectUrl' => null]),
+            [
+                'customerHashId' => $context['account']->external_customer_id,
+                'status' => 'pending',
+                'subStatus' => 'awaiting_kyc',
+                'applicant' => [
+                    'externalId' => $context['external_id'],
+                    'referenceId' => 'different-applicant-reference',
+                    'biometricUrl' => $otherUrl,
+                ],
+            ],
+        );
+
+        $this->assertSame('response_review', app(NiumHkSubmitKycService::class)->submit($context['event']));
+        $this->assertSame(1, $calls->postCount);
+        $this->assertSame(1, $calls->getCount);
+        $attempt = collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole();
+        $this->assertArrayNotHasKey('biometric_url', $attempt);
+    }
+
+    public function test_redirect_url_is_preserved_only_in_protected_attempt_metadata(): void
     {
         $context = $this->context();
         $secret = 'https://redirect.example.test/unique-secret-token';
         $body = $this->validResponse($context, ['redirectUrl' => $secret]);
         $this->mockResponse($context, $body);
         app(NiumHkSubmitKycService::class)->submit($context['event']);
-        $serialized = json_encode($context['account']->fresh()->metadata, JSON_THROW_ON_ERROR);
-        $this->assertStringNotContainsString($secret, $serialized);
-        $this->assertStringContainsString(substr(hash('sha256', $secret), 0, 16), $serialized);
+        $account = $context['account']->fresh();
+        $attempt = collect($account->metadata['nium_submit_kyc_attempts'])->sole();
+        $this->assertSame($secret, $attempt['biometric_url']);
+        $this->assertSame(substr(hash('sha256', $secret), 0, 16), $attempt['biometric_url_fingerprint']);
+        $this->assertStringNotContainsString($secret, json_encode($account->toArray(), JSON_THROW_ON_ERROR));
+        $this->assertStringNotContainsString($secret, ApiRequestLog::query()->get()->toJson());
     }
 
     public function test_job_has_one_try_and_duplicate_execution_is_safe(): void
@@ -234,10 +301,10 @@ class NiumHkProductionSubmitKycTest extends TestCase
             'status' => 'submitted', 'submitted_at' => null,
         ]);
         $job = new ContinueNiumCustomerOnboardingJob($context['user']->id, $context['provider']->id);
-        $job->handle(app(\App\Services\Nium\NiumCustomerDocumentPreparationService::class), app(\App\Services\Nium\NiumCustomerOnboardingService::class), app(ComplianceEvidenceService::class));
+        $job->handle(app(NiumCustomerDocumentPreparationService::class), app(NiumCustomerOnboardingService::class), app(ComplianceEvidenceService::class));
         $first = $submission->fresh()->submitted_at;
         $this->assertNotNull($first);
-        $job->handle(app(\App\Services\Nium\NiumCustomerDocumentPreparationService::class), app(\App\Services\Nium\NiumCustomerOnboardingService::class), app(ComplianceEvidenceService::class));
+        $job->handle(app(NiumCustomerDocumentPreparationService::class), app(NiumCustomerOnboardingService::class), app(ComplianceEvidenceService::class));
         $this->assertTrue($first->equalTo($submission->fresh()->submitted_at));
     }
 
@@ -273,6 +340,7 @@ class NiumHkProductionSubmitKycTest extends TestCase
         $context = compact('provider', 'user', 'profile', 'person', 'account', 'reference', 'externalId', 'entityType');
         $context['external_id'] = $externalId;
         $context['event'] = $this->event($context, $externalId, $reference);
+
         return $context;
     }
 
@@ -296,27 +364,110 @@ class NiumHkProductionSubmitKycTest extends TestCase
 
     private function mockResponse(array $context, array $body, int $status = 200): object
     {
-        $calls = new class { public int $count = 0; public array $payload = []; };
+        $calls = new class
+        {
+            public int $count = 0;
+
+            public int $getCount = 0;
+
+            public array $payload = [];
+        };
         $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $body, $status): void {
             $mock->shouldReceive('clientId')->andReturn('client');
             $mock->shouldReceive('path')->andReturn('/submitKyc');
             $mock->shouldReceive('post')->once()->andReturnUsing(function (...$arguments) use ($calls, $body, $status): Response {
-                $calls->count++; $calls->payload = $arguments[1];
+                $calls->count++;
+                $calls->payload = $arguments[1];
+
                 return new Response(new \GuzzleHttp\Psr7\Response($status, [], json_encode($body, JSON_THROW_ON_ERROR)));
             });
+            $mock->shouldReceive('get')->zeroOrMoreTimes()->andReturnUsing(function () use ($calls): Response {
+                $calls->getCount++;
+
+                return new Response(new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                    'applicant' => ['externalId' => 'non-matching-applicant'],
+                ], JSON_THROW_ON_ERROR)));
+            });
         });
+
+        return $calls;
+    }
+
+    private function mockResponseWithCustomerFallback(
+        array $context,
+        array $submitBody,
+        array $customerBody,
+    ): object {
+        config()->set(
+            'services.nium.customer_get_endpoint',
+            '/api/v5/client/{clientHashId}/customer/{customerHashId}',
+        );
+        $calls = new class
+        {
+            public int $postCount = 0;
+
+            public int $getCount = 0;
+        };
+        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $submitBody, $customerBody): void {
+            $mock->shouldReceive('clientId')->twice()->andReturn('client');
+            $mock->shouldReceive('path')->twice()->andReturnUsing(
+                fn (string $template): string => str_contains($template, 'submitKyc')
+                    ? '/submitKyc'
+                    : '/customer',
+            );
+            $mock->shouldReceive('post')->once()->andReturnUsing(
+                function (...$arguments) use ($calls, $context, $submitBody): Response {
+                    $calls->postCount++;
+                    ApiRequestLog::query()->create([
+                        'provider_id' => $context['provider']->id,
+                        'user_id' => $context['user']->id,
+                        'operation' => 'submit_kyc',
+                        'external_reference' => $arguments[5],
+                        'request_method' => 'POST',
+                        'request_url' => '/safe/submitKyc',
+                        'response_status' => 200,
+                        'response_body' => [],
+                        'is_success' => true,
+                    ]);
+
+                    return new Response(new \GuzzleHttp\Psr7\Response(
+                        200,
+                        [],
+                        json_encode($submitBody, JSON_THROW_ON_ERROR),
+                    ));
+                },
+            );
+            $mock->shouldReceive('get')->once()->andReturnUsing(
+                function () use ($calls, $customerBody): Response {
+                    $calls->getCount++;
+
+                    return new Response(new \GuzzleHttp\Psr7\Response(
+                        200,
+                        [],
+                        json_encode($customerBody, JSON_THROW_ON_ERROR),
+                    ));
+                },
+            );
+        });
+
         return $calls;
     }
 
     private function mockConnectionFailure(): object
     {
-        $calls = new class { public int $count = 0; };
+        $calls = new class
+        {
+            public int $count = 0;
+        };
         $this->mock(NiumService::class, function (MockInterface $mock) use ($calls): void {
-            $mock->shouldReceive('clientId')->andReturn('client'); $mock->shouldReceive('path')->andReturn('/submitKyc');
+            $mock->shouldReceive('clientId')->andReturn('client');
+            $mock->shouldReceive('path')->andReturn('/submitKyc');
             $mock->shouldReceive('post')->once()->andReturnUsing(function () use ($calls): never {
-                $calls->count++; throw new ConnectionException('uncertain');
+                $calls->count++;
+                throw new ConnectionException('uncertain');
             });
         });
+
         return $calls;
     }
 

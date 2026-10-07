@@ -13,6 +13,8 @@ final class NiumProviderAccountMetadataOwnership
         'external_id',
         'entity_kyc_status',
         'entity_status_updated_at',
+        'biometric_url',
+        'biometric_url_fingerprint',
         'redirect_url_fingerprint',
         'submit_kyc_log_id',
         'submit_kyc_log_at',
@@ -92,6 +94,8 @@ final class NiumProviderAccountMetadataOwnership
             'external_id' => $this->safeString($attempt['external_id'] ?? null, 128),
             'entity_kyc_status' => $this->safeString($attempt['entity_kyc_status'] ?? null, 64),
             'entity_status_updated_at' => $this->timestamp($attempt['entity_status_updated_at'] ?? null),
+            'biometric_url' => $this->protectedUrl($attempt['biometric_url'] ?? null),
+            'biometric_url_fingerprint' => $this->fingerprint($attempt['biometric_url_fingerprint'] ?? null, 16),
             'redirect_url_fingerprint' => $this->fingerprint($attempt['redirect_url_fingerprint'] ?? null, 16),
             'submit_kyc_log_id' => $this->positiveInt($attempt['submit_kyc_log_id'] ?? null),
             'submit_kyc_log_at' => $this->timestamp($attempt['submit_kyc_log_at'] ?? null),
@@ -202,6 +206,23 @@ final class NiumProviderAccountMetadataOwnership
     private function fingerprint(mixed $value, int $length): ?string
     {
         return is_string($value) && preg_match('/^[a-f0-9]{'.$length.'}$/', $value) === 1 ? $value : null;
+    }
+
+    private function protectedUrl(mixed $value): ?string
+    {
+        if (! is_string($value) || $value === '' || strlen($value) > 4096) {
+            return null;
+        }
+
+        $parts = parse_url($value);
+
+        return is_array($parts)
+            && strtolower((string) ($parts['scheme'] ?? '')) === 'https'
+            && filled($parts['host'] ?? null)
+            && ! isset($parts['user'])
+            && ! isset($parts['pass'])
+                ? $value
+                : null;
     }
 
     private function timestamp(mixed $value): ?string

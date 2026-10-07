@@ -18,6 +18,8 @@ class NiumProviderAccountMetadataOwnershipTest extends TestCase
                     'state' => 'response_review',
                     'kyc_mode' => 'biometric_kyc',
                     'provider_http_status' => 200,
+                    'biometric_url' => 'https://idv.nium.test/protected-session',
+                    'biometric_url_fingerprint' => str_repeat('b', 16),
                     'identificationNumber' => 'TEST-PII-MUST-NOT-SURVIVE',
                 ],
                 'untrusted-key' => ['state' => 'response_review'],
@@ -34,6 +36,10 @@ class NiumProviderAccountMetadataOwnershipTest extends TestCase
 
         $this->assertSame('nium_pending_awaiting_kyc', $merged['integration_status']);
         $this->assertSame('response_review', $merged['nium_submit_kyc_attempts'][$key]['state']);
+        $this->assertSame(
+            'https://idv.nium.test/protected-session',
+            $merged['nium_submit_kyc_attempts'][$key]['biometric_url'],
+        );
         $this->assertSame('submitting', $merged['nium_sandbox_simulation_submit_kyc_attempt']['state']);
         $this->assertArrayNotHasKey('unknown_metadata', $merged);
         $this->assertArrayNotHasKey('untrusted-key', $merged['nium_submit_kyc_attempts']);

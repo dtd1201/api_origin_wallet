@@ -210,6 +210,9 @@ final class NiumHkManualSubmitKycTest extends TestCase
 
     private function mockResponse(array $context, array $body, int $status = 200): object
     {
+        $needsCustomerGet = $status >= 200 && $status < 300
+            && ! filled($body['biometricUrl'] ?? null)
+            && ! filled($body['redirectUrl'] ?? null);
         $calls = new class
         {
             public int $count = 0;
@@ -221,12 +224,14 @@ final class NiumHkManualSubmitKycTest extends TestCase
             public string $externalReference = '';
         };
 
-        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $body, $status): void {
-            $mock->shouldReceive('clientId')->andReturn('client-id');
-            $mock->shouldReceive('path')->once()->andReturnUsing(function (string $template, array $values) use ($context): string {
+        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $body, $status, $needsCustomerGet): void {
+            $mock->shouldReceive('clientId')->times($needsCustomerGet ? 2 : 1)->andReturn('client-id');
+            $mock->shouldReceive('path')->times($needsCustomerGet ? 2 : 1)->andReturnUsing(function (string $template, array $values) use ($context): string {
                 $this->assertSame($context['account']->external_customer_id, $values['customer']);
 
-                return "/api/v5/client/{$values['client']}/customer/{$values['customer']}/submitKyc";
+                return str_contains($template, 'submitKyc')
+                    ? "/api/v5/client/{$values['client']}/customer/{$values['customer']}/submitKyc"
+                    : "/api/v5/client/{$values['client']}/customer/{$values['customer']}";
             });
             $mock->shouldReceive('post')->once()->andReturnUsing(function (...$arguments) use ($calls, $context, $body, $status): Response {
                 $calls->count++;
@@ -247,6 +252,20 @@ final class NiumHkManualSubmitKycTest extends TestCase
 
                 return new Response(new \GuzzleHttp\Psr7\Response($status, [], json_encode($body, JSON_THROW_ON_ERROR)));
             });
+            if ($needsCustomerGet) {
+                $mock->shouldReceive('get')->once()->andReturn(new Response(
+                    new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                        'customerHashId' => $context['account']->external_customer_id,
+                        'status' => 'pending',
+                        'subStatus' => 'awaiting_kyc',
+                        'applicant' => [
+                            'externalId' => 'origin-wallet-applicant-other',
+                            'referenceId' => 'other-reference',
+                            'biometricUrl' => 'https://verify.example.test/other-applicant',
+                        ],
+                    ], JSON_THROW_ON_ERROR)),
+                ));
+            }
         });
 
         return $calls;

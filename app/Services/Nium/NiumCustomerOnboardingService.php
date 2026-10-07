@@ -229,6 +229,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
         ?User $user = null,
         ?string $verifiedCustomerHashId = null,
         ?string $requestId = null,
+        ?array &$retrievedPayload = null,
     ): UserProviderAccount {
         $customerHashId = $verifiedCustomerHashId ?: $providerAccount->external_customer_id;
         $response = $this->niumService->get(
@@ -242,6 +243,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
             user: $user ?? $providerAccount->user,
         );
         $data = $this->successfulResponse($response, 'Nium V5 customer retrieval failed.');
+        $retrievedPayload = $data;
 
         return $this->stateService->applyAuthenticatedState(
             $providerAccount,
