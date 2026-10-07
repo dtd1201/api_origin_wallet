@@ -43,7 +43,7 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'externalId' => $context['external_id'],
             'kycMode' => 'BIOMETRIC_KYC',
             'kycStatus' => 'initiated',
-            'referenceId' => 'manual-provider-response-reference',
+            'referenceId' => $context['provider_reference_id'],
         ]);
 
         $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
@@ -53,11 +53,10 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertStringContainsString('/submitKyc', $calls->path);
         $this->assertSame('applicant', $calls->payload['entityType']);
         $this->assertSame('biometric_kyc', $calls->payload['kycMode']);
-        $this->assertTrue(Str::isUuid($calls->payload['entityReferenceId']));
-        $this->assertNotSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
+        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
         $this->assertStringStartsNotWith('origin-wallet-manual-', $calls->payload['entityReferenceId']);
         $this->assertSame($biometricUrl, $result['biometric_url']);
-        $this->assertSame('manual-provider-response-reference', $result['provider_reference_id']);
+        $this->assertSame($context['provider_reference_id'], $result['provider_reference_id']);
         $this->assertSame('accepted', $result['state']);
         $this->assertSame('applicant', $result['entity_type']);
         $this->assertSame($context['external_id'], $result['external_id']);
@@ -67,7 +66,7 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $attempt = collect($attempts)->sole();
         $this->assertTrue($attempt['manual_admin_action']);
         $this->assertStringStartsWith('origin-wallet-manual-', $attempt['manual_reference_id']);
-        $this->assertNotSame($calls->payload['entityReferenceId'], $attempt['manual_reference_id']);
+        $this->assertNotSame($calls->payload['entityReferenceId'], $calls->externalReference);
         $this->assertSame($attempt['manual_reference_id'], $calls->externalReference);
         $this->assertSame($biometricUrl, $attempt['biometric_url']);
         $this->assertSame(substr(hash('sha256', $biometricUrl), 0, 16), $attempt['biometric_url_fingerprint']);
@@ -112,6 +111,28 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertSame('accepted', $result['state']);
         $this->assertArrayNotHasKey('biometric_url', $result);
         $attempt = collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole();
+        $this->assertArrayNotHasKey('biometric_url', $attempt);
+    }
+
+    public function test_failed_manual_submit_attempt_is_recorded_with_internal_reference(): void
+    {
+        $context = $this->context();
+        $calls = $this->mockResponse($context, [
+            'errorCode' => 'invalid_input',
+            'errors' => [['code' => 'invalid_input', 'field' => 'entityReferenceId']],
+        ], 400);
+
+        $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
+        $this->assertStringStartsWith('origin-wallet-manual-', $calls->externalReference);
+        $this->assertSame('rejected', $result['state']);
+        $this->assertSame(400, $result['provider_http_status']);
+
+        $attempt = collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole();
+        $this->assertSame('rejected', $attempt['state']);
+        $this->assertSame(400, $attempt['provider_http_status']);
+        $this->assertSame($calls->externalReference, $attempt['manual_reference_id']);
         $this->assertArrayNotHasKey('biometric_url', $attempt);
     }
 
@@ -187,7 +208,7 @@ final class NiumHkManualSubmitKycTest extends TestCase
         ];
     }
 
-    private function mockResponse(array $context, array $body): object
+    private function mockResponse(array $context, array $body, int $status = 200): object
     {
         $calls = new class
         {
@@ -200,14 +221,14 @@ final class NiumHkManualSubmitKycTest extends TestCase
             public string $externalReference = '';
         };
 
-        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $body): void {
+        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $body, $status): void {
             $mock->shouldReceive('clientId')->andReturn('client-id');
             $mock->shouldReceive('path')->once()->andReturnUsing(function (string $template, array $values) use ($context): string {
                 $this->assertSame($context['account']->external_customer_id, $values['customer']);
 
                 return "/api/v5/client/{$values['client']}/customer/{$values['customer']}/submitKyc";
             });
-            $mock->shouldReceive('post')->once()->andReturnUsing(function (...$arguments) use ($calls, $context, $body): Response {
+            $mock->shouldReceive('post')->once()->andReturnUsing(function (...$arguments) use ($calls, $context, $body, $status): Response {
                 $calls->count++;
                 $calls->path = $arguments[0];
                 $calls->payload = $arguments[1];
@@ -219,12 +240,12 @@ final class NiumHkManualSubmitKycTest extends TestCase
                     'external_reference' => $arguments[5],
                     'request_method' => 'POST',
                     'request_url' => '/safe/submitKyc',
-                    'response_status' => 200,
-                    'response_body' => app(NiumSafeValueProjector::class)->apiResponseBody($body, 200),
-                    'is_success' => true,
+                    'response_status' => $status,
+                    'response_body' => app(NiumSafeValueProjector::class)->apiResponseBody($body, $status),
+                    'is_success' => $status >= 200 && $status < 300,
                 ]);
 
-                return new Response(new \GuzzleHttp\Psr7\Response(200, [], json_encode($body, JSON_THROW_ON_ERROR)));
+                return new Response(new \GuzzleHttp\Psr7\Response($status, [], json_encode($body, JSON_THROW_ON_ERROR)));
             });
         });
 
