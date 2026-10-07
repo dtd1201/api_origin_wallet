@@ -16,6 +16,17 @@ final class NiumSubmitKycBiometricUrlResolver
         string $externalId,
         ?string $providerReferenceId,
     ): ?string {
+        $applicant = $this->resolveApplicant($account, $externalId, $providerReferenceId);
+        $biometricUrl = $applicant['biometricUrl'] ?? null;
+
+        return is_string($biometricUrl) && trim($biometricUrl) !== '' ? $biometricUrl : null;
+    }
+
+    public function resolveApplicant(
+        UserProviderAccount $account,
+        string $externalId,
+        ?string $providerReferenceId,
+    ): ?array {
         $customer = null;
 
         try {
@@ -41,8 +52,6 @@ final class NiumSubmitKycBiometricUrlResolver
             return null;
         }
 
-        $biometricUrl = $applicant['biometricUrl'] ?? null;
-
-        return is_string($biometricUrl) && trim($biometricUrl) !== '' ? $biometricUrl : null;
+        return $applicant;
     }
 }

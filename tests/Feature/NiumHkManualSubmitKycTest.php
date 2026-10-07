@@ -77,6 +77,59 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertDatabaseCount('user_provider_accounts', 1);
     }
 
+    public function test_manual_submit_recovers_initiated_applicant_url_without_submit_or_customer_creation(): void
+    {
+        $context = $this->context();
+        $context['account']->forceFill(['metadata' => []])->save();
+        $biometricUrl = 'https://idv.nium.test/prod/jumio/start?referenceNumber=recovered';
+        $calls = new class
+        {
+            public int $getCount = 0;
+        };
+        config()->set(
+            'services.nium.customer_get_endpoint',
+            '/api/v5/client/{clientHashId}/customer/{customerHashId}',
+        );
+        $this->mock(NiumService::class, function (MockInterface $mock) use ($calls, $context, $biometricUrl): void {
+            $mock->shouldReceive('clientId')->once()->andReturn('client-id');
+            $mock->shouldReceive('path')->once()->andReturnUsing(function (string $template, array $values) use ($context): string {
+                $this->assertSame($context['account']->external_customer_id, $values['customer']);
+
+                return "/api/v5/client/{$values['client']}/customer/{$values['customer']}";
+            });
+            $mock->shouldReceive('get')->once()->andReturnUsing(function () use ($calls, $context, $biometricUrl): Response {
+                $calls->getCount++;
+
+                return new Response(new \GuzzleHttp\Psr7\Response(200, [], json_encode([
+                    'customerHashId' => $context['account']->external_customer_id,
+                    'status' => 'pending',
+                    'subStatus' => 'awaiting_kyc',
+                    'applicant' => [
+                        'externalId' => $context['external_id'],
+                        'referenceId' => $context['provider_reference_id'],
+                        'kycMode' => 'biometric_kyc',
+                        'kycStatus' => 'initiated',
+                        'biometricUrl' => $biometricUrl,
+                    ],
+                ], JSON_THROW_ON_ERROR)));
+            });
+            $mock->shouldNotReceive('post');
+        });
+
+        $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame(1, $calls->getCount);
+        $this->assertSame('accepted', $result['state']);
+        $this->assertSame('initiated', $result['kyc_status']);
+        $this->assertSame($context['external_id'], $result['external_id']);
+        $this->assertSame($context['provider_reference_id'], $result['provider_reference_id']);
+        $this->assertSame($biometricUrl, $result['biometric_url']);
+        $this->assertSame(substr(hash('sha256', $biometricUrl), 0, 16), $result['biometric_url_fingerprint']);
+        $this->assertStringStartsWith('origin-wallet-manual-', $result['manual_reference_id']);
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('user_provider_accounts', 1);
+    }
+
     public function test_redirect_url_is_used_as_fallback(): void
     {
         $context = $this->context();
