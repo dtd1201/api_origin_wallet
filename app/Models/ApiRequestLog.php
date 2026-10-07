@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class ApiRequestLog extends Model
 {
@@ -62,5 +63,10 @@ class ApiRequestLog extends Model
     public function relatedTransfer(): BelongsTo
     {
         return $this->belongsTo(Transfer::class, 'related_transfer_id');
+    }
+
+    public function niumExchangeEvidence(): HasOne
+    {
+        return $this->hasOne(NiumApiExchangeEvidence::class);
     }
 }

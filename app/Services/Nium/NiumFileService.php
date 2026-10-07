@@ -6,7 +6,9 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\User;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -14,6 +16,10 @@ use RuntimeException;
 
 class NiumFileService
 {
+    public function __construct(
+        private readonly NiumApiExchangeEvidenceStore $evidenceStore,
+    ) {}
+
     public function createFile(KycDocument $document, ?User $user = null): array
     {
         $diskName = trim((string) ($document->storage_disk
@@ -30,28 +36,63 @@ class NiumFileService
             throw new RuntimeException('The KYC document file could not be opened for Nium upload.');
         }
 
-        $fileName = $this->fileName($document, $path);
-        $fileType = $this->fileType($document, $diskName, $path);
-        $metadata = $this->createMetadata($document, $fileName, $fileType);
-        $requestId = (string) Str::uuid();
-        $url = $this->url(
-            (string) config('services.nium.file_create_endpoint'),
-            ['clientHashId' => $this->clientId()],
-        );
-        $startedAt = microtime(true);
-
         try {
-            $response = Http::timeout((int) config('services.nium.timeout', 30))
-                ->acceptJson()
-                ->withHeaders($this->headers($requestId))
-                ->attach('file', $stream, $fileName, ['Content-Type' => $fileType])
-                ->attach(
-                    'metadata',
-                    json_encode($metadata, JSON_THROW_ON_ERROR),
-                    null,
-                    ['Content-Type' => 'application/json'],
-                )
-                ->post($url);
+            $fileName = $this->fileName($document, $path);
+            $fileType = $this->fileType($document, $diskName, $path);
+            $metadata = $this->createMetadata($document, $fileName, $fileType);
+            $requestId = (string) Str::uuid();
+            $url = $this->url(
+                (string) config('services.nium.file_create_endpoint'),
+                ['clientHashId' => $this->clientId()],
+            );
+            $startedAt = microtime(true);
+            $requestHeaders = $this->headers($requestId);
+            $evidenceRequestBody = json_encode([
+                'capture_type' => 'multipart_metadata',
+                'parts' => [
+                    [
+                        'name' => 'file',
+                        'document_id' => $document->getKey(),
+                        'filename' => $fileName,
+                        'content_type' => $fileType,
+                        'byte_length' => Storage::disk($diskName)->size($path),
+                        'contents_included' => false,
+                    ],
+                    [
+                        'name' => 'metadata',
+                        'content_type' => 'application/json',
+                        'body' => $metadata,
+                    ],
+                ],
+            ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+            try {
+                $response = Http::timeout((int) config('services.nium.timeout', 30))
+                    ->acceptJson()
+                    ->withHeaders($requestHeaders)
+                    ->attach('file', $stream, $fileName, ['Content-Type' => $fileType])
+                    ->attach(
+                        'metadata',
+                        json_encode($metadata, JSON_THROW_ON_ERROR),
+                        null,
+                        ['Content-Type' => 'application/json'],
+                    )
+                    ->post($url);
+            } catch (ConnectionException $exception) {
+                $this->logConnectionFailure(
+                    method: 'POST',
+                    url: $url,
+                    requestId: $requestId,
+                    durationMs: $this->durationMs($startedAt),
+                    user: $user ?? $document->kycProfile?->user,
+                    document: $document,
+                    rawRequestBody: $evidenceRequestBody,
+                    requestContentType: 'multipart/form-data; capture=metadata-only',
+                    requestHeaders: $requestHeaders,
+                );
+
+                throw $exception;
+            }
         } finally {
             fclose($stream);
         }
@@ -67,6 +108,9 @@ class NiumFileService
             durationMs: $this->durationMs($startedAt),
             user: $user ?? $document->kycProfile?->user,
             document: $document,
+            rawRequestBody: $evidenceRequestBody,
+            requestContentType: 'multipart/form-data; capture=metadata-only',
+            requestHeaders: $requestHeaders,
         );
 
         if (! $response->successful()) {
@@ -146,10 +190,27 @@ class NiumFileService
             ],
         );
         $startedAt = microtime(true);
-        $response = Http::timeout((int) config('services.nium.timeout', 30))
-            ->acceptJson()
-            ->withHeaders($this->headers($requestId))
-            ->get($url);
+        $requestHeaders = $this->headers($requestId);
+        try {
+            $response = Http::timeout((int) config('services.nium.timeout', 30))
+                ->acceptJson()
+                ->withHeaders($requestHeaders)
+                ->get($url);
+        } catch (ConnectionException $exception) {
+            $this->logConnectionFailure(
+                method: 'GET',
+                url: $url,
+                requestId: $requestId,
+                durationMs: $this->durationMs($startedAt),
+                user: $user,
+                document: $document,
+                rawRequestBody: '',
+                requestContentType: null,
+                requestHeaders: $requestHeaders,
+            );
+
+            throw $exception;
+        }
         $data = $this->decodedResponse($response);
 
         $this->logResponse(
@@ -162,6 +223,9 @@ class NiumFileService
             durationMs: $this->durationMs($startedAt),
             user: $user,
             document: $document,
+            rawRequestBody: '',
+            requestContentType: null,
+            requestHeaders: $requestHeaders,
         );
 
         if (! $response->successful()) {
@@ -414,6 +478,9 @@ class NiumFileService
         int $durationMs,
         ?User $user,
         ?KycDocument $document,
+        ?string $rawRequestBody,
+        ?string $requestContentType,
+        array $requestHeaders,
     ): void {
         $provider = IntegrationProvider::query()->where('code', 'nium')->first();
 
@@ -421,27 +488,90 @@ class NiumFileService
             return;
         }
 
-        ApiRequestLog::create([
-            'provider_id' => $provider->id,
-            'user_id' => $user?->id,
-            'request_method' => $method,
-            'request_url' => $this->safeEndpointPath($url),
-            'request_headers' => ['x-request-id' => $requestId],
-            'request_body' => array_filter([
-                'kyc_document_id' => $document?->id,
-            ], static fn (mixed $value): bool => $value !== null),
-            'response_status' => $response->status(),
-            'response_headers' => array_filter([
-                'x-request-id' => $response->header('x-request-id'),
-                'content-type' => $response->header('content-type'),
-            ], static fn (mixed $value): bool => $value !== null && $value !== ''),
-            'response_body' => array_filter([
-                'nium_file_id' => $fileId,
-                'state' => $state,
-            ], static fn (mixed $value): bool => $value !== null && $value !== ''),
-            'duration_ms' => $durationMs,
-            'is_success' => $response->successful(),
-        ]);
+        DB::transaction(function () use ($provider, $user, $method, $url, $requestId, $document, $response, $fileId, $state, $durationMs, $requestContentType, $rawRequestBody, $requestHeaders): void {
+            $log = ApiRequestLog::create([
+                'provider_id' => $provider->id,
+                'user_id' => $user?->id,
+                'request_method' => $method,
+                'request_url' => $this->safeEndpointPath($url),
+                'request_headers' => ['x-request-id' => $requestId],
+                'request_body' => array_filter([
+                    'kyc_document_id' => $document?->id,
+                ], static fn (mixed $value): bool => $value !== null),
+                'response_status' => $response->status(),
+                'response_headers' => array_filter([
+                    'x-request-id' => $response->header('x-request-id'),
+                    'content-type' => $response->header('content-type'),
+                ], static fn (mixed $value): bool => $value !== null && $value !== ''),
+                'response_body' => array_filter([
+                    'nium_file_id' => $fileId,
+                    'state' => $state,
+                ], static fn (mixed $value): bool => $value !== null && $value !== ''),
+                'duration_ms' => $durationMs,
+                'is_success' => $response->successful(),
+            ]);
+
+            $this->evidenceStore->persist(
+                log: $log,
+                requestMethod: $method,
+                requestUrl: $this->safeEndpointPath($url),
+                requestContentType: $requestContentType,
+                responseContentType: $response->header('content-type'),
+                rawRequestBody: $rawRequestBody,
+                rawResponseBody: $response->body(),
+                requestHeaders: $requestHeaders,
+                responseHeaders: $response->headers(),
+                responseReceived: true,
+            );
+        }, 3);
+    }
+
+    private function logConnectionFailure(
+        string $method,
+        string $url,
+        string $requestId,
+        int $durationMs,
+        ?User $user,
+        ?KycDocument $document,
+        ?string $rawRequestBody,
+        ?string $requestContentType,
+        array $requestHeaders,
+    ): void {
+        $provider = IntegrationProvider::query()->where('code', 'nium')->first();
+
+        if ($provider === null) {
+            return;
+        }
+
+        DB::transaction(function () use ($provider, $user, $method, $url, $requestId, $document, $durationMs, $requestContentType, $rawRequestBody, $requestHeaders): void {
+            $log = ApiRequestLog::create([
+                'provider_id' => $provider->id,
+                'user_id' => $user?->id,
+                'request_method' => $method,
+                'request_url' => $this->safeEndpointPath($url),
+                'request_headers' => ['x-request-id' => $requestId],
+                'request_body' => array_filter([
+                    'kyc_document_id' => $document?->id,
+                ], static fn (mixed $value): bool => $value !== null),
+                'response_headers' => [],
+                'response_body' => [],
+                'duration_ms' => $durationMs,
+                'is_success' => null,
+            ]);
+
+            $this->evidenceStore->persist(
+                log: $log,
+                requestMethod: $method,
+                requestUrl: $this->safeEndpointPath($url),
+                requestContentType: $requestContentType,
+                responseContentType: null,
+                rawRequestBody: $rawRequestBody,
+                rawResponseBody: null,
+                requestHeaders: $requestHeaders,
+                responseHeaders: [],
+                responseReceived: false,
+            );
+        }, 3);
     }
 
     private function safeEndpointPath(string $url): string

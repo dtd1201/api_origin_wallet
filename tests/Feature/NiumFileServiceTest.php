@@ -6,10 +6,13 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
+use App\Models\NiumApiExchangeEvidence;
 use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
 use App\Services\Nium\NiumFileService;
+use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
@@ -156,6 +159,109 @@ class NiumFileServiceTest extends TestCase
         $this->assertStringNotContainsString('documents/passport-front.png', $serializedLogs);
         $this->assertStringNotContainsString('/remote/private/path', $serializedLogs);
         $this->assertSame(1, ApiRequestLog::query()->count());
+    }
+
+    public function test_file_upload_evidence_preserves_metadata_without_duplicating_binary_contents(): void
+    {
+        $rawFileContents = 'binary-document-contents-must-not-be-duplicated';
+        [$document, $user] = $this->createDocument(
+            type: 'passport_front',
+            originalName: 'passport-front.png',
+            mimeType: 'image/png',
+            contents: $rawFileContents,
+        );
+        $rawResponse = '{"id":"'.self::CREATE_FILE_ID.'","state":"PROCESSING","providerField":"kept exactly"}';
+        Http::fake(['*' => Http::response($rawResponse, 201, ['Content-Type' => 'application/json'])]);
+
+        app(NiumFileService::class)->createFile($document, $user);
+
+        $evidence = NiumApiExchangeEvidence::query()->sole();
+        $request = json_decode($evidence->raw_request_body, true, 512, JSON_THROW_ON_ERROR);
+        $filePart = collect($request['parts'])->firstWhere('name', 'file');
+        $metadataPart = collect($request['parts'])->firstWhere('name', 'metadata');
+
+        $this->assertSame('multipart_metadata', $request['capture_type']);
+        $this->assertSame($document->id, $filePart['document_id']);
+        $this->assertSame('passport-front.png', $filePart['filename']);
+        $this->assertSame('image/png', $filePart['content_type']);
+        $this->assertFalse($filePart['contents_included']);
+        $this->assertSame('passport', $metadataPart['body']['documentType']);
+        $this->assertStringNotContainsString($rawFileContents, $evidence->raw_request_body);
+        $this->assertSame($rawResponse, $evidence->raw_response_body);
+        $this->assertArrayNotHasKey('x-api-key', $evidence->request_headers);
+    }
+
+    public function test_upload_connection_failure_preserves_outbound_evidence_and_rethrows(): void
+    {
+        [$document, $user] = $this->createDocument();
+        Http::fake(['*' => Http::failedConnection('synthetic file upload failure')]);
+
+        try {
+            app(NiumFileService::class)->createFile($document, $user);
+            $this->fail('Expected upload connection failure.');
+        } catch (ConnectionException $exception) {
+            $this->assertSame('synthetic file upload failure', $exception->getMessage());
+        }
+
+        $log = ApiRequestLog::query()->sole();
+        $evidence = $log->niumExchangeEvidence()->sole();
+        $request = json_decode($evidence->raw_request_body, true, 512, JSON_THROW_ON_ERROR);
+
+        $this->assertSame('POST', $log->request_method);
+        $this->assertFalse($evidence->response_received);
+        $this->assertNull($evidence->raw_response_body);
+        $this->assertSame('multipart_metadata', $request['capture_type']);
+        $this->assertArrayNotHasKey('x-api-key', $evidence->request_headers);
+        $this->assertNotEmpty($evidence->request_headers['x-request-id']);
+    }
+
+    public function test_fetch_connection_failure_preserves_outbound_evidence_and_rethrows(): void
+    {
+        Http::fake(['*' => Http::failedConnection('synthetic file fetch failure')]);
+
+        try {
+            app(NiumFileService::class)->fetchFileDetails(self::AVAILABLE_FILE_ID);
+            $this->fail('Expected fetch connection failure.');
+        } catch (ConnectionException $exception) {
+            $this->assertSame('synthetic file fetch failure', $exception->getMessage());
+        }
+
+        $log = ApiRequestLog::query()->sole();
+        $evidence = $log->niumExchangeEvidence()->sole();
+
+        $this->assertSame('GET', $log->request_method);
+        $this->assertFalse($evidence->response_received);
+        $this->assertSame('', $evidence->raw_request_body);
+        $this->assertNull($evidence->raw_response_body);
+        $this->assertArrayNotHasKey('x-api-key', $evidence->request_headers);
+        $this->assertNotEmpty($evidence->request_headers['x-request-id']);
+    }
+
+    public function test_upload_stream_is_closed_when_evidence_preparation_fails(): void
+    {
+        [$document, $user] = $this->createDocument(storeFile: false);
+        $stream = fopen('php://temp', 'r+');
+        fwrite($stream, 'temporary document contents');
+        rewind($stream);
+
+        $disk = \Mockery::mock(FilesystemAdapter::class);
+        $disk->shouldReceive('exists')->once()->andReturnTrue();
+        $disk->shouldReceive('readStream')->once()->andReturn($stream);
+        $disk->shouldReceive('size')->once()->andThrow(new RuntimeException('synthetic size failure'));
+        Storage::shouldReceive('disk')->with('kyc_private')->andReturn($disk);
+        Http::fake();
+
+        try {
+            app(NiumFileService::class)->createFile($document, $user);
+            $this->fail('Expected evidence preparation failure.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('synthetic size failure', $exception->getMessage());
+        }
+
+        $this->assertFalse(is_resource($stream));
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
     }
 
     public function test_successful_fetch_returns_only_sanitized_available_details(): void

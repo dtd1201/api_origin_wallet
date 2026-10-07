@@ -6,6 +6,7 @@ use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
+use App\Services\Nium\NiumApiExchangeEvidenceStore;
 use App\Services\Nium\NiumEvidencePersistenceException;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Support\SensitiveDataSanitizer;
@@ -13,9 +14,11 @@ use Carbon\Carbon;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Throwable;
@@ -29,6 +32,7 @@ class ProviderHttpClient implements ProviderClient
         private readonly SensitiveDataSanitizer $sensitiveDataSanitizer = new SensitiveDataSanitizer,
         private readonly ?NiumSafeValueProjector $niumSafeValueProjector = null,
         private readonly array $operationalContext = [],
+        private readonly ?NiumApiExchangeEvidenceStore $niumEvidenceStore = null,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -81,7 +85,15 @@ class ProviderHttpClient implements ProviderClient
         ?User $user,
         ?int $relatedTransferId,
     ): Response {
+        $capturedRequestBody = null;
+        $capturedRequestHeaders = [];
         $request = $this->baseRequest();
+        if ($this->serviceConfigKey === 'nium') {
+            $request = $request->beforeSending(function (Request $outgoing) use (&$capturedRequestBody, &$capturedRequestHeaders): void {
+                $capturedRequestBody = $outgoing->body();
+                $capturedRequestHeaders = $outgoing->headers();
+            });
+        }
         $url = $this->buildUrl($path);
         $startedAt = microtime(true);
         $startedAtUtc = CarbonImmutable::now('UTC');
@@ -110,12 +122,15 @@ class ProviderHttpClient implements ProviderClient
                     $startedAtUtc,
                     CarbonImmutable::now('UTC'),
                     $this->connectionOutcome($exception),
+                    $capturedRequestBody,
+                    $capturedRequestHeaders,
                 );
             }
 
             throw $exception;
         }
 
+        $rawResponseBody = $this->serviceConfigKey === 'nium' ? $response->body() : null;
         $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
 
         $this->logRequest(
@@ -128,6 +143,9 @@ class ProviderHttpClient implements ProviderClient
             $durationMs,
             $startedAtUtc,
             CarbonImmutable::now('UTC'),
+            $capturedRequestBody,
+            $capturedRequestHeaders,
+            $rawResponseBody,
         );
 
         return $response;
@@ -401,9 +419,12 @@ class ProviderHttpClient implements ProviderClient
         int $durationMs,
         CarbonImmutable $startedAt,
         CarbonImmutable $finishedAt,
+        ?string $capturedRequestBody,
+        array $capturedRequestHeaders,
+        ?string $rawResponseBody,
     ): void {
         if ($this->serviceConfigKey === 'nium') {
-            [$responseBody, $malformedJson] = $this->decodedResponse($response);
+            [$responseBody, $malformedJson] = $this->decodedResponse($rawResponseBody ?? '');
             $this->logNiumRequest(
                 $user,
                 $relatedTransferId,
@@ -416,6 +437,9 @@ class ProviderHttpClient implements ProviderClient
                 $startedAt,
                 $finishedAt,
                 $malformedJson ? 'malformed_response' : 'response_received',
+                $capturedRequestBody,
+                $capturedRequestHeaders,
+                $rawResponseBody,
             );
 
             return;
@@ -454,6 +478,9 @@ class ProviderHttpClient implements ProviderClient
         CarbonImmutable $startedAt,
         CarbonImmutable $finishedAt,
         string $transportOutcome,
+        ?string $capturedRequestBody,
+        array $capturedRequestHeaders,
+        ?string $rawResponseBody = null,
     ): void {
         $requestId = collect($this->headers)
             ->first(fn ($value, $key) => strtolower((string) $key) === 'x-request-id');
@@ -508,7 +535,30 @@ class ProviderHttpClient implements ProviderClient
         ];
 
         try {
-            ApiRequestLog::create($attributes);
+            DB::transaction(function () use (
+                $attributes,
+                $method,
+                $url,
+                $response,
+                $capturedRequestBody,
+                $capturedRequestHeaders,
+                $rawResponseBody,
+            ): void {
+                $log = ApiRequestLog::create($attributes);
+                $store = $this->niumEvidenceStore ?? app(NiumApiExchangeEvidenceStore::class);
+                $store->persist(
+                    log: $log,
+                    requestMethod: $method,
+                    requestUrl: $this->safeNiumUrl($url),
+                    requestContentType: $this->headerValue($capturedRequestHeaders, 'content-type'),
+                    responseContentType: $response?->header('content-type'),
+                    rawRequestBody: $capturedRequestBody,
+                    rawResponseBody: $rawResponseBody,
+                    requestHeaders: $capturedRequestHeaders,
+                    responseHeaders: $response?->headers() ?? [],
+                    responseReceived: $response !== null,
+                );
+            }, 3);
         } catch (Throwable $exception) {
             throw new NiumEvidencePersistenceException([
                 'client_hash_id' => $attributes['client_hash_id'],
@@ -524,10 +574,23 @@ class ProviderHttpClient implements ProviderClient
         }
     }
 
-    private function decodedResponse(Response $response): array
+    private function headerValue(array $headers, string $name): ?string
     {
-        $body = $response->body();
+        foreach ($headers as $headerName => $values) {
+            if (strtolower((string) $headerName) !== strtolower($name)) {
+                continue;
+            }
 
+            $values = is_array($values) ? $values : [$values];
+
+            return isset($values[0]) && is_scalar($values[0]) ? (string) $values[0] : null;
+        }
+
+        return null;
+    }
+
+    private function decodedResponse(string $body): array
+    {
         if ($body === '') {
             return [[], false];
         }
