@@ -24,10 +24,14 @@ final class NiumHkManualSubmitKycService
         private readonly NiumSubmitKycBiometricUrlResolver $biometricUrlResolver,
     ) {}
 
-    public function submit(User $user): array
+    public function submit(User $user, ?string $idempotencyKey = null): array
     {
-        $context = $this->context($user);
-        $this->claim($context);
+        $context = $this->context($user, $idempotencyKey);
+        $existingAttempt = $this->claim($context);
+
+        if ($existingAttempt !== null) {
+            return $existingAttempt;
+        }
 
         if (isset($context['recovered_applicant'])) {
             $applicant = $context['recovered_applicant'];
@@ -102,7 +106,7 @@ final class NiumHkManualSubmitKycService
         );
     }
 
-    private function context(User $user): array
+    private function context(User $user, ?string $idempotencyKey): array
     {
         $accounts = UserProviderAccount::query()
             ->with(['provider', 'user.kycProfile.relatedPersons'])
@@ -134,13 +138,18 @@ final class NiumHkManualSubmitKycService
         $entities = $entityStates
             ->filter(fn (mixed $entity): bool => is_array($entity)
                 && ($entity['entity_type'] ?? null) === 'applicant'
-                && ($entity['kyc_status'] ?? null) === 'kyc_required'
+                && in_array($entity['kyc_status'] ?? null, ['kyc_required', 'retry'], true)
+                && ($entity['kyc_mode'] ?? null) === 'biometric_kyc'
                 && filled($entity['external_id'] ?? null)
                 && filled($entity['provider_reference_id'] ?? null))
             ->values();
 
-        if ($entities->count() !== 1) {
-            return $this->recoveredContext($account, $person, $entityStates);
+        if ($entities->count() > 1) {
+            throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
+        }
+
+        if ($entities->isEmpty()) {
+            return $this->recoveredContext($account, $person, $entityStates, $idempotencyKey);
         }
 
         $entity = $entities->sole();
@@ -160,7 +169,7 @@ final class NiumHkManualSubmitKycService
             throw new RuntimeException('The selected Nium entity is not the approved corporate applicant.');
         }
 
-        $referenceId = 'origin-wallet-manual-'.Str::uuid();
+        $referenceId = $this->manualReferenceId($user, $idempotencyKey);
 
         return [
             'account' => $account,
@@ -176,12 +185,16 @@ final class NiumHkManualSubmitKycService
         UserProviderAccount $account,
         KycRelatedPerson $person,
         Collection $entityStates,
+        ?string $idempotencyKey,
     ): array {
         $localApplicants = $entityStates
             ->filter(fn (mixed $entity): bool => is_array($entity)
                 && ($entity['entity_type'] ?? null) === 'applicant'
                 && filled($entity['external_id'] ?? null))
             ->values();
+        if ($localApplicants->count() > 1) {
+            throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
+        }
         $localApplicant = $localApplicants->count() === 1 ? $localApplicants->sole() : null;
         $externalId = is_array($localApplicant)
             ? trim((string) $localApplicant['external_id'])
@@ -196,11 +209,13 @@ final class NiumHkManualSubmitKycService
             $providerReferenceId,
         );
         $biometricUrl = $applicant['biometricUrl'] ?? null;
+        $kycStatus = strtolower((string) ($applicant['kycStatus'] ?? ''));
 
         if (! is_array($applicant)
-            || strtolower((string) ($applicant['kycStatus'] ?? '')) !== 'initiated'
-            || ! is_string($biometricUrl)
-            || trim($biometricUrl) === '') {
+            || ! in_array($kycStatus, ['kyc_required', 'retry', 'initiated'], true)
+            || strtolower((string) ($applicant['entityType'] ?? '')) !== 'applicant'
+            || strtolower((string) ($applicant['kycMode'] ?? '')) !== 'biometric_kyc'
+            || ($kycStatus === 'initiated' && (! is_string($biometricUrl) || trim($biometricUrl) === ''))) {
             throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
         }
 
@@ -209,14 +224,23 @@ final class NiumHkManualSubmitKycService
             throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
         }
 
-        return [
+        $context = [
             'account' => $account,
             'entity_type' => 'applicant',
             'external_id' => $externalId,
-            'reference_id' => 'origin-wallet-manual-'.Str::uuid(),
+            'reference_id' => $this->manualReferenceId($account->user, $idempotencyKey),
             'entity_reference_id' => $remoteReferenceId,
-            'recovered_applicant' => $applicant,
         ];
+
+        if ($kycStatus === 'initiated') {
+            $context['recovered_applicant'] = $applicant;
+
+            return $context;
+        }
+
+        $context['payload'] = $this->payloadFactory->build($person, 'applicant', $remoteReferenceId);
+
+        return $context;
     }
 
     private function corporateApplicant(KycProfile $profile): KycRelatedPerson
@@ -231,12 +255,24 @@ final class NiumHkManualSubmitKycService
         return $applicant ?? throw new RuntimeException('The approved corporate applicant cannot be resolved.');
     }
 
-    private function claim(array $context): void
+    private function claim(array $context): ?array
     {
-        DB::transaction(function () use ($context): void {
+        return DB::transaction(function () use ($context): ?array {
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
-            data_set($metadata, 'nium_submit_kyc_attempts.'.$this->attemptKey($context['reference_id']), [
+            $key = $this->attemptKey($context['reference_id']);
+            $existing = data_get($metadata, 'nium_submit_kyc_attempts.'.$key);
+
+            if (is_array($existing)) {
+                if (($existing['entity_type'] ?? null) !== $context['entity_type']
+                    || ($existing['external_id'] ?? null) !== $context['external_id']) {
+                    throw new RuntimeException('The Submit KYC idempotency key is already bound to another entity.');
+                }
+
+                return $existing;
+            }
+
+            data_set($metadata, 'nium_submit_kyc_attempts.'.$key, [
                 'state' => 'submitting',
                 'kyc_mode' => 'biometric_kyc',
                 'entity_type' => $context['entity_type'],
@@ -246,6 +282,8 @@ final class NiumHkManualSubmitKycService
                 'updated_at' => now()->toISOString(),
             ]);
             $account->forceFill(['metadata' => $metadata])->save();
+
+            return null;
         }, 3);
     }
 
@@ -326,5 +364,16 @@ final class NiumHkManualSubmitKycService
     private function attemptKey(string $referenceId): string
     {
         return 'manual_'.substr(hash('sha256', $referenceId), 0, 24);
+    }
+
+    private function manualReferenceId(User $user, ?string $idempotencyKey): string
+    {
+        $idempotencyKey = trim((string) $idempotencyKey);
+
+        if ($idempotencyKey === '') {
+            return 'origin-wallet-manual-'.Str::uuid();
+        }
+
+        return 'origin-wallet-manual-'.substr(hash('sha256', $user->id.'|'.$idempotencyKey), 0, 32);
     }
 }

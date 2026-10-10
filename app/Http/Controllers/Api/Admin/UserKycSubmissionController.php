@@ -35,9 +35,13 @@ use Throwable;
 
 class UserKycSubmissionController extends Controller
 {
-    public function submitKyc(User $user, NiumHkManualSubmitKycService $submitKycService): JsonResponse
+    public function submitKyc(Request $request, User $user, NiumHkManualSubmitKycService $submitKycService): JsonResponse
     {
         $user = $this->resolveManageableUser($user);
+        $idempotencyKey = trim((string) $request->header('Idempotency-Key'));
+        if (strlen($idempotencyKey) > 200) {
+            return response()->json(['message' => 'The Idempotency-Key header may not exceed 200 characters.'], 422);
+        }
         $submitLock = Cache::lock("manual-nium-submit-kyc:{$user->id}", 120);
 
         if (! $submitLock->get()) {
@@ -49,7 +53,7 @@ class UserKycSubmissionController extends Controller
 
         try {
             try {
-                $attempt = $submitKycService->submit($user);
+                $attempt = $submitKycService->submit($user, $idempotencyKey !== '' ? $idempotencyKey : null);
             } catch (RuntimeException $exception) {
                 return response()->json(['message' => $exception->getMessage()], 422);
             }
