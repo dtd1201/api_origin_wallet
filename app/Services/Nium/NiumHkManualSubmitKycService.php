@@ -7,6 +7,7 @@ use App\Models\KycProfile;
 use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
+use App\Models\WebhookEvent;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
@@ -149,6 +150,11 @@ final class NiumHkManualSubmitKycService
         }
 
         if ($entities->isEmpty()) {
+            $retryContext = $this->retryEvidenceContext($account, $profile, $person, $idempotencyKey);
+            if ($retryContext !== null) {
+                return $retryContext;
+            }
+
             return $this->recoveredContext($account, $person, $entityStates, $idempotencyKey);
         }
 
@@ -241,6 +247,78 @@ final class NiumHkManualSubmitKycService
         $context['payload'] = $this->payloadFactory->build($person, 'applicant', $remoteReferenceId);
 
         return $context;
+    }
+
+    private function retryEvidenceContext(
+        UserProviderAccount $account,
+        KycProfile $profile,
+        KycRelatedPerson $person,
+        ?string $idempotencyKey,
+    ): ?array {
+        $event = WebhookEvent::query()
+            ->where('provider_id', $account->provider_id)
+            ->where('event_type', 'CUSTOMER_ENTITY_KYC_STATUS')
+            ->where('external_resource_id', $account->external_customer_id)
+            ->where('processing_status', 'processed')
+            ->whereNotNull('processed_at')
+            ->orderByDesc('processed_at')
+            ->orderByDesc('id')
+            ->first();
+        $payload = (array) ($event?->payload ?? []);
+
+        if (($payload['kycStatus'] ?? null) !== 'retry') {
+            return null;
+        }
+
+        $externalId = trim((string) ($payload['externalId'] ?? ''));
+        $providerReferenceId = trim((string) ($payload['referenceId'] ?? ''));
+        if (($payload['entityType'] ?? null) !== 'applicant'
+            || ($payload['kycMode'] ?? null) !== 'biometric_kyc'
+            || $externalId === ''
+            || $providerReferenceId === '') {
+            throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
+        }
+
+        $resolvedPerson = $this->personForExternalId($profile, $externalId);
+        if (! $resolvedPerson->is($person)) {
+            throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
+        }
+
+        $matchingAttempts = collect((array) Arr::get((array) $account->metadata, 'nium_submit_kyc_attempts', []))
+            ->filter(fn (mixed $attempt): bool => is_array($attempt)
+                && ($attempt['state'] ?? null) === 'accepted'
+                && ($attempt['entity_type'] ?? null) === 'applicant'
+                && ($attempt['kyc_mode'] ?? null) === 'biometric_kyc'
+                && ($attempt['entity_kyc_status'] ?? null) === 'retry'
+                && hash_equals($externalId, trim((string) ($attempt['external_id'] ?? '')))
+                && hash_equals($providerReferenceId, trim((string) ($attempt['provider_reference_id'] ?? ''))))
+            ->values();
+
+        if ($matchingAttempts->isEmpty()) {
+            throw new RuntimeException('No unique eligible Nium applicant entity is available for manual Submit KYC.');
+        }
+
+        return [
+            'account' => $account,
+            'entity_type' => 'applicant',
+            'external_id' => $externalId,
+            'reference_id' => $this->manualReferenceId($account->user, $idempotencyKey),
+            'entity_reference_id' => $providerReferenceId,
+            'payload' => $this->payloadFactory->build($resolvedPerson, 'applicant', $providerReferenceId),
+        ];
+    }
+
+    private function personForExternalId(KycProfile $profile, string $externalId): KycRelatedPerson
+    {
+        if (preg_match('/^origin-wallet-(?:person|applicant)-(\d+)$/', $externalId, $matches) !== 1) {
+            throw new RuntimeException('No verified Nium applicant entity is available for manual Submit KYC.');
+        }
+
+        $people = $profile->relatedPersons->where('id', (int) $matches[1])->values();
+
+        return $people->count() === 1
+            ? $people->sole()
+            : throw new RuntimeException('The Nium applicant entity does not match the approved KYC profile.');
     }
 
     private function corporateApplicant(KycProfile $profile): KycRelatedPerson

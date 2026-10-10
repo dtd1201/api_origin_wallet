@@ -161,13 +161,31 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'external_id' => $context['external_id'],
             'manual_reference_id' => 'origin-wallet-manual-old-attempt',
             'provider_reference_id' => $context['provider_reference_id'],
+            'entity_kyc_status' => 'retry',
             'biometric_url' => 'https://verify.example.test/old-session',
             'updated_at' => now()->subMinute()->toISOString(),
         ];
+        $oldAttemptKey = 'ref_'.substr(hash('sha256', $context['provider_reference_id']), 0, 16);
         $metadata = $context['account']->metadata;
-        $metadata['nium_entity_kyc_states']['ref_applicant']['kyc_status'] = 'retry';
-        $metadata['nium_submit_kyc_attempts']['manual_old'] = $oldAttempt;
+        $metadata['nium_entity_kyc_states']['ref_applicant']['kyc_status'] = 'unknown';
+        $metadata['nium_submit_kyc_attempts'][$oldAttemptKey] = $oldAttempt;
         $context['account']->forceFill(['metadata' => $metadata])->save();
+        WebhookEvent::query()->create([
+            'provider_id' => $context['provider']->id,
+            'event_id' => (string) Str::uuid(),
+            'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS',
+            'external_resource_id' => $context['account']->external_customer_id,
+            'payload' => [
+                'customerHashId' => $context['account']->external_customer_id,
+                'entityType' => 'applicant',
+                'externalId' => $context['external_id'],
+                'referenceId' => $context['provider_reference_id'],
+                'kycMode' => 'biometric_kyc',
+                'kycStatus' => 'retry',
+            ],
+            'processing_status' => 'processed',
+            'processed_at' => now(),
+        ]);
 
         $newUrl = 'https://verify.example.test/new-retry-session';
         $calls = $this->mockResponse($context, [
@@ -194,9 +212,46 @@ final class NiumHkManualSubmitKycTest extends TestCase
 
         $attempts = $context['account']->fresh()->metadata['nium_submit_kyc_attempts'];
         $this->assertCount(2, $attempts);
-        $this->assertSame($oldAttempt, $attempts['manual_old']);
+        $this->assertSame($oldAttempt, $attempts[$oldAttemptKey]);
         $this->assertSame($newUrl, app(NiumCurrentBiometricKyc::class)->forUser($context['user'])['url']);
         $this->assertDatabaseCount('user_provider_accounts', 1);
+    }
+
+    public function test_retry_evidence_with_a_mismatched_reference_fails_closed(): void
+    {
+        $context = $this->context();
+        $metadata = $context['account']->metadata;
+        $metadata['nium_entity_kyc_states']['ref_applicant']['kyc_status'] = 'unknown';
+        $metadata['nium_submit_kyc_attempts']['manual_old'] = [
+            'state' => 'accepted',
+            'kyc_mode' => 'biometric_kyc',
+            'entity_type' => 'applicant',
+            'external_id' => $context['external_id'],
+            'provider_reference_id' => $context['provider_reference_id'],
+            'entity_kyc_status' => 'retry',
+        ];
+        $context['account']->forceFill(['metadata' => $metadata])->save();
+        WebhookEvent::query()->create([
+            'provider_id' => $context['provider']->id,
+            'event_id' => (string) Str::uuid(),
+            'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS',
+            'external_resource_id' => $context['account']->external_customer_id,
+            'payload' => [
+                'entityType' => 'applicant',
+                'externalId' => $context['external_id'],
+                'referenceId' => (string) Str::uuid(),
+                'kycMode' => 'biometric_kyc',
+                'kycStatus' => 'retry',
+            ],
+            'processing_status' => 'processed',
+            'processed_at' => now(),
+        ]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('No unique eligible Nium applicant entity');
+
+        app(NiumHkManualSubmitKycService::class)->submit($context['user']);
     }
 
     public function test_retry_rejects_ambiguous_applicant_entities(): void
