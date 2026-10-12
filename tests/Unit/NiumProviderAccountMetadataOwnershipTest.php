@@ -49,4 +49,37 @@ class NiumProviderAccountMetadataOwnershipTest extends TestCase
         $this->assertStringNotContainsString('must-not-survive', $serialized);
         $this->assertStringNotContainsString('local_override', $serialized);
     }
+
+    public function test_manual_and_entity_attempts_survive_projection_with_strict_fields_and_keys(): void
+    {
+        $manualKey = 'manual_'.str_repeat('a', 24);
+        $entityKey = 'entity_'.str_repeat('b', 24);
+        $merged = app(NiumProviderAccountMetadataOwnership::class)->merge([
+            'nium_submit_kyc_attempts' => [
+                $manualKey => [
+                    'state' => 'accepted',
+                    'kyc_mode' => 'biometric_kyc',
+                    'kyc_status' => 'initiated',
+                    'manual_reference_id' => 'origin-wallet-manual-synthetic',
+                    'manual_admin_action' => true,
+                    'updated_at' => '2026-10-12T01:02:03Z',
+                ],
+                $entityKey => [
+                    'state' => 'accepted',
+                    'entity_type' => 'applicant',
+                    'external_id' => 'origin-wallet-applicant-42',
+                    'updated_at' => '2026-10-12T01:02:04Z',
+                ],
+                'manual_'.str_repeat('c', 23) => ['state' => 'accepted'],
+                'manual_'.str_repeat('G', 24) => ['state' => 'accepted'],
+                'ref_'.str_repeat('d', 15) => ['state' => 'accepted'],
+            ],
+        ], []);
+
+        $this->assertSame('initiated', $merged['nium_submit_kyc_attempts'][$manualKey]['kyc_status']);
+        $this->assertSame('origin-wallet-manual-synthetic', $merged['nium_submit_kyc_attempts'][$manualKey]['manual_reference_id']);
+        $this->assertTrue($merged['nium_submit_kyc_attempts'][$manualKey]['manual_admin_action']);
+        $this->assertSame('origin-wallet-applicant-42', $merged['nium_submit_kyc_attempts'][$entityKey]['external_id']);
+        $this->assertCount(2, $merged['nium_submit_kyc_attempts']);
+    }
 }

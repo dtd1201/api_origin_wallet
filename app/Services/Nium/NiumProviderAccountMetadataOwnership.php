@@ -12,6 +12,7 @@ final class NiumProviderAccountMetadataOwnership
         'entity_type',
         'external_id',
         'entity_kyc_status',
+        'kyc_status',
         'entity_status_updated_at',
         'biometric_url',
         'biometric_url_fingerprint',
@@ -21,6 +22,8 @@ final class NiumProviderAccountMetadataOwnership
         'webhook_id',
         'webhook_processed_at',
         'updated_at',
+        'manual_reference_id',
+        'manual_admin_action',
     ];
 
     private const SUBMISSION_FIELDS = [
@@ -66,7 +69,7 @@ final class NiumProviderAccountMetadataOwnership
         $safe = [];
         foreach (array_slice($value, -20, null, true) as $key => $attempt) {
             if (! is_string($key)
-                || preg_match('/^(?:ref_[a-f0-9]{16}|entity_[a-f0-9]{24})$/', $key) !== 1
+                || preg_match('/^(?:ref_[a-f0-9]{16}|entity_[a-f0-9]{24}|manual_[a-f0-9]{24})$/', $key) !== 1
                 || ! is_array($attempt)
                 || array_is_list($attempt)) {
                 continue;
@@ -93,6 +96,7 @@ final class NiumProviderAccountMetadataOwnership
             'entity_type' => in_array($attempt['entity_type'] ?? null, ['applicant', 'individual_stakeholder'], true) ? $attempt['entity_type'] : null,
             'external_id' => $this->safeString($attempt['external_id'] ?? null, 128),
             'entity_kyc_status' => $this->safeString($attempt['entity_kyc_status'] ?? null, 64),
+            'kyc_status' => $this->safeString($attempt['kyc_status'] ?? null, 64),
             'entity_status_updated_at' => $this->timestamp($attempt['entity_status_updated_at'] ?? null),
             'biometric_url' => $this->protectedUrl($attempt['biometric_url'] ?? null),
             'biometric_url_fingerprint' => $this->fingerprint($attempt['biometric_url_fingerprint'] ?? null, 16),
@@ -102,6 +106,10 @@ final class NiumProviderAccountMetadataOwnership
             'webhook_id' => $this->positiveInt($attempt['webhook_id'] ?? null),
             'webhook_processed_at' => $this->timestamp($attempt['webhook_processed_at'] ?? null),
             'updated_at' => $this->timestamp($attempt['updated_at'] ?? null),
+            'manual_reference_id' => $this->safeString($attempt['manual_reference_id'] ?? null, 128),
+            'manual_admin_action' => is_bool($attempt['manual_admin_action'] ?? null)
+                ? $attempt['manual_admin_action']
+                : null,
         ], static fn (mixed $value): bool => $value !== null);
     }
 
