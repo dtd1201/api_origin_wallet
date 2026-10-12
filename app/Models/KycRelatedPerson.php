@@ -18,6 +18,8 @@ class KycRelatedPerson extends Model
         'relationship_type',
         'status',
         'legal_name',
+        'first_name',
+        'last_name',
         'date_of_birth',
         'nationality_country_code',
         'residence_country_code',

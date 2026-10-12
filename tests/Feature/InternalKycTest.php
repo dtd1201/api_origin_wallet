@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
 use App\Services\Currenxie\CurrenxiePayloadMapper;
 use App\Services\Integrations\DataObjects\ProviderOnboardingResult;
+use App\Services\Kyc\KycProfileSnapshot;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Support\PrimaryProvider;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -49,6 +50,252 @@ class InternalKycTest extends TestCase
         $this->assertNull(data_get($profile->metadata, 'nium_kyc_type'));
         $this->assertNull(data_get($profile->metadata, 'nium_v5_fields'));
         Http::assertNothingSent();
+    }
+
+    public function test_individual_submission_persists_passport_name_parts_without_guessing(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->individualKycPayload();
+        $payload['legal_name'] = 'NGUYEN VAN THANH PHUONG';
+        $payload['first_name'] = 'THANH PHUONG';
+        $payload['last_name'] = 'NGUYEN VAN';
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted()
+            ->assertJsonPath('kyc_profile.first_name', 'THANH PHUONG')
+            ->assertJsonPath('kyc_profile.last_name', 'NGUYEN VAN')
+            ->assertJsonPath('kyc_profile.legal_name', 'NGUYEN VAN THANH PHUONG');
+    }
+
+    public function test_new_individual_submission_requires_both_passport_name_parts(): void
+    {
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->individualKycPayload();
+        unset($payload['last_name']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('last_name');
+    }
+
+    public function test_business_submission_requires_and_persists_related_person_passport_names(): void
+    {
+        Http::fake(fn () => Http::response([], 503));
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->businessKycPayload();
+        $payload['related_persons'][0]['first_name'] = 'THANH PHUONG';
+        $payload['related_persons'][0]['last_name'] = 'NGUYEN';
+        $payload['related_persons'][0]['legal_name'] = 'NGUYEN THANH PHUONG';
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted()
+            ->assertJsonPath('kyc_profile.related_persons.0.first_name', 'THANH PHUONG')
+            ->assertJsonPath('kyc_profile.related_persons.0.last_name', 'NGUYEN');
+
+        $this->assertDatabaseHas('kyc_related_persons', [
+            'kyc_profile_id' => $user->kycProfile()->firstOrFail()->id,
+            'first_name' => 'THANH PHUONG',
+            'last_name' => 'NGUYEN',
+            'legal_name' => 'NGUYEN THANH PHUONG',
+        ]);
+
+        unset($payload['related_persons'][1]['first_name']);
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('related_persons.1.first_name');
+    }
+
+    public function test_legacy_frontend_resubmission_preserves_existing_passport_name_fields(): void
+    {
+        Http::fake(fn () => Http::response([], 503));
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->businessKycPayload();
+        $payload['company_directors'] = [[
+            'legal_name' => 'TRAN THI BICH NGOC',
+            'first_name' => 'THI BICH NGOC',
+            'last_name' => 'TRAN',
+            'date_of_birth' => '1980-01-02',
+            'metadata' => ['passport_name_fields_version' => 1],
+        ]];
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        unset($payload['metadata']['passport_name_fields_version']);
+        foreach ($payload['related_persons'] as &$person) {
+            unset($person['first_name'], $person['last_name']);
+            unset($person['metadata']['passport_name_fields_version']);
+        }
+        unset($person);
+        unset($payload['company_directors'][0]['first_name'], $payload['company_directors'][0]['last_name']);
+        unset($payload['company_directors'][0]['metadata']['passport_name_fields_version']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        $profile = $user->kycProfile()->firstOrFail();
+        $this->assertDatabaseHas('kyc_related_persons', [
+            'kyc_profile_id' => $profile->id,
+            'legal_name' => 'Jane Doe',
+            'first_name' => 'Jane',
+            'last_name' => 'Doe',
+        ]);
+        $this->assertDatabaseHas('kyc_company_directors', [
+            'kyc_profile_id' => $profile->id,
+            'legal_name' => 'TRAN THI BICH NGOC',
+            'first_name' => 'THI BICH NGOC',
+            'last_name' => 'TRAN',
+        ]);
+        $this->assertSame(1, data_get($profile->fresh()->metadata, 'passport_name_fields_version'));
+        $this->assertSame(
+            [1, 1],
+            $profile->relatedPersons()->orderBy('id')->get()
+                ->map(fn ($person) => data_get($person->metadata, 'passport_name_fields_version'))
+                ->all(),
+        );
+        $this->assertSame(
+            1,
+            data_get($profile->companyDirectors()->firstOrFail()->metadata, 'passport_name_fields_version'),
+        );
+    }
+
+    public function test_legacy_related_person_matching_rejects_ambiguous_records_without_deleting_them(): void
+    {
+        Http::fake(fn () => Http::response([], 503));
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->businessKycPayload();
+        $duplicate = $payload['related_persons'][0];
+        $payload['related_persons'] = [$duplicate, $duplicate];
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        unset($payload['metadata']['passport_name_fields_version']);
+        $payload['related_persons'] = [$duplicate];
+        unset($payload['related_persons'][0]['first_name'], $payload['related_persons'][0]['last_name']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('related_persons.0.id');
+
+        $this->assertSame(2, $user->kycProfile()->firstOrFail()->relatedPersons()->count());
+    }
+
+    public function test_legacy_company_director_matching_rejects_ambiguous_records_without_deleting_them(): void
+    {
+        Http::fake(fn () => Http::response([], 503));
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->businessKycPayload();
+        $director = [
+            'legal_name' => 'TRAN THI BICH NGOC',
+            'first_name' => 'THI BICH NGOC',
+            'last_name' => 'TRAN',
+            'date_of_birth' => '1980-01-02',
+        ];
+        $payload['company_directors'] = [$director, $director];
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        unset($payload['metadata']['passport_name_fields_version']);
+        $payload['company_directors'] = [$director];
+        unset($payload['company_directors'][0]['first_name'], $payload['company_directors'][0]['last_name']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('company_directors.0.id');
+
+        $this->assertSame(2, $user->kycProfile()->firstOrFail()->companyDirectors()->count());
+    }
+
+    public function test_passport_name_marker_persists_through_submit_read_edit_and_snapshot(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->individualKycPayload();
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted()
+            ->assertJsonPath('kyc_profile.metadata.passport_name_fields_version', 1);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->getJson("/api/user/users/{$user->id}/kyc-profile")
+            ->assertOk()
+            ->assertJsonPath('kyc_profile.metadata.passport_name_fields_version', 1);
+
+        $payload['city'] = 'Boston';
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted()
+            ->assertJsonPath('kyc_profile.metadata.passport_name_fields_version', 1);
+
+        $profile = $user->kycProfile()->firstOrFail();
+        $requirement = $profile->requirements()->firstOrFail();
+        $requirement->update(['status' => 'needs_more_info']);
+        $profile->update(['status' => 'needs_more_info']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->postJson("/api/user/users/{$user->id}/kyc-profile/requirements/{$requirement->id}/resubmit", [
+                'profile' => ['legal_name' => $payload['legal_name']],
+            ])
+            ->assertAccepted()
+            ->assertJsonPath('kyc_profile.metadata.passport_name_fields_version', 1);
+
+        $snapshot = app(KycProfileSnapshot::class)->forUser($user->fresh());
+        $this->assertSame(1, data_get($snapshot, 'profile.metadata.passport_name_fields_version'));
+    }
+
+    public function test_legacy_frontend_can_submit_legal_name_only_during_transition(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->individualKycPayload();
+        unset($payload['first_name'], $payload['last_name'], $payload['metadata']['passport_name_fields_version']);
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted()
+            ->assertJsonPath('kyc_profile.legal_name', 'Jane Doe')
+            ->assertJsonPath('kyc_profile.first_name', null)
+            ->assertJsonPath('kyc_profile.last_name', null);
+    }
+
+    public function test_legacy_frontend_update_does_not_clear_existing_profile_passport_names(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create(['status' => 'active', 'kyc_status' => 'unverified']);
+        $payload = $this->individualKycPayload();
+        $payload['legal_name'] = 'NGUYEN THANH PHUONG';
+        $payload['first_name'] = 'THANH PHUONG';
+        $payload['last_name'] = 'NGUYEN';
+
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        unset($payload['first_name'], $payload['last_name'], $payload['metadata']['passport_name_fields_version']);
+        $this->withToken($this->issueTokenFor($user))
+            ->putJson("/api/user/users/{$user->id}/kyc-profile", $payload)
+            ->assertAccepted();
+
+        $this->assertDatabaseHas('kyc_profiles', [
+            'user_id' => $user->id,
+            'legal_name' => 'NGUYEN THANH PHUONG',
+            'first_name' => 'THANH PHUONG',
+            'last_name' => 'NGUYEN',
+        ]);
     }
 
     public function test_non_hk_business_submission_retains_legacy_contract_without_hk_fields(): void
@@ -136,6 +383,8 @@ class InternalKycTest extends TestCase
         $payload['company_directors'] = [
             [
                 'legal_name' => 'Internal Director One',
+                'first_name' => 'Internal Director',
+                'last_name' => 'One',
                 'date_of_birth' => '1980-01-02',
                 'nationality_country_code' => 'GB',
                 'residence_country_code' => 'US',
@@ -171,6 +420,8 @@ class InternalKycTest extends TestCase
             ],
             [
                 'legal_name' => 'Internal Director Two',
+                'first_name' => 'Internal Director',
+                'last_name' => 'Two',
                 'date_of_birth' => '1985-03-04',
                 'nationality_country_code' => 'HK',
                 'residence_country_code' => 'HK',
@@ -1886,6 +2137,8 @@ class InternalKycTest extends TestCase
         return [
             'applicant_type' => 'individual',
             'legal_name' => 'Jane Doe',
+            'first_name' => 'Jane',
+            'last_name' => 'Doe',
             'date_of_birth' => '1990-01-01',
             'nationality_country_code' => 'US',
             'residence_country_code' => 'US',
@@ -1894,6 +2147,9 @@ class InternalKycTest extends TestCase
             'state' => 'NY',
             'postal_code' => '10001',
             'country_code' => 'US',
+            'metadata' => [
+                'passport_name_fields_version' => 1,
+            ],
             'documents' => [
                 [
                     'type' => 'passport_front',
@@ -1941,6 +2197,7 @@ class InternalKycTest extends TestCase
             'tax_id' => 'TAX-001',
             'registered_country_code' => 'US',
             'metadata' => [
+                'passport_name_fields_version' => 1,
                 'registered_date' => '2020-01-15',
                 'nium_business_type' => 'PRIVATE_COMPANY',
             ],
@@ -1977,6 +2234,8 @@ class InternalKycTest extends TestCase
                 [
                     'relationship_type' => 'authorized_representative',
                     'legal_name' => 'Jane Doe',
+                    'first_name' => 'Jane',
+                    'last_name' => 'Doe',
                     'date_of_birth' => '1990-01-01',
                     'nationality_country_code' => 'US',
                     'residence_country_code' => 'US',
@@ -1985,6 +2244,7 @@ class InternalKycTest extends TestCase
                     'state' => 'NY',
                     'postal_code' => '10001',
                     'country_code' => 'US',
+                    'metadata' => ['passport_name_fields_version' => 1],
                     'documents' => [
                         [
                             'type' => 'passport_front',
@@ -2013,6 +2273,8 @@ class InternalKycTest extends TestCase
                 [
                     'relationship_type' => 'beneficial_owner',
                     'legal_name' => 'John Owner',
+                    'first_name' => 'John',
+                    'last_name' => 'Owner',
                     'date_of_birth' => '1985-02-01',
                     'nationality_country_code' => 'US',
                     'residence_country_code' => 'US',
@@ -2022,6 +2284,7 @@ class InternalKycTest extends TestCase
                     'state' => 'NY',
                     'postal_code' => '10007',
                     'country_code' => 'US',
+                    'metadata' => ['passport_name_fields_version' => 1],
                     'documents' => [
                         [
                             'type' => 'passport_front',

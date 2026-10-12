@@ -94,7 +94,11 @@ class NiumCustomerPayloadFactory
         string $region,
         string $kycType,
     ): array {
-        [$firstName, $lastName] = $this->splitName($profile->legal_name ?: $user->full_name);
+        [$firstName, $lastName] = $this->passportNameParts(
+            $profile,
+            $profile->legal_name ?: $user->full_name,
+            'individual applicant',
+        );
         [$mobileCountryCode, $mobile] = $this->mobileParts((string) $user->phone, $profile);
         $regionFields = $this->regionFields($profile, $region);
 
@@ -290,7 +294,11 @@ class NiumCustomerPayloadFactory
         ?array $positionsOverride = null,
         string $externalIdPrefix = 'person',
     ): array {
-        [$firstName, $lastName] = $this->splitName($person->legal_name);
+        [$firstName, $lastName] = $this->passportNameParts(
+            $person,
+            $person->legal_name,
+            'corporate related person',
+        );
         $metadata = (array) ($person->metadata ?? []);
         [$mobileCountryCode, $mobile] = $this->mobileParts(
             (string) ($metadata['phone'] ?? $fallbackPhone),
@@ -702,6 +710,29 @@ class NiumCustomerPayloadFactory
         $lastName = (string) array_pop($parts);
 
         return [implode(' ', $parts), $lastName];
+    }
+
+    /**
+     * Explicit passport fields are authoritative. Name splitting remains only for untouched legacy records.
+     */
+    private function passportNameParts(object $person, ?string $legacyName, string $context): array
+    {
+        $firstName = trim((string) ($person->first_name ?? ''));
+        $lastName = trim((string) ($person->last_name ?? ''));
+
+        if ($firstName !== '' && $lastName !== '') {
+            return [$firstName, $lastName];
+        }
+
+        if ($firstName !== '' || $lastName !== '') {
+            throw new RuntimeException("Nium onboarding requires both first and last name for {$context}.");
+        }
+
+        if ((int) (($person->metadata ?? [])['passport_name_fields_version'] ?? 0) >= 1) {
+            throw new RuntimeException("Nium onboarding requires explicit passport first and last name for {$context}.");
+        }
+
+        return $this->splitName($legacyName);
     }
 
     private function withoutProviderControlledFields(array $payload): array

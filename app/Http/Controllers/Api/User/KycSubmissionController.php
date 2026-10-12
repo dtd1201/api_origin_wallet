@@ -176,6 +176,7 @@ class KycSubmissionController extends Controller
     ): JsonResponse {
         $this->validateNiumRegionInput($request, $regionResolver);
         $validated = $request->validate($this->rules($request, $user, $regionResolver));
+        $this->validatePassportNamePairs($validated);
 
         if ($request->input('applicant_type') === 'business'
             && strtoupper((string) data_get($request->all(), 'metadata.nium_region')) === 'HK') {
@@ -238,8 +239,11 @@ class KycSubmissionController extends Controller
         $validated = $this->attachBusinessRegistryVerification($validated, $businessRegistryVerificationService);
 
         $kycProfile = DB::transaction(function () use ($user, $validated, $amlScreeningService): KycProfile {
-            $existingDocuments = $user->kycProfile?->documents()->get() ?? collect();
+            $existingProfile = $user->kycProfile;
+            $existingDocuments = $existingProfile?->documents()->get() ?? collect();
+            $existingCompanyDirectors = $existingProfile?->companyDirectors()->get() ?? collect();
             $payload = Arr::only($validated, $this->profileFields());
+            $payload = $this->preservePassportNameMarker($payload, $existingProfile);
             $payload['status'] = 'submitted';
             $payload['submitted_at'] = now();
             $payload['reviewed_by_user_id'] = null;
@@ -253,6 +257,7 @@ class KycSubmissionController extends Controller
             );
 
             $kycProfile->documents()->delete();
+            $existingRelatedPersons = $kycProfile->relatedPersons()->get();
             $kycProfile->relatedPersons()->delete();
             $kycProfile->requirements()->delete();
 
@@ -274,9 +279,15 @@ class KycSubmissionController extends Controller
                 ]);
             }
 
-            foreach ($validated['related_persons'] ?? [] as $relatedPerson) {
+            foreach ($validated['related_persons'] ?? [] as $index => $relatedPerson) {
                 $relatedPersonDocuments = $relatedPerson['documents'] ?? [];
                 $relatedPerson = $this->normalizeNiumCorporateRelatedPerson($relatedPerson);
+                $existingRelatedPerson = $this->matchExistingRelatedPerson(
+                    $existingRelatedPersons,
+                    $relatedPerson,
+                    $index,
+                );
+                $relatedPerson = $this->preservePassportNames($relatedPerson, $existingRelatedPerson);
                 $createdRelatedPerson = $kycProfile->relatedPersons()->create([
                     ...Arr::only($relatedPerson, $this->relatedPersonFields()),
                     'status' => 'submitted',
@@ -299,8 +310,14 @@ class KycSubmissionController extends Controller
             if (array_key_exists('company_directors', $validated)) {
                 $kycProfile->companyDirectors()->delete();
 
-                foreach ($validated['company_directors'] as $director) {
+                foreach ($validated['company_directors'] as $index => $director) {
                     $directorDocuments = $director['documents'] ?? [];
+                    $existingDirector = $this->matchExistingCompanyDirector(
+                        $existingCompanyDirectors,
+                        $director,
+                        $index,
+                    );
+                    $director = $this->preservePassportNames($director, $existingDirector);
 
                     $createdDirector = $kycProfile->companyDirectors()->create(
                         Arr::only($director, $this->companyDirectorFields())
@@ -418,6 +435,8 @@ class KycSubmissionController extends Controller
             'profile' => ['sometimes', 'array'],
             'profile.applicant_type' => ['sometimes', 'string', Rule::in(['individual', 'business'])],
             'profile.legal_name' => ['sometimes', 'string', 'max:255'],
+            'profile.first_name' => ['sometimes', 'string', 'max:255'],
+            'profile.last_name' => ['sometimes', 'string', 'max:255'],
             'profile.date_of_birth' => ['sometimes', 'nullable', 'date', 'before:today'],
             'profile.nationality_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
             'profile.residence_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
@@ -435,6 +454,8 @@ class KycSubmissionController extends Controller
             'related_person' => ['sometimes', 'array'],
             'related_person.relationship_type' => ['sometimes', 'string', 'max:50'],
             'related_person.legal_name' => ['sometimes', 'string', 'max:255'],
+            'related_person.first_name' => ['sometimes', 'string', 'max:255'],
+            'related_person.last_name' => ['sometimes', 'string', 'max:255'],
             'related_person.date_of_birth' => ['sometimes', 'nullable', 'date', 'before:today'],
             'related_person.nationality_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
             'related_person.residence_country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
@@ -468,6 +489,7 @@ class KycSubmissionController extends Controller
             'document.metadata' => ['sometimes', 'array'],
             'metadata' => ['sometimes', 'array'],
         ]);
+        $this->validatePassportNamePairs($validated);
 
         if (
             ! array_key_exists('profile', $validated)
@@ -639,6 +661,109 @@ class KycSubmissionController extends Controller
         return null;
     }
 
+    private function preservePassportNames(array $payload, ?object $existing): array
+    {
+        if ($existing === null) {
+            return $payload;
+        }
+
+        foreach (['first_name', 'last_name'] as $field) {
+            if (! array_key_exists($field, $payload) && filled($existing->{$field})) {
+                $payload[$field] = $existing->{$field};
+            }
+        }
+
+        return $this->preservePassportNameMarker($payload, $existing);
+    }
+
+    private function preservePassportNameMarker(array $payload, ?object $existing): array
+    {
+        if ((int) (($existing?->metadata ?? [])['passport_name_fields_version'] ?? 0) < 1) {
+            return $payload;
+        }
+
+        $metadata = is_array($payload['metadata'] ?? null) ? $payload['metadata'] : [];
+        if ((int) ($metadata['passport_name_fields_version'] ?? 0) < 1) {
+            $metadata['passport_name_fields_version'] = 1;
+            $payload['metadata'] = $metadata;
+        }
+
+        return $payload;
+    }
+
+    private function matchExistingRelatedPerson($existingPeople, array $payload, int|string $index): ?object
+    {
+        if (isset($payload['id'])) {
+            return $existingPeople->firstWhere('id', (int) $payload['id']);
+        }
+
+        $matches = $existingPeople->filter(fn ($existing): bool =>
+            strtolower((string) $existing->relationship_type) === strtolower((string) ($payload['relationship_type'] ?? ''))
+            && (string) $existing->legal_name === (string) ($payload['legal_name'] ?? '')
+        );
+
+        if ($matches->count() > 1) {
+            throw ValidationException::withMessages([
+                "related_persons.{$index}.id" => 'Multiple existing related persons match this relationship and legal name. Refresh the profile and submit a record ID.',
+            ]);
+        }
+
+        return $matches->first();
+    }
+
+    private function matchExistingCompanyDirector($existingDirectors, array $payload, int|string $index): ?object
+    {
+        if (isset($payload['id'])) {
+            return $existingDirectors->firstWhere('id', (int) $payload['id']);
+        }
+
+        $matches = $existingDirectors->filter(fn ($existing): bool =>
+            (string) $existing->legal_name === (string) ($payload['legal_name'] ?? '')
+        );
+
+        if ($matches->count() > 1) {
+            throw ValidationException::withMessages([
+                "company_directors.{$index}.id" => 'Multiple existing company directors match this legal name. Refresh the profile and submit a record ID.',
+            ]);
+        }
+
+        return $matches->first();
+    }
+
+    /** @param array<string, mixed> $payload */
+    private function validatePassportNamePairs(array $payload): void
+    {
+        $subjects = [
+            '' => $payload,
+            'profile.' => is_array($payload['profile'] ?? null) ? $payload['profile'] : null,
+            'related_person.' => is_array($payload['related_person'] ?? null) ? $payload['related_person'] : null,
+        ];
+
+        foreach (['related_persons', 'company_directors'] as $collection) {
+            foreach (($payload[$collection] ?? []) as $index => $person) {
+                if (is_array($person)) {
+                    $subjects["{$collection}.{$index}."] = $person;
+                }
+            }
+        }
+
+        foreach ($subjects as $prefix => $subject) {
+            if (! is_array($subject)) {
+                continue;
+            }
+
+            $hasFirstName = filled($subject['first_name'] ?? null);
+            $hasLastName = filled($subject['last_name'] ?? null);
+
+            if ($hasFirstName !== $hasLastName) {
+                $missingField = $hasFirstName ? 'last_name' : 'first_name';
+                throw ValidationException::withMessages([
+                    $prefix.$missingField => 'First Name (Given Names) and Last Name (Surname / Family Name) must be provided together.',
+                ]);
+            }
+        }
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -663,6 +788,7 @@ class KycSubmissionController extends Controller
             && $requestedRegion === 'HK';
         $isHkCorporateFull = $isHkCorporate
             && strtolower((string) $request->input('metadata.nium_kyc_type')) === 'full';
+        $requiresPassportNames = (int) $request->input('metadata.passport_name_fields_version', 0) >= 1;
         $relationship = $request->input(
             'metadata.nium_v5_fields.addresses.isBusinessAddressSameAsRegisteredAddress',
         );
@@ -678,6 +804,8 @@ class KycSubmissionController extends Controller
         return [
             'applicant_type' => ['required', 'string', Rule::in(['individual', 'business'])],
             'legal_name' => ['required', 'string', 'max:255'],
+            'first_name' => [Rule::requiredIf($requiresPassportNames && $request->input('applicant_type') === 'individual'), 'nullable', 'string', 'max:255'],
+            'last_name' => [Rule::requiredIf($requiresPassportNames && $request->input('applicant_type') === 'individual'), 'nullable', 'string', 'max:255'],
             'date_of_birth' => ['required_if:applicant_type,individual', 'nullable', 'date', 'before:today'],
             'nationality_country_code' => ['nullable', 'string', 'size:2'],
             'residence_country_code' => ['nullable', 'string', 'size:2'],
@@ -711,7 +839,10 @@ class KycSubmissionController extends Controller
             'documents.*.expires_at' => ['nullable', 'date', 'after:today'],
             'documents.*.metadata' => ['sometimes', 'array'],
             'company_directors' => ['exclude_unless:applicant_type,business', 'sometimes', 'array', 'max:20'],
+            'company_directors.*.id' => ['sometimes', 'integer', 'min:1'],
             'company_directors.*.legal_name' => ['required_with:company_directors', 'string', 'max:255'],
+            'company_directors.*.first_name' => [Rule::requiredIf($requiresPassportNames), 'nullable', 'string', 'max:255'],
+            'company_directors.*.last_name' => [Rule::requiredIf($requiresPassportNames), 'nullable', 'string', 'max:255'],
             'company_directors.*.date_of_birth' => ['nullable', 'date', 'before:today'],
             'company_directors.*.nationality_country_code' => ['nullable', 'string', 'size:2'],
             'company_directors.*.residence_country_code' => ['nullable', 'string', 'size:2'],
@@ -740,8 +871,11 @@ class KycSubmissionController extends Controller
             'company_directors.*.documents.*.metadata' => ['sometimes', 'array'],
 
             'related_persons' => ['sometimes', 'array'],
+            'related_persons.*.id' => ['sometimes', 'integer', 'min:1'],
             'related_persons.*.relationship_type' => ['required_with:related_persons', 'string', 'max:50'],
             'related_persons.*.legal_name' => ['required_with:related_persons', 'string', 'max:255'],
+            'related_persons.*.first_name' => [Rule::requiredIf($requiresPassportNames), 'nullable', 'string', 'max:255'],
+            'related_persons.*.last_name' => [Rule::requiredIf($requiresPassportNames), 'nullable', 'string', 'max:255'],
             'related_persons.*.date_of_birth' => ['nullable', 'date', 'before:today'],
             'related_persons.*.nationality_country_code' => ['nullable', 'string', 'size:2'],
             'related_persons.*.residence_country_code' => ['nullable', 'string', 'size:2'],
@@ -1000,6 +1134,8 @@ class KycSubmissionController extends Controller
         return [
             'applicant_type',
             'legal_name',
+            'first_name',
+            'last_name',
             'date_of_birth',
             'nationality_country_code',
             'residence_country_code',
@@ -1135,6 +1271,8 @@ class KycSubmissionController extends Controller
     {
         return [
             'legal_name',
+            'first_name',
+            'last_name',
             'date_of_birth',
             'nationality_country_code',
             'residence_country_code',
@@ -1157,6 +1295,8 @@ class KycSubmissionController extends Controller
         return [
             'relationship_type',
             'legal_name',
+            'first_name',
+            'last_name',
             'date_of_birth',
             'nationality_country_code',
             'residence_country_code',

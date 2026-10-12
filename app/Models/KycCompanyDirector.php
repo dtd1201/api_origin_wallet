@@ -14,6 +14,8 @@ class KycCompanyDirector extends Model
     protected $fillable = [
         'kyc_profile_id',
         'legal_name',
+        'first_name',
+        'last_name',
         'date_of_birth',
         'nationality_country_code',
         'residence_country_code',

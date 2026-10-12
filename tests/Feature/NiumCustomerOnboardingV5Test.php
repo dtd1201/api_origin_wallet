@@ -418,6 +418,105 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_individual_payload_uses_verified_multi_word_passport_names(): void
+    {
+        $user = $this->approvedIndividual($this->provider());
+        $user->kycProfile()->update([
+            'first_name' => 'THANH PHUONG',
+            'last_name' => 'NGUYEN VAN',
+            'legal_name' => 'legacy value must not win',
+        ]);
+        $user->unsetRelation('kycProfile');
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('THANH PHUONG', $payload['firstName']);
+        $this->assertSame('NGUYEN VAN', $payload['lastName']);
+    }
+
+    public function test_legacy_individual_payload_still_splits_legal_name_when_passport_fields_are_absent(): void
+    {
+        $user = $this->approvedIndividual($this->provider());
+        $user->kycProfile()->update([
+            'first_name' => null,
+            'last_name' => null,
+            'legal_name' => 'John Michael Doe',
+        ]);
+        $user->unsetRelation('kycProfile');
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('John Michael', $payload['firstName']);
+        $this->assertSame('Doe', $payload['lastName']);
+    }
+
+    public function test_new_individual_record_never_falls_back_to_legal_name_when_passport_names_are_missing(): void
+    {
+        $user = $this->approvedIndividual($this->provider());
+        $profile = $user->kycProfile()->firstOrFail();
+        $profile->update([
+            'first_name' => null,
+            'last_name' => null,
+            'metadata' => [...(array) $profile->metadata, 'passport_name_fields_version' => 1],
+        ]);
+        $user->unsetRelation('kycProfile');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('explicit passport first and last name for individual applicant');
+
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    }
+
+    public function test_single_component_legacy_name_is_rejected_instead_of_guessed(): void
+    {
+        $user = $this->approvedIndividual($this->provider());
+        $user->kycProfile()->update([
+            'first_name' => null,
+            'last_name' => null,
+            'legal_name' => 'CHER',
+        ]);
+        $user->unsetRelation('kycProfile');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('requires both first and last name');
+
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    }
+
+    public function test_new_corporate_person_never_falls_back_to_legal_name_when_passport_names_are_missing(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $person = $user->kycProfile()->firstOrFail()->relatedPersons()->orderBy('id')->firstOrFail();
+        $person->update([
+            'ownership_percentage' => 40,
+            'first_name' => null,
+            'last_name' => null,
+            'metadata' => [...(array) $person->metadata, 'passport_name_fields_version' => 1],
+        ]);
+        $user->unsetRelation('kycProfile');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('explicit passport first and last name for corporate related person');
+
+        app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+    }
+
+    public function test_hk_corporate_payload_uses_explicit_applicant_and_stakeholder_names(): void
+    {
+        $user = $this->approvedHkCorporate($this->provider());
+        $people = $user->kycProfile()->firstOrFail()->relatedPersons()->orderBy('id')->get();
+        $people[0]->update(['first_name' => 'THANH PHUONG', 'last_name' => 'NGUYEN', 'legal_name' => 'wrong applicant', 'ownership_percentage' => 40]);
+        $people[1]->update(['first_name' => 'MARIA JOSE', 'last_name' => 'DE LA CRUZ', 'legal_name' => 'wrong stakeholder']);
+        $user->unsetRelation('kycProfile');
+
+        $payload = app(NiumCustomerPayloadFactory::class)->build($user, (string) Str::uuid());
+
+        $this->assertSame('THANH PHUONG', $payload['applicant']['firstName']);
+        $this->assertSame('NGUYEN', $payload['applicant']['lastName']);
+        $this->assertSame('MARIA JOSE', $payload['stakeholders']['individual'][0]['firstName']);
+        $this->assertSame('DE LA CRUZ', $payload['stakeholders']['individual'][0]['lastName']);
+    }
+
     public function test_invalid_individual_email_reports_customer_path_before_any_nium_http(): void
     {
         $provider = $this->provider();
@@ -4919,6 +5018,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'status' => 'approved',
             'applicant_type' => 'individual',
             'legal_name' => 'John Doe',
+            'first_name' => 'John',
+            'last_name' => 'Doe',
             'date_of_birth' => '1985-05-15',
             'nationality_country_code' => 'GB',
             'residence_country_code' => 'GB',
@@ -5087,6 +5188,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'relationship_type' => 'applicant',
             'status' => 'approved',
             'legal_name' => 'Alice Applicant',
+            'first_name' => 'Alice',
+            'last_name' => 'Applicant',
             'date_of_birth' => '1988-04-12',
             'nationality_country_code' => 'SG',
             'residence_country_code' => 'SG',
@@ -5105,6 +5208,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'relationship_type' => 'beneficial_owner',
             'status' => 'approved',
             'legal_name' => 'Uma Owner',
+            'first_name' => 'Uma',
+            'last_name' => 'Owner',
             'date_of_birth' => '1980-02-20',
             'nationality_country_code' => 'SG',
             'residence_country_code' => 'SG',

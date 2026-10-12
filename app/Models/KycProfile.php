@@ -16,6 +16,8 @@ class KycProfile extends Model
         'status',
         'applicant_type',
         'legal_name',
+        'first_name',
+        'last_name',
         'date_of_birth',
         'nationality_country_code',
         'residence_country_code',
