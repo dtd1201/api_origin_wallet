@@ -5,14 +5,17 @@ namespace Tests\Feature;
 use App\Models\ApiToken;
 use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
+use App\Models\KycDocumentUpload;
 use App\Models\KycProfileCorrection;
 use App\Models\Role;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use App\Services\Nium\NiumHkCorporateCustomerUpdatePayloadFactory;
 use App\Services\Kyc\KycCorrectionApprovedSource;
+use App\Services\Nium\NiumHkCorporateCustomerUpdatePayloadFactory;
+use App\Services\Nium\NiumCustomerDocumentResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Mockery;
 use Tests\TestCase;
@@ -20,6 +23,69 @@ use Tests\TestCase;
 class AdminKycCorrectionReviewTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_admin_approves_identity_and_passport_evidence_for_manual_compliance_review_without_customer_update(): void
+    {
+        Storage::fake('kyc_private');
+        config(['services.kyc.documents_disk' => 'kyc_private', 'services.nium.customer_update_enabled' => false]);
+        $context = $this->context();
+        config(['services.nium.customer_update_enabled' => false]);
+        $oldFileId = (string) Str::uuid();
+        $oldPassport = $context['applicant']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'approved',
+            'document_number' => 'OLDP123',
+            'issuing_country_code' => 'HK',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://old-passport',
+            'metadata' => ['nium_document_type' => 'passport', 'nium_file_id' => $oldFileId],
+        ]);
+        $path = 'kyc/'.$context['user']->id.'/documents/manual-passport.pdf';
+        $contents = 'reviewed-passport-evidence';
+        Storage::disk('kyc_private')->put($path, $contents);
+        $document = [
+            'type' => 'passport', 'file_url' => 'private://reviewed-passport',
+            'storage_disk' => 'kyc_private', 'file_path' => $path, 'original_name' => 'passport.pdf',
+            'mime_type' => 'application/pdf', 'file_size' => strlen($contents),
+            'file_hash' => hash('sha256', $contents), 'document_number' => 'P1234567',
+            'issuing_country_code' => 'HK', 'expires_at' => '2099-12-31',
+        ];
+        $context['correction']->update([
+            'requested_fields' => ['first_name', 'last_name', 'date_of_birth'],
+            'requested_document_types' => ['passport'],
+            'proposed_documents' => [$document],
+        ]);
+        KycDocumentUpload::query()->create([
+            'user_id' => $context['user']->id, 'kyc_profile_correction_id' => $context['correction']->id,
+            'storage_disk' => 'kyc_private', 'file_path' => $path, 'file_hash' => $document['file_hash'],
+            'mime_type' => 'application/pdf', 'file_size' => strlen($contents), 'status' => 'referenced',
+            'referenced_at' => now(),
+        ]);
+
+        $token = $this->issueTokenFor($this->legacyAdmin());
+        $this->withToken($token)
+            ->postJson($this->actionEndpoint($context, 'approve'), $this->reviewPayload($context))
+            ->assertOk()
+            ->assertJsonPath('correction.status', 'manual_kyc_evidence_approved');
+        $this->withToken($token)
+            ->postJson($this->actionEndpoint($context, 'approve'), $this->reviewPayload($context))
+            ->assertOk()->assertJsonPath('idempotent', true);
+
+        $canonical = $context['applicant']->documents()->where('file_path', $path)->sole();
+        $this->assertSame('manual_kyc_evidence_approved', $canonical->status);
+        $this->assertSame($context['correction']->id, data_get($canonical->metadata, 'source_correction_id'));
+        $resolvedPassports = app(NiumCustomerDocumentResolver::class)->relatedPersonDocuments($context['applicant']->fresh('documents'));
+        $this->assertFalse($resolvedPassports->contains('id', $canonical->id));
+        $this->assertTrue($resolvedPassports->contains('id', $oldPassport->id));
+        $this->assertSame($oldFileId, data_get($oldPassport->fresh()->metadata, 'nium_file_id'));
+        $this->assertNull($context['correction']->fresh()->active_slot);
+        $this->assertSame('OLD GIVEN', $context['applicant']->fresh()->first_name);
+        $this->assertSame(1, $context['applicant']->documents()->where('file_path', $path)->count());
+        $this->assertDatabaseCount('kyc_correction_sync_attempts', 0);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'kyc.correction_manual_kyc_review_approved']);
+        Http::assertNothingSent();
+    }
 
     public function test_authorized_admin_can_view_before_after_and_approve_without_mutating_live_kyc_or_calling_nium(): void
     {
@@ -524,6 +590,7 @@ class AdminKycCorrectionReviewTest extends TestCase
     {
         $admin = User::factory()->create();
         $admin->roles()->create(['role_code' => 'admin']);
+
         return $admin;
     }
 
@@ -532,6 +599,7 @@ class AdminKycCorrectionReviewTest extends TestCase
         $admin = User::factory()->create();
         $role = Role::query()->where('code', $code)->firstOrFail();
         $admin->roles()->create(['role_id' => $role->id, 'role_code' => $role->code]);
+
         return $admin;
     }
 
@@ -542,6 +610,7 @@ class AdminKycCorrectionReviewTest extends TestCase
             'user_id' => $user->id, 'name' => 'test-token', 'token_hash' => hash('sha256', $plainToken),
             'expires_at' => now()->addDay(),
         ]);
+
         return $plainToken;
     }
 }

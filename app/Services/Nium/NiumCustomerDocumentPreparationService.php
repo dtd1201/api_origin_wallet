@@ -2,10 +2,12 @@
 
 namespace App\Services\Nium;
 
+use App\Exceptions\NiumFileUploadOutcomeUnknownException;
 use App\Models\KycDocument;
 use App\Models\User;
 use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -54,6 +56,61 @@ class NiumCustomerDocumentPreparationService
             'ready' => $pendingDocumentCount === 0,
             'pending_document_count' => $pendingDocumentCount,
         ];
+    }
+
+    public function prepareManualCorrectionDocument(KycDocument $document, User $user): string
+    {
+        $lock = $this->documentLock($document);
+        try {
+            $acquired = $lock->get();
+        } catch (Throwable $exception) {
+            throw $this->lockConfigurationException($exception);
+        }
+        if ($acquired !== true) {
+            throw new RuntimeException('The reviewed passport is already being prepared for Nium.');
+        }
+
+        try {
+            $document->refresh();
+            $metadata = (array) $document->metadata;
+            $fileId = $this->metadataString($document, 'nium_file_id');
+            $outcome = strtolower((string) ($metadata['nium_manual_file_upload_outcome'] ?? ''));
+            if ($fileId === null && in_array($outcome, ['submitting', 'unknown'], true)) {
+                throw new RuntimeException('The reviewed passport has an unresolved Nium File upload outcome.');
+            }
+            if ($fileId === null) {
+                $metadata['nium_manual_file_upload_outcome'] = 'submitting';
+                $metadata['nium_manual_file_upload_started_at'] = now()->toISOString();
+                $document->forceFill(['metadata' => $metadata])->save();
+            }
+
+            try {
+                $state = $this->prepareLockedDocument($document, $user);
+            } catch (Throwable $exception) {
+                $document->refresh();
+                if ($this->metadataString($document, 'nium_file_id') === null) {
+                    $metadata = (array) $document->metadata;
+                    $metadata['nium_manual_file_upload_outcome'] = $exception instanceof ConnectionException
+                        || $exception instanceof NiumFileUploadOutcomeUnknownException
+                        || $exception instanceof NiumEvidencePersistenceException
+                            ? 'unknown'
+                            : 'failed';
+                    $metadata['nium_manual_file_upload_failed_at'] = now()->toISOString();
+                    $document->forceFill(['metadata' => $metadata])->save();
+                }
+                throw $exception;
+            }
+
+            $document->refresh();
+            $metadata = (array) $document->metadata;
+            $metadata['nium_manual_file_upload_outcome'] = strtolower($state);
+            $metadata['nium_manual_file_upload_completed_at'] = now()->toISOString();
+            $document->forceFill(['metadata' => $metadata])->save();
+
+            return $state;
+        } finally {
+            $lock->release();
+        }
     }
 
     /**

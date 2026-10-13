@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\ApiRequestLog;
 use App\Models\ApiToken;
+use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\KycProfileCorrection;
@@ -12,6 +13,7 @@ use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Nium\NiumCurrentBiometricKyc;
 use App\Services\Nium\NiumHkManualSubmitKycService;
+use App\Services\Nium\NiumHkSubmitKycService;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Services\Nium\NiumService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -315,7 +317,7 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertArrayNotHasKey('biometric_url', $attempt);
     }
 
-    public function test_submitted_and_needs_more_info_corrections_do_not_block_manual_submit(): void
+    public function test_submitted_without_changes_and_needs_more_info_corrections_do_not_block_manual_submit(): void
     {
         foreach (['submitted', 'needs_more_info'] as $status) {
             $context = $this->context();
@@ -337,6 +339,44 @@ final class NiumHkManualSubmitKycTest extends TestCase
         }
     }
 
+    public function test_submitted_field_correction_blocks_manual_submit_without_nium_call(): void
+    {
+        $context = $this->context();
+        $correction = $this->correction($context, 'submitted');
+        $proposed = $correction->proposed_values;
+        $proposed['first_name'] = 'Updated';
+        $correction->update([
+            'requested_fields' => ['first_name'],
+            'proposed_values' => $proposed,
+        ]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('not applied to the verified Nium customer');
+
+        app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+    }
+
+    public function test_submitted_passport_correction_blocks_manual_submit_without_nium_call(): void
+    {
+        $context = $this->context();
+        $correction = $this->correction($context, 'submitted');
+        $correction->update([
+            'requested_document_types' => ['passport'],
+            'proposed_documents' => [[
+                'type' => 'passport',
+                'storage_disk' => 'kyc_private',
+                'file_path' => 'kyc/'.$context['user']->id.'/documents/replacement-passport.pdf',
+            ]],
+        ]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('not applied to the verified Nium customer');
+
+        app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+    }
+
     public function test_approved_and_unresolved_sync_corrections_block_manual_submit_without_nium_call(): void
     {
         foreach (['approved', 'sync_failed', 'unknown'] as $status) {
@@ -353,6 +393,152 @@ final class NiumHkManualSubmitKycTest extends TestCase
 
             $this->app->forgetInstance(NiumService::class);
         }
+    }
+
+    public function test_reviewed_correction_submits_hk_applicant_manual_kyc_once_with_existing_bindings_and_file_id(): void
+    {
+        $context = $this->context();
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $correction->update([
+            'requested_fields' => ['first_name', 'last_name', 'date_of_birth'],
+            'requested_document_types' => ['passport'],
+            'proposed_values' => [
+                'legal_name' => 'Correct Person', 'first_name' => 'Correct',
+                'last_name' => 'Person', 'date_of_birth' => '1991-02-03',
+            ],
+        ]);
+        $fileId = (string) Str::uuid();
+        $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id, 'type' => 'passport', 'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123', 'issuing_country_code' => 'HK', 'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction', 'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport', 'nium_file_id' => $fileId, 'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+        $calls = $this->mockResponse($context, [
+            'entityType' => 'applicant', 'externalId' => $context['external_id'],
+            'kycMode' => 'manual_kyc', 'kycStatus' => 'initiated',
+            'referenceId' => $context['provider_reference_id'],
+        ]);
+
+        $first = app(NiumHkManualSubmitKycService::class)->submit($context['user'], 'first-click');
+        $second = app(NiumHkManualSubmitKycService::class)->submit($context['user'], 'second-click');
+
+        $this->assertSame(1, $calls->count);
+        $this->assertSame($first, $second);
+        $this->assertSame('HK', $calls->payload['region']);
+        $this->assertSame('applicant', $calls->payload['entityType']);
+        $this->assertSame('manual_kyc', $calls->payload['kycMode']);
+        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
+        $this->assertArrayNotHasKey('isResident', $calls->payload);
+        $this->assertArrayNotHasKey('firstName', $calls->payload);
+        $this->assertArrayNotHasKey('lastName', $calls->payload);
+        $this->assertArrayNotHasKey('dateOfBirth', $calls->payload);
+        $this->assertSame([$fileId], $calls->payload['proofOfIdentityDocument'][0]['fileIds']);
+        $this->assertSame('NEWP123', $calls->payload['proofOfIdentityDocument'][0]['identificationNumber']);
+        $this->assertSame('Test Person', $context['person']->fresh()->legal_name);
+        $this->assertSame('manual_kyc', $first['kyc_mode']);
+        $this->assertSame($correction->id, $first['kyc_profile_correction_id']);
+        $this->assertSame('manual_kyc_compliance_review', $correction->fresh()->status);
+        $this->assertSame(1, AuditLog::query()->where('action', 'kyc.manual_submission_pending_nium_compliance_review')->count());
+
+        $event = WebhookEvent::query()->create([
+            'provider_id' => $context['provider']->id, 'event_id' => (string) Str::uuid(),
+            'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS',
+            'external_resource_id' => $context['account']->external_customer_id,
+            'payload' => [
+                'customerHashId' => $context['account']->external_customer_id,
+                'entityType' => 'applicant', 'externalId' => $context['external_id'],
+                'referenceId' => $context['provider_reference_id'], 'kycMode' => 'manual_kyc',
+                'kycStatus' => 'submitted',
+            ],
+            'processing_status' => 'processed', 'processed_at' => now(),
+        ]);
+        app(NiumHkSubmitKycService::class)->reconcileEntityWebhook($event);
+
+        $this->assertSame('manual_kyc_compliance_review', $correction->fresh()->status);
+        $this->assertCount(1, $context['account']->fresh()->metadata['nium_submit_kyc_attempts']);
+        $this->assertSame('submitted', collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole()['entity_kyc_status']);
+    }
+
+    public function test_manual_kyc_wrong_success_contract_stays_evidence_approved_and_is_not_reported_as_compliance_pending(): void
+    {
+        $context = $this->context();
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $fileId = (string) Str::uuid();
+        $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'HK',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => $fileId,
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+        $calls = $this->mockResponse($context, [
+            'entityType' => 'individual_stakeholder',
+            'externalId' => $context['external_id'],
+            'kycMode' => 'manual_kyc',
+            'kycStatus' => 'initiated',
+            'referenceId' => $context['provider_reference_id'],
+        ]);
+
+        $first = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+        $second = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame('response_review', $first['state']);
+        $this->assertSame($first, $second);
+        $this->assertSame(1, $calls->count);
+        $this->assertSame('manual_kyc_evidence_approved', $correction->fresh()->status);
+        $this->assertDatabaseMissing('audit_logs', [
+            'action' => 'kyc.manual_submission_pending_nium_compliance_review',
+            'entity_id' => (string) $correction->id,
+        ]);
+    }
+
+    public function test_manual_kyc_unknown_submit_outcome_is_not_retried_or_marked_waiting_for_compliance(): void
+    {
+        $context = $this->context();
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $fileId = (string) Str::uuid();
+        $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'HK',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => $fileId,
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+        $calls = $this->mockResponse($context, ['message' => 'temporary provider failure'], 503);
+
+        $first = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+        $second = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame('unknown', $first['state']);
+        $this->assertSame($first, $second);
+        $this->assertSame(1, $calls->count);
+        $this->assertSame('manual_kyc_evidence_approved', $correction->fresh()->status);
+        $this->assertDatabaseMissing('audit_logs', [
+            'action' => 'kyc.manual_submission_pending_nium_compliance_review',
+            'entity_id' => (string) $correction->id,
+        ]);
     }
 
     private function context(): array
@@ -433,7 +619,8 @@ final class NiumHkManualSubmitKycTest extends TestCase
 
     private function mockResponse(array $context, array $body, int $status = 200): object
     {
-        $needsCustomerGet = $status >= 200 && $status < 300
+        $needsCustomerGet = ($body['kycMode'] ?? null) !== 'manual_kyc'
+            && $status >= 200 && $status < 300
             && ! filled($body['biometricUrl'] ?? null)
             && ! filled($body['redirectUrl'] ?? null);
         $calls = new class
@@ -517,7 +704,9 @@ final class NiumHkManualSubmitKycTest extends TestCase
             'before_snapshot' => $values,
             'proposed_values' => $values,
             'status' => $status,
-            'active_slot' => in_array($status, ['needs_more_info', 'synced'], true) ? null : 1,
+            'active_slot' => in_array($status, [
+                'needs_more_info', 'synced', 'manual_kyc_evidence_approved', 'manual_kyc_compliance_review',
+            ], true) ? null : 1,
             'created_by_user_id' => $context['user']->id,
             'submitted_at' => now(),
         ]);

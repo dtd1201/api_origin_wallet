@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Exceptions\NiumFileUploadOutcomeUnknownException;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
@@ -113,6 +114,11 @@ class NiumFileService
             requestHeaders: $requestHeaders,
         );
 
+        if ($response->serverError()) {
+            throw new NiumFileUploadOutcomeUnknownException(
+                "Nium file creation outcome is unknown after HTTP status {$response->status()}.",
+            );
+        }
         if (! $response->successful()) {
             throw new RuntimeException("Nium file creation failed with HTTP status {$response->status()}.");
         }

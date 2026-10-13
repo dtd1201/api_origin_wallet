@@ -19,6 +19,7 @@ final class AdminKycCorrectionReviewService
         private readonly KycApplicantCorrectionService $correctionService,
         private readonly KycCorrectionSyncPolicy $syncPolicy,
         private readonly KycCorrectionApprovedSource $approvedSource,
+        private readonly KycManualComplianceReviewService $manualReview,
     ) {}
 
     public function approve(
@@ -92,7 +93,11 @@ final class AdminKycCorrectionReviewService
                 abort(404);
             }
 
-            if ($locked->status === $targetStatus
+            $effectiveTargetStatus = $targetStatus === 'approved' && $this->manualReview->eligible($locked)
+                ? 'manual_kyc_evidence_approved'
+                : $targetStatus;
+
+            if ($locked->status === $effectiveTargetStatus
                 && $locked->correction_version === $expectedVersion
                 && hash_equals($locked->source_fingerprint, $expectedSourceFingerprint)) {
                 return ['correction' => $locked, 'idempotent' => true];
@@ -127,7 +132,7 @@ final class AdminKycCorrectionReviewService
 
             $approvedSourceSnapshot = null;
             $approvedSourceFingerprint = null;
-            if ($targetStatus === 'approved') {
+            if ($effectiveTargetStatus === 'approved') {
                 $policy = $this->syncPolicy->evaluate($accounts->sole());
                 if (! $policy['allowed']) {
                     throw ValidationException::withMessages(['correction' => $policy['reason']]);
@@ -135,19 +140,22 @@ final class AdminKycCorrectionReviewService
                 $approvedSourceSnapshot = $this->approvedSource->snapshot($profile);
                 $approvedSourceFingerprint = $this->approvedSource->fingerprint($approvedSourceSnapshot);
             }
+            if ($effectiveTargetStatus === 'manual_kyc_evidence_approved') {
+                $this->manualReview->promotePassport($locked->loadMissing(['kycProfile', 'applicant']));
+            }
 
             $locked->update([
-                'status' => $targetStatus,
-                'active_slot' => $targetStatus === 'approved' ? 1 : null,
+                'status' => $effectiveTargetStatus,
+                'active_slot' => $effectiveTargetStatus === 'approved' ? 1 : null,
                 'reviewed_by_user_id' => $reviewer->id,
                 'review_note' => $reviewNote,
                 'reviewed_at' => now(),
-                'resolved_at' => $targetStatus === 'needs_more_info' ? now() : null,
+                'resolved_at' => $effectiveTargetStatus === 'needs_more_info' ? now() : null,
                 'approved_source_snapshot' => $approvedSourceSnapshot,
                 'approved_source_fingerprint' => $approvedSourceFingerprint,
             ]);
 
-            if ($targetStatus === 'needs_more_info' && $locked->request_origin === 'admin') {
+            if ($effectiveTargetStatus === 'needs_more_info' && $locked->request_origin === 'admin') {
                 $profile->corrections()->create([
                     'applicant_related_person_id' => $locked->applicant_related_person_id,
                     'user_provider_account_id' => $locked->user_provider_account_id,
@@ -175,19 +183,24 @@ final class AdminKycCorrectionReviewService
 
             AuditLog::query()->create([
                 'user_id' => $reviewer->id,
-                'action' => $targetStatus === 'approved' ? 'kyc.correction_approved' : 'kyc.correction_changes_requested',
+                'action' => match ($effectiveTargetStatus) {
+                    'approved' => 'kyc.correction_approved',
+                    'manual_kyc_evidence_approved' => 'kyc.correction_manual_kyc_review_approved',
+                    default => 'kyc.correction_changes_requested',
+                },
                 'entity_type' => 'kyc_profile_correction',
                 'entity_id' => (string) $locked->id,
                 'old_data' => ['status' => 'submitted'],
                 'new_data' => array_filter([
-                    'status' => $targetStatus,
+                    'status' => $effectiveTargetStatus,
                     'kyc_profile_id' => $profile->id,
                     'applicant_related_person_id' => $locked->applicant_related_person_id,
                     'correction_version' => $locked->correction_version,
                     'source_fingerprint' => $locked->source_fingerprint,
                     'customer_hash_fingerprint' => $locked->customer_hash_fingerprint,
                     'applicant_reference_fingerprint' => $locked->applicant_reference_fingerprint,
-                    'review_reason_recorded' => $targetStatus === 'needs_more_info' ? true : null,
+                    'review_reason_recorded' => $effectiveTargetStatus === 'needs_more_info' ? true : null,
+                    'manual_kyc_evidence_approved' => $effectiveTargetStatus === 'manual_kyc_evidence_approved' ? true : null,
                 ], static fn ($value): bool => $value !== null),
                 'ip_address' => $ip,
                 'user_agent' => Str::limit((string) $userAgent, 1000, ''),

@@ -7,8 +7,9 @@ use App\Models\KycProfileCorrection;
 use App\Models\User;
 use App\Services\Kyc\AdminKycCorrectionReviewService;
 use App\Services\Kyc\AdminKycCorrectionSyncService;
-use App\Services\Kyc\KycCorrectionSyncPolicy;
 use App\Services\Kyc\KycApplicantCorrectionService;
+use App\Services\Kyc\KycCorrectionSyncPolicy;
+use App\Services\Kyc\KycManualComplianceReviewService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -40,12 +41,13 @@ class KycProfileCorrectionController extends Controller
 
         return response()->json(['message' => 'KYC update requested from the customer.', 'correction' => $this->serialize($correction)], 201);
     }
+
     public function index(Request $request, User $user): JsonResponse
     {
         $validated = $request->validate([
             'status' => ['sometimes', 'string', Rule::in([
                 'requested', 'submitted', 'approved', 'needs_more_info', 'syncing', 'verification_pending',
-                'sync_failed', 'unknown', 'synced',
+                'sync_failed', 'unknown', 'synced', 'manual_kyc_evidence_approved', 'manual_kyc_compliance_review',
             ])],
         ]);
         $profile = $user->kycProfile()->firstOrFail();
@@ -92,7 +94,11 @@ class KycProfileCorrectionController extends Controller
         }
 
         return response()->json([
-            'message' => $result['idempotent'] ? 'KYC correction was already approved.' : 'KYC correction approved for the next synchronization stage.',
+            'message' => $result['idempotent']
+                ? 'KYC correction was already approved.'
+                : ($result['correction']->status === 'manual_kyc_evidence_approved'
+                    ? 'KYC evidence approved and ready for Manual Submit KYC.'
+                    : 'KYC correction approved for the next synchronization stage.'),
             'correction' => $this->serialize($result['correction']),
             'idempotent' => $result['idempotent'],
         ]);
@@ -217,6 +223,7 @@ class KycProfileCorrectionController extends Controller
         $syncService = app(AdminKycCorrectionSyncService::class);
         $capability = $syncService->capability($correction);
         $approvalCapability = app(KycCorrectionSyncPolicy::class)->evaluate($correction->providerAccount);
+        $manualReviewEligible = app(KycManualComplianceReviewService::class)->eligible($correction);
         $attempt = $correction->syncAttempts->sortByDesc('id')->first();
 
         return [
@@ -260,8 +267,9 @@ class KycProfileCorrectionController extends Controller
                     && $attempt->http_status < 500,
             ],
             'review_capability' => [
-                'can_approve' => $correction->status === 'submitted' && $approvalCapability['allowed'],
-                'reason' => $approvalCapability['allowed'] ? null : $approvalCapability['reason'],
+                'can_approve' => $correction->status === 'submitted'
+                    && ($manualReviewEligible || $approvalCapability['allowed']),
+                'reason' => $manualReviewEligible || $approvalCapability['allowed'] ? null : $approvalCapability['reason'],
             ],
         ];
     }

@@ -3,12 +3,45 @@
 namespace App\Services\Nium;
 
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
-use Illuminate\Support\Str;
 
 final class NiumHkSubmitKycValidator
 {
+    public function assertManualApplicant(array $payload): void
+    {
+        $documents = $payload['proofOfIdentityDocument'] ?? null;
+        $document = is_array($documents) && array_is_list($documents) && count($documents) === 1 ? $documents[0] : null;
+        $expiry = $this->strictFutureDate($document['expiryDate'] ?? null);
+        $fileIds = is_array($document) ? ($document['fileIds'] ?? null) : null;
+        if (($payload['region'] ?? null) !== 'HK'
+            || ($payload['entityType'] ?? null) !== 'applicant'
+            || ($payload['kycMode'] ?? null) !== 'manual_kyc'
+            || array_key_exists('isResident', $payload)
+            || ! is_string($payload['entityReferenceId'] ?? null) || trim($payload['entityReferenceId']) === ''
+            || ! is_array($document)
+            || ($document['type'] ?? null) !== 'passport'
+            || preg_match('/^[A-Za-z0-9]{1,30}$/', (string) ($document['identificationNumber'] ?? '')) !== 1
+            || preg_match('/^[A-Z]{2}$/', (string) ($document['issuanceCountry'] ?? '')) !== 1
+            || $expiry === null
+            || ! is_array($fileIds) || $fileIds === []
+            || collect($fileIds)->contains(fn (mixed $fileId): bool => ! is_string($fileId) || ! Str::isUuid($fileId))) {
+            throw new RuntimeException('Invalid Nium HK applicant manual KYC payload.');
+        }
+
+        if (array_key_exists('proofOfAddressDocument', $payload)) {
+            $address = $payload['proofOfAddressDocument'];
+            $addressFileIds = is_array($address) ? ($address['fileIds'] ?? null) : null;
+            if (! is_array($address)
+                || ($address['type'] ?? null) !== 'proof_of_address'
+                || ! is_array($addressFileIds) || $addressFileIds === []
+                || collect($addressFileIds)->contains(fn (mixed $fileId): bool => ! is_string($fileId) || ! Str::isUuid($fileId))) {
+                throw new RuntimeException('Invalid Nium HK applicant proof of address payload.');
+            }
+        }
+    }
+
     public function assertManualStakeholder(array $payload): void
     {
         $documents = $payload['proofOfIdentityDocument'] ?? null;
@@ -40,6 +73,7 @@ final class NiumHkSubmitKycValidator
             return null;
         }
         $errors = CarbonImmutable::getLastErrors();
+
         return $date !== false && $date->format('Y-m-d') === $value
             && ($errors === false || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))
             && $date->isFuture() ? $date : null;

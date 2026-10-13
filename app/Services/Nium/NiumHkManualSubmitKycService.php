@@ -3,7 +3,10 @@
 namespace App\Services\Nium;
 
 use App\Models\ApiRequestLog;
+use App\Models\AuditLog;
+use App\Models\KycDocument;
 use App\Models\KycProfile;
+use App\Models\KycProfileCorrection;
 use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
@@ -23,6 +26,7 @@ final class NiumHkManualSubmitKycService
         private readonly NiumService $niumService,
         private readonly NiumHkSubmitKycPayloadFactory $payloadFactory,
         private readonly NiumSubmitKycBiometricUrlResolver $biometricUrlResolver,
+        private readonly NiumCustomerDocumentPreparationService $documentPreparation,
     ) {}
 
     public function submit(User $user, ?string $idempotencyKey = null): array
@@ -31,6 +35,11 @@ final class NiumHkManualSubmitKycService
         $existingAttempt = $this->claim($context);
 
         if ($existingAttempt !== null) {
+            if (($context['kyc_mode'] ?? null) === 'manual_kyc'
+                && ($existingAttempt['state'] ?? null) === 'accepted') {
+                $this->recordComplianceReviewPending($context, $existingAttempt);
+            }
+
             return $existingAttempt;
         }
 
@@ -85,7 +94,7 @@ final class NiumHkManualSubmitKycService
         $body = $this->responseObject($response);
         $biometricUrl = $body['biometricUrl'] ?? $body['redirectUrl'] ?? null;
         $biometricUrl = is_string($biometricUrl) && trim($biometricUrl) !== '' ? $biometricUrl : null;
-        if ($biometricUrl === null) {
+        if ($biometricUrl === null && ($context['kyc_mode'] ?? 'biometric_kyc') === 'biometric_kyc') {
             $biometricUrl = $this->biometricUrlResolver->resolve(
                 $context['account'],
                 $context['external_id'],
@@ -94,7 +103,7 @@ final class NiumHkManualSubmitKycService
         }
         $state = $this->validResponse($body, $context) ? 'accepted' : 'response_review';
 
-        return $this->finish(
+        $attempt = $this->finish(
             $context,
             $state,
             $response->status(),
@@ -105,6 +114,11 @@ final class NiumHkManualSubmitKycService
             $body['externalId'] ?? null,
             $biometricUrl,
         );
+        if (($context['kyc_mode'] ?? null) === 'manual_kyc' && $state === 'accepted') {
+            $this->recordComplianceReviewPending($context, $attempt);
+        }
+
+        return $attempt;
     }
 
     private function context(User $user, ?string $idempotencyKey): array
@@ -135,6 +149,16 @@ final class NiumHkManualSubmitKycService
         }
 
         $correction = $profile->corrections()->latest('id')->first();
+        if ($correction !== null && in_array($correction->status, [
+            'manual_kyc_evidence_approved', 'manual_kyc_compliance_review',
+        ], true)) {
+            return $this->manualComplianceContext($account, $profile, $correction, $idempotencyKey);
+        }
+        if ($correction !== null && $correction->status === 'submitted' && $this->hasUnappliedChanges($correction)) {
+            throw new RuntimeException(
+                'The submitted applicant correction is not applied to the verified Nium customer; review and synchronize it before manual Submit KYC.',
+            );
+        }
         if ($correction !== null && in_array($correction->status, [
             'approved', 'syncing', 'verification_pending', 'sync_failed', 'unknown',
         ], true)) {
@@ -191,6 +215,7 @@ final class NiumHkManualSubmitKycService
             'reference_id' => $referenceId,
             'entity_reference_id' => $entityReferenceId,
             'payload' => $this->payloadFactory->build($resolvedPerson, 'applicant', $entityReferenceId),
+            'kyc_mode' => 'biometric_kyc',
         ];
     }
 
@@ -243,6 +268,7 @@ final class NiumHkManualSubmitKycService
             'external_id' => $externalId,
             'reference_id' => $this->manualReferenceId($account->user, $idempotencyKey),
             'entity_reference_id' => $remoteReferenceId,
+            'kyc_mode' => 'biometric_kyc',
         ];
 
         if ($kycStatus === 'initiated') {
@@ -312,6 +338,61 @@ final class NiumHkManualSubmitKycService
             'reference_id' => $this->manualReferenceId($account->user, $idempotencyKey),
             'entity_reference_id' => $providerReferenceId,
             'payload' => $this->payloadFactory->build($resolvedPerson, 'applicant', $providerReferenceId),
+            'kyc_mode' => 'biometric_kyc',
+        ];
+    }
+
+    private function manualComplianceContext(
+        UserProviderAccount $account,
+        KycProfile $profile,
+        KycProfileCorrection $correction,
+        ?string $idempotencyKey,
+    ): array {
+        $person = $this->corporateApplicant($profile);
+        $customerHashId = trim((string) $correction->customer_hash_id);
+        $externalId = trim((string) $correction->applicant_external_id);
+        $referenceId = trim((string) $correction->applicant_reference_id);
+        if ((int) $correction->user_provider_account_id !== (int) $account->id
+            || (int) $correction->applicant_related_person_id !== (int) $person->id
+            || $customerHashId === '' || ! hash_equals($customerHashId, (string) $account->external_customer_id)
+            || ! hash_equals((string) $correction->customer_hash_fingerprint, hash('sha256', $customerHashId))
+            || $externalId === '' || ! hash_equals((string) $correction->applicant_external_fingerprint, hash('sha256', $externalId))
+            || $referenceId === '' || ! hash_equals((string) $correction->applicant_reference_fingerprint, hash('sha256', $referenceId))) {
+            throw new RuntimeException('The manual KYC correction no longer matches the verified Nium customer and applicant bindings.');
+        }
+
+        $states = collect((array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []))
+            ->filter(fn (mixed $state): bool => is_array($state)
+                && ($state['entity_type'] ?? null) === 'applicant'
+                && hash_equals($externalId, trim((string) ($state['external_id'] ?? '')))
+                && hash_equals($referenceId, trim((string) ($state['provider_reference_id'] ?? '')))
+                && in_array($state['kyc_status'] ?? null, ['kyc_required', 'retry'], true));
+        if ($states->count() !== 1) {
+            throw new RuntimeException('No unique eligible Nium applicant entity matches the reviewed manual KYC correction.');
+        }
+
+        $document = $person->documents()->get()
+            ->first(fn (KycDocument $candidate): bool => (int) data_get($candidate->metadata, 'source_correction_id') === (int) $correction->id
+                && data_get($candidate->metadata, 'source') === 'admin_reviewed_correction'
+                && $candidate->status === 'manual_kyc_evidence_approved'
+            );
+        if (! $document instanceof KycDocument) {
+            throw new RuntimeException('The reviewed correction passport is not available as a canonical KYC document.');
+        }
+        if ($this->documentPreparation->prepareManualCorrectionDocument($document, $account->user) !== 'AVAILABLE') {
+            throw new RuntimeException('The reviewed passport is not yet AVAILABLE in the Nium File API.');
+        }
+
+        return [
+            'account' => $account,
+            'entity_type' => 'applicant',
+            'external_id' => $externalId,
+            'reference_id' => 'origin-wallet-manual-correction-'.substr(hash('sha256', $account->user_id.'|'.$correction->id.'|'.$correction->correction_version), 0, 32),
+            'entity_reference_id' => $referenceId,
+            'payload' => $this->payloadFactory->buildApplicantManual($document->fresh(), $referenceId),
+            'kyc_mode' => 'manual_kyc',
+            'correction_id' => $correction->id,
+            'correction_version' => $correction->correction_version,
         ];
     }
 
@@ -340,6 +421,26 @@ final class NiumHkManualSubmitKycService
         return $applicant ?? throw new RuntimeException('The approved corporate applicant cannot be resolved.');
     }
 
+    private function hasUnappliedChanges(KycProfileCorrection $correction): bool
+    {
+        if (collect((array) $correction->proposed_documents)->contains(
+            fn (mixed $document): bool => is_array($document) && filled($document['file_path'] ?? null),
+        )) {
+            return true;
+        }
+
+        $before = (array) $correction->before_snapshot;
+        $proposed = (array) $correction->proposed_values;
+
+        foreach (['legal_name', 'first_name', 'last_name', 'date_of_birth'] as $field) {
+            if (array_key_exists($field, $proposed) && ($proposed[$field] ?? null) !== ($before[$field] ?? null)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private function claim(array $context): ?array
     {
         return DB::transaction(function () use ($context): ?array {
@@ -359,11 +460,12 @@ final class NiumHkManualSubmitKycService
 
             data_set($metadata, 'nium_submit_kyc_attempts.'.$key, [
                 'state' => 'submitting',
-                'kyc_mode' => 'biometric_kyc',
+                'kyc_mode' => $context['kyc_mode'] ?? 'biometric_kyc',
                 'entity_type' => $context['entity_type'],
                 'external_id' => $context['external_id'],
                 'manual_reference_id' => $context['reference_id'],
                 'manual_admin_action' => true,
+                'kyc_profile_correction_id' => $context['correction_id'] ?? null,
                 'updated_at' => now()->toISOString(),
             ]);
             $account->forceFill(['metadata' => $metadata])->save();
@@ -387,15 +489,22 @@ final class NiumHkManualSubmitKycService
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $log = $this->attemptLog($context);
+            $trustedResponse = $state === 'accepted';
             $attempt = array_filter([
                 'state' => $state,
                 'kyc_status' => is_string($kycStatus) ? strtolower($kycStatus) : null,
-                'kyc_mode' => is_string($kycMode) ? strtolower($kycMode) : 'biometric_kyc',
-                'entity_type' => is_string($entityType) ? strtolower($entityType) : $context['entity_type'],
-                'external_id' => is_string($externalId) ? $externalId : $context['external_id'],
+                'kyc_mode' => $trustedResponse && is_string($kycMode)
+                    ? strtolower($kycMode)
+                    : ($context['kyc_mode'] ?? 'biometric_kyc'),
+                'entity_type' => $trustedResponse && is_string($entityType)
+                    ? strtolower($entityType)
+                    : $context['entity_type'],
+                'external_id' => $trustedResponse && is_string($externalId)
+                    ? $externalId
+                    : $context['external_id'],
                 'manual_reference_id' => $context['reference_id'],
                 'provider_http_status' => $httpStatus,
-                'provider_reference_id' => is_string($providerReference) ? $providerReference : null,
+                'provider_reference_id' => $trustedResponse && is_string($providerReference) ? $providerReference : null,
                 'biometric_url' => $biometricUrl,
                 'biometric_url_fingerprint' => $biometricUrl !== null
                     ? substr(hash('sha256', $biometricUrl), 0, 16)
@@ -403,6 +512,7 @@ final class NiumHkManualSubmitKycService
                 'submit_kyc_log_id' => $log?->id,
                 'submit_kyc_log_at' => $log?->created_at?->toISOString(),
                 'manual_admin_action' => true,
+                'kyc_profile_correction_id' => $context['correction_id'] ?? null,
                 'updated_at' => now()->toISOString(),
             ], static fn (mixed $value): bool => $value !== null);
             data_set($metadata, 'nium_submit_kyc_attempts.'.$this->attemptKey($context['reference_id']), $attempt);
@@ -432,7 +542,40 @@ final class NiumHkManualSubmitKycService
             && filled($body['referenceId'] ?? null)
             && (! isset($body['externalId']) || $body['externalId'] === $context['external_id'])
             && in_array(strtolower((string) ($body['kycStatus'] ?? '')), ['initiated', 'submitted'], true)
-            && strtolower((string) ($body['kycMode'] ?? '')) === 'biometric_kyc';
+            && strtolower((string) ($body['kycMode'] ?? '')) === ($context['kyc_mode'] ?? 'biometric_kyc');
+    }
+
+    private function recordComplianceReviewPending(array $context, array $attempt): void
+    {
+        DB::transaction(function () use ($context, $attempt): void {
+            $correction = KycProfileCorrection::query()->whereKey($context['correction_id'])
+                ->lockForUpdate()->firstOrFail();
+            if ((int) $correction->correction_version !== (int) $context['correction_version']) {
+                throw new RuntimeException('The manual KYC correction version changed before provider submission was recorded.');
+            }
+            if (! in_array($correction->status, ['manual_kyc_evidence_approved', 'manual_kyc_compliance_review'], true)) {
+                throw new RuntimeException('The manual KYC correction is no longer eligible for Compliance review.');
+            }
+            if ($correction->status === 'manual_kyc_compliance_review') {
+                return;
+            }
+
+            $correction->update(['status' => 'manual_kyc_compliance_review']);
+            AuditLog::query()->create([
+                'user_id' => null,
+                'action' => 'kyc.manual_submission_pending_nium_compliance_review',
+                'entity_type' => 'kyc_profile_correction',
+                'entity_id' => (string) $context['correction_id'],
+                'old_data' => ['status' => 'manual_kyc_evidence_approved'],
+                'new_data' => [
+                    'status' => 'manual_kyc_compliance_review',
+                    'provider_account_id' => $context['account']->id,
+                    'attempt_reference_fingerprint' => substr(hash('sha256', (string) $context['reference_id']), 0, 16),
+                    'provider_http_status' => $attempt['provider_http_status'] ?? null,
+                    'operator_notification_required' => true,
+                ],
+            ]);
+        }, 3);
     }
 
     private function responseObject(Response $response): array

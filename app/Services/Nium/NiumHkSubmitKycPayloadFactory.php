@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Models\KycDocument;
 use App\Models\KycRelatedPerson;
 
 final class NiumHkSubmitKycPayloadFactory
@@ -28,6 +29,7 @@ final class NiumHkSubmitKycPayloadFactory
                 ]],
             ];
             $this->validator->assertManualStakeholder($payload);
+
             return $payload;
         }
         $payload = [
@@ -45,6 +47,34 @@ final class NiumHkSubmitKycPayloadFactory
         ];
 
         $this->validator->assert($payload);
+
+        return $payload;
+    }
+
+    public function buildApplicantManual(
+        KycDocument $document,
+        string $referenceId,
+        ?array $proofOfAddressDocument = null,
+    ): array {
+        $metadata = (array) $document->metadata;
+        $payload = [
+            'region' => 'HK',
+            'entityType' => 'applicant',
+            'entityReferenceId' => $referenceId,
+            'kycMode' => 'manual_kyc',
+            'proofOfIdentityDocument' => [[
+                'type' => 'passport',
+                'identificationNumber' => (string) $document->document_number,
+                'issuanceCountry' => strtoupper((string) $document->issuing_country_code),
+                'expiryDate' => $document->expires_at?->format('Y-m-d'),
+                'fileIds' => [(string) ($metadata['nium_file_id'] ?? '')],
+            ]],
+        ];
+        if ($proofOfAddressDocument !== null) {
+            $payload['proofOfAddressDocument'] = $proofOfAddressDocument;
+        }
+
+        $this->validator->assertManualApplicant($payload);
 
         return $payload;
     }

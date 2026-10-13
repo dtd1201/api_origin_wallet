@@ -9,6 +9,7 @@ use App\Models\KycProfile;
 use App\Models\NiumApiExchangeEvidence;
 use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
+use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumFileService;
 use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -213,6 +214,61 @@ class NiumFileServiceTest extends TestCase
         $this->assertSame('multipart_metadata', $request['capture_type']);
         $this->assertArrayNotHasKey('x-api-key', $evidence->request_headers);
         $this->assertNotEmpty($evidence->request_headers['x-request-id']);
+    }
+
+    public function test_manual_correction_file_upload_unknown_outcome_is_quarantined_without_retry(): void
+    {
+        [$document, $user] = $this->createDocument(metadata: [
+            'source' => 'admin_reviewed_correction',
+            'source_correction_id' => 123,
+        ]);
+        $document->update(['status' => 'approved']);
+        Http::fake(['*' => Http::failedConnection('synthetic ambiguous upload')]);
+
+        try {
+            app(NiumCustomerDocumentPreparationService::class)->prepareManualCorrectionDocument($document, $user);
+            $this->fail('Expected the ambiguous upload to fail.');
+        } catch (ConnectionException) {
+            $this->assertSame('unknown', data_get($document->fresh()->metadata, 'nium_manual_file_upload_outcome'));
+        }
+
+        try {
+            app(NiumCustomerDocumentPreparationService::class)->prepareManualCorrectionDocument($document->fresh(), $user);
+            $this->fail('Expected the quarantined upload to remain blocked.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('unresolved Nium File upload outcome', $exception->getMessage());
+        }
+
+        Http::assertSentCount(1);
+        $this->assertArrayNotHasKey('nium_file_id', $document->fresh()->metadata);
+    }
+
+    public function test_manual_correction_file_upload_server_error_is_unknown_and_is_not_retried(): void
+    {
+        [$document, $user] = $this->createDocument(metadata: [
+            'source' => 'admin_reviewed_correction',
+            'source_correction_id' => 123,
+        ]);
+        $document->update(['status' => 'manual_kyc_evidence_approved']);
+        Http::fake(['*' => Http::response(['message' => 'temporary provider failure'], 503)]);
+
+        try {
+            app(NiumCustomerDocumentPreparationService::class)->prepareManualCorrectionDocument($document, $user);
+            $this->fail('Expected the ambiguous server error to fail.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('outcome is unknown', $exception->getMessage());
+            $this->assertSame('unknown', data_get($document->fresh()->metadata, 'nium_manual_file_upload_outcome'));
+        }
+
+        try {
+            app(NiumCustomerDocumentPreparationService::class)->prepareManualCorrectionDocument($document->fresh(), $user);
+            $this->fail('Expected the unknown server-error outcome to remain blocked.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('unresolved Nium File upload outcome', $exception->getMessage());
+        }
+
+        Http::assertSentCount(1);
+        $this->assertArrayNotHasKey('nium_file_id', $document->fresh()->metadata);
     }
 
     public function test_fetch_connection_failure_preserves_outbound_evidence_and_rethrows(): void
