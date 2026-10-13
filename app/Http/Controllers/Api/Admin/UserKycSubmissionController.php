@@ -58,21 +58,29 @@ class UserKycSubmissionController extends Controller
                 return response()->json(['message' => $exception->getMessage()], 422);
             }
 
-            $successful = ($attempt['state'] ?? null) === 'accepted';
+            $state = (string) ($attempt['state'] ?? '');
+            $successful = in_array($state, ['accepted', 'compliance_review'], true);
+            $pending = in_array($state, ['file_processing', 'submitting'], true);
 
             return response()->json([
-                'message' => $successful
+                'message' => $pending
+                    ? 'The reviewed passport is still processing at Nium. Manual KYC will continue automatically.'
+                    : ($successful
                     ? (($attempt['kyc_mode'] ?? null) === 'manual_kyc'
                         ? 'Manual KYC submitted and pending Nium Compliance review. Notify Su for provider review.'
                         : 'Nium Submit KYC completed.')
-                    : 'Nium Submit KYC did not complete successfully.',
+                    : 'Nium Submit KYC did not complete successfully.'),
                 'kyc_status' => $attempt['kyc_status'] ?? null,
                 'kyc_mode' => $attempt['kyc_mode'] ?? null,
                 'reference_id' => $attempt['provider_reference_id'] ?? null,
                 'biometric_url' => $attempt['biometric_url'] ?? null,
                 'state' => $attempt['state'] ?? null,
+                'continuation_state' => $attempt['continuation_state'] ?? null,
+                'next_attempt_at' => $attempt['next_attempt_at'] ?? null,
+                'deadline_at' => $attempt['deadline_at'] ?? null,
+                'hold_code' => $attempt['hold_code'] ?? null,
                 'compliance_review_pending' => ($attempt['kyc_mode'] ?? null) === 'manual_kyc' && $successful,
-            ], $successful ? 200 : 502);
+            ], $successful ? 200 : ($pending ? 202 : 502));
         } finally {
             $submitLock->release();
         }

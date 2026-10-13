@@ -2,12 +2,14 @@
 
 namespace App\Services\Nium;
 
+use App\Jobs\Nium\ContinueNiumHkManualKycJob;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
 use App\Models\KycDocument;
 use App\Models\KycProfile;
 use App\Models\KycProfileCorrection;
 use App\Models\KycRelatedPerson;
+use App\Models\NiumManualKycContinuation;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
@@ -33,6 +35,20 @@ final class NiumHkManualSubmitKycService
     public function submit(User $user, ?string $idempotencyKey = null): array
     {
         $context = $this->context($user, $idempotencyKey);
+
+        if (isset($context['continuation'])) {
+            return $this->continuationAttempt($context['continuation']);
+        }
+
+        if (($context['file_state'] ?? null) === 'PROCESSING') {
+            return $this->beginContinuation($context);
+        }
+
+        return $this->submitPreparedContext($context, $user);
+    }
+
+    private function submitPreparedContext(array $context, User $user): array
+    {
         $existingAttempt = $this->claim($context);
 
         if ($existingAttempt !== null) {
@@ -122,7 +138,7 @@ final class NiumHkManualSubmitKycService
         return $attempt;
     }
 
-    private function context(User $user, ?string $idempotencyKey): array
+    private function context(User $user, ?string $idempotencyKey, ?int $activeContinuationId = null): array
     {
         $accounts = UserProviderAccount::query()
             ->with(['provider', 'user.kycProfile.relatedPersons'])
@@ -153,7 +169,7 @@ final class NiumHkManualSubmitKycService
         if ($correction !== null && in_array($correction->status, [
             'manual_kyc_evidence_approved', 'manual_kyc_compliance_review',
         ], true)) {
-            return $this->manualComplianceContext($account, $profile, $correction, $idempotencyKey);
+            return $this->manualComplianceContext($account, $profile, $correction, $idempotencyKey, $activeContinuationId);
         }
         if ($correction !== null && $correction->status === 'submitted' && $this->hasUnappliedChanges($correction)) {
             throw new RuntimeException(
@@ -348,6 +364,7 @@ final class NiumHkManualSubmitKycService
         KycProfile $profile,
         KycProfileCorrection $correction,
         ?string $idempotencyKey,
+        ?int $activeContinuationId = null,
     ): array {
         $person = $this->corporateApplicant($profile);
         $customerHashId = trim((string) $correction->customer_hash_id);
@@ -386,21 +403,356 @@ final class NiumHkManualSubmitKycService
         if (! $document instanceof KycDocument) {
             throw new RuntimeException('The reviewed correction passport is not available as a canonical KYC document.');
         }
-        if ($this->documentPreparation->prepareManualCorrectionDocument($document, $account->user) !== 'AVAILABLE') {
-            throw new RuntimeException('The reviewed passport is not yet AVAILABLE in the Nium File API.');
+
+        $continuation = NiumManualKycContinuation::query()
+            ->where('kyc_profile_correction_id', $correction->id)
+            ->first();
+        if ($continuation !== null && (int) $continuation->id !== $activeContinuationId) {
+            return ['continuation' => $continuation];
         }
 
-        return [
+        if ($activeContinuationId !== null) {
+            $expectedContinuation = $continuation;
+            $persistedFileId = trim((string) data_get($document->metadata, 'nium_file_id'));
+            if (! $expectedContinuation instanceof NiumManualKycContinuation
+                || ! Str::isUuid($persistedFileId)
+                || ! hash_equals($expectedContinuation->file_id_fingerprint, hash('sha256', $persistedFileId))) {
+                throw new RuntimeException('The persisted Nium File ID no longer matches the continuation binding.');
+            }
+        }
+
+        $fileState = $this->documentPreparation->prepareManualCorrectionDocument($document, $account->user);
+        $fileId = trim((string) data_get($document->fresh()->metadata, 'nium_file_id'));
+        if (! Str::isUuid($fileId)) {
+            throw new RuntimeException('The reviewed passport does not have a valid persisted Nium File ID.');
+        }
+
+        $context = [
             'account' => $account,
             'entity_type' => 'applicant',
             'external_id' => $externalId,
             'reference_id' => 'origin-wallet-manual-correction-'.substr(hash('sha256', $account->user_id.'|'.$correction->id.'|'.$correction->correction_version), 0, 32),
             'entity_reference_id' => $referenceId,
-            'payload' => $this->payloadFactory->buildApplicantManual($document->fresh(), $referenceId),
             'kyc_mode' => 'manual_kyc',
             'correction_id' => $correction->id,
             'correction_version' => $correction->correction_version,
+            'document_id' => $document->id,
+            'file_id' => $fileId,
+            'file_state' => $fileState,
         ];
+
+        if ($fileState === 'AVAILABLE') {
+            $context['payload'] = $this->payloadFactory->buildApplicantManual($document->fresh(), $referenceId);
+        }
+
+        return $context;
+    }
+
+    public function continueManualKyc(int $continuationId): ?int
+    {
+        $claimToken = (string) Str::uuid();
+        $continuation = DB::transaction(function () use ($continuationId, $claimToken): ?NiumManualKycContinuation {
+            $row = NiumManualKycContinuation::query()->whereKey($continuationId)->lockForUpdate()->first();
+            if ($row === null || in_array($row->state, [
+                NiumManualKycContinuation::ACCEPTED,
+                NiumManualKycContinuation::COMPLIANCE_REVIEW,
+                NiumManualKycContinuation::HOLD,
+                NiumManualKycContinuation::UNKNOWN,
+            ], true)) {
+                return null;
+            }
+            if ($row->state === NiumManualKycContinuation::SUBMITTING) {
+                if ($row->submit_claim_expires_at === null) {
+                    $this->holdLocked($row, NiumManualKycContinuation::UNKNOWN, 'submit_claim_invalid', 'The Submit KYC claim has no expiry and requires manual reconciliation.');
+
+                    return null;
+                }
+                if ($row->submit_claim_expires_at->isPast()) {
+                    $this->holdLocked($row, NiumManualKycContinuation::UNKNOWN, 'submit_claim_expired', 'The Submit KYC worker did not persist a trusted outcome before its durable claim expired.');
+
+                    return null;
+                }
+
+                return $row;
+            }
+            if ($row->deadline_at->isPast()
+                || $row->poll_attempts >= max(1, (int) config('services.nium.manual_kyc_continuation_max_attempts', 20))) {
+                $this->holdLocked($row, NiumManualKycContinuation::HOLD, 'file_processing_deadline', 'The Nium File API did not report AVAILABLE within the bounded polling window.');
+                return null;
+            }
+            if ($row->claimed_at !== null) {
+                $claimTtl = max(60, (int) config('services.nium.timeout', 30) + 120);
+                if ($row->claimed_at->lte(now()->subSeconds($claimTtl))) {
+                    $this->holdLocked($row, NiumManualKycContinuation::HOLD, 'stale_claim', 'A continuation claim outlived the provider request safety window.');
+
+                    return null;
+                }
+
+                return $row;
+            }
+
+            $row->forceFill([
+                'claim_token' => $claimToken,
+                'claimed_at' => now(),
+                'poll_attempts' => $row->poll_attempts + 1,
+                'next_attempt_at' => null,
+            ])->save();
+
+            return $row->fresh();
+        }, 3);
+
+        if ($continuation === null) {
+            return null;
+        }
+        if (! hash_equals((string) $continuation->claim_token, $claimToken)) {
+            return $continuation->state === NiumManualKycContinuation::SUBMITTING
+                ? $this->activeSubmitClaimDelay($continuation)
+                : $this->retryDelay((int) $continuation->poll_attempts);
+        }
+
+        try {
+            $account = UserProviderAccount::query()->findOrFail($continuation->user_provider_account_id);
+            $user = User::query()->findOrFail($account->user_id);
+            $context = $this->context($user, null, $continuation->id);
+            $correction = KycProfileCorrection::query()->findOrFail($continuation->kyc_profile_correction_id);
+
+            if ((int) ($context['correction_id'] ?? 0) !== (int) $continuation->kyc_profile_correction_id
+                || (int) ($context['correction_version'] ?? 0) !== (int) $continuation->correction_version
+                || (int) ($context['document_id'] ?? 0) !== (int) $continuation->kyc_document_id
+                || (int) ($context['account']->id ?? 0) !== (int) $continuation->user_provider_account_id
+                || $correction->status !== 'manual_kyc_evidence_approved'
+                || ! hash_equals($continuation->file_id_fingerprint, hash('sha256', (string) ($context['file_id'] ?? '')))) {
+                throw new RuntimeException('The continuation evidence no longer matches its durable correction binding.');
+            }
+        } catch (Throwable $exception) {
+            $this->holdClaim($continuationId, $claimToken, NiumManualKycContinuation::HOLD, 'evidence_invalid', $exception->getMessage());
+
+            return null;
+        }
+
+        if (($context['file_state'] ?? null) === 'PROCESSING') {
+            $delay = $this->retryDelay((int) $continuation->poll_attempts);
+            $rescheduled = DB::transaction(function () use ($continuationId, $claimToken, $delay): bool {
+                $row = NiumManualKycContinuation::query()->whereKey($continuationId)->lockForUpdate()->firstOrFail();
+                if (! hash_equals((string) $row->claim_token, $claimToken)) {
+                    return false;
+                }
+
+                $nextAttemptAt = now()->addSeconds($delay);
+                $maxAttempts = max(1, (int) config('services.nium.manual_kyc_continuation_max_attempts', 20));
+                if ($row->poll_attempts >= $maxAttempts || $nextAttemptAt->greaterThan($row->deadline_at)) {
+                    $this->holdLocked($row, NiumManualKycContinuation::HOLD, 'file_processing_deadline', 'The Nium File API did not report AVAILABLE within the bounded polling window.');
+
+                    return false;
+                }
+
+                $row->forceFill([
+                    'claim_token' => null,
+                    'claimed_at' => null,
+                    'next_attempt_at' => $nextAttemptAt,
+                ])->save();
+
+                return true;
+            }, 3);
+
+            return $rescheduled ? $delay : null;
+        }
+
+        if (! $this->queueTimingIsSafe()) {
+            $this->holdClaim(
+                $continuationId,
+                $claimToken,
+                NiumManualKycContinuation::HOLD,
+                'queue_timing_unsafe',
+                'Queue retry_after, worker timeout and Nium HTTP timeout are not safely ordered for Submit KYC.',
+            );
+
+            return null;
+        }
+
+        $submitClaimExpiresAt = now()->addSeconds($this->submitClaimTtl());
+        $maySubmit = DB::transaction(function () use ($continuationId, $claimToken, $submitClaimExpiresAt): bool {
+            $row = NiumManualKycContinuation::query()->whereKey($continuationId)->lockForUpdate()->firstOrFail();
+            if (! hash_equals((string) $row->claim_token, $claimToken)
+                || $row->state !== NiumManualKycContinuation::FILE_PROCESSING) {
+                return false;
+            }
+            $row->forceFill([
+                'state' => NiumManualKycContinuation::SUBMITTING,
+                'submit_started_at' => now(),
+                'submit_claim_expires_at' => $submitClaimExpiresAt,
+            ])->save();
+
+            return true;
+        }, 3);
+
+        if (! $maySubmit) {
+            return null;
+        }
+
+        try {
+            ContinueNiumHkManualKycJob::dispatch($continuationId)
+                ->delay($submitClaimExpiresAt)
+                ->afterCommit();
+        } catch (Throwable $exception) {
+            $this->holdClaim(
+                $continuationId,
+                $claimToken,
+                NiumManualKycContinuation::HOLD,
+                'submit_watchdog_dispatch_failed',
+                $exception->getMessage(),
+            );
+
+            return null;
+        }
+
+        $attempt = $this->submitPreparedContext($context, $user);
+        $attemptState = (string) ($attempt['state'] ?? 'unknown');
+        $terminalState = $attemptState === 'accepted'
+            ? NiumManualKycContinuation::COMPLIANCE_REVIEW
+            : ($attemptState === 'rejected' ? NiumManualKycContinuation::HOLD : NiumManualKycContinuation::UNKNOWN);
+        $this->holdClaim(
+            $continuationId,
+            $claimToken,
+            $terminalState,
+            $attemptState === 'accepted' ? null : 'submit_'.$attemptState,
+            $attemptState === 'accepted' ? null : 'Nium Submit KYC requires manual reconciliation and will not be reposted.',
+        );
+
+        return null;
+    }
+
+    public function holdFailedContinuation(int $continuationId, string $code, string $message): void
+    {
+        DB::transaction(function () use ($continuationId, $code, $message): void {
+            $row = NiumManualKycContinuation::query()->whereKey($continuationId)->lockForUpdate()->first();
+            if ($row === null || in_array($row->state, [
+                NiumManualKycContinuation::COMPLIANCE_REVIEW,
+                NiumManualKycContinuation::ACCEPTED,
+                NiumManualKycContinuation::HOLD,
+                NiumManualKycContinuation::UNKNOWN,
+            ], true)) {
+                return;
+            }
+            if ($row->state === NiumManualKycContinuation::SUBMITTING
+                && $row->submit_claim_expires_at !== null
+                && $row->submit_claim_expires_at->isFuture()) {
+                return;
+            }
+            $state = $row->state === NiumManualKycContinuation::SUBMITTING
+                ? NiumManualKycContinuation::UNKNOWN
+                : NiumManualKycContinuation::HOLD;
+            $this->holdLocked($row, $state, $code, $message);
+        }, 3);
+    }
+
+    private function beginContinuation(array $context): array
+    {
+        $continuation = DB::transaction(function () use ($context): NiumManualKycContinuation {
+            $correction = KycProfileCorrection::query()->whereKey($context['correction_id'])->lockForUpdate()->firstOrFail();
+            if ((int) $correction->correction_version !== (int) $context['correction_version']
+                || $correction->status !== 'manual_kyc_evidence_approved') {
+                throw new RuntimeException('The approved manual KYC correction changed before continuation was persisted.');
+            }
+
+            return NiumManualKycContinuation::query()->firstOrCreate(
+                ['kyc_profile_correction_id' => $correction->id],
+                [
+                    'kyc_document_id' => $context['document_id'],
+                    'user_provider_account_id' => $context['account']->id,
+                    'correction_version' => $context['correction_version'],
+                    'file_id_fingerprint' => hash('sha256', $context['file_id']),
+                    'state' => NiumManualKycContinuation::FILE_PROCESSING,
+                    'next_attempt_at' => now()->addSeconds($this->retryDelay(0)),
+                    'deadline_at' => now()->addMinutes(max(1, (int) config('services.nium.manual_kyc_continuation_deadline_minutes', 60))),
+                ],
+            );
+        }, 3);
+
+        if ($continuation->wasRecentlyCreated) {
+            ContinueNiumHkManualKycJob::dispatch($continuation->id)
+                ->delay($continuation->next_attempt_at)
+                ->afterCommit();
+        }
+
+        return $this->continuationAttempt($continuation);
+    }
+
+    private function continuationAttempt(NiumManualKycContinuation $continuation): array
+    {
+        return [
+            'state' => strtolower($continuation->state),
+            'continuation_state' => $continuation->state,
+            'kyc_mode' => 'manual_kyc',
+            'kyc_profile_correction_id' => $continuation->kyc_profile_correction_id,
+            'poll_attempts' => $continuation->poll_attempts,
+            'next_attempt_at' => $continuation->next_attempt_at?->toISOString(),
+            'deadline_at' => $continuation->deadline_at?->toISOString(),
+            'hold_code' => $continuation->hold_code,
+            'submit_claim_expires_at' => $continuation->submit_claim_expires_at?->toISOString(),
+        ];
+    }
+
+    private function holdClaim(int $id, string $claimToken, string $state, ?string $code, ?string $message): void
+    {
+        DB::transaction(function () use ($id, $claimToken, $state, $code, $message): void {
+            $row = NiumManualKycContinuation::query()->whereKey($id)->lockForUpdate()->firstOrFail();
+            if (hash_equals((string) $row->claim_token, $claimToken)) {
+                $this->holdLocked($row, $state, $code, $message);
+            }
+        }, 3);
+    }
+
+    private function holdLocked(NiumManualKycContinuation $row, string $state, ?string $code, ?string $message): void
+    {
+        $row->forceFill([
+            'state' => $state,
+            'claim_token' => null,
+            'claimed_at' => null,
+            'next_attempt_at' => null,
+            'completed_at' => now(),
+            'submit_claim_expires_at' => null,
+            'hold_code' => $code,
+            'hold_message' => $message === null ? null : Str::limit($message, 2000, ''),
+        ])->save();
+    }
+
+    private function retryDelay(int $attempt): int
+    {
+        $base = max(5, (int) config('services.nium.manual_kyc_continuation_delay_seconds', 30));
+        $maximum = max($base, (int) config('services.nium.manual_kyc_continuation_max_delay_seconds', 300));
+
+        return min($maximum, $base * (2 ** min(4, max(0, $attempt))));
+    }
+
+    private function submitClaimTtl(): int
+    {
+        $retryAfter = (int) config('queue.connections.database.retry_after', 90);
+
+        return max(
+            120,
+            $retryAfter + ContinueNiumHkManualKycJob::MAX_RUNTIME_SECONDS,
+            (int) config('services.nium.manual_kyc_submit_claim_ttl_seconds', 300),
+        );
+    }
+
+    private function activeSubmitClaimDelay(NiumManualKycContinuation $continuation): int
+    {
+        if ($continuation->submit_claim_expires_at === null) {
+            return 5;
+        }
+
+        return max(5, now()->diffInSeconds($continuation->submit_claim_expires_at, false) + 1);
+    }
+
+    private function queueTimingIsSafe(): bool
+    {
+        $httpTimeout = max(1, (int) config('services.nium.timeout', 30));
+        $retryAfter = (int) config('queue.connections.database.retry_after', 90);
+
+        return config('queue.default') === 'database'
+            && ContinueNiumHkManualKycJob::MAX_RUNTIME_SECONDS >= $httpTimeout + 15
+            && $retryAfter >= ContinueNiumHkManualKycJob::MAX_RUNTIME_SECONDS + 15;
     }
 
     private function hasVerifiedManualCorrectionRetryEvidence(

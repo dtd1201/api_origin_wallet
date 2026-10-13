@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class KycProfileCorrection extends Model
 {
@@ -103,5 +104,10 @@ class KycProfileCorrection extends Model
     public function syncAttempts(): HasMany
     {
         return $this->hasMany(KycCorrectionSyncAttempt::class);
+    }
+
+    public function manualKycContinuation(): HasOne
+    {
+        return $this->hasOne(NiumManualKycContinuation::class);
     }
 }

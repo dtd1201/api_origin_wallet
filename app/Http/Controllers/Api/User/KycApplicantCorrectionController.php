@@ -104,7 +104,7 @@ class KycApplicantCorrectionController extends Controller
 
     private function serializeCorrection(KycProfileCorrection $correction): array
     {
-        $correction->loadMissing('providerAccount');
+        $correction->loadMissing(['providerAccount', 'manualKycContinuation']);
         $providerUpdate = app(KycCorrectionSyncPolicy::class)->evaluate($correction->providerAccount);
 
         return [
@@ -129,6 +129,11 @@ class KycApplicantCorrectionController extends Controller
             'reviewed_at' => $correction->reviewed_at?->toISOString(),
             'review_note' => $correction->review_note,
             'provider_update' => $providerUpdate,
+            'manual_kyc_continuation' => $correction->manualKycContinuation === null ? null : [
+                'state' => $correction->manualKycContinuation->state,
+                'next_attempt_at' => $correction->manualKycContinuation->next_attempt_at?->toISOString(),
+                'completed_at' => $correction->manualKycContinuation->completed_at?->toISOString(),
+            ],
         ];
     }
 }

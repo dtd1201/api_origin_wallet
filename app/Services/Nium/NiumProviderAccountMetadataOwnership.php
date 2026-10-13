@@ -24,6 +24,7 @@ final class NiumProviderAccountMetadataOwnership
         'updated_at',
         'manual_reference_id',
         'manual_admin_action',
+        'kyc_profile_correction_id',
     ];
 
     private const SUBMISSION_FIELDS = [
@@ -110,6 +111,7 @@ final class NiumProviderAccountMetadataOwnership
             'manual_admin_action' => is_bool($attempt['manual_admin_action'] ?? null)
                 ? $attempt['manual_admin_action']
                 : null,
+            'kyc_profile_correction_id' => $this->positiveInt($attempt['kyc_profile_correction_id'] ?? null),
         ], static fn (mixed $value): bool => $value !== null);
     }
 

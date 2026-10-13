@@ -219,7 +219,7 @@ class KycProfileCorrectionController extends Controller
 
     private function serialize(KycProfileCorrection $correction): array
     {
-        $correction->loadMissing(['providerAccount', 'syncAttempts']);
+        $correction->loadMissing(['providerAccount', 'syncAttempts', 'manualKycContinuation']);
         $syncService = app(AdminKycCorrectionSyncService::class);
         $capability = $syncService->capability($correction);
         $approvalCapability = app(KycCorrectionSyncPolicy::class)->evaluate($correction->providerAccount);
@@ -254,6 +254,7 @@ class KycProfileCorrectionController extends Controller
             'resolved_at' => $correction->resolved_at?->toISOString(),
             'review_note' => $correction->review_note,
             'reviewed_by' => $correction->reviewedBy?->only(['id', 'email', 'full_name']),
+            'manual_kyc_continuation' => $this->serializeContinuation($correction),
             'sync' => [
                 ...$capability,
                 'status' => $attempt?->status,
@@ -275,6 +276,25 @@ class KycProfileCorrectionController extends Controller
                     && ($manualReviewEligible || $approvalCapability['allowed']),
                 'reason' => $manualReviewEligible || $approvalCapability['allowed'] ? null : $approvalCapability['reason'],
             ],
+        ];
+    }
+
+    private function serializeContinuation(KycProfileCorrection $correction): ?array
+    {
+        $continuation = $correction->manualKycContinuation;
+        if ($continuation === null) {
+            return null;
+        }
+
+        return [
+            'state' => $continuation->state,
+            'poll_attempts' => $continuation->poll_attempts,
+            'next_attempt_at' => $continuation->next_attempt_at?->toISOString(),
+            'deadline_at' => $continuation->deadline_at?->toISOString(),
+            'submit_started_at' => $continuation->submit_started_at?->toISOString(),
+            'submit_claim_expires_at' => $continuation->submit_claim_expires_at?->toISOString(),
+            'completed_at' => $continuation->completed_at?->toISOString(),
+            'hold_code' => $continuation->hold_code,
         ];
     }
 }

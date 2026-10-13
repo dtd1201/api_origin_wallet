@@ -2,22 +2,27 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\Nium\ContinueNiumHkManualKycJob;
 use App\Models\ApiRequestLog;
 use App\Models\ApiToken;
 use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\KycProfileCorrection;
+use App\Models\NiumManualKycContinuation;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Nium\NiumCurrentBiometricKyc;
+use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumHkManualSubmitKycService;
 use App\Services\Nium\NiumHkSubmitKycService;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Services\Nium\NiumService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Mockery\MockInterface;
 use Tests\TestCase;
@@ -463,6 +468,302 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertSame('submitted', collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole()['entity_kyc_status']);
     }
 
+    public function test_processing_manual_passport_persists_and_dispatches_a_delayed_continuation_without_submit_post(): void
+    {
+        Queue::fake();
+        $context = $this->context();
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $document = $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'VN',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => (string) Str::uuid(),
+                'nium_file_state' => 'PROCESSING',
+            ],
+        ]);
+        $this->mock(NiumCustomerDocumentPreparationService::class, function (MockInterface $mock) use ($document, $context): void {
+            $mock->shouldReceive('prepareManualCorrectionDocument')
+                ->once()->withArgs(fn ($candidate, $user): bool => $candidate->is($document) && $user->is($context['user']))
+                ->andReturn('PROCESSING');
+        });
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $first = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+        $second = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame('file_processing', $first['state']);
+        $this->assertSame($first['continuation_state'], $second['continuation_state']);
+        $this->assertDatabaseHas('nium_manual_kyc_continuations', [
+            'kyc_profile_correction_id' => $correction->id,
+            'kyc_document_id' => $document->id,
+            'state' => NiumManualKycContinuation::FILE_PROCESSING,
+        ]);
+        Queue::assertPushed(ContinueNiumHkManualKycJob::class, 1);
+    }
+
+    public function test_available_continuation_submits_once_and_duplicate_jobs_do_not_repost(): void
+    {
+        Queue::fake();
+        config()->set('queue.default', 'database');
+        config()->set('queue.connections.database.retry_after', 90);
+        $context = $this->context();
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $fileId = (string) Str::uuid();
+        $document = $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'VN',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => $fileId,
+                'nium_file_state' => 'PROCESSING',
+            ],
+        ]);
+        $this->mock(NiumCustomerDocumentPreparationService::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('prepareManualCorrectionDocument')->once()->andReturn('PROCESSING');
+        });
+        $pending = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+        $continuation = NiumManualKycContinuation::query()->sole();
+
+        $metadata = $document->metadata;
+        $metadata['nium_file_state'] = 'AVAILABLE';
+        $document->forceFill(['metadata' => $metadata])->save();
+        $this->app->forgetInstance(NiumCustomerDocumentPreparationService::class);
+        $this->app->forgetInstance(NiumHkManualSubmitKycService::class);
+        $this->mock(NiumCustomerDocumentPreparationService::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('prepareManualCorrectionDocument')->once()->andReturn('AVAILABLE');
+        });
+        $calls = $this->mockResponse($context, [
+            'entityType' => 'applicant',
+            'externalId' => $context['external_id'],
+            'kycMode' => 'manual_kyc',
+            'kycStatus' => 'initiated',
+            'referenceId' => $context['provider_reference_id'],
+        ]);
+
+        $this->assertSame('file_processing', $pending['state']);
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($continuation->id));
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($continuation->id));
+        $this->assertSame(1, $calls->count);
+        $this->assertSame([$fileId], $calls->payload['proofOfIdentityDocument'][0]['fileIds']);
+        $this->assertSame(NiumManualKycContinuation::COMPLIANCE_REVIEW, $continuation->fresh()->state);
+        $this->assertSame('manual_kyc_compliance_review', $correction->fresh()->status);
+    }
+
+    public function test_duplicate_job_does_not_quarantine_an_active_submitting_claim(): void
+    {
+        $fixture = $this->manualContinuationFixture(NiumManualKycContinuation::SUBMITTING, [
+            'claim_token' => (string) Str::uuid(),
+            'claimed_at' => now(),
+            'submit_started_at' => now(),
+            'submit_claim_expires_at' => now()->addMinutes(5),
+        ]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $delay = app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id);
+        app(NiumHkManualSubmitKycService::class)->holdFailedContinuation(
+            $fixture['continuation']->id,
+            'duplicate_failed',
+            'Synthetic duplicate failure.',
+        );
+
+        $this->assertGreaterThan(0, $delay);
+        $this->assertSame(NiumManualKycContinuation::SUBMITTING, $fixture['continuation']->fresh()->state);
+        $this->assertNull($fixture['continuation']->fresh()->completed_at);
+    }
+
+    public function test_expired_submitting_claim_becomes_unknown_without_reposting(): void
+    {
+        $fixture = $this->manualContinuationFixture(NiumManualKycContinuation::SUBMITTING, [
+            'claim_token' => (string) Str::uuid(),
+            'claimed_at' => now()->subMinutes(10),
+            'submit_started_at' => now()->subMinutes(10),
+            'submit_claim_expires_at' => now()->subSecond(),
+        ]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+
+        $continuation = $fixture['continuation']->fresh();
+        $this->assertSame(NiumManualKycContinuation::UNKNOWN, $continuation->state);
+        $this->assertSame('submit_claim_expired', $continuation->hold_code);
+        $this->assertNotNull($continuation->completed_at);
+    }
+
+    public function test_processing_file_get_timeout_moves_continuation_to_hold_without_post(): void
+    {
+        $fixture = $this->manualContinuationFixture();
+        config()->set('cache.default', 'array');
+        config()->set('services.nium.file_base_url', 'https://files.nium.test');
+        config()->set('services.nium.client_id', 'client-id');
+        config()->set('services.nium.auth.header_name', 'x-api-key');
+        config()->set('services.nium.auth.header_value', 'secret');
+        Http::fake(['*' => Http::failedConnection('synthetic timeout')]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+
+        $this->assertSame(NiumManualKycContinuation::HOLD, $fixture['continuation']->fresh()->state);
+        Http::assertSentCount(1);
+    }
+
+    public function test_malformed_file_details_response_moves_continuation_to_hold_without_post(): void
+    {
+        $fixture = $this->manualContinuationFixture();
+        config()->set('cache.default', 'array');
+        config()->set('services.nium.file_base_url', 'https://files.nium.test');
+        config()->set('services.nium.client_id', 'client-id');
+        config()->set('services.nium.auth.header_name', 'x-api-key');
+        config()->set('services.nium.auth.header_value', 'secret');
+        Http::fake(['*' => Http::response(['state' => 'PROCESSING'], 200)]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+
+        $this->assertSame(NiumManualKycContinuation::HOLD, $fixture['continuation']->fresh()->state);
+        Http::assertSentCount(1);
+    }
+
+    public function test_continuation_never_reuploads_when_bound_file_id_is_missing_or_changed(): void
+    {
+        foreach (['missing', 'changed'] as $scenario) {
+            $fixture = $this->manualContinuationFixture();
+            $metadata = $fixture['document']->metadata;
+            if ($scenario === 'missing') {
+                unset($metadata['nium_file_id']);
+            } else {
+                $metadata['nium_file_id'] = (string) Str::uuid();
+            }
+            $fixture['document']->forceFill(['metadata' => $metadata])->save();
+            $this->mock(NiumCustomerDocumentPreparationService::class, function (MockInterface $mock): void {
+                $mock->shouldNotReceive('prepareManualCorrectionDocument');
+            });
+            $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+            $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+            $this->assertSame(NiumManualKycContinuation::HOLD, $fixture['continuation']->fresh()->state, $scenario);
+            $this->app->forgetInstance(NiumHkManualSubmitKycService::class);
+            $this->app->forgetInstance(NiumCustomerDocumentPreparationService::class);
+            $this->app->forgetInstance(NiumService::class);
+        }
+    }
+
+    public function test_processing_reschedules_within_bounds_and_holds_at_deadline(): void
+    {
+        $fixture = $this->manualContinuationFixture();
+        $this->mock(NiumCustomerDocumentPreparationService::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('prepareManualCorrectionDocument')->once()->andReturn('PROCESSING');
+        });
+
+        $delay = app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id);
+
+        $this->assertGreaterThan(0, $delay);
+        $this->assertSame(NiumManualKycContinuation::FILE_PROCESSING, $fixture['continuation']->fresh()->state);
+        $this->assertNull($fixture['continuation']->fresh()->claim_token);
+        $this->assertNotNull($fixture['continuation']->fresh()->next_attempt_at);
+
+        $fixture['continuation']->forceFill([
+            'deadline_at' => now()->subSecond(),
+            'next_attempt_at' => null,
+        ])->save();
+        $this->app->forgetInstance(NiumHkManualSubmitKycService::class);
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+        $this->assertSame(NiumManualKycContinuation::HOLD, $fixture['continuation']->fresh()->state);
+    }
+
+    public function test_correction_approval_change_before_post_holds_without_submit(): void
+    {
+        $fixture = $this->manualContinuationFixture();
+        $fixture['correction']->update(['status' => 'rejected']);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+
+        $this->assertSame(NiumManualKycContinuation::HOLD, $fixture['continuation']->fresh()->state);
+    }
+
+    public function test_ambiguous_submit_response_becomes_unknown_and_is_never_reposted(): void
+    {
+        Queue::fake();
+        config()->set('queue.default', 'database');
+        config()->set('queue.connections.database.retry_after', 90);
+        $fixture = $this->manualContinuationFixture();
+        $metadata = $fixture['document']->metadata;
+        $metadata['nium_file_state'] = 'AVAILABLE';
+        $fixture['document']->forceFill(['metadata' => $metadata])->save();
+        $this->mock(NiumCustomerDocumentPreparationService::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('prepareManualCorrectionDocument')->once()->andReturn('AVAILABLE');
+        });
+        $calls = $this->mockResponse($fixture['context'], [
+            'entityType' => 'individual_stakeholder',
+            'externalId' => $fixture['context']['external_id'],
+            'kycMode' => 'manual_kyc',
+            'kycStatus' => 'initiated',
+            'referenceId' => $fixture['context']['provider_reference_id'],
+        ]);
+
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+        $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+
+        $this->assertSame(1, $calls->count);
+        $this->assertSame(NiumManualKycContinuation::UNKNOWN, $fixture['continuation']->fresh()->state);
+        $this->assertSame('submit_response_review', $fixture['continuation']->fresh()->hold_code);
+    }
+
+    public function test_terminal_continuation_states_are_immutable_against_duplicate_jobs(): void
+    {
+        foreach ([
+            NiumManualKycContinuation::UNKNOWN,
+            NiumManualKycContinuation::HOLD,
+            NiumManualKycContinuation::COMPLIANCE_REVIEW,
+        ] as $state) {
+            $fixture = $this->manualContinuationFixture($state, ['completed_at' => now()]);
+            $this->assertNull(app(NiumHkManualSubmitKycService::class)->continueManualKyc($fixture['continuation']->id));
+            app(NiumHkManualSubmitKycService::class)->holdFailedContinuation($fixture['continuation']->id, 'late_failure', 'Late duplicate failure.');
+            $this->assertSame($state, $fixture['continuation']->fresh()->state);
+        }
+    }
+
+    public function test_admin_sees_pending_as_202_and_terminal_unknown_as_failure(): void
+    {
+        $fixture = $this->manualContinuationFixture();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $token = $this->issueTokenFor($admin);
+
+        $this->withToken($token)
+            ->postJson("/api/admin/users/{$fixture['context']['user']->id}/kyc-profile/submit-kyc")
+            ->assertStatus(202)
+            ->assertJsonPath('continuation_state', NiumManualKycContinuation::FILE_PROCESSING);
+
+        $fixture['continuation']->forceFill([
+            'state' => NiumManualKycContinuation::UNKNOWN,
+            'completed_at' => now(),
+            'hold_code' => 'submit_claim_expired',
+        ])->save();
+
+        $this->withToken($token)
+            ->postJson("/api/admin/users/{$fixture['context']['user']->id}/kyc-profile/submit-kyc")
+            ->assertStatus(502)
+            ->assertJsonPath('continuation_state', NiumManualKycContinuation::UNKNOWN)
+            ->assertJsonPath('hold_code', 'submit_claim_expired')
+            ->assertJsonPath('compliance_review_pending', false);
+    }
+
     public function test_reviewed_correction_accepts_strict_processed_retry_webhook_and_attempt_evidence(): void
     {
         $context = $this->context();
@@ -836,6 +1137,44 @@ final class NiumHkManualSubmitKycTest extends TestCase
         });
 
         return $calls;
+    }
+
+    private function manualContinuationFixture(
+        string $state = NiumManualKycContinuation::FILE_PROCESSING,
+        array $overrides = [],
+    ): array {
+        $context = $this->context();
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $fileId = (string) Str::uuid();
+        $document = $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'VN',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => $fileId,
+                'nium_file_state' => 'PROCESSING',
+            ],
+        ]);
+        $continuation = NiumManualKycContinuation::query()->create(array_merge([
+            'kyc_profile_correction_id' => $correction->id,
+            'kyc_document_id' => $document->id,
+            'user_provider_account_id' => $context['account']->id,
+            'correction_version' => $correction->correction_version,
+            'file_id_fingerprint' => hash('sha256', $fileId),
+            'state' => $state,
+            'poll_attempts' => 0,
+            'next_attempt_at' => now(),
+            'deadline_at' => now()->addHour(),
+        ], $overrides));
+
+        return compact('context', 'correction', 'document', 'continuation', 'fileId');
     }
 
     private function correction(array $context, string $status): KycProfileCorrection
