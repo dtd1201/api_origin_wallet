@@ -84,6 +84,11 @@ class KycProfile extends Model
         return $this->hasMany(KycProviderSubmission::class);
     }
 
+    public function corrections(): HasMany
+    {
+        return $this->hasMany(KycProfileCorrection::class);
+    }
+
     public function amlScreenings(): HasMany
     {
         return $this->hasMany(AmlScreening::class);

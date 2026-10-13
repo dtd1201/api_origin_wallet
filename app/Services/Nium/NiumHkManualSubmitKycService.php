@@ -134,6 +134,13 @@ final class NiumHkManualSubmitKycService
             throw new RuntimeException('The existing Nium customer is not eligible for manual HK Submit KYC.');
         }
 
+        $correction = $profile->corrections()->latest('id')->first();
+        if ($correction !== null && in_array($correction->status, [
+            'approved', 'syncing', 'verification_pending', 'sync_failed', 'unknown',
+        ], true)) {
+            throw new RuntimeException('The approved applicant correction must be verified as synced before manual Submit KYC.');
+        }
+
         $person = $this->corporateApplicant($profile);
         $entityStates = collect((array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []));
         $entities = $entityStates

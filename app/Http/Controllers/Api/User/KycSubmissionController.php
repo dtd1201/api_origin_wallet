@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Api\User;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\KycProfile;
+use App\Models\KycDocumentUpload;
+use App\Models\KycProfileCorrection;
 use App\Models\KycRequirement;
 use App\Models\User;
 use App\Services\Aml\AmlScreeningService;
@@ -74,20 +76,55 @@ class KycSubmissionController extends Controller
             'metadata' => ['sometimes', 'array'],
         ]);
 
+        $correctionId = data_get($validated, 'metadata.correction_id');
+        $correction = null;
+        if ($correctionId !== null) {
+            $correction = KycProfileCorrection::query()
+                ->whereKey($correctionId)
+                ->where('status', 'requested')
+                ->where('active_slot', 1)
+                ->whereHas('kycProfile', fn ($query) => $query->where('user_id', $user->id))
+                ->first();
+            if (! $correction instanceof KycProfileCorrection) {
+                throw ValidationException::withMessages(['metadata.correction_id' => 'The KYC update request is not open for this customer.']);
+            }
+        }
+
         $file = $request->file('file');
         $disk = (string) config('services.kyc.documents_disk', 'kyc_private');
         $fileHash = hash_file('sha256', $file->getRealPath());
         $extension = $file->guessExtension() ?: $file->getClientOriginalExtension() ?: 'bin';
         $safeType = Str::slug((string) $validated['type']) ?: 'document';
         $path = sprintf(
-            'kyc/%d/documents/%s-%s.%s',
+            'kyc/%d/documents/%s-%s-%s.%s',
             $user->id,
             $fileHash,
             $safeType,
+            (string) Str::uuid(),
             $extension,
         );
 
-        Storage::disk($disk)->put($path, file_get_contents($file->getRealPath()));
+        $upload = null;
+        if ($correction instanceof KycProfileCorrection) {
+            $upload = KycDocumentUpload::query()->create([
+                'user_id' => $user->id,
+                'storage_disk' => $disk,
+                'file_path' => $path,
+                'file_hash' => $fileHash,
+                'mime_type' => (string) $file->getMimeType(),
+                'file_size' => (int) $file->getSize(),
+                'status' => 'uploading',
+                'expires_at' => now()->addDays(max(1, (int) config('services.kyc.correction_upload_retention_days', 7))),
+            ]);
+        }
+
+        try {
+            Storage::disk($disk)->put($path, file_get_contents($file->getRealPath()));
+            $upload?->update(['status' => 'uploaded']);
+        } catch (\Throwable $exception) {
+            $upload?->update(['status' => 'failed']);
+            throw $exception;
+        }
 
         $document = array_filter([
             'type' => $validated['type'],
@@ -131,7 +168,8 @@ class KycSubmissionController extends Controller
 
         $authenticatedUser->loadMissing('roles');
 
-        if ($authenticatedUser->id !== $user->id && ! $authenticatedUser->isAdmin()) {
+        if ($authenticatedUser->id !== $user->id
+            && (! $authenticatedUser->isAdmin() || ! $authenticatedUser->hasPermission('kyc.view'))) {
             abort(403);
         }
 

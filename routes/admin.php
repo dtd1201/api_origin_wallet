@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\Admin\ContactSubmissionController;
 use App\Http\Controllers\Api\Admin\FxOrderController;
 use App\Http\Controllers\Api\Admin\IntegrationProviderController;
 use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
+use App\Http\Controllers\Api\Admin\KycProfileCorrectionController;
 use App\Http\Controllers\Api\Admin\LedgerEntryController;
 use App\Http\Controllers\Api\Admin\ManagedExchangeRateController;
 use App\Http\Controllers\Api\Admin\NiumComplianceEventController;
@@ -114,6 +115,14 @@ Route::middleware('permission:rfi.manage')->group(function (): void {
 Route::get('kyc-submissions', [UserKycSubmissionController::class, 'index'])->middleware('permission:kyc.view')->name('kyc-submissions.index');
 Route::get('kyc-profiles', [UserKycSubmissionController::class, 'index'])->middleware('permission:kyc.view')->name('kyc-profiles.index');
 Route::get('users/{user}/kyc-profile', [UserKycSubmissionController::class, 'show'])->middleware('permission:kyc.view')->name('users.kyc-profile.show');
+Route::get('users/{user}/kyc-profile/corrections', [KycProfileCorrectionController::class, 'index'])->middleware('permission:kyc.view')->name('users.kyc-profile.corrections.index');
+Route::get('users/{user}/kyc-profile/corrections/{correction}', [KycProfileCorrectionController::class, 'show'])->middleware('permission:kyc.view')->name('users.kyc-profile.corrections.show');
+Route::post('users/{user}/kyc-profile/corrections/request-update', [KycProfileCorrectionController::class, 'requestUpdate'])->middleware('permission:kyc.reject')->name('users.kyc-profile.corrections.request-update');
+Route::post('users/{user}/kyc-profile/corrections/{correction}/approve', [KycProfileCorrectionController::class, 'approve'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.approve');
+Route::post('users/{user}/kyc-profile/corrections/{correction}/request-changes', [KycProfileCorrectionController::class, 'requestChanges'])->middleware('permission:kyc.reject')->name('users.kyc-profile.corrections.request-changes');
+Route::post('users/{user}/kyc-profile/corrections/{correction}/sync', [KycProfileCorrectionController::class, 'sync'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.sync');
+Route::post('users/{user}/kyc-profile/corrections/{correction}/reconcile', [KycProfileCorrectionController::class, 'reconcile'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.reconcile');
+Route::post('users/{user}/kyc-profile/corrections/{correction}/resolve-failure', [KycProfileCorrectionController::class, 'resolveFailure'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.resolve-failure');
 Route::post('users/{user}/kyc-profile/approve', [UserKycSubmissionController::class, 'approve'])
     ->middleware('permission:kyc.approve')
     ->name('users.kyc-profile.approve');

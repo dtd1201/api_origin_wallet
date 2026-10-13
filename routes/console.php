@@ -464,3 +464,10 @@ if ((bool) config('services.nium.wallet_data_sync_enabled', false)) {
         ->everyTenMinutes()
         ->withoutOverlapping(15);
 }
+
+if ((bool) config('services.kyc.correction_upload_cleanup_enabled', false)) {
+    Schedule::command('kyc:cleanup-document-uploads --execute')
+        ->dailyAt('03:30')
+        ->onOneServer()
+        ->withoutOverlapping(60);
+}

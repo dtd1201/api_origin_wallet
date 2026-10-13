@@ -21,6 +21,12 @@ return [
         'evidence_disk' => env('IDENTITY_VERIFICATION_EVIDENCE_DISK', 'kyc_private'),
     ],
 
+    'kyc' => [
+        'documents_disk' => env('KYC_DOCUMENTS_DISK', 'kyc_private'),
+        'correction_upload_retention_days' => (int) env('KYC_CORRECTION_UPLOAD_RETENTION_DAYS', 7),
+        'correction_upload_cleanup_enabled' => (bool) env('KYC_CORRECTION_UPLOAD_CLEANUP_ENABLED', false),
+    ],
+
     'business_registry' => [
         'timeout' => env('BUSINESS_REGISTRY_TIMEOUT', 12),
         'eu_vies' => [
@@ -103,6 +109,12 @@ return [
         'corporate_constants_endpoint' => env('NIUM_CORPORATE_CONSTANTS_ENDPOINT'),
         'corporate_constants_cache_seconds' => env('NIUM_CORPORATE_CONSTANTS_CACHE_SECONDS', 86400),
         'customer_get_endpoint' => env('NIUM_CUSTOMER_GET_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}'),
+        'customer_update_endpoint' => env('NIUM_CUSTOMER_UPDATE_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}'),
+        'customer_update_enabled' => (bool) env('NIUM_CUSTOMER_UPDATE_ENABLED', false),
+        'customer_update_allowed_statuses' => array_values(array_filter(array_map(
+            static fn (string $status): string => strtolower(trim($status)),
+            explode(',', (string) env('NIUM_CUSTOMER_UPDATE_ALLOWED_STATUSES', 'clear,rejected')),
+        ))),
         'customer_list_endpoint' => env('NIUM_CUSTOMER_LIST_ENDPOINT', '/api/v5/client/{clientHashId}/customers'),
         'customer_submit_kyc_endpoint' => env('NIUM_CUSTOMER_SUBMIT_KYC_ENDPOINT', '/api/v5/client/{clientHashId}/customer/{customerHashId}/submitKyc'),
         'confirmed_hk_stakeholder_entity_type' => env('NIUM_HK_CONFIRMED_STAKEHOLDER_ENTITY_TYPE'),

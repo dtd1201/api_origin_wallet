@@ -6,6 +6,7 @@ use App\Models\ApiRequestLog;
 use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
+use App\Models\KycProfileCorrection;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
@@ -314,9 +315,52 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertArrayNotHasKey('biometric_url', $attempt);
     }
 
+    public function test_submitted_and_needs_more_info_corrections_do_not_block_manual_submit(): void
+    {
+        foreach (['submitted', 'needs_more_info'] as $status) {
+            $context = $this->context();
+            $this->correction($context, $status);
+            $calls = $this->mockResponse($context, [
+                'biometricUrl' => 'https://verify.example.test/'.$status,
+                'entityType' => 'applicant',
+                'externalId' => $context['external_id'],
+                'kycMode' => 'biometric_kyc',
+                'kycStatus' => 'initiated',
+                'referenceId' => $context['provider_reference_id'],
+            ]);
+
+            $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+            $this->assertSame('accepted', $result['state']);
+            $this->assertSame(1, $calls->count);
+            $this->app->forgetInstance(NiumService::class);
+        }
+    }
+
+    public function test_approved_and_unresolved_sync_corrections_block_manual_submit_without_nium_call(): void
+    {
+        foreach (['approved', 'sync_failed', 'unknown'] as $status) {
+            $context = $this->context();
+            $this->correction($context, $status);
+            $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+            try {
+                app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+                $this->fail("Manual Submit KYC was not blocked for {$status}.");
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString('must be verified as synced', $exception->getMessage());
+            }
+
+            $this->app->forgetInstance(NiumService::class);
+        }
+    }
+
     private function context(): array
     {
-        $provider = IntegrationProvider::query()->create(['code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
+        $provider = IntegrationProvider::query()->firstOrCreate(
+            ['code' => 'nium'],
+            ['name' => 'Nium', 'status' => 'active'],
+        );
         $user = User::factory()->create();
         $profile = KycProfile::query()->create([
             'user_id' => $user->id,
@@ -448,6 +492,35 @@ final class NiumHkManualSubmitKycTest extends TestCase
         });
 
         return $calls;
+    }
+
+    private function correction(array $context, string $status): KycProfileCorrection
+    {
+        $values = [
+            'legal_name' => 'Test Person',
+            'first_name' => 'Test',
+            'last_name' => 'Person',
+            'date_of_birth' => '1990-01-01',
+        ];
+
+        return $context['profile']->corrections()->create([
+            'applicant_related_person_id' => $context['person']->id,
+            'user_provider_account_id' => $context['account']->id,
+            'correction_version' => 1,
+            'source_fingerprint' => hash('sha256', json_encode($values, JSON_THROW_ON_ERROR)),
+            'customer_hash_id' => $context['account']->external_customer_id,
+            'applicant_reference_id' => $context['provider_reference_id'],
+            'applicant_external_id' => $context['external_id'],
+            'customer_hash_fingerprint' => hash('sha256', $context['account']->external_customer_id),
+            'applicant_reference_fingerprint' => hash('sha256', $context['provider_reference_id']),
+            'applicant_external_fingerprint' => hash('sha256', $context['external_id']),
+            'before_snapshot' => $values,
+            'proposed_values' => $values,
+            'status' => $status,
+            'active_slot' => in_array($status, ['needs_more_info', 'synced'], true) ? null : 1,
+            'created_by_user_id' => $context['user']->id,
+            'submitted_at' => now(),
+        ]);
     }
 
     private function issueTokenFor(User $user): string

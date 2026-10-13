@@ -84,6 +84,22 @@ class NiumService
         return $this->client()->put($path, $payload, $user);
     }
 
+    public function putWithRequestId(
+        string $path,
+        array $payload,
+        User $user,
+        string $requestId,
+        ?string $operation = null,
+        ?string $externalReference = null,
+    ): Response {
+        if (! Str::isUuid($requestId)) {
+            throw new RuntimeException('Nium x-request-id must be a UUID.');
+        }
+
+        return $this->client($operation, $externalReference, ['x-request-id' => $requestId])
+            ->put($path, $payload, $user);
+    }
+
     public function delete(string $path, array $payload = [], ?User $user = null): Response
     {
         return $this->client()->delete($path, $payload, $user);
