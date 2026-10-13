@@ -196,6 +196,7 @@ class KycApplicantCorrectionTest extends TestCase
                 'type' => 'passport', 'file_url' => 'https://api.example.test/api/kyc-documents/1/hash',
                 'storage_disk' => 'kyc_private', 'file_path' => $documentPath,
                 'file_hash' => $documentHash, 'mime_type' => 'application/pdf', 'file_size' => strlen($documentContents),
+                'document_number' => 'P1234567', 'issuing_country_code' => 'HK', 'expires_at' => '2099-12-31',
             ]],
         ];
         $this->withToken($token)->postJson($this->endpoint($context['user']), $payload)
@@ -252,6 +253,7 @@ class KycApplicantCorrectionTest extends TestCase
                     'type' => 'passport', 'file_url' => "https://api.example.test/api/kyc-documents/{$context['user']->id}/{$hash}",
                     'storage_disk' => 'kyc_private', 'file_path' => $path, 'file_hash' => $hash,
                     'mime_type' => 'application/pdf', 'file_size' => strlen($contents),
+                    'document_number' => 'P1234567', 'issuing_country_code' => 'HK', 'expires_at' => '2099-12-31',
                 ]];
             }
 
@@ -297,6 +299,7 @@ class KycApplicantCorrectionTest extends TestCase
             'type' => 'passport', 'file_url' => "https://api.example.test/api/kyc-documents/{$other->id}/{$hash}",
             'storage_disk' => 'kyc_private', 'file_path' => $otherPath, 'file_hash' => $hash,
             'mime_type' => 'application/pdf', 'file_size' => strlen($contents),
+            'document_number' => 'P1234567', 'issuing_country_code' => 'HK', 'expires_at' => '2099-12-31',
         ];
         $token = $this->issueTokenFor($context['user']);
         $this->withToken($token)->postJson($this->endpoint($context['user']), [...$base, 'documents' => [$document]])
@@ -313,6 +316,121 @@ class KycApplicantCorrectionTest extends TestCase
         $document['mime_type'] = 'image/jpeg';
         $this->withToken($token)->postJson($this->endpoint($context['user']), [...$base, 'documents' => [$document]])
             ->assertUnprocessable()->assertJsonValidationErrors('documents');
+    }
+
+    public function test_requested_passport_metadata_is_required_validated_and_persisted_before_submission(): void
+    {
+        Storage::fake('kyc_private');
+        $context = $this->context();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $created = $this->withToken($this->issueTokenFor($admin))->postJson(
+            "/api/admin/users/{$context['user']->id}/kyc-profile/corrections/request-update",
+            ['subject' => 'applicant', 'fields' => [], 'document_types' => ['passport'], 'instruction' => 'Upload passport metadata and evidence.'],
+        )->assertCreated()->json('correction');
+        $state = $this->withToken($this->issueTokenFor($context['user']))
+            ->getJson($this->endpoint($context['user']))->assertOk()->json();
+
+        $contents = "%PDF-1.4\npassport-metadata\n%%EOF";
+        $hash = hash('sha256', $contents);
+        $path = "kyc/{$context['user']->id}/documents/{$hash}-passport.pdf";
+        Storage::disk('kyc_private')->put($path, $contents);
+        $this->registerUpload($context['user'], $path, $hash, $contents);
+        $base = [
+            'correction_id' => $created['id'],
+            'correction_version' => $state['correction_version'],
+            'source_fingerprint' => $state['source_fingerprint'],
+        ];
+        $document = [
+            'type' => 'passport',
+            'file_url' => "https://api.example.test/api/kyc-documents/{$context['user']->id}/{$hash}",
+            'storage_disk' => 'kyc_private',
+            'file_path' => $path,
+            'file_hash' => $hash,
+            'mime_type' => 'application/pdf',
+            'file_size' => strlen($contents),
+        ];
+        $token = $this->issueTokenFor($context['user']);
+
+        $this->withToken($token)->postJson($this->endpoint($context['user']), [...$base, 'documents' => [$document]])
+            ->assertUnprocessable()->assertJsonValidationErrors('documents.0.document_number');
+        $this->withToken($token)->postJson($this->endpoint($context['user']), [...$base, 'documents' => [[
+            ...$document, 'document_number' => 'P1234567', 'issuing_country_code' => 'HKG', 'expires_at' => '2099-12-31',
+        ]]])->assertUnprocessable()->assertJsonValidationErrors('documents.0.issuing_country_code');
+        $this->withToken($token)->postJson($this->endpoint($context['user']), [...$base, 'documents' => [[
+            ...$document, 'document_number' => 'P1234567', 'issuing_country_code' => 'HK', 'expires_at' => '2020-01-01',
+        ]]])->assertUnprocessable()->assertJsonValidationErrors('documents.0.expires_at');
+
+        $this->withToken($token)->postJson($this->endpoint($context['user']), [...$base, 'documents' => [[
+            ...$document, 'document_number' => 'P1234567', 'issuing_country_code' => 'hk', 'expires_at' => '2099-12-31',
+        ]]])->assertCreated()
+            ->assertJsonPath('correction.status', 'submitted')
+            ->assertJsonPath('correction.proposed_documents.0.document_number', 'P1234567')
+            ->assertJsonPath('correction.proposed_documents.0.issuing_country_code', 'HK')
+            ->assertJsonPath('correction.proposed_documents.0.expires_at', '2099-12-31');
+
+        $correction = KycProfileCorrection::query()->findOrFail($created['id']);
+        $this->assertSame('P1234567', $correction->proposed_documents[0]['document_number']);
+        $this->assertSame('HK', $correction->proposed_documents[0]['issuing_country_code']);
+        $this->assertSame('referenced', KycDocumentUpload::query()->where('file_path', $path)->sole()->status);
+    }
+
+    public function test_request_changes_allows_passport_metadata_resubmission_in_a_new_version_without_mutating_history(): void
+    {
+        Storage::fake('kyc_private');
+        $context = $this->context();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $adminToken = $this->issueTokenFor($admin);
+        $customerToken = $this->issueTokenFor($context['user']);
+        $first = $this->withToken($adminToken)->postJson(
+            "/api/admin/users/{$context['user']->id}/kyc-profile/corrections/request-update",
+            ['subject' => 'applicant', 'fields' => [], 'document_types' => ['passport'], 'instruction' => 'Upload passport.'],
+        )->assertCreated()->json('correction');
+
+        $submitVersion = function (array $correction, string $suffix, string $number) use ($context, $customerToken): void {
+            $state = $this->withToken($customerToken)->getJson($this->endpoint($context['user']))->assertOk()->json();
+            $contents = "%PDF-1.4\npassport-{$suffix}\n%%EOF";
+            $hash = hash('sha256', $contents);
+            $path = "kyc/{$context['user']->id}/documents/{$hash}-passport.pdf";
+            Storage::disk('kyc_private')->put($path, $contents);
+            $this->registerUpload($context['user'], $path, $hash, $contents);
+            $this->withToken($customerToken)->postJson($this->endpoint($context['user']), [
+                'correction_id' => $correction['id'],
+                'correction_version' => $state['correction_version'],
+                'source_fingerprint' => $state['source_fingerprint'],
+                'documents' => [[
+                    'type' => 'passport', 'file_url' => "https://api.example.test/api/kyc-documents/{$context['user']->id}/{$hash}",
+                    'storage_disk' => 'kyc_private', 'file_path' => $path, 'file_hash' => $hash,
+                    'mime_type' => 'application/pdf', 'file_size' => strlen($contents),
+                    'document_number' => $number, 'issuing_country_code' => 'HK', 'expires_at' => '2099-12-31',
+                ]],
+            ])->assertCreated();
+        };
+
+        $submitVersion($first, 'v1', 'P1111111');
+        $this->withToken($adminToken)->postJson(
+            "/api/admin/users/{$context['user']->id}/kyc-profile/corrections/{$first['id']}/request-changes",
+            [
+                'correction_version' => $first['correction_version'],
+                'source_fingerprint' => $first['source_fingerprint'],
+                'reason' => 'Passport metadata does not match the submitted image.',
+            ],
+        )->assertOk()->assertJsonPath('correction.status', 'needs_more_info');
+
+        $second = KycProfileCorrection::query()->where('active_slot', 1)->sole();
+        $this->assertSame(2, $second->correction_version);
+        $this->assertSame('requested', $second->status);
+        $submitVersion([
+            'id' => $second->id,
+            'correction_version' => $second->correction_version,
+            'source_fingerprint' => $second->source_fingerprint,
+        ], 'v2', 'P2222222');
+
+        $this->assertDatabaseCount('kyc_profile_corrections', 2);
+        $this->assertSame('needs_more_info', KycProfileCorrection::query()->findOrFail($first['id'])->status);
+        $this->assertSame('P1111111', KycProfileCorrection::query()->findOrFail($first['id'])->proposed_documents[0]['document_number']);
+        $this->assertSame('P2222222', $second->fresh()->proposed_documents[0]['document_number']);
     }
 
     private function context(): array

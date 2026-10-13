@@ -240,6 +240,10 @@ class KycProfileCorrectionController extends Controller
             'proposed_documents' => collect($correction->proposed_documents ?? [])->map(fn ($document) => [
                 'type' => $document['type'] ?? null, 'file_url' => $document['file_url'] ?? null,
                 'file_hash' => $document['file_hash'] ?? null, 'original_name' => $document['original_name'] ?? null,
+                'mime_type' => $document['mime_type'] ?? null,
+                'document_number' => $document['document_number'] ?? null,
+                'issuing_country_code' => $document['issuing_country_code'] ?? null,
+                'expires_at' => $document['expires_at'] ?? null,
             ])->all(),
             'request_instruction' => $correction->request_instruction,
             'request_origin' => $correction->request_origin,

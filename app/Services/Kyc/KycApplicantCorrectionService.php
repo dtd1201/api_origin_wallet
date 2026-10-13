@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Support\PrimaryProvider;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -219,8 +220,42 @@ final class KycApplicantCorrectionService
                 $proposed[$field] = $values[$field];
             }
             $requiredDocuments = (array) $locked->requested_document_types;
-            $safeDocuments = collect($documents)->map(fn (array $document): array => Arr::only($document, self::DOCUMENT_FIELDS))->values()->all();
-            foreach ($safeDocuments as $document) {
+            $safeDocuments = collect($documents)->map(function (array $document): array {
+                $safe = Arr::only($document, self::DOCUMENT_FIELDS);
+                if (($safe['type'] ?? null) === 'passport') {
+                    $safe['document_number'] = trim((string) ($safe['document_number'] ?? ''));
+                    $safe['issuing_country_code'] = strtoupper(trim((string) ($safe['issuing_country_code'] ?? '')));
+                    $safe['expires_at'] = trim((string) ($safe['expires_at'] ?? ''));
+                }
+
+                return $safe;
+            })->values()->all();
+            foreach ($safeDocuments as $index => $document) {
+                if (($document['type'] ?? null) === 'passport') {
+                    if (preg_match('/^[A-Za-z0-9]{1,30}$/', (string) ($document['document_number'] ?? '')) !== 1) {
+                        throw ValidationException::withMessages([
+                            "documents.{$index}.document_number" => 'A valid passport number is required.',
+                        ]);
+                    }
+                    if (preg_match('/^[A-Z]{2}$/', (string) ($document['issuing_country_code'] ?? '')) !== 1) {
+                        throw ValidationException::withMessages([
+                            "documents.{$index}.issuing_country_code" => 'A valid ISO alpha-2 passport issuing country is required.',
+                        ]);
+                    }
+                    try {
+                        $expiry = CarbonImmutable::createFromFormat('!Y-m-d', (string) ($document['expires_at'] ?? ''));
+                    } catch (\Throwable) {
+                        $expiry = false;
+                    }
+                    if ($expiry === false
+                        || $expiry->format('Y-m-d') !== ($document['expires_at'] ?? null)
+                        || ! $expiry->isFuture()) {
+                        throw ValidationException::withMessages([
+                            "documents.{$index}.expires_at" => 'A valid future passport expiry date in YYYY-MM-DD format is required.',
+                        ]);
+                    }
+                }
+
                 $disk = (string) ($document['storage_disk'] ?? '');
                 $path = (string) ($document['file_path'] ?? '');
                 $hash = (string) ($document['file_hash'] ?? '');

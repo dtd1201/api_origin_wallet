@@ -48,10 +48,10 @@ class KycApplicantCorrectionController extends Controller
             'documents.*.mime_type' => ['nullable', 'string', 'max:100'],
             'documents.*.file_size' => ['nullable', 'integer', 'min:1', 'max:20971520'],
             'documents.*.side' => ['nullable', 'string', 'max:20'],
-            'documents.*.document_number' => ['nullable', 'string', 'max:100'],
-            'documents.*.issuing_country_code' => ['nullable', 'string', 'size:2'],
+            'documents.*.document_number' => ['nullable', 'string', 'max:30', 'regex:/^[A-Za-z0-9]+$/'],
+            'documents.*.issuing_country_code' => ['nullable', 'string', 'regex:/^[A-Za-z]{2}$/'],
             'documents.*.issued_at' => ['nullable', 'date'],
-            'documents.*.expires_at' => ['nullable', 'date', 'after:today'],
+            'documents.*.expires_at' => ['nullable', 'date_format:Y-m-d', 'after:today'],
             'documents.*.metadata' => ['sometimes', 'array'],
         ]);
 
@@ -118,6 +118,10 @@ class KycApplicantCorrectionController extends Controller
             'proposed_documents' => collect($correction->proposed_documents ?? [])->map(fn ($document) => [
                 'type' => $document['type'] ?? null, 'file_url' => $document['file_url'] ?? null,
                 'file_hash' => $document['file_hash'] ?? null, 'original_name' => $document['original_name'] ?? null,
+                'mime_type' => $document['mime_type'] ?? null,
+                'document_number' => $document['document_number'] ?? null,
+                'issuing_country_code' => $document['issuing_country_code'] ?? null,
+                'expires_at' => $document['expires_at'] ?? null,
             ])->all(),
             'request_instruction' => $correction->request_instruction,
             'request_origin' => $correction->request_origin,
