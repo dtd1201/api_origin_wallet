@@ -463,6 +463,163 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertSame('submitted', collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole()['entity_kyc_status']);
     }
 
+    public function test_reviewed_correction_accepts_strict_processed_retry_webhook_and_attempt_evidence(): void
+    {
+        $context = $this->context();
+        $evidence = $this->manualCorrectionRetryEvidence($context);
+        $historicAttempt = $context['account']->fresh()->metadata['nium_submit_kyc_attempts']['historic_biometric_applicant'];
+        $this->assertArrayNotHasKey('webhook_id', $historicAttempt);
+        $this->assertTrue(
+            $evidence['submitted_event']->processed_at->greaterThan($historicAttempt['webhook_processed_at']),
+        );
+        $this->assertTrue(
+            $evidence['retry_event']->processed_at->greaterThan($historicAttempt['entity_status_updated_at']),
+        );
+        $calls = $this->mockResponse($context, [
+            'entityType' => 'applicant',
+            'externalId' => $context['external_id'],
+            'kycMode' => 'manual_kyc',
+            'kycStatus' => 'initiated',
+            'referenceId' => $context['provider_reference_id'],
+        ]);
+
+        $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame(1, $calls->count);
+        $this->assertSame('accepted', $result['state']);
+        $this->assertSame('manual_kyc', $calls->payload['kycMode']);
+        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
+        $this->assertSame('manual_kyc_compliance_review', $evidence['correction']->fresh()->status);
+    }
+
+    public function test_reviewed_correction_retry_fallback_rejects_incomplete_or_contradictory_evidence(): void
+    {
+        $scenarios = [
+            'missing webhook' => function (array $context, array $evidence): void {
+                $evidence['retry_event']->delete();
+            },
+            'unprocessed webhook' => function (array $context, array $evidence): void {
+                $evidence['retry_event']->update(['processing_status' => 'received', 'processed_at' => null]);
+            },
+            'different customer hash' => function (array $context, array $evidence): void {
+                $payload = $evidence['retry_event']->payload;
+                $payload['customerHashId'] = (string) Str::uuid();
+                $evidence['retry_event']->update(['payload' => $payload]);
+            },
+            'different applicant external id' => function (array $context, array $evidence): void {
+                $payload = $evidence['retry_event']->payload;
+                $payload['externalId'] = 'origin-wallet-applicant-999999';
+                $evidence['retry_event']->update(['payload' => $payload]);
+            },
+            'different applicant reference id' => function (array $context, array $evidence): void {
+                $payload = $evidence['retry_event']->payload;
+                $payload['referenceId'] = (string) Str::uuid();
+                $evidence['retry_event']->update(['payload' => $payload]);
+            },
+            'stakeholder webhook' => function (array $context, array $evidence): void {
+                $payload = $evidence['retry_event']->payload;
+                $payload['entityType'] = 'individual_stakeholder';
+                $evidence['retry_event']->update(['payload' => $payload]);
+            },
+            'newer contradictory applicant state' => function (array $context, array $evidence): void {
+                $this->entityWebhook($context, 'rejected', now()->addSecond());
+            },
+            'multiple retry applicants' => function (array $context, array $evidence): void {
+                $this->entityWebhook($context, 'retry', now()->addSecond(), [
+                    'externalId' => 'origin-wallet-applicant-999999',
+                    'referenceId' => (string) Str::uuid(),
+                ]);
+            },
+            'multiple matching retry webhooks' => function (array $context, array $evidence): void {
+                $this->entityWebhook($context, 'retry', now()->addSecond());
+            },
+            'multiple matching attempts' => function (array $context, array $evidence): void {
+                $metadata = $context['account']->fresh()->metadata;
+                $metadata['nium_submit_kyc_attempts']['duplicate'] = $metadata['nium_submit_kyc_attempts']['historic_biometric_applicant'];
+                $context['account']->forceFill(['metadata' => $metadata])->save();
+            },
+            'nonexistent webhook id' => function (array $context, array $evidence): void {
+                $metadata = $context['account']->fresh()->metadata;
+                $metadata['nium_submit_kyc_attempts']['historic_biometric_applicant']['webhook_id'] = 999999;
+                $context['account']->forceFill(['metadata' => $metadata])->save();
+            },
+            'contradictory webhook id' => function (array $context, array $evidence): void {
+                $contradictory = $this->entityWebhook(
+                    $context,
+                    'submitted',
+                    now()->subMinutes(5)->startOfSecond(),
+                    ['referenceId' => (string) Str::uuid()],
+                );
+                $metadata = $context['account']->fresh()->metadata;
+                $metadata['nium_submit_kyc_attempts']['historic_biometric_applicant']['webhook_id'] = $contradictory->id;
+                $metadata['nium_submit_kyc_attempts']['historic_biometric_applicant']['webhook_processed_at'] = $contradictory->processed_at->toISOString();
+                $context['account']->forceFill(['metadata' => $metadata])->save();
+            },
+            'inconsistent reconciliation timestamp' => function (array $context, array $evidence): void {
+                $metadata = $context['account']->fresh()->metadata;
+                $metadata['nium_submit_kyc_attempts']['historic_biometric_applicant']['entity_status_updated_at'] = now()->addMinute()->toISOString();
+                $context['account']->forceFill(['metadata' => $metadata])->save();
+            },
+        ];
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        foreach ($scenarios as $name => $mutate) {
+            $context = $this->context();
+            $evidence = $this->manualCorrectionRetryEvidence($context);
+            $mutate($context, $evidence);
+
+            try {
+                app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+                $this->fail("Manual KYC retry fallback did not reject {$name}.");
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString(
+                    'No unique eligible Nium applicant entity matches',
+                    $exception->getMessage(),
+                    $name,
+                );
+            }
+        }
+    }
+
+    public function test_reviewed_correction_retry_fallback_strictly_accepts_a_matching_webhook_id(): void
+    {
+        $context = $this->context();
+        $evidence = $this->manualCorrectionRetryEvidence($context);
+        $metadata = $context['account']->fresh()->metadata;
+        $metadata['nium_submit_kyc_attempts']['historic_biometric_applicant']['webhook_id'] = $evidence['origin_event']->id;
+        $context['account']->forceFill(['metadata' => $metadata])->save();
+        $calls = $this->mockResponse($context, [
+            'entityType' => 'applicant',
+            'externalId' => $context['external_id'],
+            'kycMode' => 'manual_kyc',
+            'kycStatus' => 'initiated',
+            'referenceId' => $context['provider_reference_id'],
+        ]);
+
+        $result = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame(1, $calls->count);
+        $this->assertSame('accepted', $result['state']);
+    }
+
+    public function test_reviewed_correction_retry_fallback_keeps_document_isolation(): void
+    {
+        $context = $this->context();
+        $evidence = $this->manualCorrectionRetryEvidence($context);
+        $document = $context['person']->documents()
+            ->where('status', 'manual_kyc_evidence_approved')
+            ->sole();
+        $metadata = $document->metadata;
+        $metadata['source_correction_id'] = $evidence['correction']->id + 1;
+        $document->update(['metadata' => $metadata]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('reviewed correction passport is not available');
+
+        app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+    }
+
     public function test_manual_kyc_wrong_success_contract_stays_evidence_approved_and_is_not_reported_as_compliance_pending(): void
     {
         $context = $this->context();
@@ -709,6 +866,88 @@ final class NiumHkManualSubmitKycTest extends TestCase
             ], true) ? null : 1,
             'created_by_user_id' => $context['user']->id,
             'submitted_at' => now(),
+        ]);
+    }
+
+    private function manualCorrectionRetryEvidence(array $context): array
+    {
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $fileId = (string) Str::uuid();
+        $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'VN',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => $fileId,
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+
+        $originProcessedAt = now()->subMinutes(17)->startOfSecond();
+        $submittedProcessedAt = now()->subSeconds(10)->startOfSecond();
+        $entityStatusUpdatedAt = now()->subSecond()->startOfSecond();
+        $originEvent = $this->entityWebhook($context, 'kyc_required', $originProcessedAt);
+        $submittedEvent = $this->entityWebhook($context, 'submitted', $submittedProcessedAt);
+        $retryEvent = $this->entityWebhook($context, 'retry', $entityStatusUpdatedAt->copy()->addSecond());
+        $context['account']->forceFill(['metadata' => [
+            'nium_entity_kyc_states' => [
+                'unknown_applicant' => [
+                    'entity_type' => 'applicant',
+                    'kyc_status' => 'unknown',
+                    'kyc_mode' => 'biometric_kyc',
+                ],
+            ],
+            'nium_submit_kyc_attempts' => [
+                'historic_biometric_applicant' => [
+                    'state' => 'accepted',
+                    'provider_http_status' => 200,
+                    'kyc_mode' => 'biometric_kyc',
+                    'entity_type' => 'applicant',
+                    'external_id' => $context['external_id'],
+                    'provider_reference_id' => $context['provider_reference_id'],
+                    'entity_kyc_status' => 'retry',
+                    'webhook_processed_at' => $originProcessedAt->toISOString(),
+                    'entity_status_updated_at' => $entityStatusUpdatedAt->toISOString(),
+                ],
+            ],
+        ]])->save();
+
+        return [
+            'correction' => $correction,
+            'origin_event' => $originEvent,
+            'submitted_event' => $submittedEvent,
+            'retry_event' => $retryEvent,
+        ];
+    }
+
+    private function entityWebhook(
+        array $context,
+        string $status,
+        \DateTimeInterface $processedAt,
+        array $payloadOverrides = [],
+    ): WebhookEvent {
+        return WebhookEvent::query()->create([
+            'provider_id' => $context['provider']->id,
+            'event_id' => (string) Str::uuid(),
+            'event_type' => 'CUSTOMER_ENTITY_KYC_STATUS',
+            'external_resource_id' => $context['account']->external_customer_id,
+            'payload' => array_merge([
+                'customerHashId' => $context['account']->external_customer_id,
+                'entityType' => 'applicant',
+                'externalId' => $context['external_id'],
+                'referenceId' => $context['provider_reference_id'],
+                'kycMode' => 'biometric_kyc',
+                'kycStatus' => $status,
+            ], $payloadOverrides),
+            'processing_status' => 'processed',
+            'processed_at' => $processedAt,
         ]);
     }
 

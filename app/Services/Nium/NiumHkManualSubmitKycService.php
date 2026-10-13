@@ -11,6 +11,7 @@ use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
@@ -367,7 +368,13 @@ final class NiumHkManualSubmitKycService
                 && hash_equals($externalId, trim((string) ($state['external_id'] ?? '')))
                 && hash_equals($referenceId, trim((string) ($state['provider_reference_id'] ?? '')))
                 && in_array($state['kyc_status'] ?? null, ['kyc_required', 'retry'], true));
-        if ($states->count() !== 1) {
+        if ($states->count() > 1
+            || ($states->isEmpty() && ! $this->hasVerifiedManualCorrectionRetryEvidence(
+                $account,
+                $customerHashId,
+                $externalId,
+                $referenceId,
+            ))) {
             throw new RuntimeException('No unique eligible Nium applicant entity matches the reviewed manual KYC correction.');
         }
 
@@ -394,6 +401,121 @@ final class NiumHkManualSubmitKycService
             'correction_id' => $correction->id,
             'correction_version' => $correction->correction_version,
         ];
+    }
+
+    private function hasVerifiedManualCorrectionRetryEvidence(
+        UserProviderAccount $account,
+        string $customerHashId,
+        string $externalId,
+        string $referenceId,
+    ): bool {
+        $events = WebhookEvent::query()
+            ->where('provider_id', $account->provider_id)
+            ->where('event_type', 'CUSTOMER_ENTITY_KYC_STATUS')
+            ->where('external_resource_id', $customerHashId)
+            ->where('processing_status', 'processed')
+            ->whereNotNull('processed_at')
+            ->orderBy('processed_at')
+            ->orderBy('id')
+            ->get()
+            ->filter(fn (WebhookEvent $event): bool => ($event->payload['customerHashId'] ?? null) === $customerHashId
+                && ($event->payload['entityType'] ?? null) === 'applicant')
+            ->values();
+
+        $retryApplicants = $events
+            ->filter(fn (WebhookEvent $event): bool => ($event->payload['kycStatus'] ?? null) === 'retry'
+                && ($event->payload['kycMode'] ?? null) === 'biometric_kyc')
+            ->map(fn (WebhookEvent $event): string => trim((string) ($event->payload['externalId'] ?? ''))
+                .'|'.trim((string) ($event->payload['referenceId'] ?? '')))
+            ->filter(fn (string $identity): bool => $identity !== '|')
+            ->unique()
+            ->values();
+        if ($retryApplicants->count() !== 1
+            || ! hash_equals($externalId.'|'.$referenceId, $retryApplicants->sole())) {
+            return false;
+        }
+
+        $applicantEvents = $events->filter(fn (WebhookEvent $event): bool =>
+            hash_equals($externalId, trim((string) ($event->payload['externalId'] ?? '')))
+            && hash_equals($referenceId, trim((string) ($event->payload['referenceId'] ?? '')))
+        )->values();
+        if ($applicantEvents->isEmpty()
+            || ($applicantEvents->last()->payload['kycStatus'] ?? null) !== 'retry'
+            || ($applicantEvents->last()->payload['kycMode'] ?? null) !== 'biometric_kyc') {
+            return false;
+        }
+        $retryEvents = $applicantEvents->filter(fn (WebhookEvent $event): bool =>
+            ($event->payload['kycStatus'] ?? null) === 'retry'
+            && ($event->payload['kycMode'] ?? null) === 'biometric_kyc'
+        )->values();
+        if ($retryEvents->count() !== 1) {
+            return false;
+        }
+        $retryEvent = $retryEvents->sole();
+
+        $attempts = collect((array) Arr::get((array) $account->metadata, 'nium_submit_kyc_attempts', []))
+            ->filter(fn (mixed $attempt): bool => is_array($attempt)
+                && ($attempt['state'] ?? null) === 'accepted'
+                && (int) ($attempt['provider_http_status'] ?? 0) === 200
+                && ($attempt['entity_type'] ?? null) === 'applicant'
+                && ($attempt['kyc_mode'] ?? null) === 'biometric_kyc'
+                && ($attempt['entity_kyc_status'] ?? null) === 'retry'
+                && hash_equals($externalId, trim((string) ($attempt['external_id'] ?? '')))
+                && hash_equals($referenceId, trim((string) ($attempt['provider_reference_id'] ?? ''))))
+            ->values();
+        if ($attempts->count() !== 1) {
+            return false;
+        }
+
+        $attempt = $attempts->sole();
+        if (! is_string($attempt['webhook_processed_at'] ?? null)
+            || ! is_string($attempt['entity_status_updated_at'] ?? null)) {
+            return false;
+        }
+
+        try {
+            $attemptWebhookProcessedAt = CarbonImmutable::parse($attempt['webhook_processed_at']);
+            $entityStatusUpdatedAt = CarbonImmutable::parse($attempt['entity_status_updated_at']);
+        } catch (Throwable) {
+            return false;
+        }
+
+        if ($entityStatusUpdatedAt->lessThan($attemptWebhookProcessedAt)
+            || $retryEvent->processed_at->lessThan($entityStatusUpdatedAt)
+            || $retryEvent->processed_at->diffInMinutes($entityStatusUpdatedAt) > 5) {
+            return false;
+        }
+
+        $precedingEvents = $applicantEvents->filter(fn (WebhookEvent $event): bool =>
+            $event->id !== $retryEvent->id
+            && $event->processed_at->lessThan($retryEvent->processed_at)
+        );
+        if ($precedingEvents->contains(fn (WebhookEvent $event): bool =>
+            $event->processed_at->lessThan($attemptWebhookProcessedAt)
+                ? false
+                : $event->processed_at->greaterThan($entityStatusUpdatedAt)
+        )) {
+            return false;
+        }
+
+        if (array_key_exists('webhook_id', $attempt)) {
+            $originWebhookId = filter_var($attempt['webhook_id'], FILTER_VALIDATE_INT, [
+                'options' => ['min_range' => 1],
+            ]);
+            if ($originWebhookId === false) {
+                return false;
+            }
+
+            $originEvent = $applicantEvents->firstWhere('id', $originWebhookId);
+            if (! $originEvent instanceof WebhookEvent
+                || ! $attemptWebhookProcessedAt->equalTo($originEvent->processed_at)
+                || ($originEvent->payload['kycMode'] ?? null) !== 'biometric_kyc'
+                || ! in_array($originEvent->payload['kycStatus'] ?? null, ['kyc_required', 'submitted', 'retry'], true)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function personForExternalId(KycProfile $profile, string $externalId): KycRelatedPerson
