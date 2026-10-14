@@ -120,7 +120,16 @@ final class NiumKycNotificationService
     private function adminReviewUrl(User $user): ?string
     {
         $base = trim((string) config('services.kyc_notifications.admin_review_url'));
-        return $base === '' ? null : rtrim($base, '/').'/'.$user->id;
+        if ($base === '') {
+            return null;
+        }
+
+        [$url, $fragment] = array_pad(explode('#', $base, 2), 2, null);
+        $separator = str_contains($url, '?')
+            ? (str_ends_with($url, '?') || str_ends_with($url, '&') ? '' : '&')
+            : '?';
+
+        return $url.$separator.'user_id='.$user->id.($fragment === null ? '' : '#'.$fragment);
     }
 
     private function isUniqueViolation(QueryException $exception): bool

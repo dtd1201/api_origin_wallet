@@ -73,6 +73,42 @@ final class NiumKycNotificationTest extends TestCase
         $this->assertDatabaseCount('kyc_notification_events', 0);
     }
 
+    public function test_admin_review_url_appends_customer_as_query_parameter(): void
+    {
+        config()->set('services.kyc_notifications.admin_review_url', 'https://admin.originwallet.asia/admin/kyc-reviews');
+        $account = $this->account('customer@example.com');
+
+        $this->service()->recordStateTransition($account, ['status' => 'submitted'], ['status' => 'active']);
+
+        $this->assertSame(
+            'https://admin.originwallet.asia/admin/kyc-reviews?user_id='.$account->user_id,
+            KycNotificationEvent::query()->sole()->payload['admin_review_url'],
+        );
+    }
+
+    public function test_admin_review_url_preserves_existing_query_parameters(): void
+    {
+        config()->set('services.kyc_notifications.admin_review_url', 'https://admin.originwallet.asia/admin/kyc-reviews?source=email');
+        $account = $this->account('customer@example.com');
+
+        $this->service()->recordStateTransition($account, ['status' => 'submitted'], ['status' => 'active']);
+
+        $this->assertSame(
+            'https://admin.originwallet.asia/admin/kyc-reviews?source=email&user_id='.$account->user_id,
+            KycNotificationEvent::query()->sole()->payload['admin_review_url'],
+        );
+    }
+
+    public function test_empty_admin_review_url_is_omitted(): void
+    {
+        config()->set('services.kyc_notifications.admin_review_url', '');
+        $account = $this->account('customer@example.com');
+
+        $this->service()->recordStateTransition($account, ['status' => 'submitted'], ['status' => 'active']);
+
+        $this->assertNull(KycNotificationEvent::query()->sole()->payload['admin_review_url']);
+    }
+
     public function test_webhook_and_reconciliation_race_cannot_create_duplicate_transition_events(): void
     {
         $account = $this->account('customer@example.com');
