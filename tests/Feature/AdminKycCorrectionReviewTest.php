@@ -563,6 +563,56 @@ class AdminKycCorrectionReviewTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_customer_uploads_only_for_their_own_outstanding_proof_of_address_request_without_nium_calls(): void
+    {
+        Storage::fake('kyc_private');
+        Http::preventStrayRequests();
+        config(['services.kyc.documents_disk' => 'kyc_private']);
+        $context = $this->context();
+        $context['applicant']->update(['residence_country_code' => 'VN']);
+        $context['correction']->update([
+            'status' => 'manual_kyc_evidence_approved', 'active_slot' => null,
+            'requested_document_types' => ['passport', 'proof_of_address'],
+            'request_instruction' => 'Upload a recent residential address document.',
+        ]);
+        $pdf = "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF";
+        $endpoint = '/api/user/users/'.$context['user']->id.'/kyc-profile/applicant-correction/'.$context['correction']->id.'/proof-of-address';
+
+        $document = $this->withToken($this->issueTokenFor($context['user']))->post($endpoint, [
+            'correction_version' => 1,
+            'file' => UploadedFile::fake()->createWithContent('customer-address.pdf', $pdf),
+            'issued_at' => '2026-09-01', 'address_line1' => 'Customer supplied line',
+            'city' => 'Ho Chi Minh City', 'country_code' => 'VN',
+        ])->assertCreated()->assertJsonPath('document.status', 'pending_admin_review')
+            ->assertJsonPath('document.upload_origin', 'customer_uploaded')->json('document');
+
+        $this->assertDatabaseHas('kyc_document_uploads', ['user_id' => $context['user']->id, 'kyc_profile_correction_id' => $context['correction']->id, 'status' => 'referenced']);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'kyc.correction_proof_of_address_customer_uploaded', 'entity_id' => (string) $document['id']]);
+        $this->assertNull(data_get($context['applicant']->documents()->findOrFail($document['id'])->metadata, 'verified_residence_address'));
+        Http::assertNothingSent();
+    }
+
+    public function test_customer_proof_of_address_upload_rejects_missing_stale_and_cross_customer_requests(): void
+    {
+        Storage::fake('kyc_private');
+        config(['services.kyc.documents_disk' => 'kyc_private']);
+        $first = $this->context();
+        $second = $this->context();
+        $first['correction']->update(['status' => 'manual_kyc_evidence_approved', 'active_slot' => null, 'requested_document_types' => []]);
+        $second['correction']->update(['status' => 'manual_kyc_evidence_approved', 'active_slot' => null, 'requested_document_types' => ['proof_of_address']]);
+        $file = fn () => UploadedFile::fake()->create('address.pdf', 10, 'application/pdf');
+
+        $this->withToken($this->issueTokenFor($first['user']))->withHeaders(['Accept' => 'application/json'])->post('/api/user/users/'.$first['user']->id.'/kyc-profile/applicant-correction/'.$first['correction']->id.'/proof-of-address', [
+            'correction_version' => 1, 'file' => $file(),
+        ])->assertUnprocessable();
+        $this->withToken($this->issueTokenFor($first['user']))->withHeaders(['Accept' => 'application/json'])->post('/api/user/users/'.$first['user']->id.'/kyc-profile/applicant-correction/'.$second['correction']->id.'/proof-of-address', [
+            'correction_version' => 1, 'file' => $file(),
+        ])->assertNotFound();
+        $this->withToken($this->issueTokenFor($second['user']))->withHeaders(['Accept' => 'application/json'])->post('/api/user/users/'.$second['user']->id.'/kyc-profile/applicant-correction/'.$second['correction']->id.'/proof-of-address', [
+            'correction_version' => 99, 'file' => $file(),
+        ])->assertUnprocessable()->assertJsonValidationErrors('correction_version');
+    }
+
     private function context(bool $legacyExternalId = false): array
     {
         config(['services.nium.customer_update_enabled' => true]);

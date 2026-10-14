@@ -26,6 +26,7 @@ Route::get('users/{user}/kyc-profile', [KycSubmissionController::class, 'show'])
 Route::put('users/{user}/kyc-profile', [KycSubmissionController::class, 'submit']);
 Route::get('users/{user}/kyc-profile/applicant-correction', [KycApplicantCorrectionController::class, 'show']);
 Route::post('users/{user}/kyc-profile/applicant-correction', [KycApplicantCorrectionController::class, 'store']);
+Route::post('users/{user}/kyc-profile/applicant-correction/{correction}/proof-of-address', [KycApplicantCorrectionController::class, 'uploadProofOfAddress']);
 Route::post('users/{user}/kyc-profile/documents', [KycSubmissionController::class, 'uploadDocument']);
 Route::post('users/{user}/kyc-profile/requirements/{requirement}/resubmit', [KycSubmissionController::class, 'resubmitRequirement']);
 Route::post('users/{user}/kyc-profile/business-registry/verify', BusinessRegistryVerificationController::class);

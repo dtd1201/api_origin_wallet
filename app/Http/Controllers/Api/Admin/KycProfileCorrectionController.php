@@ -20,6 +20,18 @@ use RuntimeException;
 
 class KycProfileCorrectionController extends Controller
 {
+    public function requestProofOfAddress(Request $request, User $user, KycProfileCorrection $correction, AdminKycProofOfAddressService $service): JsonResponse
+    {
+        $this->assertOwnedBy($user, $correction);
+        $validated = $request->validate(['instruction' => ['required', 'string', 'max:2000']]);
+        try {
+            $updated = $service->requestCustomerUpload($user, $correction, $request->user(), $validated['instruction']);
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+        return response()->json(['message' => 'Proof of Address requested from the customer.', 'correction' => $this->serialize($updated)]);
+    }
+
     public function uploadProofOfAddress(
         Request $request,
         User $user,
@@ -68,8 +80,27 @@ class KycProfileCorrectionController extends Controller
         AdminKycProofOfAddressService $service,
     ): JsonResponse {
         $this->assertOwnedBy($user, $correction);
+        $validated = $request->validate([
+            'reason' => ['nullable', 'string', 'max:1000'],
+            'issuer' => ['nullable', 'string', 'max:255'],
+            'issued_at' => ['nullable', 'date', 'before_or_equal:today'],
+            'address_line1' => ['nullable', 'string', 'max:255'], 'address_line2' => ['nullable', 'string', 'max:255'],
+            'city' => ['nullable', 'string', 'max:120'], 'state' => ['nullable', 'string', 'max:120'],
+            'postal_code' => ['nullable', 'string', 'max:40'], 'country_code' => ['nullable', 'string', 'size:2'],
+        ]);
+        $address = collect(['address_line1', 'address_line2', 'city', 'state', 'postal_code', 'country_code'])
+            ->mapWithKeys(fn (string $key): array => [$key => filled($validated[$key] ?? null)
+                ? ($key === 'country_code' ? strtoupper(trim((string) $validated[$key])) : trim((string) $validated[$key])) : null])
+            ->filter()->all();
+        $customerUploaded = data_get($document->metadata, 'upload_origin') === 'customer_uploaded';
+        if ($customerUploaded && (! filled($validated['reason'] ?? null) || ! filled($address['address_line1'] ?? null)
+            || ! filled($address['city'] ?? null) || ! filled($address['country_code'] ?? null))) {
+            throw ValidationException::withMessages([
+                'reason' => 'Customer-uploaded evidence requires an audit reason and verified residential address.',
+            ]);
+        }
         try {
-            $approved = $service->approve($user, $correction, $document, $request->user());
+            $approved = $service->approve($user, $correction, $document, $request->user(), $validated['reason'] ?? 'Admin verified uploaded evidence.', $validated['issuer'] ?? null, $validated['issued_at'] ?? null, $address);
         } catch (RuntimeException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }
@@ -78,6 +109,18 @@ class KycProfileCorrectionController extends Controller
             'message' => 'Proof of Address approved. It will be prepared through the existing Nium File API flow when Submit KYC is explicitly requested.',
             'document' => $this->serializeProofOfAddress($approved),
         ]);
+    }
+
+    public function requestProofOfAddressChanges(Request $request, User $user, KycProfileCorrection $correction, KycDocument $document, AdminKycProofOfAddressService $service): JsonResponse
+    {
+        $this->assertOwnedBy($user, $correction);
+        $validated = $request->validate(['reason' => ['required', 'string', 'max:1000']]);
+        try {
+            $updated = $service->requestChanges($user, $correction, $document, $request->user(), $validated['reason']);
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+        return response()->json(['message' => 'Proof of Address returned to the customer for changes.', 'document' => $this->serializeProofOfAddress($updated)]);
     }
 
     public function requestUpdate(Request $request, User $user, KycApplicantCorrectionService $service): JsonResponse
@@ -361,6 +404,9 @@ class KycProfileCorrectionController extends Controller
             'file_size' => $document->file_size,
             'issued_at' => $document->issued_at?->format('Y-m-d'),
             'verified_residence_address' => data_get($document->metadata, 'verified_residence_address'),
+            'customer_provided_residence_address' => data_get($document->metadata, 'customer_provided_residence_address'),
+            'review_feedback' => data_get($document->metadata, 'review_feedback'),
+            'upload_origin' => data_get($document->metadata, 'upload_origin'),
             'nium_file_state' => data_get($document->metadata, 'nium_file_state'),
             'has_nium_file_id' => filled(data_get($document->metadata, 'nium_file_id')),
             'approved_at' => data_get($document->metadata, 'approved_at'),

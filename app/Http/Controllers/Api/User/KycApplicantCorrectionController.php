@@ -3,8 +3,10 @@
 namespace App\Http\Controllers\Api\User;
 
 use App\Http\Controllers\Controller;
+use App\Models\KycDocument;
 use App\Models\KycProfileCorrection;
 use App\Models\User;
+use App\Services\Kyc\AdminKycProofOfAddressService;
 use App\Services\Kyc\KycApplicantCorrectionService;
 use App\Services\Kyc\KycCorrectionSyncPolicy;
 use Illuminate\Http\JsonResponse;
@@ -15,6 +17,34 @@ use RuntimeException;
 
 class KycApplicantCorrectionController extends Controller
 {
+    public function uploadProofOfAddress(Request $request, User $user, KycProfileCorrection $correction, AdminKycProofOfAddressService $service): JsonResponse
+    {
+        $validated = $request->validate([
+            'file' => ['required', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:20480'],
+            'correction_version' => ['required', 'integer', 'min:1'],
+            'issued_at' => ['nullable', 'date', 'before_or_equal:today'],
+            'address_line1' => ['nullable', 'string', 'max:255'], 'address_line2' => ['nullable', 'string', 'max:255'],
+            'city' => ['nullable', 'string', 'max:120'], 'state' => ['nullable', 'string', 'max:120'],
+            'postal_code' => ['nullable', 'string', 'max:40'], 'country_code' => ['nullable', 'string', 'size:2'],
+        ]);
+        abort_unless((int) $correction->kycProfile?->user_id === (int) $user->id, 404);
+        if ((int) $correction->correction_version !== (int) $validated['correction_version']) {
+            throw ValidationException::withMessages(['correction_version' => 'This Proof of Address request is stale. Refresh before uploading.']);
+        }
+        $address = collect(['address_line1', 'address_line2', 'city', 'state', 'postal_code', 'country_code'])
+            ->mapWithKeys(fn (string $key): array => [$key => filled($validated[$key] ?? null)
+                ? ($key === 'country_code' ? strtoupper(trim((string) $validated[$key])) : trim((string) $validated[$key])) : null])
+            ->filter()->all();
+        try {
+            $document = $service->uploadByCustomer($user, $correction, $request->file('file'), $validated['issued_at'] ?? null, $address, $request->ip(), $request->userAgent());
+        } catch (ValidationException $exception) {
+            throw $exception;
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+        return response()->json(['message' => 'Proof of Address uploaded for Admin review.', 'document' => $this->serializeProofOfAddress($document)], 201);
+    }
+
     public function show(User $user, KycApplicantCorrectionService $service): JsonResponse
     {
         return response()->json($this->serializeState($service->state($user)));
@@ -107,6 +137,12 @@ class KycApplicantCorrectionController extends Controller
         $correction->loadMissing(['providerAccount', 'manualKycContinuation']);
         $providerUpdate = app(KycCorrectionSyncPolicy::class)->evaluate($correction->providerAccount);
 
+        $proofOfAddressDocuments = KycDocument::query()->where('kyc_profile_id', $correction->kyc_profile_id)
+            ->where('kyc_related_person_id', $correction->applicant_related_person_id)->get()
+            ->filter(fn (KycDocument $document): bool => (int) data_get($document->metadata, 'source_correction_id') === (int) $correction->id
+                && strtolower((string) data_get($document->metadata, 'nium_document_type', $document->type)) === 'proof_of_address')
+            ->map(fn (KycDocument $document): array => $this->serializeProofOfAddress($document))->values()->all();
+
         return [
             'id' => $correction->id,
             'correction_version' => $correction->correction_version,
@@ -125,6 +161,7 @@ class KycApplicantCorrectionController extends Controller
             ])->all(),
             'request_instruction' => $correction->request_instruction,
             'request_origin' => $correction->request_origin,
+            'proof_of_address_documents' => $proofOfAddressDocuments,
             'submitted_at' => $correction->submitted_at?->toISOString(),
             'reviewed_at' => $correction->reviewed_at?->toISOString(),
             'review_note' => $correction->review_note,
@@ -134,6 +171,19 @@ class KycApplicantCorrectionController extends Controller
                 'next_attempt_at' => $correction->manualKycContinuation->next_attempt_at?->toISOString(),
                 'completed_at' => $correction->manualKycContinuation->completed_at?->toISOString(),
             ],
+        ];
+    }
+
+    private function serializeProofOfAddress(KycDocument $document): array
+    {
+        return [
+            'id' => $document->id, 'type' => 'proof_of_address', 'status' => $document->status,
+            'file_url' => $document->file_url, 'original_name' => $document->original_name,
+            'mime_type' => $document->mime_type, 'file_size' => $document->file_size,
+            'issued_at' => $document->issued_at?->format('Y-m-d'),
+            'customer_provided_residence_address' => data_get($document->metadata, 'customer_provided_residence_address'),
+            'review_feedback' => data_get($document->metadata, 'review_feedback'),
+            'upload_origin' => data_get($document->metadata, 'upload_origin'),
         ];
     }
 }

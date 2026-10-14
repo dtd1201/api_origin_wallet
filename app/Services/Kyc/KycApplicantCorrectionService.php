@@ -7,6 +7,7 @@ use App\Models\KycProfile;
 use App\Models\KycProfileCorrection;
 use App\Models\KycDocumentUpload;
 use App\Models\KycRelatedPerson;
+use App\Models\NiumManualKycResubmissionAuthorization;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
@@ -38,7 +39,7 @@ final class KycApplicantCorrectionService
             ];
         }
 
-        $active = $this->activeCorrection($user);
+        $active = $this->activeCorrection($user) ?? $this->outstandingEvidenceCorrection($user);
 
         return [
             'eligible' => $active === null,
@@ -447,6 +448,16 @@ final class KycApplicantCorrectionService
     {
         return KycProfileCorrection::query()->whereHas('kycProfile', fn ($query) => $query->where('user_id', $user->id))
             ->where('active_slot', 1)->latest('id')->first();
+    }
+
+    private function outstandingEvidenceCorrection(User $user): ?KycProfileCorrection
+    {
+        return KycProfileCorrection::query()
+            ->whereHas('kycProfile', fn ($query) => $query->where('user_id', $user->id))
+            ->where('status', 'manual_kyc_evidence_approved')->latest('id')->get()
+            ->first(fn (KycProfileCorrection $correction): bool => in_array('proof_of_address', (array) $correction->requested_document_types, true)
+                && ! $correction->manualKycContinuation()->exists()
+                && ! NiumManualKycResubmissionAuthorization::query()->where('kyc_profile_correction_id', $correction->id)->exists());
     }
 
     private function latestResolvedCorrection(User $user): ?KycProfileCorrection
