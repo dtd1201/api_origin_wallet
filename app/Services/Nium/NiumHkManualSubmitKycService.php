@@ -10,6 +10,7 @@ use App\Models\KycProfile;
 use App\Models\KycProfileCorrection;
 use App\Models\KycRelatedPerson;
 use App\Models\NiumManualKycContinuation;
+use App\Models\NiumManualKycResubmissionAuthorization;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
@@ -30,6 +31,8 @@ final class NiumHkManualSubmitKycService
         private readonly NiumHkSubmitKycPayloadFactory $payloadFactory,
         private readonly NiumSubmitKycBiometricUrlResolver $biometricUrlResolver,
         private readonly NiumCustomerDocumentPreparationService $documentPreparation,
+        private readonly NiumCustomerDocumentResolver $documentResolver,
+        private readonly NiumHkManualKycResubmissionService $resubmissions,
     ) {}
 
     public function submit(User $user, ?string $idempotencyKey = null): array
@@ -395,14 +398,21 @@ final class NiumHkManualSubmitKycService
             throw new RuntimeException('No unique eligible Nium applicant entity matches the reviewed manual KYC correction.');
         }
 
-        $document = $person->documents()->get()
-            ->first(fn (KycDocument $candidate): bool => (int) data_get($candidate->metadata, 'source_correction_id') === (int) $correction->id
-                && data_get($candidate->metadata, 'source') === 'admin_reviewed_correction'
-                && $candidate->status === 'manual_kyc_evidence_approved'
-            );
-        if (! $document instanceof KycDocument) {
-            throw new RuntimeException('The reviewed correction passport is not available as a canonical KYC document.');
+        $document = $this->manualPassportDocument($person, $correction);
+
+        $residenceCountry = strtoupper(trim((string) $person->residence_country_code));
+        if (preg_match('/^[A-Z]{2}$/', $residenceCountry) !== 1) {
+            throw new RuntimeException('The correction-bound applicant has no unambiguous verified residence country.');
         }
+        foreach ([(array) $correction->before_snapshot, (array) $correction->proposed_values] as $correctionValues) {
+            if (array_key_exists('residence_country_code', $correctionValues)
+                && strtoupper(trim((string) $correctionValues['residence_country_code'])) !== $residenceCountry) {
+                throw new RuntimeException('The correction residence evidence contradicts the verified applicant residence.');
+            }
+        }
+        $isResident = $residenceCountry === 'HK';
+        $addressDocument = $this->manualProofOfAddressDocument($person, $correction);
+        $authorization = $this->resubmissions->pendingFor($account, $correction);
 
         $continuation = NiumManualKycContinuation::query()
             ->where('kyc_profile_correction_id', $correction->id)
@@ -414,35 +424,88 @@ final class NiumHkManualSubmitKycService
         if ($activeContinuationId !== null) {
             $expectedContinuation = $continuation;
             $persistedFileId = trim((string) data_get($document->metadata, 'nium_file_id'));
+            $persistedAddressFileId = $addressDocument === null
+                ? null
+                : trim((string) data_get($addressDocument->metadata, 'nium_file_id'));
             if (! $expectedContinuation instanceof NiumManualKycContinuation
                 || ! Str::isUuid($persistedFileId)
-                || ! hash_equals($expectedContinuation->file_id_fingerprint, hash('sha256', $persistedFileId))) {
+                || ! hash_equals($expectedContinuation->file_id_fingerprint, hash('sha256', $persistedFileId))
+                || (int) ($expectedContinuation->proof_of_address_document_id ?? 0) !== (int) ($addressDocument?->id ?? 0)
+                || ($addressDocument !== null && (! Str::isUuid($persistedAddressFileId)
+                    || ! hash_equals((string) $expectedContinuation->proof_of_address_file_id_fingerprint, hash('sha256', $persistedAddressFileId))))) {
                 throw new RuntimeException('The persisted Nium File ID no longer matches the continuation binding.');
             }
         }
 
+        if ($authorization instanceof NiumManualKycResubmissionAuthorization) {
+            $this->assertResubmissionEvidence(
+                $authorization,
+                $correction,
+                $document,
+                trim((string) data_get($document->metadata, 'nium_file_id')),
+                $addressDocument,
+                $addressDocument === null ? null : trim((string) data_get($addressDocument->metadata, 'nium_file_id')),
+                $residenceCountry,
+            );
+        }
+
         $fileState = $this->documentPreparation->prepareManualCorrectionDocument($document, $account->user);
+        $addressFileState = $addressDocument === null
+            ? null
+            : $this->documentPreparation->prepareManualCorrectionDocument($addressDocument, $account->user);
         $fileId = trim((string) data_get($document->fresh()->metadata, 'nium_file_id'));
         if (! Str::isUuid($fileId)) {
             throw new RuntimeException('The reviewed passport does not have a valid persisted Nium File ID.');
         }
-
+        $addressFileId = $addressDocument === null
+            ? null
+            : trim((string) data_get($addressDocument->fresh()->metadata, 'nium_file_id'));
+        if ($addressDocument !== null && ! Str::isUuid($addressFileId)) {
+            throw new RuntimeException('The approved proof of address does not have a valid persisted Nium File ID.');
+        }
+        if ($authorization instanceof NiumManualKycResubmissionAuthorization && $addressFileId !== null) {
+            $this->bindPreparedAddressFileId($authorization, $addressDocument, $addressFileId);
+            $authorization->refresh();
+            $this->assertResubmissionEvidence(
+                $authorization,
+                $correction,
+                $document->fresh(),
+                $fileId,
+                $addressDocument?->fresh(),
+                $addressFileId,
+                $residenceCountry,
+            );
+        }
         $context = [
             'account' => $account,
             'entity_type' => 'applicant',
             'external_id' => $externalId,
-            'reference_id' => 'origin-wallet-manual-correction-'.substr(hash('sha256', $account->user_id.'|'.$correction->id.'|'.$correction->correction_version), 0, 32),
+            'reference_id' => $authorization?->attempt_reference
+                ?? 'origin-wallet-manual-correction-'.substr(hash('sha256', $account->user_id.'|'.$correction->id.'|'.$correction->correction_version), 0, 32),
             'entity_reference_id' => $referenceId,
             'kyc_mode' => 'manual_kyc',
             'correction_id' => $correction->id,
             'correction_version' => $correction->correction_version,
             'document_id' => $document->id,
             'file_id' => $fileId,
-            'file_state' => $fileState,
+            'proof_of_address_document_id' => $addressDocument?->id,
+            'proof_of_address_file_id' => $addressFileId,
+            'file_state' => in_array('PROCESSING', [$fileState, $addressFileState], true) ? 'PROCESSING' : 'AVAILABLE',
+            'is_resident' => $isResident,
+            'resubmission_authorization_id' => $authorization?->id,
         ];
 
-        if ($fileState === 'AVAILABLE') {
-            $context['payload'] = $this->payloadFactory->buildApplicantManual($document->fresh(), $referenceId);
+        if ($context['file_state'] === 'AVAILABLE') {
+            $proofOfAddress = $addressFileId === null ? null : [
+                'type' => 'proof_of_address',
+                'fileIds' => [$addressFileId],
+            ];
+            $context['payload'] = $this->payloadFactory->buildApplicantManual(
+                $document->fresh(),
+                $referenceId,
+                $isResident,
+                $proofOfAddress,
+            );
         }
 
         return $context;
@@ -519,9 +582,13 @@ final class NiumHkManualSubmitKycService
             if ((int) ($context['correction_id'] ?? 0) !== (int) $continuation->kyc_profile_correction_id
                 || (int) ($context['correction_version'] ?? 0) !== (int) $continuation->correction_version
                 || (int) ($context['document_id'] ?? 0) !== (int) $continuation->kyc_document_id
+                || (int) ($context['resubmission_authorization_id'] ?? 0) !== (int) ($continuation->resubmission_authorization_id ?? 0)
+                || (int) ($context['proof_of_address_document_id'] ?? 0) !== (int) ($continuation->proof_of_address_document_id ?? 0)
                 || (int) ($context['account']->id ?? 0) !== (int) $continuation->user_provider_account_id
                 || $correction->status !== 'manual_kyc_evidence_approved'
-                || ! hash_equals($continuation->file_id_fingerprint, hash('sha256', (string) ($context['file_id'] ?? '')))) {
+                || ! hash_equals($continuation->file_id_fingerprint, hash('sha256', (string) ($context['file_id'] ?? '')))
+                || (($context['proof_of_address_file_id'] ?? null) !== null
+                    && ! hash_equals((string) $continuation->proof_of_address_file_id_fingerprint, hash('sha256', $context['proof_of_address_file_id'])))) {
                 throw new RuntimeException('The continuation evidence no longer matches its durable correction binding.');
             }
         } catch (Throwable $exception) {
@@ -654,14 +721,20 @@ final class NiumHkManualSubmitKycService
                 || $correction->status !== 'manual_kyc_evidence_approved') {
                 throw new RuntimeException('The approved manual KYC correction changed before continuation was persisted.');
             }
+            $this->consumeAuthorizationLocked($context);
 
             return NiumManualKycContinuation::query()->firstOrCreate(
                 ['kyc_profile_correction_id' => $correction->id],
                 [
+                    'resubmission_authorization_id' => $context['resubmission_authorization_id'] ?? null,
                     'kyc_document_id' => $context['document_id'],
+                    'proof_of_address_document_id' => $context['proof_of_address_document_id'],
                     'user_provider_account_id' => $context['account']->id,
                     'correction_version' => $context['correction_version'],
                     'file_id_fingerprint' => hash('sha256', $context['file_id']),
+                    'proof_of_address_file_id_fingerprint' => isset($context['proof_of_address_file_id'])
+                        ? hash('sha256', $context['proof_of_address_file_id'])
+                        : null,
                     'state' => NiumManualKycContinuation::FILE_PROCESSING,
                     'next_attempt_at' => now()->addSeconds($this->retryDelay(0)),
                     'deadline_at' => now()->addMinutes(max(1, (int) config('services.nium.manual_kyc_continuation_deadline_minutes', 60))),
@@ -715,6 +788,26 @@ final class NiumHkManualSubmitKycService
             'hold_code' => $code,
             'hold_message' => $message === null ? null : Str::limit($message, 2000, ''),
         ])->save();
+
+        if ($row->resubmission_authorization_id !== null) {
+            $authorization = NiumManualKycResubmissionAuthorization::query()
+                ->whereKey($row->resubmission_authorization_id)->lockForUpdate()->first();
+            if ($authorization !== null && $authorization->state !== NiumManualKycResubmissionAuthorization::TERMINAL) {
+                if ($state === NiumManualKycContinuation::UNKNOWN) {
+                    $authorization->forceFill([
+                        'state' => NiumManualKycResubmissionAuthorization::TERMINAL,
+                        'outcome_state' => 'unknown',
+                        'terminal_at' => now(),
+                    ])->save();
+                } elseif ($code === 'evidence_invalid') {
+                    $authorization->forceFill([
+                        'state' => NiumManualKycResubmissionAuthorization::INVALIDATED,
+                        'invalidation_code' => 'evidence_changed',
+                        'invalidated_at' => now(),
+                    ])->save();
+                }
+            }
+        }
     }
 
     private function retryDelay(int $attempt): int
@@ -895,6 +988,180 @@ final class NiumHkManualSubmitKycService
         return $applicant ?? throw new RuntimeException('The approved corporate applicant cannot be resolved.');
     }
 
+    private function manualProofOfAddressDocument(
+        KycRelatedPerson $person,
+        KycProfileCorrection $correction,
+    ): ?KycDocument {
+        $requested = collect((array) $correction->requested_document_types)
+            ->contains(fn (mixed $type): bool => strtolower(trim((string) $type)) === 'proof_of_address');
+        $rawAddressEvidence = $person->documents()->get()->filter(fn (KycDocument $candidate): bool =>
+            strtolower(trim((string) data_get($candidate->metadata, 'nium_document_type', $candidate->type))) === 'proof_of_address');
+        $documents = $this->documentResolver->relatedPersonDocuments($person)
+            ->filter(fn (KycDocument $candidate): bool =>
+                (int) $candidate->kyc_profile_id === (int) $correction->kyc_profile_id
+                && (int) $candidate->kyc_related_person_id === (int) $person->id
+                && strtolower(trim((string) data_get(
+                    $candidate->metadata,
+                    'nium_document_type',
+                    $candidate->type,
+                ))) === 'proof_of_address'
+                && in_array(strtolower(trim((string) $candidate->status)), ['approved', 'verified'], true))
+            ->filter(function (KycDocument $candidate) use ($correction, $requested): bool {
+                $sourceCorrectionId = data_get($candidate->metadata, 'source_correction_id');
+
+                return $sourceCorrectionId === null
+                    ? ! $requested
+                    : (int) $sourceCorrectionId === (int) $correction->id;
+            })
+            ->values();
+
+        if ($documents->isEmpty() && $rawAddressEvidence->isNotEmpty()) {
+            throw new RuntimeException('The applicant has proof-of-address evidence, but none is current, approved and correction-relevant.');
+        }
+        if ($documents->count() > 1) {
+            throw new RuntimeException('Multiple current approved proof-of-address documents match the applicant; operator review is required.');
+        }
+        if ($requested && $documents->isEmpty()) {
+            throw new RuntimeException('An approved correction-bound proof of address is required before manual Submit KYC.');
+        }
+
+        return $documents->first();
+    }
+
+    private function manualPassportDocument(
+        KycRelatedPerson $person,
+        KycProfileCorrection $correction,
+    ): KycDocument {
+        $documents = $person->documents()->get()
+            ->filter(fn (KycDocument $candidate): bool =>
+                (int) $candidate->kyc_profile_id === (int) $correction->kyc_profile_id
+                && (int) $candidate->kyc_related_person_id === (int) $person->id
+                && in_array(strtolower(trim((string) data_get(
+                    $candidate->metadata,
+                    'nium_document_type',
+                    $candidate->type,
+                ))), ['passport', 'passport_front'], true)
+                && (int) data_get($candidate->metadata, 'source_correction_id') === (int) $correction->id
+                && data_get($candidate->metadata, 'source') === 'admin_reviewed_correction'
+                && $candidate->status === 'manual_kyc_evidence_approved')
+            ->values();
+
+        if ($documents->count() !== 1) {
+            throw new RuntimeException('Exactly one approved correction-bound passport is required for manual Submit KYC.');
+        }
+
+        return $documents->sole();
+    }
+
+    private function assertResubmissionEvidence(
+        NiumManualKycResubmissionAuthorization $authorization,
+        KycProfileCorrection $correction,
+        KycDocument $passport,
+        string $passportFileId,
+        ?KycDocument $address,
+        ?string $addressFileId,
+        string $residenceCountry,
+    ): void {
+        $valid = $authorization->state === NiumManualKycResubmissionAuthorization::PENDING
+                || $authorization->state === NiumManualKycResubmissionAuthorization::CONSUMED
+                || $authorization->state === NiumManualKycResubmissionAuthorization::TERMINAL;
+        $valid = $valid
+            && (int) $authorization->kyc_profile_correction_id === (int) $correction->id
+            && (int) $authorization->correction_version === (int) $correction->correction_version
+            && (int) $authorization->passport_document_id === (int) $passport->id
+            && (int) ($authorization->proof_of_address_document_id ?? 0) === (int) ($address?->id ?? 0)
+            && hash_equals($authorization->applicant_reference_fingerprint, hash('sha256', (string) $correction->applicant_reference_id))
+            && hash_equals($authorization->residence_fingerprint, hash('sha256', $residenceCountry))
+            && hash_equals($authorization->passport_evidence_fingerprint, $this->resubmissions->evidenceFingerprint($passport))
+            && Str::isUuid($passportFileId)
+            && hash_equals($authorization->passport_file_id_fingerprint, hash('sha256', $passportFileId));
+        if ($valid && $address !== null) {
+            $valid = is_string($authorization->proof_of_address_evidence_fingerprint)
+                && hash_equals(
+                    $authorization->proof_of_address_evidence_fingerprint,
+                    $this->resubmissions->evidenceFingerprint($address),
+                );
+        }
+        if ($valid && $authorization->proof_of_address_file_id_fingerprint !== null) {
+            $valid = is_string($addressFileId) && Str::isUuid($addressFileId)
+                && hash_equals($authorization->proof_of_address_file_id_fingerprint, hash('sha256', $addressFileId));
+        }
+        if ($valid) {
+            return;
+        }
+
+        DB::transaction(function () use ($authorization): void {
+            $locked = NiumManualKycResubmissionAuthorization::query()->whereKey($authorization->id)
+                ->lockForUpdate()->firstOrFail();
+            if ($locked->state === NiumManualKycResubmissionAuthorization::PENDING) {
+                $locked->forceFill([
+                    'state' => NiumManualKycResubmissionAuthorization::INVALIDATED,
+                    'invalidation_code' => 'evidence_changed',
+                    'invalidated_at' => now(),
+                ])->save();
+            }
+        }, 3);
+
+        throw new RuntimeException('The manual KYC resubmission authorization evidence changed and was invalidated.');
+    }
+
+    private function consumeAuthorizationLocked(array $context): void
+    {
+        if (! isset($context['resubmission_authorization_id'])) {
+            return;
+        }
+        $authorization = NiumManualKycResubmissionAuthorization::query()
+            ->whereKey($context['resubmission_authorization_id'])->lockForUpdate()->firstOrFail();
+        if (! hash_equals($authorization->attempt_reference, (string) $context['reference_id'])
+            || $authorization->state === NiumManualKycResubmissionAuthorization::INVALIDATED
+            || $authorization->state === NiumManualKycResubmissionAuthorization::TERMINAL) {
+            throw new RuntimeException('The manual KYC resubmission authorization is no longer consumable.');
+        }
+        if ($authorization->state === NiumManualKycResubmissionAuthorization::PENDING) {
+            $authorization->forceFill([
+                'state' => NiumManualKycResubmissionAuthorization::CONSUMED,
+                'consumed_at' => now(),
+            ])->save();
+            AuditLog::query()->create([
+                'user_id' => $authorization->authorized_by_user_id,
+                'action' => 'kyc.nium_manual_resubmission_consumed',
+                'entity_type' => 'nium_manual_kyc_resubmission_authorization',
+                'entity_id' => (string) $authorization->id,
+                'old_data' => ['state' => NiumManualKycResubmissionAuthorization::PENDING],
+                'new_data' => [
+                    'state' => NiumManualKycResubmissionAuthorization::CONSUMED,
+                    'correction_id' => $authorization->kyc_profile_correction_id,
+                    'correction_version' => $authorization->correction_version,
+                    'prior_api_request_log_id' => $authorization->prior_api_request_log_id,
+                ],
+            ]);
+        }
+    }
+
+    private function bindPreparedAddressFileId(
+        NiumManualKycResubmissionAuthorization $authorization,
+        ?KycDocument $address,
+        string $fileId,
+    ): void {
+        DB::transaction(function () use ($authorization, $address, $fileId): void {
+            $locked = NiumManualKycResubmissionAuthorization::query()->whereKey($authorization->id)
+                ->lockForUpdate()->firstOrFail();
+            $fingerprint = hash('sha256', $fileId);
+            if ((int) ($locked->proof_of_address_document_id ?? 0) !== (int) ($address?->id ?? 0)
+                || ! Str::isUuid($fileId)
+                || ($locked->proof_of_address_file_id_fingerprint !== null
+                    && ! hash_equals($locked->proof_of_address_file_id_fingerprint, $fingerprint))) {
+                throw new RuntimeException('The prepared proof-of-address File ID does not match its authorization binding.');
+            }
+            if ($locked->proof_of_address_file_id_fingerprint === null) {
+                if ($locked->state !== NiumManualKycResubmissionAuthorization::PENDING) {
+                    throw new RuntimeException('The proof-of-address File ID cannot be bound after authorization consumption.');
+                }
+                $locked->forceFill(['proof_of_address_file_id_fingerprint' => $fingerprint])->save();
+            }
+        }, 3);
+    }
+
     private function hasUnappliedChanges(KycProfileCorrection $correction): bool
     {
         if (collect((array) $correction->proposed_documents)->contains(
@@ -931,6 +1198,8 @@ final class NiumHkManualSubmitKycService
 
                 return $existing;
             }
+
+            $this->consumeAuthorizationLocked($context);
 
             data_set($metadata, 'nium_submit_kyc_attempts.'.$key, [
                 'state' => 'submitting',
@@ -991,6 +1260,19 @@ final class NiumHkManualSubmitKycService
             ], static fn (mixed $value): bool => $value !== null);
             data_set($metadata, 'nium_submit_kyc_attempts.'.$this->attemptKey($context['reference_id']), $attempt);
             $account->forceFill(['metadata' => $metadata])->save();
+
+            if (isset($context['resubmission_authorization_id'])) {
+                $authorization = NiumManualKycResubmissionAuthorization::query()
+                    ->whereKey($context['resubmission_authorization_id'])->lockForUpdate()->firstOrFail();
+                if ($authorization->state !== NiumManualKycResubmissionAuthorization::TERMINAL) {
+                    $authorization->forceFill([
+                        'state' => NiumManualKycResubmissionAuthorization::TERMINAL,
+                        'outcome_state' => $state === 'accepted' ? 'compliance_review' : $state,
+                        'new_api_request_log_id' => $log?->id,
+                        'terminal_at' => now(),
+                    ])->save();
+                }
+            }
 
             return $attempt;
         }, 3);

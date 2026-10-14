@@ -37,9 +37,19 @@ final class NiumManualKycContinuation extends Model
         return $this->belongsTo(KycProfileCorrection::class, 'kyc_profile_correction_id');
     }
 
+    public function resubmissionAuthorization(): BelongsTo
+    {
+        return $this->belongsTo(NiumManualKycResubmissionAuthorization::class, 'resubmission_authorization_id');
+    }
+
     public function document(): BelongsTo
     {
         return $this->belongsTo(KycDocument::class, 'kyc_document_id');
+    }
+
+    public function proofOfAddressDocument(): BelongsTo
+    {
+        return $this->belongsTo(KycDocument::class, 'proof_of_address_document_id');
     }
 
     public function providerAccount(): BelongsTo

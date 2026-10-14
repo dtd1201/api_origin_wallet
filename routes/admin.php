@@ -120,6 +120,8 @@ Route::get('users/{user}/kyc-profile/corrections/{correction}', [KycProfileCorre
 Route::post('users/{user}/kyc-profile/corrections/request-update', [KycProfileCorrectionController::class, 'requestUpdate'])->middleware('permission:kyc.reject')->name('users.kyc-profile.corrections.request-update');
 Route::post('users/{user}/kyc-profile/corrections/{correction}/approve', [KycProfileCorrectionController::class, 'approve'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.approve');
 Route::post('users/{user}/kyc-profile/corrections/{correction}/request-changes', [KycProfileCorrectionController::class, 'requestChanges'])->middleware('permission:kyc.reject')->name('users.kyc-profile.corrections.request-changes');
+Route::post('users/{user}/kyc-profile/corrections/{correction}/proof-of-address', [KycProfileCorrectionController::class, 'uploadProofOfAddress'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.proof-of-address.store');
+Route::post('users/{user}/kyc-profile/corrections/{correction}/proof-of-address/{document}/approve', [KycProfileCorrectionController::class, 'approveProofOfAddress'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.proof-of-address.approve');
 Route::post('users/{user}/kyc-profile/corrections/{correction}/sync', [KycProfileCorrectionController::class, 'sync'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.sync');
 Route::post('users/{user}/kyc-profile/corrections/{correction}/reconcile', [KycProfileCorrectionController::class, 'reconcile'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.reconcile');
 Route::post('users/{user}/kyc-profile/corrections/{correction}/resolve-failure', [KycProfileCorrectionController::class, 'resolveFailure'])->middleware('permission:kyc.approve')->name('users.kyc-profile.corrections.resolve-failure');
@@ -129,6 +131,12 @@ Route::post('users/{user}/kyc-profile/approve', [UserKycSubmissionController::cl
 Route::post('users/{user}/kyc-profile/submit-kyc', [UserKycSubmissionController::class, 'submitKyc'])
     ->middleware('permission:kyc.approve')
     ->name('users.kyc-profile.submit-kyc');
+Route::post('users/{user}/kyc-profile/manual-kyc-resubmission-authorizations', [UserKycSubmissionController::class, 'authorizeManualKycResubmission'])
+    ->middleware('permission:kyc.approve')
+    ->name('users.kyc-profile.manual-kyc-resubmission-authorizations.store');
+Route::get('users/{user}/kyc-profile/manual-kyc-resubmission-authorization', [UserKycSubmissionController::class, 'manualKycResubmissionState'])
+    ->middleware('permission:kyc.view')
+    ->name('users.kyc-profile.manual-kyc-resubmission-authorization.show');
 Route::post('users/{user}/kyc-profile/reject', [UserKycSubmissionController::class, 'reject'])
     ->middleware('permission:kyc.reject')
     ->name('users.kyc-profile.reject');

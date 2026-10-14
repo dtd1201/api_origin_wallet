@@ -54,6 +54,7 @@ final class NiumHkSubmitKycPayloadFactory
     public function buildApplicantManual(
         KycDocument $document,
         string $referenceId,
+        bool $isResident,
         ?array $proofOfAddressDocument = null,
     ): array {
         $metadata = (array) $document->metadata;
@@ -62,6 +63,7 @@ final class NiumHkSubmitKycPayloadFactory
             'entityType' => 'applicant',
             'entityReferenceId' => $referenceId,
             'kycMode' => 'manual_kyc',
+            'isResident' => $isResident,
             'proofOfIdentityDocument' => [[
                 'type' => 'passport',
                 'identificationNumber' => (string) $document->document_number,

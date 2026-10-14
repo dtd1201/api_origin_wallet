@@ -17,6 +17,7 @@ use App\Services\Integrations\ProviderOnboardingReadinessService;
 use App\Services\Nium\NiumCurrentBiometricKyc;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumHkManualSubmitKycService;
+use App\Services\Nium\NiumHkManualKycResubmissionService;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Support\KycAuditProjection;
 use App\Support\PrimaryProvider;
@@ -35,6 +36,73 @@ use Throwable;
 
 class UserKycSubmissionController extends Controller
 {
+    public function manualKycResubmissionState(
+        User $user,
+        NiumHkManualKycResubmissionService $service,
+    ): JsonResponse {
+        $user = $this->resolveManageableUser($user);
+        $authorization = $service->latestFor($user);
+
+        return response()->json([
+            'authorization' => $authorization === null ? null : [
+                'id' => $authorization->id,
+                'state' => strtolower($authorization->state),
+                'outcome_state' => $authorization->outcome_state,
+                'correction_id' => $authorization->kyc_profile_correction_id,
+                'correction_version' => $authorization->correction_version,
+                'prior_attempt' => [
+                    'state' => 'rejected',
+                    'http_status' => 400,
+                    'api_request_log_id' => $authorization->prior_api_request_log_id,
+                ],
+                'new_api_request_log_id' => $authorization->new_api_request_log_id,
+                'authorized_at' => $authorization->authorized_at?->toISOString(),
+                'consumed_at' => $authorization->consumed_at?->toISOString(),
+                'invalidated_at' => $authorization->invalidated_at?->toISOString(),
+                'terminal_at' => $authorization->terminal_at?->toISOString(),
+                'invalidation_code' => $authorization->invalidation_code,
+            ],
+        ]);
+    }
+
+    public function authorizeManualKycResubmission(
+        Request $request,
+        User $user,
+        NiumHkManualKycResubmissionService $service,
+    ): JsonResponse {
+        $user = $this->resolveManageableUser($user);
+        $validated = $request->validate([
+            'prior_api_request_log_id' => ['required', 'integer', 'min:1'],
+            'reason' => ['required', 'string', 'min:10', 'max:1000'],
+        ]);
+
+        try {
+            $authorization = $service->authorize(
+                $user,
+                $request->user(),
+                (int) $validated['prior_api_request_log_id'],
+                $validated['reason'],
+            );
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        return response()->json([
+            'authorization' => [
+                'id' => $authorization->id,
+                'state' => strtolower($authorization->state),
+                'outcome_state' => $authorization->outcome_state,
+                'correction_id' => $authorization->kyc_profile_correction_id,
+                'correction_version' => $authorization->correction_version,
+                'prior_api_request_log_id' => $authorization->prior_api_request_log_id,
+                'authorized_at' => $authorization->authorized_at?->toISOString(),
+                'consumed_at' => $authorization->consumed_at?->toISOString(),
+                'invalidated_at' => $authorization->invalidated_at?->toISOString(),
+                'terminal_at' => $authorization->terminal_at?->toISOString(),
+            ],
+        ], $authorization->wasRecentlyCreated ? 201 : 200);
+    }
+
     public function submitKyc(Request $request, User $user, NiumHkManualSubmitKycService $submitKycService): JsonResponse
     {
         $user = $this->resolveManageableUser($user);

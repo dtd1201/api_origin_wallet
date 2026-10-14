@@ -18,9 +18,10 @@ final class NiumHkSubmitKycValidator
         if (($payload['region'] ?? null) !== 'HK'
             || ($payload['entityType'] ?? null) !== 'applicant'
             || ($payload['kycMode'] ?? null) !== 'manual_kyc'
-            || array_key_exists('isResident', $payload)
+            || ! is_bool($payload['isResident'] ?? null)
             || ! is_string($payload['entityReferenceId'] ?? null) || trim($payload['entityReferenceId']) === ''
             || ! is_array($document)
+            || array_diff(array_keys($document), ['type', 'identificationNumber', 'issuanceCountry', 'expiryDate', 'fileIds']) !== []
             || ($document['type'] ?? null) !== 'passport'
             || preg_match('/^[A-Za-z0-9]{1,30}$/', (string) ($document['identificationNumber'] ?? '')) !== 1
             || preg_match('/^[A-Z]{2}$/', (string) ($document['issuanceCountry'] ?? '')) !== 1
@@ -34,11 +35,21 @@ final class NiumHkSubmitKycValidator
             $address = $payload['proofOfAddressDocument'];
             $addressFileIds = is_array($address) ? ($address['fileIds'] ?? null) : null;
             if (! is_array($address)
+                || array_diff(array_keys($address), ['type', 'fileIds']) !== []
+                || count($address) !== 2
                 || ($address['type'] ?? null) !== 'proof_of_address'
                 || ! is_array($addressFileIds) || $addressFileIds === []
                 || collect($addressFileIds)->contains(fn (mixed $fileId): bool => ! is_string($fileId) || ! Str::isUuid($fileId))) {
                 throw new RuntimeException('Invalid Nium HK applicant proof of address payload.');
             }
+        }
+
+        $allowed = [
+            'region', 'entityType', 'entityReferenceId', 'kycMode', 'isResident',
+            'proofOfIdentityDocument', 'proofOfAddressDocument',
+        ];
+        if (array_diff(array_keys($payload), $allowed) !== []) {
+            throw new RuntimeException('Invalid Nium HK applicant manual KYC payload fields.');
         }
     }
 

@@ -10,12 +10,14 @@ use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
 use App\Models\KycProfileCorrection;
 use App\Models\NiumManualKycContinuation;
+use App\Models\NiumManualKycResubmissionAuthorization;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Nium\NiumCurrentBiometricKyc;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumHkManualSubmitKycService;
+use App\Services\Nium\NiumHkManualKycResubmissionService;
 use App\Services\Nium\NiumHkSubmitKycService;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Services\Nium\NiumService;
@@ -39,6 +41,193 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->withToken($this->issueTokenFor($normalUser))
             ->postJson("/api/admin/users/{$customer->id}/kyc-profile/submit-kyc")
             ->assertForbidden();
+    }
+
+    public function test_manual_resubmission_authorization_permission_is_required(): void
+    {
+        $customer = User::factory()->create();
+        $normalUser = User::factory()->create();
+
+        $this->withToken($this->issueTokenFor($normalUser))
+            ->postJson("/api/admin/users/{$customer->id}/kyc-profile/manual-kyc-resubmission-authorizations", [
+                'prior_api_request_log_id' => 184,
+                'reason' => 'Correct the confirmed isResident validation failure.',
+            ])->assertForbidden();
+    }
+
+    public function test_resubmission_snapshot_rejects_ambiguous_or_wrong_type_correction_passports(): void
+    {
+        foreach (['wrong_type', 'ambiguous'] as $scenario) {
+            $context = $this->context();
+            $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+            $documents = $scenario === 'ambiguous' ? 2 : 1;
+            for ($index = 0; $index < $documents; $index++) {
+                $context['person']->documents()->create([
+                    'kyc_profile_id' => $context['profile']->id,
+                    'type' => $scenario === 'wrong_type' ? 'identity_card' : 'passport',
+                    'status' => 'manual_kyc_evidence_approved',
+                    'document_number' => 'P12345'.$index,
+                    'issuing_country_code' => 'VN',
+                    'expires_at' => '2099-12-31',
+                    'file_url' => 'private://correction-passport-'.$scenario.'-'.$index,
+                    'metadata' => [
+                        'source' => 'admin_reviewed_correction',
+                        'source_correction_id' => $correction->id,
+                        'nium_document_type' => $scenario === 'wrong_type' ? 'national_id' : 'passport',
+                        'nium_file_id' => (string) Str::uuid(),
+                        'nium_file_state' => 'AVAILABLE',
+                    ],
+                ]);
+            }
+
+            try {
+                app(NiumHkManualKycResubmissionService::class)->snapshot($context['account'], $correction);
+                $this->fail("The {$scenario} correction evidence was accepted.");
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString('Exactly one approved correction-bound passport', $exception->getMessage());
+            }
+        }
+    }
+
+    public function test_resubmission_snapshot_rejects_unapproved_or_unrelated_address_evidence(): void
+    {
+        foreach (['unapproved', 'other_correction'] as $scenario) {
+            $context = $this->context();
+            $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+            $context['person']->documents()->create([
+                'kyc_profile_id' => $context['profile']->id,
+                'type' => 'passport',
+                'status' => 'manual_kyc_evidence_approved',
+                'document_number' => 'P123456',
+                'issuing_country_code' => 'VN',
+                'expires_at' => '2099-12-31',
+                'file_url' => 'private://correction-passport-'.$scenario,
+                'metadata' => [
+                    'source' => 'admin_reviewed_correction',
+                    'source_correction_id' => $correction->id,
+                    'nium_document_type' => 'passport',
+                    'nium_file_id' => (string) Str::uuid(),
+                    'nium_file_state' => 'AVAILABLE',
+                ],
+            ]);
+            $context['person']->documents()->create([
+                'kyc_profile_id' => $context['profile']->id,
+                'type' => 'proof_of_address',
+                'status' => $scenario === 'unapproved' ? 'pending' : 'approved',
+                'file_url' => 'private://proof-of-address-'.$scenario,
+                'file_hash' => hash('sha256', $scenario),
+                'metadata' => [
+                    'nium_document_type' => 'proof_of_address',
+                    'source_correction_id' => $scenario === 'other_correction' ? $correction->id + 1 : null,
+                ],
+            ]);
+
+            try {
+                app(NiumHkManualKycResubmissionService::class)->snapshot($context['account'], $correction);
+                $this->fail("The {$scenario} address evidence was accepted.");
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString('none is current, approved and correction-relevant', $exception->getMessage());
+            }
+        }
+    }
+
+    public function test_deterministic_rejection_authorizes_one_immutable_new_attempt_and_preserves_history(): void
+    {
+        $context = $this->context();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $passportFileId = (string) Str::uuid();
+        $passport = $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'VN',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => $passportFileId,
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+        $address = $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'proof_of_address',
+            'status' => 'approved',
+            'file_url' => 'private://approved-address',
+            'file_hash' => hash('sha256', 'approved-address'),
+            'metadata' => [
+                'source' => 'admin_uploaded_correction_evidence',
+                'source_correction_id' => $correction->id,
+                'user_provider_account_id' => $context['account']->id,
+                'nium_document_type' => 'proof_of_address',
+                'nium_file_id' => (string) Str::uuid(),
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+        $priorReference = 'origin-wallet-manual-correction-prior';
+        $log = ApiRequestLog::query()->create([
+            'provider_id' => $context['provider']->id,
+            'user_id' => $context['user']->id,
+            'operation' => 'submit_kyc',
+            'external_reference' => $priorReference,
+            'request_method' => 'POST',
+            'request_url' => '/safe/submitKyc',
+            'request_body' => ['region' => 'HK', 'entityType' => 'applicant', 'kycMode' => 'manual_kyc'],
+            'response_status' => 400,
+            'response_body' => ['error_items' => [['error_field' => 'isResident']]],
+            'transport_outcome' => 'response_received',
+            'is_success' => false,
+        ]);
+        $metadata = $context['account']->metadata;
+        $metadata['nium_submit_kyc_attempts']['prior_manual'] = [
+            'state' => 'rejected',
+            'provider_http_status' => 400,
+            'kyc_mode' => 'manual_kyc',
+            'entity_type' => 'applicant',
+            'external_id' => $context['external_id'],
+            'manual_reference_id' => $priorReference,
+            'kyc_profile_correction_id' => $correction->id,
+            'submit_kyc_log_id' => $log->id,
+        ];
+        $context['account']->update(['metadata' => $metadata]);
+
+        $first = app(NiumHkManualKycResubmissionService::class)
+            ->authorize($context['user'], $admin, $log->id, 'Correct the confirmed isResident validation failure.');
+        $second = app(NiumHkManualKycResubmissionService::class)
+            ->authorize($context['user'], $admin, $log->id, 'Repeated authorization click.');
+
+        $this->assertTrue($first->is($second));
+        $this->assertSame(NiumManualKycResubmissionAuthorization::PENDING, $first->state);
+        $this->assertStringStartsWith('origin-wallet-manual-reauth-', $first->attempt_reference);
+        $this->assertSame($passport->id, $first->passport_document_id);
+        $this->assertSame($address->id, $first->proof_of_address_document_id);
+        $this->assertDatabaseHas('api_request_logs', ['id' => $log->id, 'response_status' => 400]);
+        $this->assertSame('rejected', $context['account']->fresh()->metadata['nium_submit_kyc_attempts']['prior_manual']['state']);
+
+        $calls = $this->mockResponse($context, [
+            'entityType' => 'applicant',
+            'externalId' => $context['external_id'],
+            'kycMode' => 'manual_kyc',
+            'kycStatus' => 'initiated',
+            'referenceId' => $context['provider_reference_id'],
+        ]);
+        $submitted = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+        $repeated = app(NiumHkManualSubmitKycService::class)->submit($context['user']);
+
+        $this->assertSame(1, $calls->count);
+        $this->assertSame($submitted, $repeated);
+        $this->assertTrue($calls->payload['isResident'] === false);
+        $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
+        $this->assertSame($first->attempt_reference, $calls->externalReference);
+        $this->assertSame(NiumManualKycResubmissionAuthorization::TERMINAL, $first->fresh()->state);
+        $this->assertSame('compliance_review', $first->fresh()->outcome_state);
+        $this->assertCount(2, $context['account']->fresh()->metadata['nium_submit_kyc_attempts']);
+        $this->assertDatabaseHas('api_request_logs', ['id' => $log->id, 'response_status' => 400]);
     }
 
     public function test_manual_submit_uses_metadata_applicant_without_entity_webhook_and_persists_real_biometric_url(): void
@@ -422,6 +611,18 @@ final class NiumHkManualSubmitKycTest extends TestCase
                 'nium_document_type' => 'passport', 'nium_file_id' => $fileId, 'nium_file_state' => 'AVAILABLE',
             ],
         ]);
+        $addressFileId = (string) Str::uuid();
+        $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'proof_of_address',
+            'status' => 'approved',
+            'file_url' => 'private://approved-address',
+            'metadata' => [
+                'nium_document_type' => 'proof_of_address',
+                'nium_file_id' => $addressFileId,
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
         $calls = $this->mockResponse($context, [
             'entityType' => 'applicant', 'externalId' => $context['external_id'],
             'kycMode' => 'manual_kyc', 'kycStatus' => 'initiated',
@@ -437,11 +638,15 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertSame('applicant', $calls->payload['entityType']);
         $this->assertSame('manual_kyc', $calls->payload['kycMode']);
         $this->assertSame($context['provider_reference_id'], $calls->payload['entityReferenceId']);
-        $this->assertArrayNotHasKey('isResident', $calls->payload);
+        $this->assertFalse($calls->payload['isResident']);
         $this->assertArrayNotHasKey('firstName', $calls->payload);
         $this->assertArrayNotHasKey('lastName', $calls->payload);
         $this->assertArrayNotHasKey('dateOfBirth', $calls->payload);
         $this->assertSame([$fileId], $calls->payload['proofOfIdentityDocument'][0]['fileIds']);
+        $this->assertSame(
+            ['type' => 'proof_of_address', 'fileIds' => [$addressFileId]],
+            $calls->payload['proofOfAddressDocument'],
+        );
         $this->assertSame('NEWP123', $calls->payload['proofOfIdentityDocument'][0]['identificationNumber']);
         $this->assertSame('Test Person', $context['person']->fresh()->legal_name);
         $this->assertSame('manual_kyc', $first['kyc_mode']);
@@ -466,6 +671,35 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->assertSame('manual_kyc_compliance_review', $correction->fresh()->status);
         $this->assertCount(1, $context['account']->fresh()->metadata['nium_submit_kyc_attempts']);
         $this->assertSame('submitted', collect($context['account']->fresh()->metadata['nium_submit_kyc_attempts'])->sole()['entity_kyc_status']);
+    }
+
+    public function test_manual_applicant_missing_residence_fails_closed_without_submit_post(): void
+    {
+        $context = $this->context();
+        $correction = $this->correction($context, 'manual_kyc_evidence_approved');
+        $context['person']->update(['residence_country_code' => null]);
+        $context['person']->documents()->create([
+            'kyc_profile_id' => $context['profile']->id,
+            'type' => 'passport',
+            'status' => 'manual_kyc_evidence_approved',
+            'document_number' => 'NEWP123',
+            'issuing_country_code' => 'HK',
+            'expires_at' => '2099-12-31',
+            'file_url' => 'private://reviewed-passport',
+            'metadata' => [
+                'source' => 'admin_reviewed_correction',
+                'source_correction_id' => $correction->id,
+                'nium_document_type' => 'passport',
+                'nium_file_id' => (string) Str::uuid(),
+                'nium_file_state' => 'AVAILABLE',
+            ],
+        ]);
+        $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('no unambiguous verified residence country');
+
+        app(NiumHkManualSubmitKycService::class)->submit($context['user']);
     }
 
     public function test_processing_manual_passport_persists_and_dispatches_a_delayed_continuation_without_submit_post(): void
@@ -916,7 +1150,7 @@ final class NiumHkManualSubmitKycTest extends TestCase
         $this->mock(NiumService::class, fn (MockInterface $mock) => $mock->shouldNotReceive('post'));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('reviewed correction passport is not available');
+        $this->expectExceptionMessage('Exactly one approved correction-bound passport');
 
         app(NiumHkManualSubmitKycService::class)->submit($context['user']);
     }

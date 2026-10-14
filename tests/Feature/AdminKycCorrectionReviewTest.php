@@ -14,6 +14,7 @@ use App\Services\Kyc\KycCorrectionApprovedSource;
 use App\Services\Nium\NiumHkCorporateCustomerUpdatePayloadFactory;
 use App\Services\Nium\NiumCustomerDocumentResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -23,6 +24,65 @@ use Tests\TestCase;
 class AdminKycCorrectionReviewTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_admin_uploads_then_explicitly_approves_correction_bound_proof_of_address(): void
+    {
+        Storage::fake('kyc_private');
+        config(['services.kyc.documents_disk' => 'kyc_private']);
+        $context = $this->context();
+        $context['applicant']->update(['residence_country_code' => 'VN']);
+        $context['correction']->update(['status' => 'manual_kyc_evidence_approved', 'active_slot' => null]);
+        $token = $this->issueTokenFor($this->legacyAdmin());
+        $endpoint = $this->actionEndpoint($context, 'proof-of-address');
+        $pdf = "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF";
+
+        $uploaded = $this->withToken($token)->post($endpoint, [
+            'type' => 'proof_of_address',
+            'file' => UploadedFile::fake()->createWithContent('address.pdf', $pdf),
+            'issued_at' => '2026-09-01',
+            'address_line1' => 'Verified residence line',
+            'city' => 'Ho Chi Minh City',
+            'country_code' => 'VN',
+        ])->assertCreated()
+            ->assertJsonPath('document.status', 'pending_admin_review')
+            ->assertJsonPath('document.verified_residence_address.country_code', 'VN')
+            ->json('document');
+
+        $this->assertSame('manual_kyc_evidence_approved', $context['correction']->fresh()->status);
+        $this->assertDatabaseHas('kyc_document_uploads', [
+            'user_id' => $context['user']->id,
+            'kyc_profile_correction_id' => $context['correction']->id,
+            'status' => 'referenced',
+        ]);
+        $this->withToken($token)
+            ->postJson($endpoint.'/'.$uploaded['id'].'/approve')
+            ->assertOk()->assertJsonPath('document.status', 'approved');
+
+        $document = $context['applicant']->documents()->findOrFail($uploaded['id']);
+        $this->assertSame($context['account']->id, (int) data_get($document->metadata, 'user_provider_account_id'));
+        $this->assertNull(data_get($document->metadata, 'nium_file_id'));
+        $this->assertDatabaseHas('audit_logs', ['action' => 'kyc.correction_proof_of_address_approved']);
+    }
+
+    public function test_proof_of_address_approval_rejects_cross_customer_document_binding(): void
+    {
+        Storage::fake('kyc_private');
+        config(['services.kyc.documents_disk' => 'kyc_private']);
+        $first = $this->context();
+        $second = $this->context();
+        $first['correction']->update(['status' => 'manual_kyc_evidence_approved', 'active_slot' => null]);
+        $second['correction']->update(['status' => 'manual_kyc_evidence_approved', 'active_slot' => null]);
+        $token = $this->issueTokenFor($this->legacyAdmin());
+        $uploaded = $this->withToken($token)->post($this->actionEndpoint($first, 'proof-of-address'), [
+            'type' => 'proof_of_address',
+            'file' => UploadedFile::fake()->create('address.pdf', 120, 'application/pdf'),
+        ])->assertCreated()->json('document');
+
+        $this->withToken($token)
+            ->postJson($this->actionEndpoint($second, 'proof-of-address').'/'.$uploaded['id'].'/approve')
+            ->assertStatus(422);
+        $this->assertDatabaseHas('kyc_documents', ['id' => $uploaded['id'], 'status' => 'pending_admin_review']);
+    }
 
     public function test_admin_approves_identity_and_passport_evidence_for_manual_compliance_review_without_customer_update(): void
     {

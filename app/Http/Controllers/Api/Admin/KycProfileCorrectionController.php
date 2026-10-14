@@ -4,9 +4,11 @@ namespace App\Http\Controllers\Api\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\KycProfileCorrection;
+use App\Models\KycDocument;
 use App\Models\User;
 use App\Services\Kyc\AdminKycCorrectionReviewService;
 use App\Services\Kyc\AdminKycCorrectionSyncService;
+use App\Services\Kyc\AdminKycProofOfAddressService;
 use App\Services\Kyc\KycApplicantCorrectionService;
 use App\Services\Kyc\KycCorrectionSyncPolicy;
 use App\Services\Kyc\KycManualComplianceReviewService;
@@ -18,6 +20,66 @@ use RuntimeException;
 
 class KycProfileCorrectionController extends Controller
 {
+    public function uploadProofOfAddress(
+        Request $request,
+        User $user,
+        KycProfileCorrection $correction,
+        AdminKycProofOfAddressService $service,
+    ): JsonResponse {
+        $this->assertOwnedBy($user, $correction);
+        $validated = $request->validate([
+            'type' => ['required', Rule::in(['proof_of_address'])],
+            'file' => ['required', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:20480'],
+            'issued_at' => ['sometimes', 'nullable', 'date', 'before_or_equal:today'],
+            'address_line1' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'address_line2' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'city' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'state' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'postal_code' => ['sometimes', 'nullable', 'string', 'max:40'],
+            'country_code' => ['sometimes', 'nullable', 'string', 'size:2'],
+        ]);
+        $address = collect(['address_line1', 'address_line2', 'city', 'state', 'postal_code', 'country_code'])
+            ->mapWithKeys(fn (string $key): array => [$key => isset($validated[$key])
+                ? ($key === 'country_code' ? strtoupper(trim((string) $validated[$key])) : trim((string) $validated[$key]))
+                : null])
+            ->filter(fn (mixed $value): bool => is_string($value) && $value !== '')->all();
+        try {
+            $document = $service->upload(
+                $user, $correction, $request->user(), $request->file('file'),
+                $validated['issued_at'] ?? null, $address,
+            );
+        } catch (ValidationException $exception) {
+            throw $exception;
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        return response()->json([
+            'message' => 'Proof of Address uploaded and awaiting explicit Admin approval.',
+            'document' => $this->serializeProofOfAddress($document),
+        ], 201);
+    }
+
+    public function approveProofOfAddress(
+        Request $request,
+        User $user,
+        KycProfileCorrection $correction,
+        KycDocument $document,
+        AdminKycProofOfAddressService $service,
+    ): JsonResponse {
+        $this->assertOwnedBy($user, $correction);
+        try {
+            $approved = $service->approve($user, $correction, $document, $request->user());
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        return response()->json([
+            'message' => 'Proof of Address approved. It will be prepared through the existing Nium File API flow when Submit KYC is explicitly requested.',
+            'document' => $this->serializeProofOfAddress($approved),
+        ]);
+    }
+
     public function requestUpdate(Request $request, User $user, KycApplicantCorrectionService $service): JsonResponse
     {
         $validated = $request->validate([
@@ -225,6 +287,13 @@ class KycProfileCorrectionController extends Controller
         $approvalCapability = app(KycCorrectionSyncPolicy::class)->evaluate($correction->providerAccount);
         $manualReviewEligible = app(KycManualComplianceReviewService::class)->eligible($correction);
         $attempt = $correction->syncAttempts->sortByDesc('id')->first();
+        $proofOfAddressDocuments = KycDocument::query()
+            ->where('kyc_profile_id', $correction->kyc_profile_id)
+            ->where('kyc_related_person_id', $correction->applicant_related_person_id)
+            ->get()->filter(fn (KycDocument $document): bool =>
+                strtolower(trim((string) data_get($document->metadata, 'nium_document_type', $document->type))) === 'proof_of_address'
+                && (int) data_get($document->metadata, 'source_correction_id') === (int) $correction->id)
+            ->map(fn (KycDocument $document): array => $this->serializeProofOfAddress($document))->values()->all();
 
         return [
             'id' => $correction->id,
@@ -255,6 +324,7 @@ class KycProfileCorrectionController extends Controller
             'review_note' => $correction->review_note,
             'reviewed_by' => $correction->reviewedBy?->only(['id', 'email', 'full_name']),
             'manual_kyc_continuation' => $this->serializeContinuation($correction),
+            'proof_of_address_documents' => $proofOfAddressDocuments,
             'sync' => [
                 ...$capability,
                 'status' => $attempt?->status,
@@ -276,6 +346,24 @@ class KycProfileCorrectionController extends Controller
                     && ($manualReviewEligible || $approvalCapability['allowed']),
                 'reason' => $manualReviewEligible || $approvalCapability['allowed'] ? null : $approvalCapability['reason'],
             ],
+        ];
+    }
+
+    private function serializeProofOfAddress(KycDocument $document): array
+    {
+        return [
+            'id' => $document->id,
+            'type' => 'proof_of_address',
+            'status' => $document->status,
+            'file_url' => $document->file_url,
+            'original_name' => $document->original_name,
+            'mime_type' => $document->mime_type,
+            'file_size' => $document->file_size,
+            'issued_at' => $document->issued_at?->format('Y-m-d'),
+            'verified_residence_address' => data_get($document->metadata, 'verified_residence_address'),
+            'nium_file_state' => data_get($document->metadata, 'nium_file_state'),
+            'has_nium_file_id' => filled(data_get($document->metadata, 'nium_file_id')),
+            'approved_at' => data_get($document->metadata, 'approved_at'),
         ];
     }
 
