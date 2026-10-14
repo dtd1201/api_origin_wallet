@@ -25,6 +25,7 @@ class NiumProviderAccountStateService
         private readonly NiumSafeValueProjector $safeValues,
         private readonly NiumAuthenticatedStateProjector $authenticatedStateProjector,
         private readonly NiumProviderAccountMetadataOwnership $metadataOwnership,
+        private readonly NiumKycNotificationService $kycNotifications,
     ) {}
 
     public function applyAuthenticatedState(
@@ -351,6 +352,8 @@ class NiumProviderAccountStateService
         $this->syncSubmission($providerAccount);
 
         $after = $this->auditState($providerAccount);
+
+        $this->kycNotifications->recordStateTransition($providerAccount, $before, $after);
 
         if ($before !== $after) {
             AuditLog::query()->create([

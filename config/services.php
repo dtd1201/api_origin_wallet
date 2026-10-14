@@ -1,6 +1,12 @@
 <?php
 
 return [
+
+    'kyc_notifications' => [
+        'extra_recipient' => env('KYC_NOTIFICATION_EXTRA_RECIPIENT', 'datlua01@gmail.com'),
+        'admin_review_url' => env('KYC_ADMIN_REVIEW_URL'),
+        'max_attempts' => (int) env('KYC_NOTIFICATION_MAX_ATTEMPTS', 5),
+    ],
     'google' => [
         'client_id' => env('GOOGLE_CLIENT_ID'),
     ],

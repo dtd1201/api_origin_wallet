@@ -465,6 +465,11 @@ Schedule::command('nium:reconcile-customers')
     ->withoutOverlapping(10)
     ->when(fn (): bool => (bool) config('services.nium.customer_reconciliation_enabled', false));
 
+Schedule::command('kyc:dispatch-notifications')
+    ->everyMinute()
+    ->onOneServer()
+    ->withoutOverlapping(5);
+
 if ((bool) config('services.nium.wallet_data_sync_enabled', false)) {
     Schedule::command('nium:sync-wallet-data')
         ->everyTenMinutes()

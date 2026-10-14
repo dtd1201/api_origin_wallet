@@ -14,6 +14,8 @@ use RuntimeException;
 
 final class NiumRfiWorkflowService
 {
+    public function __construct(private readonly NiumKycNotificationService $kycNotifications) {}
+
     public function ingestCustomerEvidence(IntegrationProvider $provider, UserProviderAccount $account, array $payload, ?int $webhookEventId = null, ?string $authenticatedRequestId = null): ?NiumRfiCase
     {
         $status = strtolower(trim((string) ($payload['subStatus'] ?? $payload['rfiStatus'] ?? '')));
@@ -153,10 +155,15 @@ final class NiumRfiWorkflowService
         $providerStatus = strtolower(trim((string) $account->provider_status));
 
         if ($providerSubStatus === 'rfi_requested') {
-            $account->update(['rfi_status' => 'requested']);
-            NiumRfiCase::query()->where('user_provider_account_id', $account->id)
-                ->whereIn('status', ['provisional', 'requested'])
-                ->update(['status' => 'requested', 'reconciled_at' => now()]);
+            DB::transaction(function () use ($account): void {
+                $account->update(['rfi_status' => 'requested']);
+                NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                    ->whereIn('status', ['provisional', 'requested'])
+                    ->update(['status' => 'requested', 'reconciled_at' => now()]);
+                NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                    ->where('status', 'requested')->get()
+                    ->each(fn (NiumRfiCase $case) => $this->kycNotifications->recordConfirmedRfi($account, $case));
+            });
 
             return;
         }
@@ -212,6 +219,12 @@ final class NiumRfiWorkflowService
                     }
 
                     NiumRfiCase::query()->whereKey($match['case']->id)->update($updates);
+                    if ($updates['status'] === 'requested') {
+                        $this->kycNotifications->recordConfirmedRfi(
+                            $account,
+                            NiumRfiCase::query()->findOrFail($match['case']->id),
+                        );
+                    }
                 }
             });
 
