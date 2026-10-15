@@ -26,6 +26,8 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-key']);
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'webhook-key');
+        config()->set('services.nium.customer_rfi_request_schema_version', 'corporate-rfi-request-test-v1');
+        config()->set('services.nium.customer_rfi_response_contract_version', 'corporate-rfi-response-test-v1');
         Http::preventStrayRequests();
     }
 
@@ -224,6 +226,7 @@ class NiumCorporateRfiSubmissionTest extends TestCase
                 'requiredData' => [['value' => 'businessDescription', 'type' => 'TEXT']],
             ],
             'response_draft' => [$this->answer('businessDescription', 'Cross-border software services')],
+            'contract_gate' => 'corporate-rfi-response-test-v1',
             'submission_state' => 'approved',
             'approved_by' => $user->id,
             'approved_at' => now(),

@@ -12,6 +12,7 @@ use App\Services\Nium\NiumTransactionRfiSubmissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
+use RuntimeException;
 
 final class NiumRfiCaseController extends Controller
 {
@@ -26,12 +27,14 @@ final class NiumRfiCaseController extends Controller
         $validated = $request->validate([
             'scope' => ['nullable', Rule::in(['customer', 'transaction'])],
             'status' => ['nullable', 'string', 'max:30'],
-            'submission_state' => ['nullable', Rule::in(['not_claimed', 'draft', 'approved', 'claimed', 'responded', 'reconciled'])],
+            'submission_state' => ['nullable', Rule::in(['new', 'sent_to_user', 'user_draft', 'user_submitted', 'admin_review', 'revision_requested', 'admin_approved', 'nium_submission_pending', 'nium_submitted', 'nium_submission_failed', 'not_claimed', 'draft', 'approved', 'claimed', 'responded', 'reconciled'])],
+            'user_id' => ['nullable', 'integer', 'min:1'],
         ]);
         $cases = NiumRfiCase::query()
             ->when(isset($validated['scope']), fn ($query) => $query->where('scope', $validated['scope']))
             ->when(isset($validated['status']), fn ($query) => $query->where('status', $validated['status']))
             ->when(isset($validated['submission_state']), fn ($query) => $query->where('submission_state', $validated['submission_state']))
+            ->when(isset($validated['user_id']), fn ($query) => $query->whereHas('account', fn ($account) => $account->where('user_id', $validated['user_id'])))
             ->latest('id')->paginate((int) $request->integer('per_page', 15));
 
         return response()->json($cases->through(fn (NiumRfiCase $case) => $this->workflow->listPayload($case)));
@@ -70,10 +73,35 @@ final class NiumRfiCaseController extends Controller
     public function submit(NiumRfiCase $niumRfiCase): JsonResponse
     {
         $this->assertNiumCase($niumRfiCase);
-        $case = $niumRfiCase->scope === 'customer'
-            ? $this->corporateSubmission->submit($niumRfiCase)
-            : $this->transactionSubmission->submit($niumRfiCase);
+        if ($niumRfiCase->scope === 'customer') {
+            try {
+                $case = $this->corporateSubmission->submit($niumRfiCase);
+            } catch (RuntimeException $exception) {
+                return response()->json(['message' => $exception->getMessage()], 422);
+            }
+        } else {
+            $case = $this->transactionSubmission->submit($niumRfiCase);
+        }
 
+        return response()->json($this->workflow->detailPayload($case));
+    }
+
+    public function sendToUser(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
+    {
+        $case = $this->workflow->sendToUser($niumRfiCase, (int) $request->user()->id);
+        return response()->json($this->workflow->detailPayload($case));
+    }
+
+    public function requestRevision(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
+    {
+        $validated = $request->validate(['reason' => ['required', 'string', 'max:5000']]);
+        $case = $this->workflow->requestRevision($niumRfiCase, (int) $request->user()->id, $validated['reason']);
+        return response()->json($this->workflow->detailPayload($case));
+    }
+
+    public function approveUserSubmission(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
+    {
+        $case = $this->workflow->approveUserSubmission($niumRfiCase, (int) $request->user()->id);
         return response()->json($this->workflow->detailPayload($case));
     }
 

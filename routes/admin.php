@@ -110,6 +110,9 @@ Route::middleware('permission:rfi.manage')->group(function (): void {
     Route::put('nium-rfi-cases/{niumRfiCase}/draft', [NiumRfiCaseController::class, 'draft'])->name('nium-rfi-cases.draft');
     Route::post('nium-rfi-cases/{niumRfiCase}/approve', [NiumRfiCaseController::class, 'approve'])->name('nium-rfi-cases.approve');
     Route::post('nium-rfi-cases/{niumRfiCase}/submit', [NiumRfiCaseController::class, 'submit'])->name('nium-rfi-cases.submit');
+    Route::post('nium-rfi-cases/{niumRfiCase}/send-to-user', [NiumRfiCaseController::class, 'sendToUser'])->name('nium-rfi-cases.send-to-user');
+    Route::post('nium-rfi-cases/{niumRfiCase}/request-revision', [NiumRfiCaseController::class, 'requestRevision'])->name('nium-rfi-cases.request-revision');
+    Route::post('nium-rfi-cases/{niumRfiCase}/approve-user-submission', [NiumRfiCaseController::class, 'approveUserSubmission'])->name('nium-rfi-cases.approve-user-submission');
 });
 
 Route::get('kyc-submissions', [UserKycSubmissionController::class, 'index'])->middleware('permission:kyc.view')->name('kyc-submissions.index');

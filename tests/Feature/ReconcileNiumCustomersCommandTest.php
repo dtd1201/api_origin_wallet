@@ -3,14 +3,19 @@
 namespace Tests\Feature;
 
 use App\Models\IntegrationProvider;
+use App\Models\KycNotificationEvent;
+use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumProviderAccountStateService;
+use App\Services\Nium\NiumCorporateRfiService;
+use App\Services\Nium\NiumRfiWorkflowService;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 final class ReconcileNiumCustomersCommandTest extends TestCase
@@ -66,6 +71,100 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
         $this->assertSame('under_review', $account->fresh()->status);
         $this->assertSame('under_review', $account->fresh()->provider_sub_status);
         $this->assertOnlyCustomerGetWasSent();
+    }
+
+    public function test_requested_rfi_is_authoritatively_enriched_without_duplicate_case_or_notification(): void
+    {
+        Queue::fake();
+        $account = $this->account([
+            'status' => 'under_review',
+            'provider_status' => 'pending',
+            'provider_sub_status' => 'rfi_requested',
+            'rfi_status' => 'requested',
+        ]);
+        $rfiHashId = 'scheduled-rfi-hash-001';
+        $case = NiumRfiCase::query()->create([
+            'provider_id' => $this->provider->id,
+            'user_provider_account_id' => $account->id,
+            'scope' => 'customer',
+            'origin' => 'webhook',
+            'provider_reference_fingerprint' => hash('sha256', 'webhook-event-001'),
+            'status' => 'provisional',
+            'evidence' => ['eventId' => 'webhook-event-001'],
+        ]);
+        Http::fake(function (Request $request) use ($account, $rfiHashId) {
+            if (str_contains($request->url(), '/corporate/rfi')) {
+                return Http::response(['rfiTemplates' => [[
+                    'rfiHashId' => $rfiHashId,
+                    'templateId' => 'scheduled-template-001',
+                    'template' => [
+                        'name' => 'otherDocument',
+                        'documentType' => 'document',
+                        'type' => 'document',
+                        'rfiType' => 'corporate',
+                        'requiredFields' => [[
+                            'fieldLabel' => 'Company Source of Funds and Source of Wealth',
+                            'fieldValue' => 'document',
+                            'type' => 'document',
+                        ]],
+                    ],
+                    'remarks' => 'Provide company source of funds and source of wealth evidence.',
+                    'status' => 'RFI_REQUESTED',
+                ]]]);
+            }
+
+            return Http::response($this->customerPayload($account, 'pending', 'rfi_requested'));
+        });
+
+        $this->artisan('nium:reconcile-customers')->assertExitCode(0);
+        $this->travel(16)->minutes();
+        $this->artisan('nium:reconcile-customers')->assertExitCode(0);
+
+        $case->refresh();
+        $this->assertSame(['eventId' => 'webhook-event-001'], $case->evidence);
+        $authoritative = NiumRfiCase::query()->where('origin', 'authoritative_fetch')->sole();
+        $this->assertSame('scheduled-rfi-hash-001', data_get($authoritative->evidence, 'rfiHashId'));
+        $this->assertSame('scheduled-template-001', data_get($authoritative->evidence, 'templateId'));
+        $this->assertSame('otherDocument', data_get($authoritative->evidence, 'template.name'));
+        $this->assertSame('Company Source of Funds and Source of Wealth', data_get($authoritative->evidence, 'template.requiredFields.0.fieldLabel'));
+        $this->assertSame('under_review', $account->fresh()->status);
+        $this->assertDatabaseCount('nium_rfi_cases', 2);
+        $this->assertSame(1, KycNotificationEvent::query()->where('event_type', 'rfi')->count());
+        Http::assertSentCount(4);
+        $this->assertCount(0, collect(Http::recorded())->filter(fn ($pair): bool => $pair[0]->method() !== 'GET'));
+    }
+
+    public function test_real_four_rfi_shape_is_parsed_and_persisted_idempotently_without_touching_webhook_history(): void
+    {
+        $account = $this->account(['provider_status' => 'pending', 'provider_sub_status' => 'rfi_requested']);
+        $historical = NiumRfiCase::query()->create([
+            'provider_id' => $this->provider->id, 'user_provider_account_id' => $account->id,
+            'scope' => 'customer', 'origin' => 'webhook',
+            'provider_reference_fingerprint' => hash('sha256', 'original-webhook-event'),
+            'status' => 'provisional', 'evidence' => ['eventId' => 'original-webhook-event'],
+        ]);
+        $templates = collect([
+            ['businessRegistrationDocument', 'Business Registration Document'],
+            ['otherDocument', 'Personal Source of Wealth'],
+            ['otherDocument', 'Personal Source of Funds'],
+            ['otherDocument', 'Company Source of Funds and Source of Wealth'],
+        ])->map(fn (array $item, int $index): array => [
+            'rfiHashId' => "provider-rfi-{$index}", 'templateId' => "template-{$index}",
+            'template' => ['name' => $item[0], 'documentType' => 'document', 'type' => 'document', 'rfiType' => 'corporate',
+                'requiredFields' => [['fieldLabel' => $item[1], 'fieldValue' => 'document', 'type' => 'document']]],
+            'remarks' => "Authoritative instruction {$index}", 'status' => 'RFI_REQUESTED',
+        ])->all();
+        Http::fake(['*' => Http::response(['rfiTemplates' => $templates])]);
+
+        $rfis = app(NiumCorporateRfiService::class)->fetch($account);
+        app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account, $rfis);
+        app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account, $rfis);
+
+        $this->assertCount(4, $rfis);
+        $this->assertDatabaseCount('nium_rfi_cases', 5);
+        $this->assertSame(['eventId' => 'original-webhook-event'], $historical->fresh()->evidence);
+        $this->assertSame(4, NiumRfiCase::query()->where('origin', 'authoritative_fetch')->distinct('provider_reference_fingerprint')->count());
+        $this->assertNull(data_get($rfis, '0.requiredData'));
     }
 
     public function test_terminal_unverified_conflicted_and_unknown_create_accounts_are_skipped(): void

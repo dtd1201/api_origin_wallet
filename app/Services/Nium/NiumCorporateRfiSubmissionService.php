@@ -22,9 +22,14 @@ final class NiumCorporateRfiSubmissionService
         if ($case->scope !== 'customer' || $case->transaction_id !== null) {
             throw new RuntimeException('Only a customer-scoped Nium RFI case can use the Corporate submission contract.');
         }
-        if ($case->status !== 'requested' || $case->submission_state !== 'approved' || $case->approved_at === null) {
+        if ($case->status !== 'requested'
+            || ! in_array($case->submission_state, ['approved', 'admin_approved'], true)
+            || $case->approved_at === null) {
             throw new RuntimeException('Corporate RFI submission requires a requested case with separate human approval.');
         }
+
+        // The verified GET contract does not establish a Corporate RFI POST contract.
+        $this->workflow->assertProviderContractConfirmed($case);
 
         $account = UserProviderAccount::query()->with('user')->whereKey($case->user_provider_account_id)
             ->where('provider_id', $case->provider_id)->firstOrFail();

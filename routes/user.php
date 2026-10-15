@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\User\KycApplicantCorrectionController;
 use App\Http\Controllers\Api\User\KycSubmissionController;
 use App\Http\Controllers\Api\User\NiumCorporateConstantsController;
 use App\Http\Controllers\Api\User\NiumPurposeCodeController;
+use App\Http\Controllers\Api\User\NiumRfiCaseController;
 use App\Http\Controllers\Api\User\OverviewController;
 use App\Http\Controllers\Api\User\ProfileController;
 use App\Http\Controllers\Api\User\ProviderAccountController;
@@ -28,6 +29,10 @@ Route::get('users/{user}/kyc-profile/applicant-correction', [KycApplicantCorrect
 Route::post('users/{user}/kyc-profile/applicant-correction', [KycApplicantCorrectionController::class, 'store']);
 Route::post('users/{user}/kyc-profile/applicant-correction/{correction}/proof-of-address', [KycApplicantCorrectionController::class, 'uploadProofOfAddress']);
 Route::post('users/{user}/kyc-profile/documents', [KycSubmissionController::class, 'uploadDocument']);
+Route::get('users/{user}/nium-rfi-cases', [NiumRfiCaseController::class, 'index']);
+Route::post('users/{user}/nium-rfi-documents', [NiumRfiCaseController::class, 'upload']);
+Route::put('users/{user}/nium-rfi-cases/{niumRfiCase}/draft', [NiumRfiCaseController::class, 'draft']);
+Route::post('users/{user}/nium-rfi-cases/{niumRfiCase}/submit', [NiumRfiCaseController::class, 'submit']);
 Route::post('users/{user}/kyc-profile/requirements/{requirement}/resubmit', [KycSubmissionController::class, 'resubmitRequirement']);
 Route::post('users/{user}/kyc-profile/business-registry/verify', BusinessRegistryVerificationController::class);
 Route::get('users/{user}/kyc-profile/corporate-constants', NiumCorporateConstantsController::class);

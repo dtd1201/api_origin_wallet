@@ -15,7 +15,11 @@ use Throwable;
 
 final class NiumCustomerReconciliationService
 {
-    public function __construct(private readonly NiumCustomerOnboardingService $onboarding) {}
+    public function __construct(
+        private readonly NiumCustomerOnboardingService $onboarding,
+        private readonly NiumRfiWorkflowService $rfiWorkflow,
+        private readonly NiumCorporateRfiService $corporateRfi,
+    ) {}
 
     public function reconcile(?int $limit = null): array
     {
@@ -54,6 +58,11 @@ final class NiumCustomerReconciliationService
 
                 $fresh->forceFill(['reconciliation_requested_at' => now()])->save();
                 $updated = $this->onboarding->retrieveCustomer($fresh, requestId: 'scheduled-customer-reconciliation');
+                $rfiEvidence = $this->rfiWorkflow->requiresAuthoritativeRfiFetch($updated)
+                    ? $this->corporateRfi->fetch($updated)
+                    : null;
+                $this->rfiWorkflow->reconcileCustomerEvidence($updated, $rfiEvidence);
+                $updated = $updated->fresh();
                 $this->clearFailureMetadata($updated);
                 $summary['reconciled']++;
                 Log::info('Nium customer reconciliation completed.', [

@@ -29,7 +29,7 @@ final class NiumRfiWorkflowService
         }
 
         return NiumRfiCase::query()->firstOrCreate(
-            ['provider_id' => $provider->id, 'user_provider_account_id' => $account->id, 'scope' => 'customer', 'provider_reference_fingerprint' => hash('sha256', $reference)],
+            ['provider_id' => $provider->id, 'user_provider_account_id' => $account->id, 'scope' => 'customer', 'origin' => 'webhook', 'provider_reference_fingerprint' => hash('sha256', $reference)],
             [
                 'webhook_event_id' => $webhookEventId,
                 'status' => 'provisional',
@@ -79,24 +79,7 @@ final class NiumRfiWorkflowService
 
     public function claimForProviderSubmission(NiumRfiCase $case, ?string $requestId = null): NiumRfiCase
     {
-        $prefix = $case->scope === 'customer' ? 'customer' : 'transaction';
-        $contract = [
-            config("services.nium.{$prefix}_rfi_response_endpoint"),
-            config("services.nium.{$prefix}_rfi_response_method"),
-            config("services.nium.{$prefix}_rfi_request_schema_version"),
-            config("services.nium.{$prefix}_rfi_response_contract_version"),
-        ];
-        if ($case->scope === 'transaction') {
-            $officialEndpoint = '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions/{authCode}/rfi/upload';
-            if ($contract[0] !== $officialEndpoint || strtoupper((string) $contract[1]) !== 'POST') {
-                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Transaction RFI response contract is not configured.');
-            }
-        } else {
-            $officialEndpoint = '/api/v1/client/{clientHashId}/corporate/rfi';
-            if ($contract[0] !== $officialEndpoint || strtoupper((string) $contract[1]) !== 'POST') {
-                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Corporate RFI response contract is not configured.');
-            }
-        }
+        $this->assertProviderContractConfirmed($case);
 
         return DB::transaction(function () use ($case, $requestId): NiumRfiCase {
             $locked = NiumRfiCase::query()->lockForUpdate()->findOrFail($case->id);
@@ -108,7 +91,7 @@ final class NiumRfiWorkflowService
             if ($locked->scope === 'customer' && $locked->status !== 'requested') {
                 throw new RuntimeException('Corporate RFI submission requires the latest authoritative requested status.');
             }
-            if ($locked->submission_state !== 'approved' || $locked->approved_at === null) {
+            if (! in_array($locked->submission_state, ['approved', 'admin_approved'], true) || $locked->approved_at === null) {
                 throw new RuntimeException('Nium RFI submission requires separate human approval and an unclaimed case.');
             }
             $locked->update([
@@ -125,26 +108,194 @@ final class NiumRfiWorkflowService
         });
     }
 
+    public function assertProviderContractConfirmed(NiumRfiCase $case): void
+    {
+        $prefix = $case->scope === 'customer' ? 'customer' : 'transaction';
+        $contract = [
+            config("services.nium.{$prefix}_rfi_response_endpoint"),
+            config("services.nium.{$prefix}_rfi_response_method"),
+            config("services.nium.{$prefix}_rfi_request_schema_version"),
+            config("services.nium.{$prefix}_rfi_response_contract_version"),
+        ];
+        if ($case->scope === 'transaction') {
+            $officialEndpoint = '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions/{authCode}/rfi/upload';
+            if ($contract[0] !== $officialEndpoint || strtoupper((string) $contract[1]) !== 'POST') {
+                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Transaction RFI response contract is not configured.');
+            }
+        } else {
+            $officialEndpoint = '/api/v1/client/{clientHashId}/corporate/rfi';
+            $requestSchemaVersion = trim((string) $contract[2]);
+            $responseContractVersion = trim((string) $contract[3]);
+            if ($contract[0] !== $officialEndpoint
+                || strtoupper((string) $contract[1]) !== 'POST'
+                || $requestSchemaVersion === ''
+                || $responseContractVersion === ''
+                || $case->contract_gate === 'provider_contract_unconfirmed'
+                || ! hash_equals($responseContractVersion, (string) $case->contract_gate)) {
+                throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Corporate RFI response contract is not configured.');
+            }
+        }
+    }
+
     public function listPayload(NiumRfiCase $case): array
     {
         return Arr::only($case->toArray(), [
-            'id', 'scope', 'status', 'contract_gate', 'submission_state', 'approved_at',
+            'id', 'scope', 'origin', 'status', 'contract_gate', 'submission_state', 'approved_at',
             'claimed_at', 'reconciled_at', 'created_at', 'updated_at',
         ]);
     }
 
     public function detailPayload(NiumRfiCase $case): array
     {
-        return [...$this->listPayload($case), 'evidence' => $case->evidence, 'response_draft' => $case->response_draft,
-            'supporting_file_count' => count((array) $case->supporting_file_ids)];
+        $case->loadMissing(['documents', 'events']);
+
+        return [...$this->listPayload($case),
+            'origin' => $case->origin,
+            'evidence' => $case->evidence,
+            'response_draft' => $case->response_draft,
+            'user_explanation' => $case->user_explanation,
+            'revision_reason' => $case->revision_reason,
+            'sent_to_user_at' => $case->sent_to_user_at,
+            'user_submitted_at' => $case->user_submitted_at,
+            'admin_reviewed_at' => $case->admin_reviewed_at,
+            'documents' => $case->documents->whereNull('pivot.detached_at')->map(fn (KycDocument $document): array => [
+                'id' => $document->id,
+                'type' => $document->type,
+                'status' => $document->status,
+                'original_name' => $document->original_name,
+                'mime_type' => $document->mime_type,
+                'file_size' => $document->file_size,
+                'file_url' => $document->file_url,
+            ])->values()->all(),
+            'history' => $case->events->map(fn ($event): array => [
+                'event_type' => $event->event_type,
+                'from_state' => $event->from_state,
+                'to_state' => $event->to_state,
+                'metadata' => $event->metadata,
+                'created_at' => $event->created_at,
+            ])->all(),
+            'supporting_file_count' => $case->documents->whereNull('pivot.detached_at')->count(),
+        ];
+    }
+
+    public function sendToUser(NiumRfiCase $case, int $adminUserId): NiumRfiCase
+    {
+        $updated = $this->transition($case, ['new', 'revision_requested'], 'sent_to_user', $adminUserId, [
+            'sent_to_user_at' => now(), 'revision_reason' => null,
+        ], 'sent_to_user');
+        $account = UserProviderAccount::query()->findOrFail($updated->user_provider_account_id);
+        $this->kycNotifications->recordRfiSentToUser($account, $updated);
+
+        return $updated;
+    }
+
+    public function saveUserDraft(NiumRfiCase $case, int $userId, array $documentIds, ?string $explanation): NiumRfiCase
+    {
+        return DB::transaction(function () use ($case, $userId, $documentIds, $explanation): NiumRfiCase {
+            $locked = NiumRfiCase::query()->with('account')->lockForUpdate()->findOrFail($case->id);
+            if ((int) $locked->account?->user_id !== $userId || ! in_array($locked->submission_state, ['sent_to_user', 'user_draft', 'revision_requested'], true)) {
+                throw new RuntimeException('This Corporate RFI is not available for a customer draft.');
+            }
+            $this->syncCustomerDocuments($locked, $userId, $documentIds);
+            $from = $locked->submission_state;
+            $locked->update(['submission_state' => 'user_draft', 'user_explanation' => $explanation]);
+            $this->recordEvent($locked, $userId, 'user_draft_saved', $from, 'user_draft');
+
+            return $locked->fresh();
+        });
+    }
+
+    public function submitByUser(NiumRfiCase $case, int $userId): NiumRfiCase
+    {
+        return DB::transaction(function () use ($case, $userId): NiumRfiCase {
+            $locked = NiumRfiCase::query()->with(['account', 'documents'])->lockForUpdate()->findOrFail($case->id);
+            if ((int) $locked->account?->user_id !== $userId || ! in_array($locked->submission_state, ['user_draft', 'revision_requested'], true)) {
+                throw new RuntimeException('This Corporate RFI draft cannot be submitted.');
+            }
+            if ($locked->documents->whereNull('pivot.detached_at')->isEmpty()) {
+                throw new RuntimeException('At least one supporting document is required.');
+            }
+            $from = $locked->submission_state;
+            $locked->update(['submission_state' => 'user_submitted', 'user_submitted_at' => now()]);
+            $this->recordEvent($locked, $userId, 'user_submitted', $from, 'user_submitted');
+
+            return $locked->fresh();
+        });
+    }
+
+    public function requestRevision(NiumRfiCase $case, int $adminUserId, string $reason): NiumRfiCase
+    {
+        $updated = $this->transition($case, ['user_submitted', 'admin_review'], 'revision_requested', $adminUserId, [
+            'revision_reason' => $reason, 'admin_reviewed_at' => now(),
+        ], 'revision_requested');
+        $updated->documents()->wherePivotNull('detached_at')->update(['status' => 'changes_requested']);
+
+        return $updated->fresh();
+    }
+
+    public function approveUserSubmission(NiumRfiCase $case, int $adminUserId): NiumRfiCase
+    {
+        $updated = $this->transition($case, ['user_submitted', 'admin_review'], 'admin_approved', $adminUserId, [
+            'approved_by' => $adminUserId, 'approved_at' => now(), 'admin_reviewed_at' => now(),
+        ], 'admin_approved');
+        $updated->documents()->wherePivotNull('detached_at')->update(['status' => 'approved']);
+
+        return $updated->fresh();
+    }
+
+    private function transition(NiumRfiCase $case, array $fromStates, string $toState, int $actorId, array $attributes, string $eventType): NiumRfiCase
+    {
+        return DB::transaction(function () use ($case, $fromStates, $toState, $actorId, $attributes, $eventType): NiumRfiCase {
+            $locked = NiumRfiCase::query()->lockForUpdate()->findOrFail($case->id);
+            if ($locked->origin !== 'authoritative_fetch' || ! in_array($locked->submission_state, $fromStates, true)) {
+                throw new RuntimeException('Invalid Corporate RFI workflow transition.');
+            }
+            $from = $locked->submission_state;
+            $locked->update([...$attributes, 'submission_state' => $toState]);
+            $this->recordEvent($locked, $actorId, $eventType, $from, $toState);
+
+            return $locked->fresh();
+        });
+    }
+
+    private function syncCustomerDocuments(NiumRfiCase $case, int $userId, array $documentIds): void
+    {
+        $documentIds = collect($documentIds)->map(fn ($id): int => (int) $id)->filter()->unique()->values();
+        $owned = KycDocument::query()->whereIn('id', $documentIds)
+            ->whereHas('kycProfile', fn ($query) => $query->where('user_id', $userId))
+            ->where('storage_disk', 'kyc_private')->get();
+        if ($owned->count() !== $documentIds->count()) {
+            throw new RuntimeException('One or more Corporate RFI documents are unavailable or not owned by this customer.');
+        }
+        $activeIds = $case->documents()->wherePivotNull('detached_at')->pluck('kyc_documents.id');
+        foreach ($activeIds->diff($documentIds) as $documentId) {
+            $case->documents()->updateExistingPivot($documentId, ['detached_at' => now()]);
+        }
+        foreach ($documentIds as $documentId) {
+            $case->documents()->syncWithoutDetaching([$documentId => ['attached_by' => $userId, 'detached_at' => null]]);
+            $case->documents()->updateExistingPivot($documentId, ['attached_by' => $userId, 'detached_at' => null]);
+        }
+    }
+
+    private function recordEvent(NiumRfiCase $case, ?int $actorId, string $type, ?string $from, ?string $to, array $metadata = []): void
+    {
+        $case->events()->create(['actor_user_id' => $actorId, 'event_type' => $type, 'from_state' => $from, 'to_state' => $to, 'metadata' => $metadata ?: null]);
     }
 
     public function requiresAuthoritativeRfiFetch(UserProviderAccount $account): bool
     {
-        return strtolower(trim((string) $account->provider_sub_status)) === 'under_review'
-            && NiumRfiCase::query()->where('user_provider_account_id', $account->id)
-                ->whereIn('status', ['provisional', 'requested'])
+        $subStatus = strtolower(trim((string) $account->provider_sub_status));
+        $hasActionableCase = $subStatus === 'rfi_requested'
+            || NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                ->whereIn('status', ['provisional', 'requested', 'responded_under_review'])
                 ->exists();
+
+        return in_array($subStatus, ['rfi_requested', 'under_review'], true)
+            && $hasActionableCase
+            && filled($account->external_customer_id)
+            && $account->customer_id_verified_at !== null
+            && $account->security_conflict_at === null
+            && blank($account->security_conflict_reason);
     }
 
     public function reconcileCustomerEvidence(
@@ -154,55 +305,61 @@ final class NiumRfiWorkflowService
         $providerSubStatus = strtolower(trim((string) $account->provider_sub_status));
         $providerStatus = strtolower(trim((string) $account->provider_status));
 
-        if ($providerSubStatus === 'rfi_requested') {
-            DB::transaction(function () use ($account): void {
-                $account->update(['rfi_status' => 'requested']);
-                NiumRfiCase::query()->where('user_provider_account_id', $account->id)
-                    ->whereIn('status', ['provisional', 'requested'])
-                    ->update(['status' => 'requested', 'reconciled_at' => now()]);
-                NiumRfiCase::query()->where('user_provider_account_id', $account->id)
-                    ->where('status', 'requested')->get()
-                    ->each(fn (NiumRfiCase $case) => $this->kycNotifications->recordConfirmedRfi($account, $case));
-            });
-
-            return;
-        }
-
-        if ($providerSubStatus === 'under_review' && $this->requiresAuthoritativeRfiFetch($account)) {
+        if (in_array($providerSubStatus, ['rfi_requested', 'under_review'], true)
+            && $this->requiresAuthoritativeRfiFetch($account)) {
             if ($authoritativeRfis === null) {
-                throw new RuntimeException('Nium Corporate RFI evidence is required while an actionable RFI is under review.');
+                throw new RuntimeException('Nium Corporate RFI evidence is required while an actionable RFI is pending.');
+            }
+            if ($authoritativeRfis === []) {
+                throw new RuntimeException('Nium Corporate RFI evidence cannot be empty while an actionable RFI is pending.');
             }
 
-            $cases = NiumRfiCase::query()->where('user_provider_account_id', $account->id)
-                ->whereIn('status', ['provisional', 'requested'])
-                ->orderBy('id')
-                ->get();
-            $matches = $this->matchAuthoritativeRfis($cases->all(), $authoritativeRfis);
-            $hasRequested = collect($matches)->contains(
-                fn (array $match): bool => $match['provider']['status'] === 'RFI_REQUESTED',
+            $hasRequested = collect($authoritativeRfis)->contains(
+                fn (array $providerRfi): bool => ($providerRfi['status'] ?? null) === 'RFI_REQUESTED',
             );
 
-            DB::transaction(function () use ($account, $matches, $hasRequested): void {
+            if ($providerSubStatus === 'rfi_requested' && ! $hasRequested) {
+                throw new RuntimeException('Nium Corporate RFI evidence does not contain the requested actionable RFI.');
+            }
+
+            DB::transaction(function () use ($account, $authoritativeRfis, $hasRequested): void {
                 UserProviderAccount::query()->whereKey($account->id)->update([
                     'rfi_status' => $hasRequested ? 'requested' : 'responded',
                 ]);
 
-                foreach ($matches as $match) {
-                    $providerRfi = $match['provider'];
+                foreach ($authoritativeRfis as $providerRfi) {
+                    if (! is_array($providerRfi)
+                        || blank($providerRfi['rfiHashId'] ?? null)
+                        || blank($providerRfi['templateId'] ?? null)
+                        || ! is_array($providerRfi['template'] ?? null)
+                        || ! in_array($providerRfi['status'] ?? null, ['RFI_REQUESTED', 'RFI_RESPONDED'], true)) {
+                        throw new RuntimeException('Nium Corporate RFI evidence contains an invalid provider RFI.');
+                    }
+
+                    $fingerprint = hash('sha256', $providerRfi['rfiHashId']);
+                    $case = NiumRfiCase::query()->firstOrCreate([
+                        'provider_id' => $account->provider_id,
+                        'user_provider_account_id' => $account->id,
+                        'scope' => 'customer',
+                        'origin' => 'authoritative_fetch',
+                        'provider_reference_fingerprint' => $fingerprint,
+                    ], [
+                        'status' => $providerRfi['status'] === 'RFI_REQUESTED' ? 'requested' : 'responded_under_review',
+                        'submission_state' => 'new',
+                        'evidence' => [],
+                    ]);
+
                     $updates = [
                         'status' => $providerRfi['status'] === 'RFI_RESPONDED'
                             ? 'responded_under_review'
                             : 'requested',
-                        'evidence' => array_merge((array) $match['case']->evidence, array_filter([
+                        'evidence' => [
                             'rfiHashId' => $providerRfi['rfiHashId'],
-                            'caseId' => $providerRfi['caseId'] ?? null,
-                            'referenceId' => $providerRfi['referenceId'] ?? null,
-                            'rfiTemplateId' => $providerRfi['rfiTemplateId'] ?? null,
-                            'clientId' => $providerRfi['clientId'] ?? null,
-                            'region' => $providerRfi['region'] ?? null,
-                            'requiredData' => $providerRfi['requiredData'] ?? null,
+                            'templateId' => $providerRfi['templateId'],
+                            'template' => $providerRfi['template'],
+                            'remarks' => $providerRfi['remarks'] ?? null,
                             'rfiStatus' => $providerRfi['status'],
-                        ], static fn (mixed $value): bool => $value !== null && $value !== '')),
+                        ],
                         'reconciled_at' => now(),
                     ];
 
@@ -210,22 +367,25 @@ final class NiumRfiWorkflowService
                         $updates['provider_response_evidence'] = array_filter([
                             'rfi_status' => 'RFI_RESPONDED',
                             'rfi_hash_id' => $providerRfi['rfiHashId'],
-                            'case_id' => $providerRfi['caseId'] ?? null,
-                            'reference_id' => $providerRfi['referenceId'] ?? null,
-                            'template_id' => $providerRfi['rfiTemplateId'] ?? null,
+                            'template_id' => $providerRfi['templateId'],
                             'source' => 'authoritative_provider_rfi_fetch',
                             'recorded_at' => now()->toISOString(),
                         ], static fn (mixed $value): bool => $value !== null && $value !== '');
                     }
 
-                    NiumRfiCase::query()->whereKey($match['case']->id)->update($updates);
+                    NiumRfiCase::query()->whereKey($case->id)->update($updates);
                     if ($updates['status'] === 'requested') {
                         $this->kycNotifications->recordConfirmedRfi(
                             $account,
-                            NiumRfiCase::query()->findOrFail($match['case']->id),
+                            NiumRfiCase::query()->findOrFail($case->id),
                         );
                     }
                 }
+
+                NiumRfiCase::query()->where('user_provider_account_id', $account->id)
+                    ->where('scope', 'customer')->where('origin', 'webhook')
+                    ->whereIn('status', ['provisional', 'requested', 'responded_under_review'])
+                    ->update(['status' => 'historical_webhook_evidence', 'reconciled_at' => now()]);
             });
 
             return;
@@ -237,83 +397,6 @@ final class NiumRfiWorkflowService
                 ->whereIn('status', ['provisional', 'requested', 'responded_under_review'])
                 ->update(['status' => 'resolved_authoritative_clear', 'reconciled_at' => now()]);
         }
-    }
-
-    private function matchAuthoritativeRfis(array $cases, array $providerRfis): array
-    {
-        if ($cases === [] || $providerRfis === [] || ! array_is_list($providerRfis)) {
-            throw new RuntimeException('Nium Corporate RFI evidence cannot be matched to an actionable local case.');
-        }
-
-        foreach ($providerRfis as $providerRfi) {
-            if (! is_array($providerRfi)
-                || blank($providerRfi['rfiHashId'] ?? null)
-                || ! in_array($providerRfi['status'] ?? null, ['RFI_REQUESTED', 'RFI_RESPONDED'], true)) {
-                throw new RuntimeException('Nium Corporate RFI evidence contains an invalid provider RFI.');
-            }
-        }
-
-        $matches = [];
-        $usedProviderIndexes = [];
-        foreach ($cases as $case) {
-            $candidateIndexes = [];
-            foreach ($providerRfis as $index => $providerRfi) {
-                if (isset($usedProviderIndexes[$index])) {
-                    continue;
-                }
-                if ($this->caseMatchesProviderRfi($case, $providerRfi)) {
-                    $candidateIndexes[] = $index;
-                }
-            }
-
-            if (count($candidateIndexes) === 0
-                && count($cases) === 1
-                && count($providerRfis) === 1) {
-                $candidateIndexes = [0];
-            }
-
-            if (count($candidateIndexes) !== 1) {
-                throw new RuntimeException('Nium Corporate RFI evidence is ambiguous for the local RFI case.');
-            }
-
-            $providerIndex = $candidateIndexes[0];
-            $usedProviderIndexes[$providerIndex] = true;
-            $matches[] = ['case' => $case, 'provider' => $providerRfis[$providerIndex]];
-        }
-
-        return $matches;
-    }
-
-    private function caseMatchesProviderRfi(NiumRfiCase $case, array $providerRfi): bool
-    {
-        $identifiers = array_values(array_filter([
-            $providerRfi['rfiHashId'] ?? null,
-            $providerRfi['caseId'] ?? null,
-            $providerRfi['referenceId'] ?? null,
-        ], static fn (mixed $value): bool => is_string($value) && trim($value) !== ''));
-
-        foreach ($identifiers as $identifier) {
-            if (hash_equals($case->provider_reference_fingerprint, hash('sha256', $identifier))) {
-                return true;
-            }
-        }
-
-        $evidence = (array) $case->evidence;
-        foreach ([
-            'rfiHashId' => 'rfiHashId',
-            'rfi_hash_id' => 'rfiHashId',
-            'caseId' => 'caseId',
-            'case_id' => 'caseId',
-            'referenceId' => 'referenceId',
-            'reference_id' => 'referenceId',
-        ] as $evidenceKey => $providerKey) {
-            if (is_string($evidence[$evidenceKey] ?? null)
-                && hash_equals($evidence[$evidenceKey], (string) ($providerRfi[$providerKey] ?? ''))) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private function resolveFactualFileIds(NiumRfiCase $case, array $fileIds): array

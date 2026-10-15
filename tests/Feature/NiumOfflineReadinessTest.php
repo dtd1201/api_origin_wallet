@@ -20,6 +20,9 @@ use App\Services\Nium\NiumPayoutReadinessService;
 use App\Services\Nium\NiumRfiWorkflowService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Tests\TestCase;
@@ -132,6 +135,99 @@ class NiumOfflineReadinessTest extends TestCase
         }
     }
 
+    public function test_customer_rfi_draft_reuses_owned_document_across_cases_and_rejects_cross_tenant_access(): void
+    {
+        [$provider, $user, $account] = $this->account();
+        [, $otherUser] = $this->account();
+        $cases = collect(['personal-sow', 'personal-sof'])->map(fn (string $reference) => NiumRfiCase::query()->create([
+            ...$this->rfiAttributes($provider, $account, $reference),
+            'origin' => 'authoritative_fetch', 'submission_state' => 'sent_to_user',
+            'evidence' => ['rfiHashId' => $reference, 'templateId' => "template-{$reference}",
+                'template' => ['name' => 'otherDocument', 'documentType' => 'document', 'type' => 'document', 'rfiType' => 'corporate',
+                    'requiredFields' => [['fieldLabel' => $reference, 'fieldValue' => 'document', 'type' => 'document']]],
+                'remarks' => 'Provide the requested evidence.', 'rfiStatus' => 'RFI_REQUESTED'],
+        ]));
+        $document = $user->kycProfile->documents()->create([
+            'type' => 'corporate_rfi_supporting_document', 'status' => 'pending_admin_review',
+            'file_url' => '/api/kyc-documents/test', 'storage_disk' => 'kyc_private', 'file_path' => 'kyc/test/bank.pdf',
+            'original_name' => 'bank-statement.pdf', 'mime_type' => 'application/pdf', 'file_size' => 1024,
+            'file_hash' => hash('sha256', 'bank-statement'), 'metadata' => ['factual' => true, 'synthetic' => false],
+        ]);
+        $workflow = app(NiumRfiWorkflowService::class);
+
+        foreach ($cases as $case) {
+            $workflow->saveUserDraft($case, $user->id, [$document->id], 'Shared bank statement.');
+            $workflow->submitByUser($case->fresh(), $user->id);
+        }
+
+        $this->assertDatabaseCount('nium_rfi_case_documents', 2);
+        $this->assertSame(['user_submitted', 'user_submitted'], $cases->map(fn (NiumRfiCase $case) => $case->fresh()->submission_state)->all());
+        $this->expectExceptionMessage('not available for a customer draft');
+        $workflow->saveUserDraft($cases->first()->fresh(), $otherUser->id, [$document->id], 'Not mine.');
+    }
+
+    public function test_admin_user_admin_rfi_workflow_enforces_authorization_notifications_reuse_and_contract_gate(): void
+    {
+        Queue::fake();
+        Storage::fake('kyc_private');
+        [$provider, $customer, $account] = $this->account();
+        [, $otherCustomer] = $this->account(provider: $provider);
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $adminToken = $this->issueTokenFor($admin);
+        $customerToken = $this->issueTokenFor($customer);
+        $otherToken = $this->issueTokenFor($otherCustomer);
+        $cases = collect(['personal-sow', 'personal-sof'])->map(fn (string $identity) => NiumRfiCase::query()->create([
+            ...$this->rfiAttributes($provider, $account, $identity),
+            'origin' => 'authoritative_fetch', 'submission_state' => 'new',
+            'evidence' => $this->authoritativeRfi($identity, 'RFI_REQUESTED'),
+        ]));
+
+        foreach ($cases as $case) {
+            $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/send-to-user")->assertOk()
+                ->assertJsonPath('submission_state', 'sent_to_user');
+        }
+        $this->assertSame(2, \App\Models\KycNotificationEvent::query()->where('event_type', 'rfi')->count());
+
+        $upload = $this->withToken($customerToken)->post("/api/user/users/{$customer->id}/nium-rfi-documents", [
+            'file' => UploadedFile::fake()->create('bank-statement.pdf', 128, 'application/pdf'),
+        ])->assertCreated();
+        $documentId = (int) $upload->json('document.id');
+
+        $this->withToken($otherToken)->putJson("/api/user/users/{$customer->id}/nium-rfi-cases/{$cases->first()->id}/draft", [
+            'document_ids' => [$documentId], 'explanation' => 'Cross tenant attempt.',
+        ])->assertForbidden();
+
+        foreach ($cases as $case) {
+            $this->withToken($customerToken)->putJson("/api/user/users/{$customer->id}/nium-rfi-cases/{$case->id}/draft", [
+                'document_ids' => [$documentId], 'explanation' => 'The same factual bank statement supports both requests.',
+            ])->assertOk()->assertJsonPath('submission_state', 'user_draft');
+            $this->withToken($customerToken)->postJson("/api/user/users/{$customer->id}/nium-rfi-cases/{$case->id}/submit")
+                ->assertOk()->assertJsonPath('submission_state', 'user_submitted');
+        }
+        $this->assertDatabaseCount('nium_rfi_case_documents', 2);
+
+        $first = $cases->first();
+        $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$first->id}/request-revision", [
+            'reason' => 'Please provide the complete statement period.',
+        ])->assertOk()->assertJsonPath('submission_state', 'revision_requested');
+        $this->withToken($customerToken)->putJson("/api/user/users/{$customer->id}/nium-rfi-cases/{$first->id}/draft", [
+            'document_ids' => [$documentId], 'explanation' => 'Complete statement period confirmed.',
+        ])->assertOk();
+        $this->withToken($customerToken)->postJson("/api/user/users/{$customer->id}/nium-rfi-cases/{$first->id}/submit")->assertOk();
+
+        Http::fake();
+        foreach ($cases as $case) {
+            $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/approve-user-submission")
+                ->assertOk()->assertJsonPath('submission_state', 'admin_approved')
+                ->assertJsonPath('contract_gate', 'provider_contract_unconfirmed');
+            $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit")
+                ->assertUnprocessable()
+                ->assertJsonPath('message', 'NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Corporate RFI response contract is not configured.');
+        }
+        Http::assertNothingSent();
+    }
+
     public function test_owned_factual_available_file_and_human_answer_provenance_are_accepted(): void
     {
         [$provider, $reviewer, $account] = $this->account();
@@ -160,8 +256,14 @@ class NiumOfflineReadinessTest extends TestCase
         $account->update(['rfi_status' => null, 'provider_status' => 'clear', 'provider_sub_status' => null]); $service->reconcileCustomerEvidence($account->fresh());
         $this->assertSame('resolved_authoritative_clear', $case->fresh()->status);
         $case->refresh()->update(['status' => 'provisional']); $account->update(['rfi_status' => 'requested', 'provider_sub_status' => 'rfi_requested']);
-        $service->reconcileCustomerEvidence($account->fresh());
-        $this->assertSame('requested', $case->fresh()->status);
+        $service->reconcileCustomerEvidence($account->fresh(), [$this->authoritativeRfi('reconcile-provider-id', 'RFI_REQUESTED')]);
+        $this->assertSame('historical_webhook_evidence', $case->fresh()->status);
+        $this->assertDatabaseHas('nium_rfi_cases', [
+            'user_provider_account_id' => $account->id,
+            'origin' => 'authoritative_fetch',
+            'provider_reference_fingerprint' => hash('sha256', 'reconcile-provider-id'),
+            'status' => 'requested',
+        ]);
     }
 
     public function test_responded_rfi_under_review_is_non_actionable_but_not_clear(): void
@@ -179,20 +281,19 @@ class NiumOfflineReadinessTest extends TestCase
             'rfi_status' => 'requested',
         ]);
 
-        $service->reconcileCustomerEvidence($account->fresh(), [[
-            'rfiHashId' => 'c4b61b85-d1c0-4461-83d2-e204de675ed4',
-            'caseId' => '5a32aa25-debd-4b40-b8a3-65a5a7512ae2',
-            'status' => 'RFI_RESPONDED',
-        ]]);
+        $service->reconcileCustomerEvidence($account->fresh(), [
+            $this->authoritativeRfi('c4b61b85-d1c0-4461-83d2-e204de675ed4', 'RFI_RESPONDED'),
+        ]);
 
         $case->refresh();
         $this->assertSame('responded', $account->fresh()->rfi_status);
-        $this->assertSame('responded_under_review', $case->status);
+        $this->assertSame('historical_webhook_evidence', $case->status);
         $this->assertSame('not_claimed', $case->submission_state);
         $this->assertNull($case->approved_at);
         $this->assertNull($case->claimed_at);
-        $this->assertSame('RFI_RESPONDED', data_get($case->provider_response_evidence, 'rfi_status'));
-        $this->assertSame('5a32aa25-debd-4b40-b8a3-65a5a7512ae2', data_get($case->provider_response_evidence, 'case_id'));
+        $authoritative = NiumRfiCase::query()->where('origin', 'authoritative_fetch')->sole();
+        $this->assertSame('responded_under_review', $authoritative->status);
+        $this->assertSame('RFI_RESPONDED', data_get($authoritative->provider_response_evidence, 'rfi_status'));
     }
 
     public function test_under_review_without_responded_evidence_does_not_clear_or_deactivate_rfi(): void
@@ -231,27 +332,29 @@ class NiumOfflineReadinessTest extends TestCase
         ]);
         $responded->update(['status' => 'requested']);
         $account->update(['provider_status' => 'pending', 'provider_sub_status' => 'under_review']);
-        $service->reconcileCustomerEvidence($account->fresh(), [[
-            'rfiHashId' => 'first-rfi-provider-id',
-            'status' => 'RFI_RESPONDED',
-        ]]);
+        $service->reconcileCustomerEvidence($account->fresh(), [$this->authoritativeRfi('first-rfi-provider-id', 'RFI_RESPONDED')]);
 
         $account->update(['provider_status' => 'clear', 'provider_sub_status' => null]);
         $service->reconcileCustomerEvidence($account->fresh());
 
         $this->assertSame('cleared', $account->fresh()->rfi_status);
-        $this->assertSame('resolved_authoritative_clear', $responded->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $responded->fresh()->status);
 
         $newCase = $service->ingestCustomerEvidence($provider, $account->fresh(), [
             'eventId' => 'later-rfi',
             'subStatus' => 'RFI_REQUESTED',
         ]);
         $account->update(['provider_status' => 'pending', 'provider_sub_status' => 'rfi_requested']);
-        $service->reconcileCustomerEvidence($account->fresh());
+        $service->reconcileCustomerEvidence($account->fresh(), [$this->authoritativeRfi('later-rfi-provider-id', 'RFI_REQUESTED')]);
 
         $this->assertSame('requested', $account->fresh()->rfi_status);
-        $this->assertSame('requested', $newCase->fresh()->status);
-        $this->assertSame('resolved_authoritative_clear', $responded->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $newCase->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $responded->fresh()->status);
+        $this->assertDatabaseHas('nium_rfi_cases', [
+            'origin' => 'authoritative_fetch',
+            'provider_reference_fingerprint' => hash('sha256', 'later-rfi-provider-id'),
+            'status' => 'requested',
+        ]);
     }
 
     public function test_endpoint_only_does_not_open_rfi_contract_gate(): void
@@ -328,6 +431,11 @@ class NiumOfflineReadinessTest extends TestCase
     private function rfiAttributes(IntegrationProvider $provider, $account, string $reference): array
     { return ['provider_id' => $provider->id, 'user_provider_account_id' => $account->id, 'scope' => 'customer',
         'provider_reference_fingerprint' => hash('sha256', $reference), 'status' => 'requested', 'evidence' => []]; }
+    private function authoritativeRfi(string $rfiHashId, string $status): array
+    { return ['rfiHashId' => $rfiHashId, 'templateId' => "template-{$rfiHashId}",
+        'template' => ['name' => 'otherDocument', 'documentType' => 'document', 'type' => 'document', 'rfiType' => 'corporate',
+            'requiredFields' => [['fieldLabel' => 'Source of Funds', 'fieldValue' => 'document', 'type' => 'document']]],
+        'remarks' => 'Provide the requested supporting document.', 'status' => $status]; }
     private function vanConfig(): void { config()->set('services.nium.hk_van_allocation_mode', 'request_based'); config()->set('services.nium.hk_payment_id_currency', 'HKD'); config()->set('services.nium.hk_payment_id_bank_name', 'Confirmed Bank'); config()->set('services.nium.hk_payment_id_account_category', 'COLLECTION_ACCOUNT'); }
     private function corridor(): array { return [...$this->dimensions(), 'routingCodeType' => ['IFSC']]; }
     private function dimensions(): array { return ['destinationCountry' => 'IN', 'destinationCurrency' => 'INR', 'payoutMethod' => 'LOCAL', 'beneficiaryAccountType' => 'INDIVIDUAL', 'customerType' => 'INDIVIDUAL']; }

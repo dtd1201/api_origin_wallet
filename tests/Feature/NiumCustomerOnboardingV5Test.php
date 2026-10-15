@@ -680,6 +680,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $clear['externalId'] = $account->external_reference;
         Http::fakeSequence()
             ->push($this->authoritativeCustomer($account, $rfi), 200)
+            ->push(['rfiTemplates' => [$this->corporateRfiFixture('authoritative-rfi-001', 'RFI_REQUESTED', 'corporate-rfi-template-001')]], 200)
             ->push($this->authoritativeCustomer($account, $clear), 200);
 
         $this->withHeaders([
@@ -696,6 +697,14 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->assertSame('under_review', $account->status);
         $this->assertSame($rfi['customerHashId'], $account->external_customer_id);
         $this->assertSame($rfi['walletHashIds'][0], $account->external_account_id);
+        $webhookCase = NiumRfiCase::query()->where('user_provider_account_id', $account->id)->where('origin', 'webhook')->sole();
+        $case = NiumRfiCase::query()->where('user_provider_account_id', $account->id)->where('origin', 'authoritative_fetch')->sole();
+        $this->assertNotSame($webhookCase->id, $case->id);
+        $this->assertSame('authoritative-rfi-001', data_get($case->evidence, 'rfiHashId'));
+        $this->assertSame('corporate-rfi-template-001', data_get($case->evidence, 'templateId'));
+        $this->assertSame('Source of Funds', data_get($case->evidence, 'template.requiredFields.0.fieldLabel'));
+        $this->assertSame('provider_contract_unconfirmed', $case->contract_gate);
+        $this->assertSame('new', $case->submission_state);
 
         $this->withHeaders([
             'x-partner-key' => 'verified-partner-key',
@@ -720,9 +729,10 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'provider_id' => $provider->id,
             'user_provider_account_id' => $account->id,
             'scope' => 'customer',
-            'provider_reference_fingerprint' => hash('sha256', $rfiHashId),
+            'origin' => 'webhook',
+            'provider_reference_fingerprint' => hash('sha256', 'responded-under-review-webhook'),
             'status' => 'requested',
-            'evidence' => ['rfiHashId' => $rfiHashId],
+            'evidence' => ['eventId' => 'responded-under-review-webhook'],
         ]);
         $underReview = $this->fixture('customer-status-rfi-webhook.json');
         $underReview['externalId'] = $account->external_reference;
@@ -732,12 +742,15 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $phase = 'responded';
         Http::fake(function (Request $request) use ($account, $underReview, $rfiHashId, &$phase) {
             if (str_contains($request->url(), '/corporate/rfi')) {
-                return Http::response(['rfiTemplates' => [[
-                    'rfiHashId' => $rfiHashId,
-                    'templateId' => '213f361f-2ab0-463e-9a27-5652becf17dc',
-                    'referenceId' => '99bcc647-663a-47bd-b9f4-f49d16f22407',
-                    'status' => 'RFI_RESPONDED',
-                ]]]);
+                if ($phase === 'later') {
+                    return Http::response(['rfiTemplates' => [$this->corporateRfiFixture(
+                        '7c802b81-34f4-4bb5-9f1c-b62576156dcb', 'RFI_REQUESTED', 'later-corporate-rfi-template'
+                    )]]);
+                }
+
+                return Http::response(['rfiTemplates' => [$this->corporateRfiFixture(
+                    $rfiHashId, 'RFI_RESPONDED', '213f361f-2ab0-463e-9a27-5652becf17dc'
+                )]]);
             }
 
             if ($phase === 'clear') {
@@ -761,8 +774,10 @@ class NiumCustomerOnboardingV5Test extends TestCase
         ])->postJson('/api/webhooks/providers/nium', $underReview)->assertOk();
 
         $this->assertSame('responded', $account->fresh()->rfi_status);
-        $this->assertSame('responded_under_review', $case->fresh()->status);
-        $this->assertSame($rfiHashId, data_get($case->fresh()->evidence, 'rfiHashId'));
+        $this->assertSame('historical_webhook_evidence', $case->fresh()->status);
+        $providerCase = NiumRfiCase::query()->where('origin', 'authoritative_fetch')->where('provider_reference_fingerprint', hash('sha256', $rfiHashId))->sole();
+        $this->assertSame('responded_under_review', $providerCase->status);
+        $this->assertSame($rfiHashId, data_get($providerCase->evidence, 'rfiHashId'));
         $this->assertSame('not_claimed', $case->fresh()->submission_state);
         $this->assertNull($case->fresh()->approved_at);
         $this->assertNull($case->fresh()->claimed_at);
@@ -787,7 +802,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
             ['clear', null, 'cleared'],
             [$account->provider_status, $account->provider_sub_status, $account->rfi_status],
         );
-        $this->assertSame('resolved_authoritative_clear', $case->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $case->fresh()->status);
 
         $later = $this->fixture('customer-status-rfi-webhook.json');
         $later['externalId'] = $account->external_reference;
@@ -798,12 +813,22 @@ class NiumCustomerOnboardingV5Test extends TestCase
         ])->postJson('/api/webhooks/providers/nium', $later)->assertOk();
 
         $this->assertSame('requested', $account->fresh()->rfi_status);
-        $this->assertSame('resolved_authoritative_clear', $case->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $case->fresh()->status);
         $this->assertDatabaseHas('nium_rfi_cases', [
             'user_provider_account_id' => $account->id,
             'provider_reference_fingerprint' => hash('sha256', 'later-rfi-requested-001'),
-            'status' => 'requested',
+            'status' => 'historical_webhook_evidence',
         ]);
+        $laterCase = NiumRfiCase::query()
+            ->where('user_provider_account_id', $account->id)
+            ->where('origin', 'authoritative_fetch')
+            ->where('provider_reference_fingerprint', hash('sha256', '7c802b81-34f4-4bb5-9f1c-b62576156dcb'))
+            ->sole();
+        $this->assertSame('7c802b81-34f4-4bb5-9f1c-b62576156dcb', data_get($laterCase->evidence, 'rfiHashId'));
+        $this->assertSame('later-corporate-rfi-template', data_get($laterCase->evidence, 'templateId'));
+        $this->assertSame('Source of Funds', data_get($laterCase->evidence, 'template.requiredFields.0.fieldLabel'));
+        $this->assertSame('provider_contract_unconfirmed', $laterCase->contract_gate);
+        $this->assertSame('new', $laterCase->submission_state);
     }
 
     public function test_webhook_under_review_with_provider_rfi_still_requested_remains_actionable(): void
@@ -811,7 +836,7 @@ class NiumCustomerOnboardingV5Test extends TestCase
         [$provider, $user, $account, $case, $payload, $rfiHashId] = $this->rfiWebhookContext('still-requested');
         Http::fake(function (Request $request) use ($account, $payload, $rfiHashId) {
             return str_contains($request->url(), '/corporate/rfi')
-                ? Http::response(['rfiTemplates' => [['rfiHashId' => $rfiHashId, 'status' => 'RFI_REQUESTED']]])
+                ? Http::response(['rfiTemplates' => [$this->corporateRfiFixture($rfiHashId, 'RFI_REQUESTED', 'still-requested-template')]])
                 : Http::response($this->authoritativeCustomer($account, $payload, 'pending'));
         });
 
@@ -819,7 +844,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
             ->postJson('/api/webhooks/providers/nium', $payload)->assertOk();
 
         $this->assertSame('requested', $account->fresh()->rfi_status);
-        $this->assertSame('requested', $case->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $case->fresh()->status);
+        $this->assertDatabaseHas('nium_rfi_cases', ['origin' => 'authoritative_fetch', 'provider_reference_fingerprint' => hash('sha256', $rfiHashId), 'status' => 'requested']);
     }
 
     public function test_webhook_under_review_fails_closed_when_corporate_rfi_fetch_fails(): void
@@ -847,15 +873,16 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'provider_id' => $provider->id,
             'user_provider_account_id' => $account->id,
             'scope' => 'customer',
-            'provider_reference_fingerprint' => hash('sha256', $secondHash),
+            'origin' => 'webhook',
+            'provider_reference_fingerprint' => hash('sha256', 'multi-second-webhook'),
             'status' => 'requested',
-            'evidence' => [],
+            'evidence' => ['eventId' => 'multi-second-webhook'],
         ]);
         Http::fake(function (Request $request) use ($account, $payload, $firstHash, $secondHash) {
             return str_contains($request->url(), '/corporate/rfi')
                 ? Http::response(['rfiTemplates' => [
-                    ['rfiHashId' => $secondHash, 'status' => 'RFI_REQUESTED'],
-                    ['rfiHashId' => $firstHash, 'status' => 'RFI_RESPONDED'],
+                    $this->corporateRfiFixture($secondHash, 'RFI_REQUESTED', 'second-template'),
+                    $this->corporateRfiFixture($firstHash, 'RFI_RESPONDED', 'first-template'),
                 ]])
                 : Http::response($this->authoritativeCustomer($account, $payload, 'pending'));
         });
@@ -863,9 +890,11 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->withHeaders(['x-partner-key' => 'verified-partner-key', 'x-request-id' => 'multiple-rfi-001'])
             ->postJson('/api/webhooks/providers/nium', $payload)->assertOk();
 
-        $this->assertSame('responded_under_review', $first->fresh()->status);
-        $this->assertSame('requested', $second->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $first->fresh()->status);
+        $this->assertSame('historical_webhook_evidence', $second->fresh()->status);
         $this->assertSame('requested', $account->fresh()->rfi_status);
+        $this->assertDatabaseHas('nium_rfi_cases', ['origin' => 'authoritative_fetch', 'provider_reference_fingerprint' => hash('sha256', $firstHash), 'status' => 'responded_under_review']);
+        $this->assertDatabaseHas('nium_rfi_cases', ['origin' => 'authoritative_fetch', 'provider_reference_fingerprint' => hash('sha256', $secondHash), 'status' => 'requested']);
     }
 
     public function test_one_local_case_and_two_unmatched_provider_rfis_fail_closed(): void
@@ -875,8 +904,8 @@ class NiumCustomerOnboardingV5Test extends TestCase
         Http::fake(function (Request $request) use ($account, $payload) {
             return str_contains($request->url(), '/corporate/rfi')
                 ? Http::response(['rfiTemplates' => [
-                    ['rfiHashId' => '10000000-0000-4000-8000-000000000001', 'status' => 'RFI_RESPONDED'],
-                    ['rfiHashId' => '20000000-0000-4000-8000-000000000002', 'status' => 'RFI_RESPONDED'],
+                    $this->corporateRfiFixture('10000000-0000-4000-8000-000000000001', 'RFI_RESPONDED', 'template-one'),
+                    $this->corporateRfiFixture('20000000-0000-4000-8000-000000000002', 'RFI_RESPONDED', 'template-two'),
                 ]])
                 : Http::response($this->authoritativeCustomer($account, $payload, 'pending'));
         });
@@ -884,16 +913,58 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $this->withHeaders([
             'x-partner-key' => 'verified-partner-key',
             'x-request-id' => 'ambiguous-provider-rfis-001',
-        ])->postJson('/api/webhooks/providers/nium', $payload)->assertUnprocessable();
+        ])->postJson('/api/webhooks/providers/nium', $payload)->assertOk();
 
         $case->refresh();
-        $this->assertSame('requested', $account->fresh()->rfi_status);
-        $this->assertSame('requested', $case->status);
+        $this->assertSame('responded', $account->fresh()->rfi_status);
+        $this->assertSame('historical_webhook_evidence', $case->status);
         $this->assertSame($originalEvidence, $case->evidence);
         $this->assertNull($case->provider_response_evidence);
         $this->assertSame('not_claimed', $case->submission_state);
         $this->assertNull($case->approved_at);
         $this->assertNull($case->claimed_at);
+        $this->assertSame(2, NiumRfiCase::query()->where('origin', 'authoritative_fetch')->count());
+    }
+
+    public function test_one_local_case_and_one_unmatched_provider_rfi_does_not_use_positional_fallback(): void
+    {
+        [$provider, $user, $account, $case, $payload] = $this->rfiWebhookContext('unmatched-single');
+        $originalEvidence = $case->evidence;
+        Http::fake(function (Request $request) use ($account, $payload) {
+            return str_contains($request->url(), '/corporate/rfi')
+                ? Http::response(['rfiTemplates' => [$this->corporateRfiFixture('unrelated-provider-rfi', 'RFI_RESPONDED')]])
+                : Http::response($this->authoritativeCustomer($account, $payload, 'pending'));
+        });
+
+        $this->withHeaders(['x-partner-key' => 'verified-partner-key', 'x-request-id' => 'unmatched-single-001'])
+            ->postJson('/api/webhooks/providers/nium', $payload)->assertOk();
+
+        $this->assertSame($originalEvidence, $case->fresh()->evidence);
+        $this->assertSame('historical_webhook_evidence', $case->fresh()->status);
+        $this->assertSame('responded', $account->fresh()->rfi_status);
+        $this->assertDatabaseHas('nium_rfi_cases', ['origin' => 'authoritative_fetch', 'provider_reference_fingerprint' => hash('sha256', 'unrelated-provider-rfi')]);
+    }
+
+    public function test_incomplete_requested_rfi_get_response_preserves_existing_case_evidence(): void
+    {
+        [$provider, $user, $account, $case, $payload, $rfiHashId] = $this->rfiWebhookContext('incomplete-requested');
+        $originalEvidence = $case->evidence;
+        Http::fake(function (Request $request) use ($account, $payload, $rfiHashId) {
+            return str_contains($request->url(), '/corporate/rfi')
+                ? Http::response(['rfiTemplates' => [[
+                    'rfiHashId' => $rfiHashId,
+                    'templateId' => 'incomplete-template',
+                    'status' => 'RFI_REQUESTED',
+                ]]])
+                : Http::response($this->authoritativeCustomer($account, $payload, 'pending'));
+        });
+
+        $this->withHeaders(['x-partner-key' => 'verified-partner-key', 'x-request-id' => 'incomplete-requested-001'])
+            ->postJson('/api/webhooks/providers/nium', $payload)->assertUnprocessable();
+
+        $this->assertSame($originalEvidence, $case->fresh()->evidence);
+        $this->assertSame('requested', $case->fresh()->status);
+        $this->assertNull($case->fresh()->reconciled_at);
         $this->assertSame('failed', $account->fresh()->reconciliation_status);
     }
 
@@ -904,9 +975,11 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $account = $this->pendingAccount($user, $provider);
         $rfi = $this->fixture('customer-status-rfi-webhook.json');
         $rfi['externalId'] = $account->external_reference;
-        Http::fake([
-            '*' => Http::response($this->authoritativeCustomer($account, $rfi), 200),
-        ]);
+        Http::fake(function (Request $request) use ($account, $rfi) {
+            return str_contains($request->url(), '/corporate/rfi')
+                ? Http::response(['rfiTemplates' => [$this->corporateRfiFixture('duplicate-rfi-hash', 'RFI_REQUESTED', 'duplicate-rfi-template')]])
+                : Http::response($this->authoritativeCustomer($account, $rfi), 200);
+        });
 
         $headers = [
             'x-partner-key' => 'verified-partner-key',
@@ -5559,9 +5632,10 @@ class NiumCustomerOnboardingV5Test extends TestCase
             'provider_id' => $provider->id,
             'user_provider_account_id' => $account->id,
             'scope' => 'customer',
-            'provider_reference_fingerprint' => hash('sha256', $rfiHashId),
+            'origin' => 'webhook',
+            'provider_reference_fingerprint' => hash('sha256', "webhook-{$suffix}"),
             'status' => 'requested',
-            'evidence' => ['rfiHashId' => $rfiHashId],
+            'evidence' => ['eventId' => "webhook-{$suffix}"],
         ]);
         $payload = $this->fixture('customer-status-rfi-webhook.json');
         $payload['externalId'] = $account->external_reference;
@@ -5569,6 +5643,32 @@ class NiumCustomerOnboardingV5Test extends TestCase
         $payload['subStatus'] = 'under_review';
 
         return [$provider, $user, $account, $case, $payload, $rfiHashId];
+    }
+
+    private function corporateRfiFixture(
+        string $rfiHashId,
+        string $status,
+        string $templateId = 'corporate-template',
+        string $name = 'otherDocument',
+        string $label = 'Source of Funds',
+    ): array {
+        return [
+            'rfiHashId' => $rfiHashId,
+            'templateId' => $templateId,
+            'template' => [
+                'name' => $name,
+                'documentType' => 'document',
+                'type' => 'document',
+                'rfiType' => 'corporate',
+                'requiredFields' => [[
+                    'fieldLabel' => $label,
+                    'fieldValue' => 'document',
+                    'type' => 'document',
+                ]],
+            ],
+            'remarks' => "Provide {$label} evidence.",
+            'status' => $status,
+        ];
     }
 
     private function issueTokenFor(User $user): string

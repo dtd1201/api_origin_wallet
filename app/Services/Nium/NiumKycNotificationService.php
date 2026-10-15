@@ -40,6 +40,11 @@ final class NiumKycNotificationService
         $this->record($account, 'rfi', "rfi:{$case->id}:requested", false);
     }
 
+    public function recordRfiSentToUser(UserProviderAccount $account, NiumRfiCase $case): void
+    {
+        $this->record($account, 'rfi', "rfi:{$case->id}:sent-to-user", true);
+    }
+
     private function record(UserProviderAccount $account, string $eventType, string $identity, bool $includeUser): void
     {
         $account->loadMissing(['user.profile', 'user.kycProfile']);
