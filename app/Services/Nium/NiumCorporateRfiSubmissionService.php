@@ -15,7 +15,13 @@ final class NiumCorporateRfiSubmissionService
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumRfiWorkflowService $workflow,
+        private readonly NiumCorporateRfiPayloadBuilder $payloadBuilder,
     ) {}
+
+    public function preparePayload(NiumRfiCase $case): array
+    {
+        return $this->payloadBuilder->prepare($case);
+    }
 
     public function submit(NiumRfiCase $case): NiumRfiCase
     {
@@ -30,6 +36,11 @@ final class NiumCorporateRfiSubmissionService
 
         // The verified GET contract does not establish a Corporate RFI POST contract.
         $this->workflow->assertProviderContractConfirmed($case);
+
+        if ($case->origin === 'authoritative_fetch') {
+            $this->payloadBuilder->prepare($case);
+            throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: authoritative Corporate RFI POST envelope remains unverified.');
+        }
 
         $account = UserProviderAccount::query()->with('user')->whereKey($case->user_provider_account_id)
             ->where('provider_id', $case->provider_id)->firstOrFail();

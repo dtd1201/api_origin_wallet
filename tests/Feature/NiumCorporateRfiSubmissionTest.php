@@ -158,6 +158,104 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $this->assertSame($account->id, $case->user_provider_account_id);
     }
 
+    public function test_prepares_each_authoritative_corporate_document_template_offline_from_its_own_active_links(): void
+    {
+        Storage::fake('kyc_private');
+        $templates = [
+            ['businessRegistrationDocument', 'Business registration document'],
+            ['otherDocument', 'Personal Source of Wealth'],
+            ['otherDocument', 'Personal Source of Funds'],
+            ['otherDocument', 'Corporate Source of Wealth and Funds'],
+        ];
+
+        foreach ($templates as $index => [$templateName, $label]) {
+            [$case, $account, $user] = $this->authoritativeCorporateCase(
+                "rfi-hash-{$index}",
+                "template-{$index}",
+                $templateName,
+                $label,
+            );
+            $document = $this->approvedDocument($user, "evidence-{$index}.pdf", "document-{$index}");
+            $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+
+            $prepared = app(NiumCorporateRfiSubmissionService::class)->preparePayload($case->fresh());
+
+            $this->assertSame($account->external_customer_id, $prepared['customerHashId']);
+            $this->assertSame("rfi-hash-{$index}", $prepared['rfiHashId']);
+            $this->assertSame("template-{$index}", $prepared['templateId']);
+            $this->assertSame($templateName, data_get($prepared, 'template.name'));
+            $this->assertSame('document', data_get($prepared, 'template.documentType'));
+            $this->assertSame('corporate', data_get($prepared, 'template.rfiType'));
+            $this->assertSame('document', data_get($prepared, 'fields.0.fieldValue'));
+            $this->assertSame([$document->id], collect(data_get($prepared, 'fields.0.documents'))->pluck('documentId')->all());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_authoritative_offline_preparation_rejects_invalid_case_document_evidence(): void
+    {
+        Storage::fake('kyc_private');
+
+        [$missing] = $this->authoritativeCorporateCase('missing-doc', 'template-missing', 'otherDocument', 'Missing document');
+        $this->expectPreparationFailure($missing, 'active approved supporting document');
+
+        [$detached, , $detachedUser] = $this->authoritativeCorporateCase('detached-doc', 'template-detached', 'otherDocument', 'Detached document');
+        $detachedDocument = $this->approvedDocument($detachedUser, 'detached.pdf', 'detached');
+        $detached->documents()->attach($detachedDocument->id, ['attached_by' => $detachedUser->id, 'detached_at' => now()]);
+        $this->expectPreparationFailure($detached->fresh(), 'active approved supporting document');
+
+        [$unapproved, , $unapprovedUser] = $this->authoritativeCorporateCase('unapproved-doc', 'template-unapproved', 'otherDocument', 'Unapproved document');
+        $unapprovedDocument = $this->approvedDocument($unapprovedUser, 'unapproved.pdf', 'unapproved');
+        $unapprovedDocument->update(['status' => 'pending_admin_review']);
+        $unapproved->documents()->attach($unapprovedDocument->id, ['attached_by' => $unapprovedUser->id]);
+        $this->expectPreparationFailure($unapproved->fresh(), 'ownership, provenance, status, or storage');
+
+        [$superseded, , $supersededUser] = $this->authoritativeCorporateCase('superseded-doc', 'template-superseded', 'otherDocument', 'Superseded document');
+        $supersededDocument = $this->approvedDocument($supersededUser, 'superseded.pdf', 'superseded');
+        $supersededDocument->update(['status' => 'superseded']);
+        $superseded->documents()->attach($supersededDocument->id, ['attached_by' => $supersededUser->id]);
+        $this->expectPreparationFailure($superseded->fresh(), 'ownership, provenance, status, or storage');
+
+        [$synthetic, , $syntheticUser] = $this->authoritativeCorporateCase('synthetic-doc', 'template-synthetic', 'otherDocument', 'Synthetic document');
+        $syntheticDocument = $this->approvedDocument($syntheticUser, 'synthetic.pdf', 'synthetic');
+        $syntheticDocument->update(['metadata' => ['factual' => true, 'synthetic' => true]]);
+        $synthetic->documents()->attach($syntheticDocument->id, ['attached_by' => $syntheticUser->id]);
+        $this->expectPreparationFailure($synthetic->fresh(), 'ownership, provenance, status, or storage');
+
+        [$crossCustomer] = $this->authoritativeCorporateCase('cross-customer-doc', 'template-cross', 'otherDocument', 'Cross-customer document');
+        [, , $otherUser] = $this->corporateCase();
+        $crossDocument = $this->approvedDocument($otherUser, 'cross-customer.pdf', 'cross-customer');
+        $crossCustomer->documents()->attach($crossDocument->id, ['attached_by' => $otherUser->id]);
+        $this->expectPreparationFailure($crossCustomer->fresh(), 'ownership, provenance, status, or storage');
+
+        [$badHash, , $badHashUser] = $this->authoritativeCorporateCase('bad-file-hash', 'template-file-hash', 'otherDocument', 'Bad file hash');
+        $badHashDocument = $this->approvedDocument($badHashUser, 'bad-hash.pdf', 'bad-file-hash');
+        $badHashDocument->update(['file_hash' => str_repeat('0', 64)]);
+        $badHash->documents()->attach($badHashDocument->id, ['attached_by' => $badHashUser->id]);
+        $this->expectPreparationFailure($badHash->fresh(), 'hash does not match');
+
+        [$unsafePath, , $unsafePathUser] = $this->authoritativeCorporateCase('unsafe-path', 'template-unsafe', 'otherDocument', 'Unsafe path');
+        $unsafePathDocument = $this->approvedDocument($unsafePathUser, 'unsafe-path.pdf', 'unsafe-path');
+        $unsafePathDocument->update(['file_path' => '../unsafe-path.pdf']);
+        $unsafePath->documents()->attach($unsafePathDocument->id, ['attached_by' => $unsafePathUser->id]);
+        $this->expectPreparationFailure($unsafePath->fresh(), 'ownership, provenance, status, or storage');
+
+        [$mismatchedRfi, , $mismatchedUser] = $this->authoritativeCorporateCase('mismatched-rfi', 'template-rfi-hash', 'otherDocument', 'Mismatched RFI');
+        $mismatchedDocument = $this->approvedDocument($mismatchedUser, 'mismatched-rfi.pdf', 'mismatched-rfi');
+        $mismatchedRfi->documents()->attach($mismatchedDocument->id, ['attached_by' => $mismatchedUser->id]);
+        $mismatchedRfi->update(['provider_reference_fingerprint' => hash('sha256', 'different-rfi')]);
+        $this->expectPreparationFailure($mismatchedRfi->fresh(), 'provider reference fingerprint');
+
+        [$duplicates, , $duplicateUser] = $this->authoritativeCorporateCase('duplicate-docs', 'template-duplicates', 'otherDocument', 'Duplicate documents');
+        $firstDuplicate = $this->approvedDocument($duplicateUser, 'duplicate-one.pdf', 'same-content');
+        $secondDuplicate = $this->approvedDocument($duplicateUser, 'duplicate-two.pdf', 'same-content');
+        $duplicates->documents()->attach([$firstDuplicate->id, $secondDuplicate->id], ['attached_by' => $duplicateUser->id]);
+        $this->expectPreparationFailure($duplicates->fresh(), 'duplicate supporting evidence');
+
+        Http::assertNothingSent();
+    }
+
     public function test_deterministic_and_uncertain_provider_outcomes_are_persisted(): void
     {
         Http::fake(['*' => Http::sequence()
@@ -235,6 +333,79 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         return [$case, $account, $user, $provider];
     }
 
+    private function authoritativeCorporateCase(
+        string $rfiHashId,
+        string $templateId,
+        string $templateName,
+        string $fieldLabel,
+    ): array {
+        [$case, $account, $user, $provider] = $this->corporateCase();
+        $user->kycProfile()->firstOrCreate([], [
+            'status' => 'approved',
+            'applicant_type' => 'business',
+            'legal_name' => 'Corporate RFI Test',
+            'address_line1' => '1 Test Road',
+            'city' => 'Singapore',
+            'country_code' => 'SG',
+        ]);
+        $case->update([
+            'origin' => 'authoritative_fetch',
+            'provider_reference_fingerprint' => hash('sha256', $rfiHashId),
+            'evidence' => [
+                'rfiHashId' => $rfiHashId,
+                'templateId' => $templateId,
+                'template' => [
+                    'name' => $templateName,
+                    'documentType' => 'document',
+                    'type' => 'document',
+                    'rfiType' => 'corporate',
+                    'requiredFields' => [[
+                        'fieldLabel' => $fieldLabel,
+                        'fieldValue' => 'document',
+                        'type' => 'document',
+                    ]],
+                ],
+                'remarks' => "Provide {$fieldLabel} evidence.",
+                'rfiStatus' => 'RFI_REQUESTED',
+            ],
+            'response_draft' => null,
+            'supporting_file_ids' => null,
+            'contract_gate' => 'provider_contract_unconfirmed',
+            'submission_state' => 'admin_approved',
+        ]);
+
+        return [$case->fresh(), $account, $user, $provider];
+    }
+
+    private function approvedDocument(User $user, string $fileName, string $marker): KycDocument
+    {
+        $contents = "%PDF-1.4\n{$marker}\n%%EOF";
+        $path = "rfi/{$user->id}/".str()->uuid().'.pdf';
+        Storage::disk('kyc_private')->put($path, $contents);
+        $profile = $user->kycProfile()->firstOrCreate([], [
+            'status' => 'approved',
+            'applicant_type' => 'business',
+            'legal_name' => 'Corporate RFI Test',
+            'address_line1' => '1 Test Road',
+            'city' => 'Singapore',
+            'country_code' => 'SG',
+        ]);
+
+        return KycDocument::query()->create([
+            'kyc_profile_id' => $profile->id,
+            'type' => 'corporate_rfi_supporting_document',
+            'status' => 'approved',
+            'file_url' => 'private://'.$path,
+            'storage_disk' => 'kyc_private',
+            'file_path' => $path,
+            'original_name' => $fileName,
+            'mime_type' => 'application/pdf',
+            'file_size' => strlen($contents),
+            'file_hash' => hash('sha256', $contents),
+            'metadata' => ['factual' => true, 'synthetic' => false, 'rfi_upload' => true],
+        ]);
+    }
+
     private function answer(string $field, mixed $value): array
     {
         return ['questionId' => $field, 'answer' => $value, 'provenance' => [
@@ -247,6 +418,16 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         try {
             app(NiumCorporateRfiSubmissionService::class)->submit($case);
             $this->fail('Expected Corporate RFI submission to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString($message, $exception->getMessage());
+        }
+    }
+
+    private function expectPreparationFailure(NiumRfiCase $case, string $message): void
+    {
+        try {
+            app(NiumCorporateRfiSubmissionService::class)->preparePayload($case);
+            $this->fail('Expected offline Corporate RFI preparation to fail closed.');
         } catch (RuntimeException $exception) {
             $this->assertStringContainsString($message, $exception->getMessage());
         }
