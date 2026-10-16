@@ -8,8 +8,11 @@ use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumCorporateRfiSubmissionService;
+use App\Services\Nium\NiumCorporateRfiAuthoritativeTransport;
 use App\Services\Nium\NiumRegionResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -25,7 +28,7 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         parent::setUp();
         config()->set('services.nium.base_url', 'https://gateway.test.invalid');
         config()->set('services.nium.client_id', 'path-client-hash');
-        config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-key']);
+        config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-contract-key']);
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'webhook-key');
         config()->set('services.nium.customer_rfi_request_schema_version', 'corporate-rfi-request-test-v1');
@@ -402,6 +405,133 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_contract_transport_sends_exact_legacy_candidate_but_treats_http_200_as_unverified(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        [$case, $account, $user] = $this->authoritativeCorporateCase('transport-rfi', 'transport-template', 'otherDocument', 'Transport document');
+        $this->makeHkProfile($user);
+        $document = $this->approvedDocument($user, 'transport.pdf', 'transport-document');
+        $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+
+        config()->set('services.nium.auth.header_name', 'x-nium-test-key');
+        Http::fake(function (Request $request) use ($account) {
+            $this->assertSame('POST', $request->method());
+            $this->assertSame('https://gateway.test.invalid/api/v1/client/path-client-hash/corporate/rfi', $request->url());
+            $this->assertTrue(Str::isUuid((string) ($request->header('x-request-id')[0] ?? '')));
+            $this->assertSame('test-contract-key', $request->header('x-nium-test-key')[0] ?? null);
+            $this->assertSame([
+                'region' => 'HK',
+                'customerHashId' => $account->external_customer_id,
+                'rfiResponseRequest' => [[
+                    'rfiHashId' => 'transport-rfi',
+                    'businessDetails' => ['documentDetails' => ['document' => [[
+                        'document' => base64_encode("%PDF-1.4\ntransport-document\n%%EOF"),
+                        'fileName' => 'transport.pdf',
+                        'fileType' => 'application/pdf',
+                    ]]]],
+                ]],
+            ], $request->data());
+
+            return Http::response(['status' => 'RFI_RESPONDED']);
+        });
+
+        $result = app(NiumCorporateRfiAuthoritativeTransport::class)->sendForContractTest($case->fresh());
+
+        $this->assertSame('UNKNOWN', $result['outcome']);
+        $this->assertSame('legacy_response_contract_unverified', $result['reason']);
+        $this->assertTrue($result['manual_reconciliation_required']);
+        $this->assertSame('admin_approved', $case->fresh()->submission_state);
+        $this->assertNull($case->fresh()->claimed_at);
+        $this->assertNull($case->fresh()->provider_response_evidence);
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+        Http::assertSentCount(1);
+    }
+
+    public function test_contract_transport_rejects_non_testing_unsafe_gateway_credentials_and_unprotected_http(): void
+    {
+        [$case] = $this->corporateCase();
+        $transport = app(NiumCorporateRfiAuthoritativeTransport::class);
+
+        $this->app->detectEnvironment(fn (): string => 'production');
+        try {
+            $transport->sendForContractTest($case);
+            $this->fail('Expected the contract transport to reject non-testing environments.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('not activated', $exception->getMessage());
+        } finally {
+            $this->app->detectEnvironment(fn (): string => 'testing');
+        }
+
+        config()->set('services.nium.base_url', 'https://gateway.nium.com');
+        $this->expectContractTransportFailure($case, 'reserved test gateway');
+        config()->set('services.nium.base_url', 'https://gateway.test.invalid');
+
+        foreach ([
+            ['header', '', 'test-contract-key'],
+            ['header', 'Authorization', 'test-contract-key'],
+            ['header', 'x-api-key', 'production-looking-secret'],
+            ['none', 'x-api-key', 'test-contract-key'],
+        ] as [$mode, $name, $value]) {
+            config()->set('services.nium.auth', ['mode' => $mode, 'header_name' => $name, 'header_value' => $value]);
+            $this->expectContractTransportFailure($case, 'safe synthetic test credential');
+        }
+
+        config()->set('services.nium.auth', ['mode' => 'header', 'header_name' => 'x-api-key', 'header_value' => 'test-contract-key']);
+        Http::allowStrayRequests();
+        $this->expectContractTransportFailure($case, 'stray HTTP requests to be prevented');
+        Http::assertNothingSent();
+    }
+
+    public function test_contract_transport_classifies_rejections_and_uncertain_outcomes_without_persisting_documents(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        Http::fake(['*' => Http::sequence()
+            ->push(['message' => 'invalid'], 400)
+            ->push(['message' => 'invalid'], 422)
+            ->push(['message' => 'timeout'], 408)
+            ->push(['message' => 'limited'], 429)
+            ->push(['message' => 'unavailable'], 503)]);
+
+        foreach ([400, 422, 408, 429, 503] as $status) {
+            [$case, , $user] = $this->authoritativeCorporateCase("transport-{$status}", "template-{$status}", 'otherDocument', "Status {$status}");
+            $this->makeHkProfile($user);
+            $document = $this->approvedDocument($user, "status-{$status}.pdf", "status-{$status}");
+            $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+
+            $result = app(NiumCorporateRfiAuthoritativeTransport::class)->sendForContractTest($case->fresh());
+            $this->assertSame(in_array($status, [400, 422], true) ? 'REJECTED' : 'UNKNOWN', $result['outcome']);
+            $this->assertSame(! in_array($status, [400, 422], true), $result['manual_reconciliation_required']);
+            $this->assertNull($case->fresh()->provider_response_evidence);
+        }
+    }
+
+    public function test_contract_transport_cannot_escape_when_no_http_fake_is_registered(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        [$case, , $user] = $this->authoritativeCorporateCase('unfaked-rfi', 'unfaked-template', 'otherDocument', 'Unfaked request');
+        $this->makeHkProfile($user);
+        $document = $this->approvedDocument($user, 'unfaked.pdf', 'unfaked-document');
+        $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+
+        try {
+            app(NiumCorporateRfiAuthoritativeTransport::class)->sendForContractTest($case->fresh());
+            $this->fail('Expected Laravel HTTP to reject the unfaked contract request.');
+        } catch (StrayRequestException $exception) {
+            $this->assertStringContainsString('without a matching fake', $exception->getMessage());
+            $this->assertStringNotContainsString(base64_encode("%PDF-1.4\nunfaked-document\n%%EOF"), $exception->getMessage());
+            $this->assertStringNotContainsString('unfaked.pdf', $exception->getMessage());
+        }
+
+        $this->assertSame('admin_approved', $case->fresh()->submission_state);
+        $this->assertNull($case->fresh()->provider_response_evidence);
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+    }
+
     public function test_post_envelope_fails_closed_for_missing_identifiers_region_mismatch_and_unsupported_templates(): void
     {
         Storage::fake('kyc_private');
@@ -709,6 +839,16 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         try {
             app(NiumCorporateRfiSubmissionService::class)->preparePostEnvelope($case);
             $this->fail('Expected offline Corporate RFI POST envelope preparation to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString($message, $exception->getMessage());
+        }
+    }
+
+    private function expectContractTransportFailure(NiumRfiCase $case, string $message): void
+    {
+        try {
+            app(NiumCorporateRfiAuthoritativeTransport::class)->sendForContractTest($case);
+            $this->fail('Expected the authoritative Corporate RFI contract transport to fail closed.');
         } catch (RuntimeException $exception) {
             $this->assertStringContainsString($message, $exception->getMessage());
         }

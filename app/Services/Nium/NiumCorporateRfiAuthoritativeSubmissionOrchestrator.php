@@ -41,7 +41,7 @@ final class NiumCorporateRfiAuthoritativeSubmissionOrchestrator
         );
         $requestId = (string) Str::uuid();
         $authHeaderName = strtolower(trim((string) data_get(config('services.nium.auth'), 'header_name')));
-        if ($authHeaderName !== 'x-api-key') {
+        if ($authHeaderName === '') {
             throw new RuntimeException('Authoritative Corporate RFI dry-run requires the configured Nium credential header.');
         }
 
