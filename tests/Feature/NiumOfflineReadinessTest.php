@@ -256,6 +256,70 @@ class NiumOfflineReadinessTest extends TestCase
         $this->assertSame($reviewer->id, data_get($draft->response_draft, '0.provenance.reviewer_id'));
     }
 
+    public function test_admin_rfi_detail_exposes_only_bounded_submission_evidence(): void
+    {
+        [$provider, $customer, $account] = $this->account();
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        $adminToken = $this->issueTokenFor($admin);
+        $customerToken = $this->issueTokenFor($customer);
+        $case = NiumRfiCase::query()->create([
+            ...$this->rfiAttributes($provider, $account, 'safe-admin-history'),
+            'origin' => 'authoritative_fetch',
+            'submission_state' => 'responded',
+            'status' => 'responded_under_review',
+            'evidence' => $this->authoritativeRfi('safe-admin-history', 'RFI_RESPONDED'),
+            'provider_response_evidence' => [
+                'http_status' => 200,
+                'outcome' => 'RECONCILED',
+                'manual_reconciliation_required' => false,
+                'x_request_id' => 'secret-request-id',
+                'rfi_hash_id' => 'secret-rfi-hash',
+                'raw_request_body' => ['document' => base64_encode('secret-document')],
+                'private_file_path' => 'private://secret/document.pdf',
+            ],
+        ]);
+
+        $this->withToken($customerToken)->getJson("/api/admin/nium-rfi-cases/{$case->id}")->assertForbidden();
+        $response = $this->withToken($adminToken)->getJson("/api/admin/nium-rfi-cases/{$case->id}")
+            ->assertOk()
+            ->assertJsonPath('submission_http_status', 200)
+            ->assertJsonPath('submission_outcome', 'RECONCILED')
+            ->assertJsonPath('reconciliation_required', false)
+            ->assertJsonMissingPath('provider_response_evidence');
+        $this->assertStringNotContainsString('secret-request-id', $response->getContent());
+        $this->assertStringNotContainsString('secret-rfi-hash', $response->getContent());
+        $this->assertStringNotContainsString(base64_encode('secret-document'), $response->getContent());
+        $this->assertStringNotContainsString('private://secret/document.pdf', $response->getContent());
+
+        foreach ([400, 422] as $httpStatus) {
+            $case->update(['provider_response_evidence' => [
+                'http_status' => $httpStatus,
+                'outcome' => 'REJECTED',
+                'manual_reconciliation_required' => false,
+            ]]);
+            $this->withToken($adminToken)->getJson("/api/admin/nium-rfi-cases/{$case->id}")
+                ->assertOk()
+                ->assertJsonPath('submission_http_status', $httpStatus)
+                ->assertJsonPath('submission_outcome', 'REJECTED')
+                ->assertJsonPath('reconciliation_required', false);
+        }
+
+        foreach ([
+            null,
+            ['http_status' => '200', 'outcome' => 'reconciled', 'manual_reconciliation_required' => 0],
+            ['http_status' => 99, 'outcome' => 'SUCCESS', 'manual_reconciliation_required' => 'false'],
+            ['http_status' => 600, 'outcome' => ['RECONCILED'], 'manual_reconciliation_required' => []],
+        ] as $invalidEvidence) {
+            $case->update(['provider_response_evidence' => $invalidEvidence]);
+            $this->withToken($adminToken)->getJson("/api/admin/nium-rfi-cases/{$case->id}")
+                ->assertOk()
+                ->assertJsonPath('submission_http_status', null)
+                ->assertJsonPath('submission_outcome', null)
+                ->assertJsonPath('reconciliation_required', null);
+        }
+    }
+
     public function test_same_rfi_reference_does_not_collide_across_accounts(): void
     {
         [$provider, $userA, $accountA] = $this->account();

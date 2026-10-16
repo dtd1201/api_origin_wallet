@@ -198,6 +198,17 @@ final class NiumRfiWorkflowService
     public function detailPayload(NiumRfiCase $case): array
     {
         $case->loadMissing(['account.user.kycProfile', 'documents', 'events']);
+        $providerEvidence = is_array($case->provider_response_evidence) && ! array_is_list($case->provider_response_evidence)
+            ? $case->provider_response_evidence
+            : [];
+        $httpStatus = $providerEvidence['http_status'] ?? null;
+        $httpStatus = is_int($httpStatus) && $httpStatus >= 100 && $httpStatus <= 599 ? $httpStatus : null;
+        $outcome = $providerEvidence['outcome'] ?? null;
+        $outcome = is_string($outcome) && in_array($outcome, ['PENDING', 'ACKNOWLEDGED', 'REJECTED', 'UNKNOWN', 'RECONCILED'], true)
+            ? $outcome
+            : null;
+        $reconciliationRequired = $providerEvidence['manual_reconciliation_required'] ?? null;
+        $reconciliationRequired = is_bool($reconciliationRequired) ? $reconciliationRequired : null;
 
         return [...$this->listPayload($case),
             'origin' => $case->origin,
@@ -212,6 +223,9 @@ final class NiumRfiWorkflowService
             'sent_to_user_at' => $case->sent_to_user_at,
             'user_submitted_at' => $case->user_submitted_at,
             'admin_reviewed_at' => $case->admin_reviewed_at,
+            'submission_http_status' => $httpStatus,
+            'submission_outcome' => $outcome,
+            'reconciliation_required' => $reconciliationRequired,
             'documents' => $case->documents->whereNull('pivot.detached_at')->map(fn (KycDocument $document): array => [
                 'id' => $document->id,
                 'type' => $document->type,
