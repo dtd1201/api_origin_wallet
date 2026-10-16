@@ -8,6 +8,7 @@ use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumCorporateRfiSubmissionService;
+use App\Services\Nium\NiumRegionResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -256,6 +257,134 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_prepares_non_executable_hk_post_envelopes_for_each_authoritative_template(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        $templates = [
+            ['businessRegistrationDocument', 'Business registration document', 'BUSINESS_REGISTRATION_DOC'],
+            ['otherDocument', 'Personal Source of Wealth', null],
+            ['otherDocument', 'Personal Source of Funds', null],
+            ['otherDocument', 'Corporate Source of Wealth and Funds', null],
+        ];
+
+        foreach ($templates as $index => [$templateName, $label, $expectedDocumentType]) {
+            [$case, $account, $user] = $this->authoritativeCorporateCase(
+                "envelope-rfi-{$index}",
+                "envelope-template-{$index}",
+                $templateName,
+                $label,
+            );
+            $user->kycProfile()->update([
+                'registered_country_code' => 'HK',
+                'country_code' => 'HK',
+                'metadata' => ['nium_region' => 'HK'],
+            ]);
+            $document = $this->approvedDocument($user, "envelope-{$index}.pdf", "envelope-document-{$index}");
+            $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+
+            $envelope = app(NiumCorporateRfiSubmissionService::class)->preparePostEnvelope($case->fresh());
+
+            $this->assertFalse($envelope['executable']);
+            $this->assertSame('POST', data_get($envelope, 'transport.method'));
+            $this->assertSame('/api/v1/client/{clientHashId}/corporate/rfi', data_get($envelope, 'transport.endpointTemplate'));
+            $this->assertSame('path-client-hash', data_get($envelope, 'transport.pathParameters.clientHashId'));
+            $this->assertSame($account->external_customer_id, data_get($envelope, 'body.customerHashId'));
+            $this->assertSame('HK', data_get($envelope, 'body.region'));
+            $this->assertSame("envelope-rfi-{$index}", data_get($envelope, 'body.rfiResponseRequest.0.rfiHashId'));
+            $this->assertSame("envelope-template-{$index}", data_get($envelope, 'body.rfiResponseRequest.0.rfiTemplateId'));
+            $this->assertSame('corporate', data_get($envelope, 'body.rfiResponseRequest.0.rfiType'));
+            $this->assertSame($templateName, data_get($envelope, 'body.rfiResponseRequest.0.templateName'));
+            $this->assertSame('document', data_get($envelope, 'body.rfiResponseRequest.0.responseFields.0.fieldValue'));
+            $this->assertSame($expectedDocumentType, data_get($envelope, 'body.rfiResponseRequest.0.responseFields.0.documentType'));
+            $this->assertArrayNotHasKey('caseId', $envelope['body']);
+            $this->assertArrayNotHasKey('clientId', $envelope['body']);
+            $this->assertNotEmpty($envelope['contractBlockers']);
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_post_envelope_fails_closed_for_missing_identifiers_region_mismatch_and_unsupported_templates(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+
+        [$missingCustomer, $missingCustomerAccount, $missingCustomerUser] = $this->authoritativeCorporateCase('missing-customer', 'template-customer', 'otherDocument', 'Missing customer');
+        $this->makeHkProfile($missingCustomerUser);
+        $missingCustomerDocument = $this->approvedDocument($missingCustomerUser, 'missing-customer.pdf', 'missing-customer');
+        $missingCustomer->documents()->attach($missingCustomerDocument->id, ['attached_by' => $missingCustomerUser->id]);
+        $missingCustomerAccount->update(['external_customer_id' => null]);
+        $this->expectEnvelopeFailure($missingCustomer->fresh(), 'customerHashId');
+
+        [$missingTemplate, , $missingTemplateUser] = $this->authoritativeCorporateCase('missing-template', 'template-missing-id', 'otherDocument', 'Missing template');
+        $this->makeHkProfile($missingTemplateUser);
+        $missingTemplateDocument = $this->approvedDocument($missingTemplateUser, 'missing-template.pdf', 'missing-template');
+        $missingTemplate->documents()->attach($missingTemplateDocument->id, ['attached_by' => $missingTemplateUser->id]);
+        $evidence = $missingTemplate->evidence;
+        unset($evidence['templateId']);
+        $missingTemplate->update(['evidence' => $evidence]);
+        $this->expectEnvelopeFailure($missingTemplate->fresh(), 'templateId');
+
+        [$missingClient, , $missingClientUser] = $this->authoritativeCorporateCase('missing-client', 'template-client', 'otherDocument', 'Missing client');
+        $this->makeHkProfile($missingClientUser);
+        $missingClientDocument = $this->approvedDocument($missingClientUser, 'missing-client.pdf', 'missing-client');
+        $missingClient->documents()->attach($missingClientDocument->id, ['attached_by' => $missingClientUser->id]);
+        config()->set('services.nium.client_id', '');
+        $this->expectEnvelopeFailure($missingClient->fresh(), 'client id is not configured');
+        config()->set('services.nium.client_id', 'path-client-hash');
+
+        [$regionMismatch, , $regionMismatchUser] = $this->authoritativeCorporateCase('region-mismatch', 'template-region', 'otherDocument', 'Region mismatch');
+        $regionMismatchUser->kycProfile()->update(['registered_country_code' => 'SG', 'country_code' => 'SG', 'metadata' => ['nium_region' => 'SG']]);
+        $regionDocument = $this->approvedDocument($regionMismatchUser, 'region.pdf', 'region');
+        $regionMismatch->documents()->attach($regionDocument->id, ['attached_by' => $regionMismatchUser->id]);
+        $this->expectEnvelopeFailure($regionMismatch->fresh(), NiumRegionResolver::REGION_MISMATCH);
+
+        [$unsupported, , $unsupportedUser] = $this->authoritativeCorporateCase('unsupported-template', 'template-unsupported', 'taxDocument', 'Unsupported template');
+        $this->makeHkProfile($unsupportedUser);
+        $unsupportedDocument = $this->approvedDocument($unsupportedUser, 'unsupported.pdf', 'unsupported');
+        $unsupported->documents()->attach($unsupportedDocument->id, ['attached_by' => $unsupportedUser->id]);
+        $this->expectEnvelopeFailure($unsupported->fresh(), 'does not support this authoritative template name');
+
+        [$unsupportedType, , $unsupportedTypeUser] = $this->authoritativeCorporateCase('unsupported-type', 'template-type', 'otherDocument', 'Unsupported document type');
+        $this->makeHkProfile($unsupportedTypeUser);
+        $unsupportedTypeDocument = $this->approvedDocument($unsupportedTypeUser, 'unsupported-type.pdf', 'unsupported-type');
+        $unsupportedType->documents()->attach($unsupportedTypeDocument->id, ['attached_by' => $unsupportedTypeUser->id]);
+        $unsupportedTypeEvidence = $unsupportedType->evidence;
+        $unsupportedTypeEvidence['template']['documentType'] = 'tax_document';
+        $unsupportedType->update(['evidence' => $unsupportedTypeEvidence]);
+        $this->expectEnvelopeFailure($unsupportedType->fresh(), 'does not support this authoritative documentType');
+
+        Http::assertNothingSent();
+    }
+
+    public function test_post_envelope_keeps_case_documents_isolated_and_reuses_all_builder_security_checks(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        [$first, , $firstUser] = $this->authoritativeCorporateCase('isolated-first', 'template-first', 'otherDocument', 'Personal Source of Wealth');
+        [$second, , $secondUser] = $this->authoritativeCorporateCase('isolated-second', 'template-second', 'otherDocument', 'Personal Source of Funds');
+        $this->makeHkProfile($firstUser);
+        $this->makeHkProfile($secondUser);
+        $firstDocument = $this->approvedDocument($firstUser, 'first.pdf', 'first-private-document');
+        $secondDocument = $this->approvedDocument($secondUser, 'second.pdf', 'second-private-document');
+        $first->documents()->attach($firstDocument->id, ['attached_by' => $firstUser->id]);
+        $second->documents()->attach($secondDocument->id, ['attached_by' => $secondUser->id]);
+
+        $firstEnvelope = app(NiumCorporateRfiSubmissionService::class)->preparePostEnvelope($first->fresh());
+        $secondEnvelope = app(NiumCorporateRfiSubmissionService::class)->preparePostEnvelope($second->fresh());
+        $firstEncoded = data_get($firstEnvelope, 'body.rfiResponseRequest.0.responseFields.0.documents.0.document');
+        $secondEncoded = data_get($secondEnvelope, 'body.rfiResponseRequest.0.responseFields.0.documents.0.document');
+
+        $this->assertNotSame($firstEncoded, $secondEncoded);
+        $this->assertSame('isolated-first', data_get($firstEnvelope, 'body.rfiResponseRequest.0.rfiHashId'));
+        $this->assertSame('isolated-second', data_get($secondEnvelope, 'body.rfiResponseRequest.0.rfiHashId'));
+
+        $firstDocument->update(['file_path' => '../unsafe.pdf']);
+        $this->expectEnvelopeFailure($first->fresh(), 'ownership, provenance, status, or storage');
+        Http::assertNothingSent();
+    }
+
     public function test_deterministic_and_uncertain_provider_outcomes_are_persisted(): void
     {
         Http::fake(['*' => Http::sequence()
@@ -406,6 +535,15 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         ]);
     }
 
+    private function makeHkProfile(User $user): void
+    {
+        $user->kycProfile()->update([
+            'registered_country_code' => 'HK',
+            'country_code' => 'HK',
+            'metadata' => ['nium_region' => 'HK'],
+        ]);
+    }
+
     private function answer(string $field, mixed $value): array
     {
         return ['questionId' => $field, 'answer' => $value, 'provenance' => [
@@ -428,6 +566,16 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         try {
             app(NiumCorporateRfiSubmissionService::class)->preparePayload($case);
             $this->fail('Expected offline Corporate RFI preparation to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString($message, $exception->getMessage());
+        }
+    }
+
+    private function expectEnvelopeFailure(NiumRfiCase $case, string $message): void
+    {
+        try {
+            app(NiumCorporateRfiSubmissionService::class)->preparePostEnvelope($case);
+            $this->fail('Expected offline Corporate RFI POST envelope preparation to fail closed.');
         } catch (RuntimeException $exception) {
             $this->assertStringContainsString($message, $exception->getMessage());
         }

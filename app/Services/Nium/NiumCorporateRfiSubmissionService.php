@@ -16,11 +16,17 @@ final class NiumCorporateRfiSubmissionService
         private readonly NiumService $niumService,
         private readonly NiumRfiWorkflowService $workflow,
         private readonly NiumCorporateRfiPayloadBuilder $payloadBuilder,
+        private readonly NiumCorporateRfiPostEnvelopeAdapter $postEnvelopeAdapter,
     ) {}
 
     public function preparePayload(NiumRfiCase $case): array
     {
         return $this->payloadBuilder->prepare($case);
+    }
+
+    public function preparePostEnvelope(NiumRfiCase $case): array
+    {
+        return $this->postEnvelopeAdapter->prepare($case);
     }
 
     public function submit(NiumRfiCase $case): NiumRfiCase
