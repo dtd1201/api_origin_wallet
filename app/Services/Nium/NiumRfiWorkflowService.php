@@ -77,11 +77,11 @@ final class NiumRfiWorkflowService
         return $case->fresh();
     }
 
-    public function claimForProviderSubmission(NiumRfiCase $case, ?string $requestId = null): NiumRfiCase
+    public function claimForProviderSubmission(NiumRfiCase $case, ?string $requestId = null, array $evidence = []): NiumRfiCase
     {
         $this->assertProviderContractConfirmed($case);
 
-        return DB::transaction(function () use ($case, $requestId): NiumRfiCase {
+        return DB::transaction(function () use ($case, $requestId, $evidence): NiumRfiCase {
             $locked = NiumRfiCase::query()->lockForUpdate()->findOrFail($case->id);
             if ($locked->scope === 'transaction'
                 && ($locked->status !== 'requested'
@@ -94,14 +94,21 @@ final class NiumRfiWorkflowService
             if (! in_array($locked->submission_state, ['approved', 'admin_approved'], true) || $locked->approved_at === null) {
                 throw new RuntimeException('Nium RFI submission requires separate human approval and an unclaimed case.');
             }
+            $existingEvidence = $locked->provider_response_evidence;
+            $existingEvidence = is_array($existingEvidence) && ! array_is_list($existingEvidence)
+                ? $existingEvidence
+                : [];
+            $claimEvidence = ! array_is_list($evidence) ? $evidence : [];
             $locked->update([
                 'submission_state' => 'claimed',
                 'claimed_at' => now(),
                 'provider_response_evidence' => array_filter([
+                    ...$existingEvidence,
+                    ...$claimEvidence,
                     'x_request_id' => $requestId,
                     'request_correlation_fingerprint' => $requestId ? hash('sha256', $requestId) : null,
                     'claimed_at' => now()->toISOString(),
-                ]),
+                ], static fn (mixed $value): bool => $value !== null),
             ]);
 
             return $locked->fresh();
@@ -383,13 +390,44 @@ final class NiumRfiWorkflowService
                     ];
 
                     if ($providerRfi['status'] === 'RFI_RESPONDED') {
-                        $updates['provider_response_evidence'] = array_filter([
-                            'rfi_status' => 'RFI_RESPONDED',
-                            'rfi_hash_id' => $providerRfi['rfiHashId'],
-                            'template_id' => $providerRfi['templateId'],
-                            'source' => 'authoritative_provider_rfi_fetch',
-                            'recorded_at' => now()->toISOString(),
-                        ], static fn (mixed $value): bool => $value !== null && $value !== '');
+                        $existingEvidence = (array) $case->provider_response_evidence;
+                        if (($existingEvidence['submission_mode'] ?? null) === 'authoritative_legacy') {
+                            $requestId = $existingEvidence['x_request_id'] ?? null;
+                            $requestFingerprint = $existingEvidence['request_correlation_fingerprint'] ?? null;
+                            $persistedProviderFingerprint = $existingEvidence['provider_reference_fingerprint'] ?? null;
+                            $persistedTemplateFingerprint = $existingEvidence['template_fingerprint'] ?? null;
+                            if (! in_array($case->submission_state, ['provider_acknowledged', 'unknown', 'claimed'], true)
+                                || ! is_string($requestId) || ! Str::isUuid($requestId)
+                                || ! is_string($requestFingerprint)
+                                || ! hash_equals(hash('sha256', $requestId), $requestFingerprint)
+                                || ! is_string($persistedProviderFingerprint)
+                                || ! hash_equals((string) $case->provider_reference_fingerprint, $persistedProviderFingerprint)
+                                || ! hash_equals($fingerprint, $persistedProviderFingerprint)
+                                || ! is_string($persistedTemplateFingerprint)
+                                || ! hash_equals(hash('sha256', (string) $providerRfi['templateId']), $persistedTemplateFingerprint)) {
+                                throw new RuntimeException('Authoritative Corporate RFI reconciliation evidence does not match the claimed submission.');
+                            }
+                            $updates['submission_state'] = 'responded';
+                            $updates['provider_response_evidence'] = [
+                                ...$existingEvidence,
+                                'outcome' => 'RECONCILED',
+                                'reason' => 'authoritative_get_confirmed_rfi_responded',
+                                'manual_reconciliation_required' => false,
+                                'authoritative_rfi_status' => 'RFI_RESPONDED',
+                                'provider_reference_fingerprint' => $fingerprint,
+                                'template_fingerprint' => hash('sha256', (string) $providerRfi['templateId']),
+                                'reconciled_source' => 'authoritative_provider_rfi_fetch',
+                                'reconciled_at' => now()->toISOString(),
+                            ];
+                        } else {
+                            $updates['provider_response_evidence'] = array_filter([
+                                'rfi_status' => 'RFI_RESPONDED',
+                                'rfi_hash_id' => $providerRfi['rfiHashId'],
+                                'template_id' => $providerRfi['templateId'],
+                                'source' => 'authoritative_provider_rfi_fetch',
+                                'recorded_at' => now()->toISOString(),
+                            ], static fn (mixed $value): bool => $value !== null && $value !== '');
+                        }
                     }
 
                     NiumRfiCase::query()->whereKey($case->id)->update($updates);

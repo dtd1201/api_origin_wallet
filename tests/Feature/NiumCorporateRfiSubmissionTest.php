@@ -3,17 +3,24 @@
 namespace Tests\Feature;
 
 use App\Models\IntegrationProvider;
+use App\Models\ApiRequestLog;
 use App\Models\KycDocument;
+use App\Models\NiumApiExchangeEvidence;
 use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumCorporateRfiSubmissionService;
 use App\Services\Nium\NiumCorporateRfiAuthoritativeTransport;
+use App\Services\Nium\NiumCorporateRfiAuthoritativeSubmissionService;
+use App\Services\Nium\NiumEvidencePersistenceException;
+use App\Services\Nium\NiumService;
+use App\Services\Nium\NiumRfiWorkflowService;
 use App\Services\Nium\NiumRegionResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -532,6 +539,266 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
     }
 
+    public function test_production_authoritative_workflow_is_disabled_by_default(): void
+    {
+        [$case] = $this->authoritativeCorporateCase('disabled-authoritative', 'disabled-template', 'otherDocument', 'Disabled submission');
+
+        try {
+            app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($case);
+            $this->fail('Expected authoritative Corporate RFI submission to remain disabled.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('AUTHORITATIVE_SUBMISSION_DISABLED', $exception->getMessage());
+        }
+
+        $this->assertSame('admin_approved', $case->fresh()->submission_state);
+        $this->assertNull($case->fresh()->claimed_at);
+        Http::assertNothingSent();
+    }
+
+    public function test_authoritative_acknowledgement_requires_matching_get_reconciliation_and_never_persists_documents(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
+        [$case, $account, $user] = $this->authoritativeCorporateCase('production-rfi', 'production-template', 'otherDocument', 'Production workflow');
+        $this->makeHkProfile($user);
+        $document = $this->approvedDocument($user, 'production-private.pdf', 'production-private-document');
+        $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+        $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+        Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
+
+        $acknowledged = app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($case->fresh());
+
+        $this->assertSame('provider_acknowledged', $acknowledged->submission_state);
+        $this->assertSame('ACKNOWLEDGED', data_get($acknowledged->provider_response_evidence, 'outcome'));
+        $this->assertTrue((bool) data_get($acknowledged->provider_response_evidence, 'manual_reconciliation_required'));
+        $requestId = data_get($acknowledged->provider_response_evidence, 'x_request_id');
+        $this->assertTrue(Str::isUuid((string) $requestId));
+
+        $log = ApiRequestLog::query()->where('operation', 'corporate_rfi_authoritative_submit')->sole();
+        $this->assertSame(['region' => 'HK'], $log->request_body);
+        $exchange = NiumApiExchangeEvidence::query()->where('api_request_log_id', $log->id)->sole();
+        $this->assertNull($exchange->raw_request_body);
+        $this->assertNull($exchange->raw_response_body);
+        $this->assertStringNotContainsString('production-private.pdf', json_encode($log->toArray()));
+        $this->assertStringNotContainsString(base64_encode("%PDF-1.4\nproduction-private-document\n%%EOF"), json_encode($log->toArray()));
+
+        try {
+            app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($acknowledged->fresh());
+            $this->fail('Expected duplicate authoritative submission to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('separate human approval', $exception->getMessage());
+        }
+        Http::assertSentCount(1);
+
+        $account->update([
+            'provider_status' => 'pending',
+            'provider_sub_status' => 'under_review',
+            'customer_id_verified_at' => now(),
+        ]);
+        $this->expectReconciliationFailure($account->fresh(), null, 'evidence is required');
+        $this->assertSame('provider_acknowledged', $case->fresh()->submission_state);
+        app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account->fresh(), [[
+            'rfiHashId' => 'production-rfi',
+            'templateId' => 'production-template',
+            'template' => $case->evidence['template'],
+            'remarks' => 'Confirmed by authoritative GET.',
+            'status' => 'RFI_RESPONDED',
+        ]]);
+
+        $reconciled = $case->fresh();
+        $this->assertSame('responded', $reconciled->submission_state);
+        $this->assertSame('RECONCILED', data_get($reconciled->provider_response_evidence, 'outcome'));
+        $this->assertSame($requestId, data_get($reconciled->provider_response_evidence, 'x_request_id'));
+        $this->assertFalse((bool) data_get($reconciled->provider_response_evidence, 'manual_reconciliation_required'));
+        $this->assertArrayNotHasKey('rfi_hash_id', $reconciled->provider_response_evidence);
+        $this->assertSame('pending', $account->fresh()->provider_status);
+    }
+
+    public function test_authoritative_workflow_separates_rejection_uncertainty_and_invalid_success(): void
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
+        Http::fake(['*' => Http::sequence()
+            ->push(['message' => 'invalid'], 422)
+            ->push(['message' => 'timeout'], 408)
+            ->push(['status' => 'PENDING'], 200)]);
+
+        foreach ([
+            [422, 'rejected', 'REJECTED', false],
+            [408, 'unknown', 'UNKNOWN', true],
+            [200, 'unknown', 'UNKNOWN', true],
+        ] as [$status, $state, $outcome, $reconcile]) {
+            [$case, , $user] = $this->authoritativeCorporateCase("outcome-{$status}", "outcome-template-{$status}", 'otherDocument', "Outcome {$status}");
+            $this->makeHkProfile($user);
+            $document = $this->approvedDocument($user, "outcome-{$status}.pdf", "outcome-{$status}");
+            $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+            $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+
+            $result = app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($case->fresh());
+            $this->assertSame($state, $result->submission_state);
+            $this->assertSame($outcome, data_get($result->provider_response_evidence, 'outcome'));
+            $this->assertSame($reconcile, (bool) data_get($result->provider_response_evidence, 'manual_reconciliation_required'));
+            $this->assertSame($status, data_get($result->provider_response_evidence, 'http_status'));
+        }
+    }
+
+    public function test_authoritative_deterministic_preflight_failures_do_not_claim(): void
+    {
+        [$configurationCase] = $this->activatedAuthoritativeSubmissionCase('preflight-config');
+        $service = $this->partialMock(NiumService::class, function ($mock): void {
+            $mock->shouldReceive('clientId')->andReturn('path-client-hash');
+            $mock->shouldReceive('assertConfigured')->once()->andThrow(new RuntimeException('invalid local Nium configuration'));
+        });
+        $this->expectAuthoritativeFailure($configurationCase, 'invalid local Nium configuration');
+        $this->assertSame('admin_approved', $configurationCase->fresh()->submission_state);
+        $this->assertNull($configurationCase->fresh()->claimed_at);
+
+        $this->app->forgetInstance(NiumService::class);
+        [$endpointCase] = $this->activatedAuthoritativeSubmissionCase('preflight-endpoint');
+        $this->partialMock(NiumService::class, function ($mock): void {
+            $mock->shouldReceive('clientId')->andReturn('path-client-hash');
+            $mock->shouldReceive('assertConfigured')->once();
+            $mock->shouldReceive('path')->once()->andThrow(new RuntimeException('invalid deterministic endpoint'));
+        });
+        $this->expectAuthoritativeFailure($endpointCase, 'invalid deterministic endpoint');
+        $this->assertSame('admin_approved', $endpointCase->fresh()->submission_state);
+        $this->assertNull($endpointCase->fresh()->claimed_at);
+        Http::assertNothingSent();
+    }
+
+    public function test_claim_normalizes_null_existing_and_malformed_provider_evidence(): void
+    {
+        $workflow = app(NiumRfiWorkflowService::class);
+
+        [$nullCase] = $this->corporateCase();
+        $nullRequestId = (string) Str::uuid();
+        $claimedNull = $workflow->claimForProviderSubmission($nullCase, $nullRequestId);
+        $this->assertSame($nullRequestId, data_get($claimedNull->provider_response_evidence, 'x_request_id'));
+
+        [$existingCase] = $this->corporateCase();
+        $existingCase->update(['provider_response_evidence' => [
+            'legitimate_existing_field' => 'preserved',
+            'manual_reconciliation_required' => false,
+            'x_request_id' => 'superseded-correlation',
+        ]]);
+        $existingRequestId = (string) Str::uuid();
+        $claimedExisting = $workflow->claimForProviderSubmission($existingCase->fresh(), $existingRequestId, [
+            'template_fingerprint' => 'template-fingerprint',
+        ]);
+        $this->assertSame('preserved', data_get($claimedExisting->provider_response_evidence, 'legitimate_existing_field'));
+        $this->assertFalse(data_get($claimedExisting->provider_response_evidence, 'manual_reconciliation_required'));
+        $this->assertSame('template-fingerprint', data_get($claimedExisting->provider_response_evidence, 'template_fingerprint'));
+        $this->assertSame($existingRequestId, data_get($claimedExisting->provider_response_evidence, 'x_request_id'));
+
+        [$malformedCase] = $this->corporateCase();
+        DB::table('nium_rfi_cases')->where('id', $malformedCase->id)->update([
+            'provider_response_evidence' => json_encode('unexpected-scalar'),
+        ]);
+        $malformedRequestId = (string) Str::uuid();
+        $claimedMalformed = $workflow->claimForProviderSubmission($malformedCase->fresh(), $malformedRequestId, [
+            'provider_reference_fingerprint' => 'safe-fingerprint',
+        ]);
+        $this->assertSame($malformedRequestId, data_get($claimedMalformed->provider_response_evidence, 'x_request_id'));
+        $this->assertSame('safe-fingerprint', data_get($claimedMalformed->provider_response_evidence, 'provider_reference_fingerprint'));
+        $this->assertNotContains('unexpected-scalar', $claimedMalformed->provider_response_evidence);
+        Http::assertNothingSent();
+    }
+
+    public function test_authoritative_transport_and_evidence_failures_remain_unresolved_and_are_not_resent(): void
+    {
+        [$transportCase] = $this->activatedAuthoritativeSubmissionCase('transport-uncertain');
+        Http::fake(['*' => Http::failedConnection('timeout')]);
+        $uncertain = app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($transportCase->fresh());
+        $this->assertSame('unknown', $uncertain->submission_state);
+        $this->assertTrue((bool) data_get($uncertain->provider_response_evidence, 'manual_reconciliation_required'));
+        $this->assertTrue(Str::isUuid((string) data_get($uncertain->provider_response_evidence, 'x_request_id')));
+        $this->expectAuthoritativeFailure($uncertain->fresh(), 'separate human approval');
+        Http::assertSentCount(1);
+
+        $this->app->forgetInstance(NiumService::class);
+        [$evidenceCase] = $this->activatedAuthoritativeSubmissionCase('evidence-failure');
+        $this->partialMock(NiumService::class, function ($mock): void {
+            $mock->shouldReceive('clientId')->andReturn('path-client-hash');
+            $mock->shouldReceive('assertConfigured')->once();
+            $mock->shouldReceive('path')->andReturn('/api/v1/client/path-client-hash/corporate/rfi');
+            $mock->shouldReceive('postSensitiveWithRequestId')->once()->andThrow(new NiumEvidencePersistenceException([
+                'http_status' => 200,
+                'transport_outcome' => 'persistence_failure',
+            ]));
+        });
+        $evidenceFailure = app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($evidenceCase->fresh());
+        $this->assertSame('unknown', $evidenceFailure->submission_state);
+        $this->assertSame(200, data_get($evidenceFailure->provider_response_evidence, 'http_status'));
+        $this->assertSame('provider_response_received_but_evidence_persistence_failed', data_get($evidenceFailure->provider_response_evidence, 'reason'));
+        $this->assertTrue((bool) data_get($evidenceFailure->provider_response_evidence, 'manual_reconciliation_required'));
+    }
+
+    public function test_authoritative_get_reconciliation_rejects_stale_fingerprints_and_invalid_states(): void
+    {
+        [$case, $account] = $this->activatedAuthoritativeSubmissionCase('reconcile-guards');
+        Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
+        $acknowledged = app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($case->fresh());
+        $account->update(['provider_status' => 'pending', 'provider_sub_status' => 'under_review', 'customer_id_verified_at' => now()]);
+        $providerRfi = [[
+            'rfiHashId' => 'reconcile-guards',
+            'templateId' => 'template-reconcile-guards',
+            'template' => $case->evidence['template'],
+            'status' => 'RFI_RESPONDED',
+        ]];
+
+        $validEvidence = $acknowledged->provider_response_evidence;
+        $badEvidence = $acknowledged->provider_response_evidence;
+        $badEvidence['provider_reference_fingerprint'] = hash('sha256', 'stale-reference');
+        $acknowledged->update(['provider_response_evidence' => $badEvidence]);
+        $this->expectReconciliationFailure($account->fresh(), $providerRfi, 'does not match the claimed submission');
+        $this->assertSame('provider_acknowledged', $acknowledged->fresh()->submission_state);
+
+        $acknowledged->update([
+            'provider_response_evidence' => $validEvidence,
+            'submission_state' => 'rejected',
+        ]);
+        $this->expectReconciliationFailure($account->fresh(), $providerRfi, 'does not match the claimed submission');
+        $this->assertSame('rejected', $acknowledged->fresh()->submission_state);
+    }
+
+    public function test_two_authoritative_cases_can_reuse_one_approved_document_without_mixing_rfi_identity(): void
+    {
+        Storage::fake('kyc_private');
+        [$first, $account, $user, $provider] = $this->authoritativeCorporateCase('shared-rfi-one', 'shared-template-one', 'otherDocument', 'First shared document');
+        $document = $this->approvedDocument($user, 'shared.pdf', 'shared-approved-document');
+        $first->documents()->attach($document->id, ['attached_by' => $user->id]);
+        $second = NiumRfiCase::query()->create([
+            'provider_id' => $provider->id,
+            'user_provider_account_id' => $account->id,
+            'scope' => 'customer',
+            'origin' => 'authoritative_fetch',
+            'provider_reference_fingerprint' => hash('sha256', 'shared-rfi-two'),
+            'status' => 'requested',
+            'evidence' => [
+                'rfiHashId' => 'shared-rfi-two',
+                'templateId' => 'shared-template-two',
+                'template' => $first->evidence['template'],
+                'remarks' => 'Second shared document',
+                'rfiStatus' => 'RFI_REQUESTED',
+            ],
+            'contract_gate' => 'provider_contract_unconfirmed',
+            'submission_state' => 'admin_approved',
+            'approved_by' => $user->id,
+            'approved_at' => now(),
+        ]);
+        $second->documents()->attach($document->id, ['attached_by' => $user->id]);
+
+        $firstPayload = app(NiumCorporateRfiSubmissionService::class)->preparePayload($first->fresh());
+        $secondPayload = app(NiumCorporateRfiSubmissionService::class)->preparePayload($second->fresh());
+
+        $this->assertSame('shared-rfi-one', $firstPayload['rfiHashId']);
+        $this->assertSame('shared-rfi-two', $secondPayload['rfiHashId']);
+        $this->assertSame($firstPayload['fields'][0]['documents'][0]['fileHash'], $secondPayload['fields'][0]['documents'][0]['fileHash']);
+        Http::assertNothingSent();
+    }
+
     public function test_post_envelope_fails_closed_for_missing_identifiers_region_mismatch_and_unsupported_templates(): void
     {
         Storage::fake('kyc_private');
@@ -849,6 +1116,45 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         try {
             app(NiumCorporateRfiAuthoritativeTransport::class)->sendForContractTest($case);
             $this->fail('Expected the authoritative Corporate RFI contract transport to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString($message, $exception->getMessage());
+        }
+    }
+
+    private function activatedAuthoritativeSubmissionCase(string $suffix): array
+    {
+        Storage::fake('kyc_private');
+        config()->set('services.nium.regulatory_region', 'HK');
+        config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
+        [$case, $account, $user, $provider] = $this->authoritativeCorporateCase(
+            $suffix,
+            "template-{$suffix}",
+            'otherDocument',
+            "Document {$suffix}",
+        );
+        $this->makeHkProfile($user);
+        $document = $this->approvedDocument($user, "{$suffix}.pdf", "document-{$suffix}");
+        $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+        $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+
+        return [$case->fresh(), $account, $user, $provider];
+    }
+
+    private function expectAuthoritativeFailure(NiumRfiCase $case, string $message): void
+    {
+        try {
+            app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($case);
+            $this->fail('Expected authoritative Corporate RFI submission to fail closed.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString($message, $exception->getMessage());
+        }
+    }
+
+    private function expectReconciliationFailure(UserProviderAccount $account, ?array $providerRfis, string $message): void
+    {
+        try {
+            app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account, $providerRfis);
+            $this->fail('Expected authoritative Corporate RFI reconciliation to fail closed.');
         } catch (RuntimeException $exception) {
             $this->assertStringContainsString($message, $exception->getMessage());
         }

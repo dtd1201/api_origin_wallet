@@ -187,6 +187,7 @@ return [
         'customer_rfi_response_method' => env('NIUM_CUSTOMER_RFI_RESPONSE_METHOD', 'POST'),
         'customer_rfi_request_schema_version' => env('NIUM_CUSTOMER_RFI_REQUEST_SCHEMA_VERSION'),
         'customer_rfi_response_contract_version' => env('NIUM_CUSTOMER_RFI_RESPONSE_CONTRACT_VERSION'),
+        'customer_rfi_authoritative_submission_enabled' => (bool) env('NIUM_CUSTOMER_RFI_AUTHORITATIVE_SUBMISSION_ENABLED', false),
         'transaction_rfi_response_method' => env('NIUM_TRANSACTION_RFI_RESPONSE_METHOD', 'POST'),
         'transaction_rfi_request_schema_version' => env('NIUM_TRANSACTION_RFI_REQUEST_SCHEMA_VERSION'),
         'transaction_rfi_response_contract_version' => env('NIUM_TRANSACTION_RFI_RESPONSE_CONTRACT_VERSION'),

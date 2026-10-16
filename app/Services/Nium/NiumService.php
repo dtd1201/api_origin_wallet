@@ -53,6 +53,22 @@ class NiumService
             ->post($path, $payload, $user);
     }
 
+    public function postSensitiveWithRequestId(
+        string $path,
+        array $payload,
+        User $user,
+        string $requestId,
+        ?string $operation = null,
+        ?string $externalReference = null,
+    ): Response {
+        if (! Str::isUuid($requestId)) {
+            throw new RuntimeException('Nium x-request-id must be a UUID.');
+        }
+
+        return $this->client($operation, $externalReference, ['x-request-id' => $requestId], false)
+            ->post($path, $payload, $user);
+    }
+
     public function postOnboardingSimulation(
         string $path,
         array $payload,
@@ -138,6 +154,13 @@ class NiumService
         return $clientId;
     }
 
+    public function assertConfigured(): void
+    {
+        if (! $this->provider()->isConfigured()) {
+            throw new RuntimeException('Nium integration configuration is incomplete or unsafe.');
+        }
+    }
+
     public function path(string $template, array $replacements = []): string
     {
         $template = trim($template);
@@ -191,6 +214,7 @@ class NiumService
         ?string $operation = null,
         ?string $externalReference = null,
         array $additionalHeaders = [],
+        bool $persistRawExchange = true,
     ): ProviderHttpClient
     {
         $provider = $this->provider();
@@ -211,6 +235,7 @@ class NiumService
                 'client_hash_id' => config('services.nium.client_id'),
                 'external_reference' => $externalReference,
             ], static fn ($value): bool => $value !== null && $value !== ''),
+            persistRawExchange: $persistRawExchange,
         );
     }
 

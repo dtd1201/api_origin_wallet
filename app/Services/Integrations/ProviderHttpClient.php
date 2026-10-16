@@ -33,6 +33,7 @@ class ProviderHttpClient implements ProviderClient
         private readonly ?NiumSafeValueProjector $niumSafeValueProjector = null,
         private readonly array $operationalContext = [],
         private readonly ?NiumApiExchangeEvidenceStore $niumEvidenceStore = null,
+        private readonly bool $persistRawExchange = true,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -552,8 +553,8 @@ class ProviderHttpClient implements ProviderClient
                     requestUrl: $this->safeNiumUrl($url),
                     requestContentType: $this->headerValue($capturedRequestHeaders, 'content-type'),
                     responseContentType: $response?->header('content-type'),
-                    rawRequestBody: $capturedRequestBody,
-                    rawResponseBody: $rawResponseBody,
+                    rawRequestBody: $this->persistRawExchange ? $capturedRequestBody : null,
+                    rawResponseBody: $this->persistRawExchange ? $rawResponseBody : null,
                     requestHeaders: $capturedRequestHeaders,
                     responseHeaders: $response?->headers() ?? [],
                     responseReceived: $response !== null,
