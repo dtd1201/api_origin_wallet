@@ -12,6 +12,7 @@ use App\Services\Nium\NiumRegionResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -323,6 +324,81 @@ class NiumCorporateRfiSubmissionTest extends TestCase
             $this->assertArrayNotHasKey('clientId', $envelope['candidateBody']);
         }
 
+        Http::assertNothingSent();
+    }
+
+    public function test_authoritative_submission_dry_run_builds_transport_plan_without_sending_or_claiming(): void
+    {
+        Storage::fake('kyc_private');
+        Http::fake();
+        config()->set('services.nium.regulatory_region', 'HK');
+
+        [$case, $account, $user] = $this->authoritativeCorporateCase(
+            'dry-run-rfi-hash',
+            'dry-run-template-id',
+            'otherDocument',
+            'Corporate Source of Wealth and Funds',
+        );
+        $this->makeHkProfile($user);
+        $document = $this->approvedDocument($user, 'dry-run.pdf', 'dry-run-document');
+        $case->documents()->attach($document->id, ['attached_by' => $user->id]);
+
+        $first = app(NiumCorporateRfiSubmissionService::class)->prepareAuthoritativeDryRun($case->fresh());
+        $second = app(NiumCorporateRfiSubmissionService::class)->prepareAuthoritativeDryRun($case->fresh());
+        $unchanged = $case->fresh();
+
+        $this->assertFalse($first['executable']);
+        $this->assertSame('POST', data_get($first, 'request.method'));
+        $this->assertSame('/api/v1/client/path-client-hash/corporate/rfi', data_get($first, 'request.endpoint'));
+        $this->assertSame('application/json', data_get($first, 'request.headers.Accept'));
+        $this->assertSame('application/json', data_get($first, 'request.headers.Content-Type'));
+        $this->assertTrue(Str::isUuid((string) data_get($first, 'request.headers.x-request-id')));
+        $this->assertNotSame(
+            data_get($first, 'request.headers.x-request-id'),
+            data_get($second, 'request.headers.x-request-id'),
+        );
+        $this->assertSame(['x-api-key'], data_get($first, 'request.credentialHeaderNames'));
+        $this->assertSame(['region', 'customerHashId', 'rfiResponseRequest'], array_keys(data_get($first, 'request.body')));
+        $this->assertSame('HK', data_get($first, 'request.body.region'));
+        $this->assertSame($account->external_customer_id, data_get($first, 'request.body.customerHashId'));
+        $this->assertSame('dry-run-rfi-hash', data_get($first, 'request.body.rfiResponseRequest.0.rfiHashId'));
+        $this->assertSame(
+            base64_encode("%PDF-1.4\ndry-run-document\n%%EOF"),
+            data_get($first, 'request.body.rfiResponseRequest.0.businessDetails.documentDetails.document.0.document'),
+        );
+        $this->assertArrayNotHasKey('caseId', data_get($first, 'request.body'));
+        $this->assertArrayNotHasKey('clientId', data_get($first, 'request.body'));
+        $this->assertArrayNotHasKey('rfiTemplateId', data_get($first, 'request.body.rfiResponseRequest.0'));
+        $this->assertSame('admin_approved', $unchanged->submission_state);
+        $this->assertNull($unchanged->claimed_at);
+        $this->assertNull($unchanged->provider_response_evidence);
+        Http::assertNothingSent();
+    }
+
+    public function test_authoritative_submit_remains_blocked_when_contract_configuration_or_gate_changes(): void
+    {
+        Storage::fake('kyc_private');
+        Http::fake();
+        config()->set('services.nium.regulatory_region', 'HK');
+
+        [$unconfirmed] = $this->authoritativeCorporateCase('blocked-unconfirmed', 'template-unconfirmed', 'otherDocument', 'Unconfirmed contract');
+        $this->expectFailure($unconfirmed, 'exact Corporate RFI response contract is not configured');
+
+        [$configurationOnly] = $this->authoritativeCorporateCase('blocked-configuration', 'template-configuration', 'otherDocument', 'Configuration only');
+        config()->set('services.nium.customer_rfi_response_contract_version', 'configuration-only-change');
+        $this->expectFailure($configurationOnly, 'exact Corporate RFI response contract is not configured');
+        config()->set('services.nium.customer_rfi_response_contract_version', 'corporate-rfi-response-test-v1');
+
+        [$changedGate, , $changedGateUser] = $this->authoritativeCorporateCase('blocked-gate', 'template-gate', 'otherDocument', 'Changed gate');
+        $this->makeHkProfile($changedGateUser);
+        $changedGateDocument = $this->approvedDocument($changedGateUser, 'blocked-gate.pdf', 'blocked-gate');
+        $changedGate->documents()->attach($changedGateDocument->id, ['attached_by' => $changedGateUser->id]);
+        $changedGate->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+        $this->expectFailure($changedGate->fresh(), 'authoritative Corporate RFI POST envelope remains unverified');
+
+        $this->assertSame('admin_approved', $changedGate->fresh()->submission_state);
+        $this->assertNull($changedGate->fresh()->claimed_at);
+        $this->assertNull($changedGate->fresh()->provider_response_evidence);
         Http::assertNothingSent();
     }
 

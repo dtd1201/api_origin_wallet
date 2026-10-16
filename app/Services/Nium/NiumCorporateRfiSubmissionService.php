@@ -17,6 +17,7 @@ final class NiumCorporateRfiSubmissionService
         private readonly NiumRfiWorkflowService $workflow,
         private readonly NiumCorporateRfiPayloadBuilder $payloadBuilder,
         private readonly NiumCorporateRfiPostEnvelopeAdapter $postEnvelopeAdapter,
+        private readonly NiumCorporateRfiAuthoritativeSubmissionOrchestrator $authoritativeOrchestrator,
     ) {}
 
     public function preparePayload(NiumRfiCase $case): array
@@ -27,6 +28,11 @@ final class NiumCorporateRfiSubmissionService
     public function preparePostEnvelope(NiumRfiCase $case): array
     {
         return $this->postEnvelopeAdapter->prepare($case);
+    }
+
+    public function prepareAuthoritativeDryRun(NiumRfiCase $case): array
+    {
+        return $this->authoritativeOrchestrator->dryRun($case);
     }
 
     public function submit(NiumRfiCase $case): NiumRfiCase
