@@ -221,9 +221,27 @@ class NiumOfflineReadinessTest extends TestCase
             $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/approve-user-submission")
                 ->assertOk()->assertJsonPath('submission_state', 'admin_approved')
                 ->assertJsonPath('contract_gate', 'provider_contract_unconfirmed');
+
             $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit")
                 ->assertUnprocessable()
+                ->assertJsonValidationErrors([
+                    'case_id', 'confirmation', 'provider_reference_fingerprint', 'template_fingerprint',
+                ]);
+            $this->assertSame('admin_approved', $case->fresh()->submission_state);
+            $this->assertNull($case->fresh()->claimed_at);
+
+            // Enable only the fake test path so the unconfirmed contract gate is the next guard evaluated.
+            config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
+            $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit", [
+                'case_id' => $case->id,
+                'confirmation' => 'SUBMIT_TO_NIUM_LIVE',
+                'provider_reference_fingerprint' => $case->provider_reference_fingerprint,
+                'template_fingerprint' => hash('sha256', (string) data_get($case->evidence, 'templateId')),
+            ])
+                ->assertUnprocessable()
                 ->assertJsonPath('message', 'NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Corporate RFI response contract is not configured.');
+            $this->assertSame('admin_approved', $case->fresh()->submission_state);
+            $this->assertNull($case->fresh()->claimed_at);
         }
         Http::assertNothingSent();
     }

@@ -862,6 +862,57 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $this->assertSame('rejected', $acknowledged->fresh()->submission_state);
     }
 
+    public function test_production_case_two_to_five_fixtures_reconcile_idempotently_from_authoritative_get(): void
+    {
+        $account = null;
+        $providerRfis = [];
+        $cases = [];
+        foreach ([2 => 'provider_acknowledged', 3 => 'unknown', 4 => 'unknown', 5 => 'unknown'] as $number => $state) {
+            [$case, $caseAccount] = $this->authoritativeCorporateCase(
+                "fixture-production-case-{$number}",
+                "fixture-production-template-{$number}",
+                'otherDocument',
+                "Synthetic fixture for previously submitted case {$number}",
+            );
+            $account ??= $caseAccount;
+            if ($caseAccount->id !== $account->id) {
+                $case->update(['user_provider_account_id' => $account->id]);
+            }
+            $requestId = (string) Str::uuid();
+            $case->update([
+                'submission_state' => $state,
+                'claimed_at' => now(),
+                'provider_response_evidence' => [
+                    'submission_mode' => 'authoritative_legacy',
+                    'x_request_id' => $requestId,
+                    'request_correlation_fingerprint' => hash('sha256', $requestId),
+                    'provider_reference_fingerprint' => hash('sha256', "fixture-production-case-{$number}"),
+                    'template_fingerprint' => hash('sha256', "fixture-production-template-{$number}"),
+                    'outcome' => $state === 'provider_acknowledged' ? 'ACKNOWLEDGED' : 'UNKNOWN',
+                ],
+            ]);
+            $cases[] = $case;
+            $providerRfis[] = [
+                'rfiHashId' => "fixture-production-case-{$number}",
+                'templateId' => "fixture-production-template-{$number}",
+                'template' => $case->evidence['template'],
+                'remarks' => "Synthetic fixture {$number}",
+                'status' => 'RFI_RESPONDED',
+            ];
+        }
+        $account->update(['provider_status' => 'pending', 'provider_sub_status' => 'under_review', 'customer_id_verified_at' => now()]);
+
+        app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account->fresh(), $providerRfis);
+        app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account->fresh(), $providerRfis);
+
+        foreach ($cases as $case) {
+            $this->assertSame('responded', $case->fresh()->submission_state);
+            $this->assertSame('responded_under_review', $case->fresh()->status);
+            $this->assertSame('RECONCILED', data_get($case->fresh()->provider_response_evidence, 'outcome'));
+        }
+        Http::assertNothingSent();
+    }
+
     public function test_two_authoritative_cases_can_reuse_one_approved_document_without_mixing_rfi_identity(): void
     {
         Storage::fake('kyc_private');

@@ -162,12 +162,36 @@ final class NiumRfiWorkflowService
         $providerRemarks = trim((string) data_get($case->evidence, 'remarks', ''));
         $requiredFields = $template['requiredFields'] ?? data_get($case->evidence, 'requiredData', []);
 
+        $providerStatus = strtoupper(trim((string) data_get($case->evidence, 'rfiStatus')));
+        $templateId = data_get($case->evidence, 'templateId');
+        $providerFingerprint = strtolower((string) $case->provider_reference_fingerprint);
+        $templateFingerprint = is_string($templateId) && $templateId !== '' ? hash('sha256', $templateId) : null;
+        $submissionEligible = $case->scope === 'customer'
+            && $case->origin === 'authoritative_fetch'
+            && config('services.nium.customer_rfi_authoritative_submission_enabled') === true
+            && config('services.nium.customer_rfi_response_endpoint') === '/api/v1/client/{clientHashId}/corporate/rfi'
+            && strtoupper((string) config('services.nium.customer_rfi_response_method')) === 'POST'
+            && filled(config('services.nium.customer_rfi_request_schema_version'))
+            && filled(config('services.nium.customer_rfi_response_contract_version'))
+            && hash_equals((string) config('services.nium.customer_rfi_response_contract_version'), (string) $case->contract_gate)
+            && $case->status === 'requested'
+            && $providerStatus === 'RFI_REQUESTED'
+            && in_array($case->submission_state, ['approved', 'admin_approved'], true)
+            && $case->approved_at !== null
+            && $case->claimed_at === null
+            && $case->contract_gate !== 'provider_contract_unconfirmed';
+
         return [...$payload,
             'customer_id' => $case->account?->user_id,
             'customer_name' => $customerName !== '' ? $customerName : null,
             'template_name' => $templateName !== '' ? Str::limit($templateName, 160, '') : null,
             'provider_remarks' => $providerRemarks !== '' ? Str::limit($providerRemarks, 500, '') : null,
+            'provider_status' => $providerStatus !== '' ? $providerStatus : null,
             'required_document_count' => is_array($requiredFields) ? count($requiredFields) : 0,
+            'submission_eligible' => $submissionEligible,
+            'provider_reference_fingerprint' => preg_match('/^[a-f0-9]{64}$/', $providerFingerprint) === 1 ? $providerFingerprint : null,
+            'template_fingerprint' => $templateFingerprint,
+            'status_refresh_eligible' => $case->scope === 'customer' && $case->origin === 'authoritative_fetch',
         ];
     }
 
@@ -177,7 +201,11 @@ final class NiumRfiWorkflowService
 
         return [...$this->listPayload($case),
             'origin' => $case->origin,
-            'evidence' => $case->evidence,
+            'evidence' => array_filter([
+                'template' => data_get($case->evidence, 'template'),
+                'remarks' => data_get($case->evidence, 'remarks'),
+                'rfiStatus' => data_get($case->evidence, 'rfiStatus'),
+            ], static fn (mixed $value): bool => $value !== null),
             'response_draft' => $case->response_draft,
             'user_explanation' => $case->user_explanation,
             'revision_reason' => $case->revision_reason,
@@ -197,7 +225,6 @@ final class NiumRfiWorkflowService
                 'event_type' => $event->event_type,
                 'from_state' => $event->from_state,
                 'to_state' => $event->to_state,
-                'metadata' => $event->metadata,
                 'created_at' => $event->created_at,
             ])->all(),
             'supporting_file_count' => $case->documents->whereNull('pivot.detached_at')->count(),
@@ -308,6 +335,11 @@ final class NiumRfiWorkflowService
         $case->events()->create(['actor_user_id' => $actorId, 'event_type' => $type, 'from_state' => $from, 'to_state' => $to, 'metadata' => $metadata ?: null]);
     }
 
+    public function recordOperatorEvent(NiumRfiCase $case, int $actorId, string $type, string $from, string $to): void
+    {
+        $this->recordEvent($case, $actorId, $type, $from, $to);
+    }
+
     public function requiresAuthoritativeRfiFetch(UserProviderAccount $account): bool
     {
         $subStatus = strtolower(trim((string) $account->provider_sub_status));
@@ -344,7 +376,22 @@ final class NiumRfiWorkflowService
                 fn (array $providerRfi): bool => ($providerRfi['status'] ?? null) === 'RFI_REQUESTED',
             );
 
-            if ($providerSubStatus === 'rfi_requested' && ! $hasRequested) {
+            $hasReconcilableAttempt = collect($authoritativeRfis)->contains(function (array $providerRfi) use ($account): bool {
+                if (($providerRfi['status'] ?? null) !== 'RFI_RESPONDED' || ! is_string($providerRfi['rfiHashId'] ?? null)) {
+                    return false;
+                }
+
+                return NiumRfiCase::query()
+                    ->where('provider_id', $account->provider_id)
+                    ->where('user_provider_account_id', $account->id)
+                    ->where('scope', 'customer')
+                    ->where('origin', 'authoritative_fetch')
+                    ->where('provider_reference_fingerprint', hash('sha256', $providerRfi['rfiHashId']))
+                    ->whereIn('submission_state', ['claimed', 'provider_acknowledged', 'unknown', 'responded'])
+                    ->exists();
+            });
+
+            if ($providerSubStatus === 'rfi_requested' && ! $hasRequested && ! $hasReconcilableAttempt) {
                 throw new RuntimeException('Nium Corporate RFI evidence does not contain the requested actionable RFI.');
             }
 
@@ -396,7 +443,9 @@ final class NiumRfiWorkflowService
                             $requestFingerprint = $existingEvidence['request_correlation_fingerprint'] ?? null;
                             $persistedProviderFingerprint = $existingEvidence['provider_reference_fingerprint'] ?? null;
                             $persistedTemplateFingerprint = $existingEvidence['template_fingerprint'] ?? null;
-                            if (! in_array($case->submission_state, ['provider_acknowledged', 'unknown', 'claimed'], true)
+                            $alreadyReconciled = $case->submission_state === 'responded'
+                                && ($existingEvidence['outcome'] ?? null) === 'RECONCILED';
+                            if (! in_array($case->submission_state, ['provider_acknowledged', 'unknown', 'claimed'], true) && ! $alreadyReconciled
                                 || ! is_string($requestId) || ! Str::isUuid($requestId)
                                 || ! is_string($requestFingerprint)
                                 || ! hash_equals(hash('sha256', $requestId), $requestFingerprint)
