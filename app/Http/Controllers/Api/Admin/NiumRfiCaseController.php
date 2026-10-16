@@ -29,13 +29,38 @@ final class NiumRfiCaseController extends Controller
             'status' => ['nullable', 'string', 'max:30'],
             'submission_state' => ['nullable', Rule::in(['new', 'sent_to_user', 'user_draft', 'user_submitted', 'admin_review', 'revision_requested', 'admin_approved', 'nium_submission_pending', 'nium_submitted', 'nium_submission_failed', 'not_claimed', 'draft', 'approved', 'claimed', 'responded', 'reconciled'])],
             'user_id' => ['nullable', 'integer', 'min:1'],
+            'search' => ['nullable', 'string', 'max:100'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
         ]);
+
+        $search = trim((string) ($validated['search'] ?? ''));
         $cases = NiumRfiCase::query()
+            ->with([
+                'account:id,user_id',
+                'account.user:id',
+                'account.user.kycProfile:id,user_id,applicant_type,legal_name,business_name',
+            ])
             ->when(isset($validated['scope']), fn ($query) => $query->where('scope', $validated['scope']))
             ->when(isset($validated['status']), fn ($query) => $query->where('status', $validated['status']))
             ->when(isset($validated['submission_state']), fn ($query) => $query->where('submission_state', $validated['submission_state']))
             ->when(isset($validated['user_id']), fn ($query) => $query->whereHas('account', fn ($account) => $account->where('user_id', $validated['user_id'])))
-            ->latest('id')->paginate((int) $request->integer('per_page', 15));
+            ->when($search !== '', function ($query) use ($search): void {
+                $pattern = "%{$search}%";
+                $query->where(function ($searchQuery) use ($search, $pattern): void {
+                    if (preg_match('/^#?([1-9][0-9]*)$/', $search, $caseId) === 1) {
+                        $searchQuery->orWhere('nium_rfi_cases.id', (int) $caseId[1]);
+                    }
+
+                    $searchQuery
+                        ->orWhereHas('account.user.kycProfile', fn ($profile) => $profile
+                            ->whereLike('legal_name', $pattern)
+                            ->orWhereLike('business_name', $pattern))
+                        ->orWhereLike('evidence->template->name', $pattern)
+                        ->orWhereLike('evidence->template->documentType', $pattern);
+                });
+            })
+            ->latest('id')
+            ->paginate((int) ($validated['per_page'] ?? 15));
 
         return response()->json($cases->through(fn (NiumRfiCase $case) => $this->workflow->listPayload($case)));
     }

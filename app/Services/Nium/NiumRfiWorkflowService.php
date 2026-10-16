@@ -139,15 +139,34 @@ final class NiumRfiWorkflowService
 
     public function listPayload(NiumRfiCase $case): array
     {
-        return Arr::only($case->toArray(), [
+        $payload = Arr::only($case->toArray(), [
             'id', 'scope', 'origin', 'status', 'contract_gate', 'submission_state', 'approved_at',
             'claimed_at', 'reconciled_at', 'created_at', 'updated_at',
         ]);
+
+        $profile = $case->account?->user?->kycProfile;
+        $customerName = $profile?->applicant_type === 'business' && filled($profile->business_name)
+            ? trim((string) $profile->business_name)
+            : trim((string) ($profile?->legal_name ?? ''));
+        $template = is_array(data_get($case->evidence, 'template'))
+            ? data_get($case->evidence, 'template')
+            : [];
+        $templateName = trim((string) ($template['name'] ?? $template['documentType'] ?? ''));
+        $providerRemarks = trim((string) data_get($case->evidence, 'remarks', ''));
+        $requiredFields = $template['requiredFields'] ?? data_get($case->evidence, 'requiredData', []);
+
+        return [...$payload,
+            'customer_id' => $case->account?->user_id,
+            'customer_name' => $customerName !== '' ? $customerName : null,
+            'template_name' => $templateName !== '' ? Str::limit($templateName, 160, '') : null,
+            'provider_remarks' => $providerRemarks !== '' ? Str::limit($providerRemarks, 500, '') : null,
+            'required_document_count' => is_array($requiredFields) ? count($requiredFields) : 0,
+        ];
     }
 
     public function detailPayload(NiumRfiCase $case): array
     {
-        $case->loadMissing(['documents', 'events']);
+        $case->loadMissing(['account.user.kycProfile', 'documents', 'events']);
 
         return [...$this->listPayload($case),
             'origin' => $case->origin,
