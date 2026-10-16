@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Console\Commands\SubmitNiumAuthoritativeCorporateRfi;
 use App\Models\IntegrationProvider;
 use App\Models\ApiRequestLog;
 use App\Models\KycDocument;
@@ -20,6 +21,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -553,6 +555,103 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $this->assertSame('admin_approved', $case->fresh()->submission_state);
         $this->assertNull($case->fresh()->claimed_at);
         Http::assertNothingSent();
+    }
+
+    public function test_operator_command_inspects_without_writes_or_http_and_rejects_wrong_or_stale_cases(): void
+    {
+        [$case] = $this->activatedAuthoritativeSubmissionCase('command-inspect');
+        config()->set('services.nium.customer_rfi_authoritative_submission_enabled', false);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', ['case' => $case->id])
+            ->expectsOutputToContain("case_id={$case->id} state=admin_approved outcome=INSPECTED correlation=none")
+            ->assertSuccessful();
+        $this->assertSame('admin_approved', $case->fresh()->submission_state);
+        $this->assertNull($case->fresh()->claimed_at);
+        Http::assertNothingSent();
+
+        [$wrongCase] = $this->corporateCase();
+        $this->artisan('nium:submit-authoritative-corporate-rfi', ['case' => $wrongCase->id])
+            ->expectsOutputToContain('case selection rejected')
+            ->assertFailed();
+
+        [$transactionCase] = $this->corporateCase();
+        $transactionCase->update(['scope' => 'transaction']);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', ['case' => $transactionCase->id])
+            ->expectsOutputToContain('case selection rejected')
+            ->assertFailed();
+
+        [$staleCase] = $this->activatedAuthoritativeSubmissionCase('command-stale');
+        $staleEvidence = $staleCase->evidence;
+        $staleEvidence['rfiStatus'] = 'RFI_RESPONDED';
+        $staleCase->update(['evidence' => $staleEvidence]);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', ['case' => $staleCase->id])
+            ->expectsOutputToContain('case is stale')
+            ->assertFailed();
+        Http::assertNothingSent();
+    }
+
+    public function test_operator_command_requires_authorization_activation_gate_and_confirmation(): void
+    {
+        [$case] = $this->activatedAuthoritativeSubmissionCase('command-authorization');
+        $this->artisan('nium:submit-authoritative-corporate-rfi', [
+            'case' => $case->id,
+            '--submit' => true,
+        ])->expectsOutputToContain('operator authorization rejected')->assertFailed();
+
+        $authorized = [
+            'case' => $case->id,
+            '--submit' => true,
+            '--expect-reference-fingerprint' => $case->provider_reference_fingerprint,
+            '--approve' => SubmitNiumAuthoritativeCorporateRfi::APPROVAL,
+            '--operator' => 'OPS-123 verified Legacy Corporate RFI',
+        ];
+        $wrongFingerprint = $authorized;
+        $wrongFingerprint['--expect-reference-fingerprint'] = str_repeat('0', 64);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', $wrongFingerprint)
+            ->expectsOutputToContain('case identity rejected')->assertFailed();
+
+        config()->set('services.nium.customer_rfi_authoritative_submission_enabled', false);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', $authorized)
+            ->expectsOutputToContain('submission disabled')->assertFailed();
+
+        config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
+        $case->update(['contract_gate' => 'provider_contract_unconfirmed']);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', $authorized)
+            ->expectsOutputToContain('contract gate rejected')->assertFailed();
+
+        $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', $authorized)
+            ->expectsConfirmation("Submit authoritative Corporate RFI case {$case->id}?", 'no')
+            ->expectsOutputToContain('operator confirmation rejected')
+            ->assertFailed();
+        $this->assertSame('admin_approved', $case->fresh()->submission_state);
+        Http::assertNothingSent();
+    }
+
+    public function test_operator_command_reports_acknowledgement_and_uncertainty_without_sensitive_output_or_retry(): void
+    {
+        [$ackCase, $ackAccount] = $this->activatedAuthoritativeSubmissionCase('command-ack');
+        Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
+        $ackOptions = $this->authorizedCommandOptions($ackCase);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', $ackOptions)
+            ->expectsConfirmation("Submit authoritative Corporate RFI case {$ackCase->id}?", 'yes')
+            ->expectsOutputToContain("case_id={$ackCase->id} state=provider_acknowledged outcome=ACKNOWLEDGED correlation=")
+            ->assertSuccessful();
+        $ackOutput = Artisan::output();
+        $this->assertStringNotContainsString((string) $ackAccount->external_customer_id, $ackOutput);
+        $this->assertStringNotContainsString('command-ack.pdf', $ackOutput);
+        $this->assertStringNotContainsString(base64_encode("%PDF-1.4\ndocument-command-ack\n%%EOF"), $ackOutput);
+
+        [$unknownCase] = $this->activatedAuthoritativeSubmissionCase('command-unknown');
+        Http::fake(['*' => Http::failedConnection('timeout')]);
+        $unknownOptions = $this->authorizedCommandOptions($unknownCase);
+        $this->artisan('nium:submit-authoritative-corporate-rfi', $unknownOptions)
+            ->expectsConfirmation("Submit authoritative Corporate RFI case {$unknownCase->id}?", 'yes')
+            ->expectsOutputToContain("case_id={$unknownCase->id} state=unknown outcome=UNKNOWN correlation=")
+            ->assertSuccessful();
+        $this->artisan('nium:submit-authoritative-corporate-rfi', $unknownOptions)
+            ->expectsOutputToContain('case state rejected')
+            ->assertFailed();
+        Http::assertSentCount(1);
     }
 
     public function test_authoritative_acknowledgement_requires_matching_get_reconciliation_and_never_persists_documents(): void
@@ -1138,6 +1237,17 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
 
         return [$case->fresh(), $account, $user, $provider];
+    }
+
+    private function authorizedCommandOptions(NiumRfiCase $case): array
+    {
+        return [
+            'case' => $case->id,
+            '--submit' => true,
+            '--expect-reference-fingerprint' => $case->provider_reference_fingerprint,
+            '--approve' => SubmitNiumAuthoritativeCorporateRfi::APPROVAL,
+            '--operator' => 'OPS-123 verified Legacy Corporate RFI',
+        ];
     }
 
     private function expectAuthoritativeFailure(NiumRfiCase $case, string $message): void
