@@ -7,15 +7,19 @@ use App\Models\KycNotificationEvent;
 use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumCorporateRfiService;
+use App\Services\Nium\NiumCustomerReconciliationService;
+use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumRfiWorkflowService;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Monolog\Handler\TestHandler;
+use RuntimeException;
 use Tests\TestCase;
 
 final class ReconcileNiumCustomersCommandTest extends TestCase
@@ -37,6 +41,7 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
             'services.nium.customer_create_endpoint' => '/api/v5/client/{clientHashId}/customers',
             'services.nium.customer_list_endpoint' => '/api/v5/client/{clientHashId}/customers',
             'services.nium.customer_get_endpoint' => '/api/v5/client/{clientHashId}/customer/{customerHashId}',
+            'services.nium.customer_rfi_fetch_endpoint' => '/api/v1/client/{clientHashId}/corporate/rfi',
             'services.nium.customer_reconciliation_enabled' => true,
             'services.nium.customer_reconciliation_batch_size' => 50,
             'services.nium.customer_reconciliation_poll_interval_seconds' => 900,
@@ -230,9 +235,10 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
     public function test_temporary_get_failure_preserves_trusted_state_and_records_backoff(): void
     {
         $account = $this->account(['provider_status' => 'pending', 'provider_sub_status' => 'under_review', 'status' => 'under_review']);
-        Http::fake(['*' => Http::response(['message' => 'temporary'], 503)]);
+        $logs = $this->captureLogs();
+        Http::fake(['*' => Http::response(['message' => 'sensitive-provider-payload'], 503)]);
 
-        $this->artisan('nium:reconcile-customers')->assertExitCode(1);
+        $this->assertSame(1, app(NiumCustomerReconciliationService::class)->reconcile()['failed']);
 
         $account->refresh();
         $this->assertSame('under_review', $account->status);
@@ -241,10 +247,88 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
         $this->assertSame('scheduled_customer_get_failed', $account->reconciliation_error);
         $this->assertSame(1, data_get($account->metadata, 'nium_customer_reconciliation.failure_count'));
         $this->assertNotNull(data_get($account->metadata, 'nium_customer_reconciliation.next_attempt_at'));
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'provider_account.nium_scheduled_reconciliation_failed',
+            'entity_id' => (string) $account->id,
+        ]);
+        $this->assertFailureLog($logs, $account, 'retrieve_customer', 'provider_request_failure');
 
         Http::fake();
         $this->artisan('nium:reconcile-customers')->assertExitCode(0);
         Http::assertNothingSent();
+    }
+
+    public function test_failure_logging_identifies_corporate_rfi_fetch_stage_without_retry(): void
+    {
+        $account = $this->account(['status' => 'under_review', 'provider_sub_status' => 'rfi_requested']);
+        $logs = $this->captureLogs();
+        Http::fake(function (Request $request) use ($account) {
+            return str_contains($request->url(), '/corporate/rfi')
+                ? Http::response(['message' => 'secret-rfi-provider-payload'], 503)
+                : Http::response($this->customerPayload($account, 'pending', 'rfi_requested'));
+        });
+
+        $this->assertSame(1, app(NiumCustomerReconciliationService::class)->reconcile()['failed']);
+
+        $this->assertFailureLog($logs, $account, 'fetch_corporate_rfi', 'provider_request_failure');
+        Http::assertSentCount(2);
+    }
+
+    public function test_failure_logging_identifies_customer_evidence_reconciliation_stage(): void
+    {
+        $account = $this->account(['status' => 'under_review', 'provider_sub_status' => 'rfi_requested']);
+        $logs = $this->captureLogs();
+        Http::fake(function (Request $request) use ($account) {
+            return str_contains($request->url(), '/corporate/rfi')
+                ? Http::response(['rfiTemplates' => [$this->providerRfi('RFI_RESPONDED')]])
+                : Http::response($this->customerPayload($account, 'pending', 'rfi_requested'));
+        });
+
+        $this->assertSame(1, app(NiumCustomerReconciliationService::class)->reconcile()['failed']);
+
+        $this->assertFailureLog($logs, $account, 'reconcile_customer_evidence', 'validation_or_state_failure');
+        Http::assertSentCount(2);
+    }
+
+    public function test_failure_logging_identifies_failure_metadata_cleanup_stage(): void
+    {
+        $account = $this->account(['metadata' => ['nium_customer_reconciliation' => ['failure_count' => 1]]]);
+        $armed = false;
+        $retrievalsAfterReconciliation = 0;
+        UserProviderAccount::saved(function (UserProviderAccount $saved) use ($account, &$armed): void {
+            if ($saved->id === $account->id && $saved->reconciliation_status === 'reconciled') {
+                $armed = true;
+            }
+        });
+        UserProviderAccount::retrieved(function (UserProviderAccount $retrieved) use ($account, &$armed, &$retrievalsAfterReconciliation): void {
+            if ($armed && $retrieved->id === $account->id && ++$retrievalsAfterReconciliation === 3) {
+                throw new RuntimeException('secret cleanup failure with provider payload');
+            }
+        });
+        $logs = $this->captureLogs();
+        Http::fake(['*' => Http::response($this->customerPayload($account, 'pending', null))]);
+
+        $this->assertSame(1, app(NiumCustomerReconciliationService::class)->reconcile()['failed']);
+
+        $this->assertFailureLog($logs, $account, 'clear_failure_metadata', 'validation_or_state_failure');
+        Http::assertSentCount(1);
+    }
+
+    public function test_one_failed_account_does_not_prevent_later_eligible_account_reconciliation(): void
+    {
+        $failed = $this->account();
+        $successful = $this->account();
+        Http::fake(function (Request $request) use ($failed, $successful) {
+            return str_contains($request->url(), (string) $failed->external_customer_id)
+                ? Http::response(['message' => 'temporary'], 503)
+                : Http::response($this->customerPayload($successful, 'pending', 'under_review'));
+        });
+
+        $this->artisan('nium:reconcile-customers')->assertExitCode(1);
+
+        $this->assertSame('scheduled_customer_get_failed', $failed->fresh()->reconciliation_error);
+        $this->assertSame('reconciled', $successful->fresh()->reconciliation_status);
+        Http::assertSentCount(2);
     }
 
     public function test_batching_is_bounded_and_oldest_accounts_are_selected_first(): void
@@ -310,5 +394,57 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
         Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
             && str_contains($request->url(), '/api/v5/client/client-reconcile-test/customer/'));
         $this->assertCount(0, collect(Http::recorded())->filter(fn ($pair): bool => $pair[0]->method() !== 'GET'));
+    }
+
+    private function providerRfi(string $status): array
+    {
+        return [
+            'rfiHashId' => 'synthetic-rfi-hash',
+            'templateId' => 'synthetic-template-id',
+            'template' => [
+                'name' => 'otherDocument',
+                'documentType' => 'document',
+                'type' => 'document',
+                'rfiType' => 'corporate',
+                'requiredFields' => [[
+                    'fieldLabel' => 'Synthetic bank statement',
+                    'fieldValue' => 'document',
+                    'type' => 'document',
+                ]],
+            ],
+            'remarks' => 'Synthetic evidence only.',
+            'status' => $status,
+        ];
+    }
+
+    private function captureLogs(): TestHandler
+    {
+        $handler = new TestHandler();
+        Log::getLogger()->pushHandler($handler);
+
+        return $handler;
+    }
+
+    private function assertFailureLog(TestHandler $logs, UserProviderAccount $account, string $stage, string $diagnostic): void
+    {
+        $records = collect($logs->getRecords())->filter(
+            fn ($record): bool => $record->message === 'Nium customer reconciliation failed.',
+        )->values();
+        $this->assertCount(1, $records);
+        $context = $records->first()->context;
+        $this->assertSame([
+            'provider_account_id',
+            'error_category',
+            'failure_stage',
+            'diagnostic_category',
+        ], array_keys($context));
+        $this->assertSame($account->id, $context['provider_account_id']);
+        $this->assertSame('authoritative_get_customer_failed', $context['error_category']);
+        $this->assertSame($stage, $context['failure_stage']);
+        $this->assertSame($diagnostic, $context['diagnostic_category']);
+        $serialized = json_encode($context, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('secret', $serialized);
+        $this->assertStringNotContainsString((string) $account->external_customer_id, $serialized);
+        $this->assertStringNotContainsString('test-key', $serialized);
     }
 }

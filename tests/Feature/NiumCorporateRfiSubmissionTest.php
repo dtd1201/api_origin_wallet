@@ -267,6 +267,11 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $duplicates->documents()->attach([$firstDuplicate->id, $secondDuplicate->id], ['attached_by' => $duplicateUser->id]);
         $this->expectPreparationFailure($duplicates->fresh(), 'duplicate supporting evidence');
 
+        [$oversized, , $oversizedUser] = $this->authoritativeCorporateCase('oversized-doc', 'template-oversized', 'otherDocument', 'Oversized document');
+        $oversizedDocument = $this->approvedDocument($oversizedUser, 'oversized.pdf', str_repeat('A', 2 * 1024 * 1024));
+        $oversized->documents()->attach($oversizedDocument->id, ['attached_by' => $oversizedUser->id]);
+        $this->expectPreparationFailure($oversized->fresh(), 'no larger than 2 MB');
+
         Http::assertNothingSent();
     }
 

@@ -7,6 +7,8 @@ use App\Models\IntegrationProvider;
 use App\Models\UserProviderAccount;
 use Illuminate\Cache\Lock;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\QueryException;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -42,6 +44,7 @@ final class NiumCustomerReconciliationService
         $summary['selected'] = $accounts->count();
 
         foreach ($accounts as $account) {
+            $failureStage = 'retrieve_customer';
             $lock = Cache::lock($this->lockKey($account), $this->lockTtlSeconds());
             if (! $lock->get()) {
                 $summary['skipped']++;
@@ -58,11 +61,14 @@ final class NiumCustomerReconciliationService
 
                 $fresh->forceFill(['reconciliation_requested_at' => now()])->save();
                 $updated = $this->onboarding->retrieveCustomer($fresh, requestId: 'scheduled-customer-reconciliation');
+                $failureStage = 'fetch_corporate_rfi';
                 $rfiEvidence = $this->rfiWorkflow->requiresAuthoritativeRfiFetch($updated)
                     ? $this->corporateRfi->fetch($updated)
                     : null;
+                $failureStage = 'reconcile_customer_evidence';
                 $this->rfiWorkflow->reconcileCustomerEvidence($updated, $rfiEvidence);
                 $updated = $updated->fresh();
+                $failureStage = 'clear_failure_metadata';
                 $this->clearFailureMetadata($updated);
                 $summary['reconciled']++;
                 Log::info('Nium customer reconciliation completed.', [
@@ -83,6 +89,8 @@ final class NiumCustomerReconciliationService
                 Log::warning('Nium customer reconciliation failed.', [
                     'provider_account_id' => $account->id,
                     'error_category' => 'authoritative_get_customer_failed',
+                    'failure_stage' => $failureStage,
+                    'diagnostic_category' => $this->diagnosticCategory($exception),
                 ]);
             } finally {
                 $this->release($lock);
@@ -201,6 +209,17 @@ final class NiumCustomerReconciliationService
             Arr::forget($metadata, 'nium_customer_reconciliation');
             $locked->forceFill(['metadata' => $metadata])->save();
         }, 3);
+    }
+
+    private function diagnosticCategory(Throwable $exception): string
+    {
+        return match (true) {
+            $exception instanceof NiumProviderRequestException => 'provider_request_failure',
+            $exception instanceof ConnectionException => 'provider_connection_failure',
+            $exception instanceof QueryException => 'database_failure',
+            $exception instanceof \RuntimeException => 'validation_or_state_failure',
+            default => 'unexpected_failure',
+        };
     }
 
     private function lockKey(UserProviderAccount $account): string

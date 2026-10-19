@@ -39,36 +39,76 @@ class SuperAdminCorporateRfiIntegrationTest extends TestCase
         config()->set('nium_rfi_contracts.corporate', [$this->testContract()]);
     }
 
-    public function test_super_admin_approves_submits_and_authoritatively_reconciles_registered_other_document(): void
+    public function test_two_customer_documents_are_approved_submitted_and_authoritatively_reconciled(): void
     {
-        [$case, $account, $document] = $this->caseWithApprovedDocument();
-        $superAdmin = $this->admin('super_admin');
-        $token = $this->issueTokenFor($superAdmin);
+        [$case, $account, $excludedDocument] = $this->caseWithApprovedDocument();
+        $customer = $account->user()->firstOrFail();
+        $case->documents()->detach($excludedDocument->id);
+        $case->update(['submission_state' => 'sent_to_user', 'approved_at' => null, 'approved_by' => null]);
 
-        $this->withToken($token)->getJson("/api/admin/nium-rfi-cases/{$case->id}")
-            ->assertOk()->assertJsonPath('submission_state', 'draft');
-        $this->withToken($token)->postJson("/api/admin/nium-rfi-cases/{$case->id}/approve")
-            ->assertOk()->assertJsonPath('submission_state', 'approved');
+        $documents = collect([
+            ['2026-07-bank-statement.pdf', "%PDF-1.4\nSynthetic July 2026 bank statement\n%%EOF"],
+            ['2026-08-bank-statement.pdf', "%PDF-1.4\nSynthetic August 2026 bank statement\n%%EOF"],
+        ])->map(function (array $fixture) use ($customer): KycDocument {
+            [$fileName, $contents] = $fixture;
+            $path = 'rfi/'.$customer->id.'/'.Str::uuid().'.pdf';
+            Storage::disk('kyc_private')->put($path, $contents);
+
+            return KycDocument::query()->create([
+                'kyc_profile_id' => $customer->kycProfile->id,
+                'type' => 'corporate_rfi_supporting_document',
+                'status' => 'pending_admin_review',
+                'file_url' => 'private://'.$path,
+                'storage_disk' => 'kyc_private',
+                'file_path' => $path,
+                'original_name' => $fileName,
+                'mime_type' => 'application/pdf',
+                'file_size' => strlen($contents),
+                'file_hash' => hash('sha256', $contents),
+                'metadata' => ['factual' => true, 'synthetic' => false, 'rfi_upload' => true],
+            ]);
+        });
+
+        $superAdmin = $this->admin('super_admin');
+        $adminToken = $this->issueTokenFor($superAdmin);
+        $customerToken = $this->issueTokenFor($customer);
+
+        $this->withToken($customerToken)->putJson("/api/user/users/{$customer->id}/nium-rfi-cases/{$case->id}/draft", [
+            'document_ids' => $documents->pluck('id')->all(),
+            'explanation' => 'Official company bank statements for July and August 2026.',
+        ])->assertOk()
+            ->assertJsonPath('submission_state', 'user_draft')
+            ->assertJsonPath('supporting_file_count', 2);
+        $this->withToken($customerToken)->postJson("/api/user/users/{$customer->id}/nium-rfi-cases/{$case->id}/submit")
+            ->assertOk()->assertJsonPath('submission_state', 'user_submitted');
+        $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/approve-user-submission")
+            ->assertOk()
+            ->assertJsonPath('submission_state', 'admin_approved')
+            ->assertJsonPath('supporting_file_count', 2);
+        $this->assertSame(['approved', 'approved'], $documents->map(fn (KycDocument $document) => $document->fresh()->status)->all());
 
         config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
         $postCount = 0;
         $getCount = 0;
-        Http::fake(function (Request $request) use (&$postCount, &$getCount, $account, $document) {
+        Http::fake(function (Request $request) use (&$postCount, &$getCount, $account, $documents) {
             $this->assertSame('https://gateway.test.invalid/api/v1/client/synthetic-client/corporate/rfi', strtok($request->url(), '?'));
             if ($request->method() === 'POST') {
                 $postCount++;
+                $expectedDocuments = $documents->sortBy('id')->values()->map(fn (KycDocument $document): array => [
+                    'document' => base64_encode(Storage::disk('kyc_private')->get($document->file_path)),
+                    'fileName' => $document->original_name,
+                    'fileType' => 'application/pdf',
+                ])->all();
                 $this->assertSame([
                     'region' => 'HK',
                     'customerHashId' => $account->external_customer_id,
                     'rfiResponseRequest' => [[
                         'rfiHashId' => $this->rfiHashId,
-                        'businessDetails' => ['documentDetails' => ['document' => [[
-                            'document' => base64_encode(Storage::disk('kyc_private')->get($document->file_path)),
-                            'fileName' => $document->original_name,
-                            'fileType' => 'application/pdf',
-                        ]]]],
+                        'businessDetails' => ['documentDetails' => ['document' => $expectedDocuments]],
                     ]],
                 ], $request->data());
+                $this->assertCount(1, $request->data()['rfiResponseRequest']);
+                $this->assertCount(2, data_get($request->data(), 'rfiResponseRequest.0.businessDetails.documentDetails.document'));
 
                 return Http::response(['status' => 'RFI_RESPONDED'], 200);
             }
@@ -80,13 +120,13 @@ class SuperAdminCorporateRfiIntegrationTest extends TestCase
         });
 
         $fingerprints = $this->fingerprints($case);
-        $this->withToken($token)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit", [
+        $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit", [
             'case_id' => $case->id,
             'confirmation' => 'SUBMIT '.$case->id,
             ...$fingerprints,
         ])->assertOk()->assertJsonPath('submission_state', 'provider_acknowledged');
 
-        $this->withToken($token)->postJson("/api/admin/nium-rfi-cases/{$case->id}/refresh-status", [
+        $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/refresh-status", [
             'case_id' => $case->id,
             ...$fingerprints,
         ])->assertOk()
@@ -96,7 +136,7 @@ class SuperAdminCorporateRfiIntegrationTest extends TestCase
             ->assertJsonPath('authoritative_rfi_status', 'RFI_RESPONDED')
             ->assertJsonPath('reconciliation_required', false);
 
-        $this->withToken($token)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit", [
+        $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit", [
             'case_id' => $case->id,
             'confirmation' => 'SUBMIT '.$case->id,
             ...$fingerprints,
@@ -104,12 +144,16 @@ class SuperAdminCorporateRfiIntegrationTest extends TestCase
         $this->assertSame(1, $postCount);
         $this->assertSame(1, $getCount);
 
-        $detail = $this->withToken($token)->getJson("/api/admin/nium-rfi-cases/{$case->id}")->assertOk();
+        $detail = $this->withToken($adminToken)->getJson("/api/admin/nium-rfi-cases/{$case->id}")->assertOk();
         $json = $detail->getContent();
         $this->assertStringNotContainsString($this->rfiHashId, $json);
         $this->assertStringNotContainsString($this->templateId, $json);
         $this->assertStringNotContainsString((string) $account->external_customer_id, $json);
-        $this->assertStringNotContainsString(base64_encode(Storage::disk('kyc_private')->get($document->file_path)), $json);
+        $this->assertStringNotContainsString('test-corporate-rfi-key', $json);
+        foreach ($documents as $document) {
+            $this->assertStringNotContainsString(base64_encode(Storage::disk('kyc_private')->get($document->file_path)), $json);
+        }
+        $this->assertStringNotContainsString(base64_encode(Storage::disk('kyc_private')->get($excludedDocument->file_path)), $json);
         $detail->assertJsonPath('submission_http_status', 200)
             ->assertJsonPath('submission_outcome', 'RECONCILED');
     }
