@@ -270,6 +270,20 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_authoritative_offline_preparation_rejects_invalid_case_scope_before_document_loading(): void
+    {
+        [$case] = $this->authoritativeCorporateCase(
+            'invalid-scope',
+            'template-invalid-scope',
+            'otherDocument',
+            'Invalid scope fixture',
+        );
+        $case->update(['scope' => 'transaction']);
+
+        $this->expectPreparationFailure($case->fresh(), 'authoritative customer-scoped case');
+        Http::assertNothingSent();
+    }
+
     public function test_prepares_non_executable_hk_post_envelopes_for_each_authoritative_template(): void
     {
         Storage::fake('kyc_private');
@@ -393,12 +407,19 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         Http::fake();
         config()->set('services.nium.regulatory_region', 'HK');
 
-        [$unconfirmed] = $this->authoritativeCorporateCase('blocked-unconfirmed', 'template-unconfirmed', 'otherDocument', 'Unconfirmed contract');
-        $this->expectFailure($unconfirmed, 'exact Corporate RFI response contract is not configured');
+        [$unconfirmed, , $unconfirmedUser] = $this->authoritativeCorporateCase('blocked-unconfirmed', 'template-unconfirmed', 'otherDocument', 'Unconfirmed contract');
+        $this->makeHkProfile($unconfirmedUser);
+        $unconfirmedDocument = $this->approvedDocument($unconfirmedUser, 'blocked-unconfirmed.pdf', 'blocked-unconfirmed');
+        $unconfirmed->documents()->attach($unconfirmedDocument->id, ['attached_by' => $unconfirmedUser->id]);
+        $this->expectFailure($unconfirmed->fresh(), 'not verified for live submission');
 
-        [$configurationOnly] = $this->authoritativeCorporateCase('blocked-configuration', 'template-configuration', 'otherDocument', 'Configuration only');
+        [$configurationOnly, , $configurationOnlyUser] = $this->authoritativeCorporateCase('blocked-configuration', 'template-configuration', 'otherDocument', 'Configuration only');
+        $this->makeHkProfile($configurationOnlyUser);
+        $configurationOnlyDocument = $this->approvedDocument($configurationOnlyUser, 'blocked-configuration.pdf', 'blocked-configuration');
+        $configurationOnly->documents()->attach($configurationOnlyDocument->id, ['attached_by' => $configurationOnlyUser->id]);
+        $this->allowAuthoritativeContract($configurationOnly->fresh());
         config()->set('services.nium.customer_rfi_response_contract_version', 'configuration-only-change');
-        $this->expectFailure($configurationOnly, 'exact Corporate RFI response contract is not configured');
+        $this->expectFailure($configurationOnly->fresh(), 'not verified for live submission');
         config()->set('services.nium.customer_rfi_response_contract_version', 'corporate-rfi-response-test-v1');
 
         [$changedGate, , $changedGateUser] = $this->authoritativeCorporateCase('blocked-gate', 'template-gate', 'otherDocument', 'Changed gate');
@@ -406,11 +427,14 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $changedGateDocument = $this->approvedDocument($changedGateUser, 'blocked-gate.pdf', 'blocked-gate');
         $changedGate->documents()->attach($changedGateDocument->id, ['attached_by' => $changedGateUser->id]);
         $changedGate->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+        $this->allowAuthoritativeContract($changedGate->fresh());
         $this->expectFailure($changedGate->fresh(), 'authoritative Corporate RFI POST envelope remains unverified');
 
-        $this->assertSame('admin_approved', $changedGate->fresh()->submission_state);
-        $this->assertNull($changedGate->fresh()->claimed_at);
-        $this->assertNull($changedGate->fresh()->provider_response_evidence);
+        foreach ([$unconfirmed, $configurationOnly, $changedGate] as $case) {
+            $this->assertSame('admin_approved', $case->fresh()->submission_state);
+            $this->assertNull($case->fresh()->claimed_at);
+            $this->assertNull($case->fresh()->provider_response_evidence);
+        }
         Http::assertNothingSent();
     }
 
@@ -614,11 +638,11 @@ class NiumCorporateRfiSubmissionTest extends TestCase
             ->expectsOutputToContain('submission disabled')->assertFailed();
 
         config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
-        $case->update(['contract_gate' => 'provider_contract_unconfirmed']);
+        config()->set('nium_rfi_contracts.corporate', []);
         $this->artisan('nium:submit-authoritative-corporate-rfi', $authorized)
             ->expectsOutputToContain('contract gate rejected')->assertFailed();
 
-        $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+        $this->allowAuthoritativeContract($case->fresh());
         $this->artisan('nium:submit-authoritative-corporate-rfi', $authorized)
             ->expectsConfirmation("Submit authoritative Corporate RFI case {$case->id}?", 'no')
             ->expectsOutputToContain('operator confirmation rejected')
@@ -664,6 +688,7 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $document = $this->approvedDocument($user, 'production-private.pdf', 'production-private-document');
         $case->documents()->attach($document->id, ['attached_by' => $user->id]);
         $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+        $this->allowAuthoritativeContract($case->fresh());
         Http::fake(['*' => Http::response(['status' => 'RFI_RESPONDED'])]);
 
         $acknowledged = app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($case->fresh());
@@ -734,6 +759,7 @@ class NiumCorporateRfiSubmissionTest extends TestCase
             $document = $this->approvedDocument($user, "outcome-{$status}.pdf", "outcome-{$status}");
             $case->documents()->attach($document->id, ['attached_by' => $user->id]);
             $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+            $this->allowAuthoritativeContract($case->fresh());
 
             $result = app(NiumCorporateRfiAuthoritativeSubmissionService::class)->submit($case->fresh());
             $this->assertSame($state, $result->submission_state);
@@ -922,6 +948,7 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $second = NiumRfiCase::query()->create([
             'provider_id' => $provider->id,
             'user_provider_account_id' => $account->id,
+            'transaction_id' => null,
             'scope' => 'customer',
             'origin' => 'authoritative_fetch',
             'provider_reference_fingerprint' => hash('sha256', 'shared-rfi-two'),
@@ -1120,7 +1147,9 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $case = NiumRfiCase::query()->create([
             'provider_id' => $provider->id,
             'user_provider_account_id' => $account->id,
+            'transaction_id' => null,
             'scope' => 'customer',
+            'origin' => 'webhook',
             'provider_reference_fingerprint' => hash('sha256', 'rfi-hash-'.str()->uuid()),
             'status' => 'requested',
             'evidence' => [
@@ -1158,6 +1187,8 @@ class NiumCorporateRfiSubmissionTest extends TestCase
             'country_code' => 'SG',
         ]);
         $case->update([
+            'transaction_id' => null,
+            'scope' => 'customer',
             'origin' => 'authoritative_fetch',
             'provider_reference_fingerprint' => hash('sha256', $rfiHashId),
             'evidence' => [
@@ -1286,8 +1317,30 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $document = $this->approvedDocument($user, "{$suffix}.pdf", "document-{$suffix}");
         $case->documents()->attach($document->id, ['attached_by' => $user->id]);
         $case->update(['contract_gate' => 'corporate-rfi-response-test-v1']);
+        $this->allowAuthoritativeContract($case->fresh());
 
         return [$case->fresh(), $account, $user, $provider];
+    }
+
+    private function allowAuthoritativeContract(NiumRfiCase $case): void
+    {
+        $shape = [
+            'template_name' => data_get($case->evidence, 'template.name'),
+            'rfi_type' => data_get($case->evidence, 'template.rfiType'),
+            'field_value' => data_get($case->evidence, 'template.requiredFields.0.fieldValue'),
+            'field_type' => data_get($case->evidence, 'template.requiredFields.0.type'),
+        ];
+        $verified = (array) config('nium_rfi_contracts.corporate', []);
+        $verified[] = [
+            'environment' => app()->environment(),
+            'endpoint' => '/api/v1/client/{clientHashId}/corporate/rfi',
+            'method' => 'POST',
+            'request_schema_version' => 'corporate-rfi-request-test-v1',
+            'contract_version' => 'corporate-rfi-response-test-v1',
+            'template_fingerprint' => hash('sha256', (string) data_get($case->evidence, 'templateId')),
+            'required_field_shape_fingerprint' => hash('sha256', json_encode($shape, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)),
+        ];
+        config()->set('nium_rfi_contracts.corporate', $verified);
     }
 
     private function authorizedCommandOptions(NiumRfiCase $case): array

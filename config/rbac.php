@@ -11,7 +11,7 @@ return [
     ],
     'permissions' => [
         'users.view', 'users.manage', 'kyc.view', 'kyc.approve', 'kyc.reject',
-        'aml.view', 'aml.review', 'rfi.view', 'rfi.manage',
+        'aml.view', 'aml.review', 'rfi.view', 'rfi.manage', 'rfi.submit.live',
         'transfers.view', 'transfers.manage', 'transfers.approve', 'transfers.reject',
         'transactions.view', 'transactions.manage', 'wallet.view', 'wallet.sync', 'wallet.manage',
         'providers.view', 'providers.sync', 'providers.manage',

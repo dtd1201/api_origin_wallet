@@ -182,6 +182,10 @@ class User extends Authenticatable
         $roleCodes = $this->roles()->pluck('role_code')
             ->map(fn ($code) => Str::lower((string) $code));
 
+        if ($permission === 'rfi.submit.live') {
+            return $roleCodes->contains('super_admin');
+        }
+
         if ($roleCodes->intersect(['admin', 'super_admin'])->isNotEmpty()) {
             return true;
         }

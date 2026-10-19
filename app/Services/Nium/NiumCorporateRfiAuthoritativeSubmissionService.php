@@ -11,7 +11,7 @@ use RuntimeException;
 final class NiumCorporateRfiAuthoritativeSubmissionService
 {
     public function __construct(
-        private readonly NiumCorporateRfiPostEnvelopeAdapter $adapter,
+        private readonly NiumCorporateRfiContractRegistry $contractRegistry,
         private readonly NiumRfiWorkflowService $workflow,
         private readonly NiumService $niumService,
     ) {}
@@ -22,12 +22,12 @@ final class NiumCorporateRfiAuthoritativeSubmissionService
             throw new RuntimeException('NIUM_RFI_AUTHORITATIVE_SUBMISSION_DISABLED: authoritative Corporate RFI POST is not activated.');
         }
 
-        $this->workflow->assertProviderContractConfirmed($case);
         if ($case->origin !== 'authoritative_fetch') {
             throw new RuntimeException('Authoritative Corporate RFI submission requires authoritative provider evidence.');
         }
 
-        $envelope = $this->adapter->prepare($case);
+        $verified = $this->contractRegistry->assertVerified($case);
+        $envelope = $verified['envelope'];
         if (($envelope['executable'] ?? null) !== false) {
             throw new RuntimeException('Authoritative Corporate RFI submission requires the reviewed non-executable candidate contract.');
         }
@@ -44,8 +44,10 @@ final class NiumCorporateRfiAuthoritativeSubmissionService
             (string) data_get($envelope, 'transport.endpointTemplate'),
             (array) data_get($envelope, 'transport.pathParameters', []),
         );
-        $templateFingerprint = hash('sha256', (string) data_get($envelope, 'reviewMetadata.templateId'));
+        $templateFingerprint = (string) data_get($verified, 'contract.template_fingerprint');
         $requestId = (string) Str::uuid();
+        // Re-run every mutable readiness check immediately before the atomic claim.
+        $this->contractRegistry->assertVerified($case->fresh());
         $claimed = $this->workflow->claimForProviderSubmission($case, $requestId, [
             'submission_mode' => 'authoritative_legacy',
             'provider_reference_fingerprint' => $case->provider_reference_fingerprint,

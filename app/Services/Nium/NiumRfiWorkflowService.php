@@ -14,7 +14,10 @@ use RuntimeException;
 
 final class NiumRfiWorkflowService
 {
-    public function __construct(private readonly NiumKycNotificationService $kycNotifications) {}
+    public function __construct(
+        private readonly NiumKycNotificationService $kycNotifications,
+        private readonly NiumCorporateRfiContractRegistry $corporateContractRegistry,
+    ) {}
 
     public function ingestCustomerEvidence(IntegrationProvider $provider, UserProviderAccount $account, array $payload, ?int $webhookEventId = null, ?string $authenticatedRequestId = null): ?NiumRfiCase
     {
@@ -88,8 +91,10 @@ final class NiumRfiWorkflowService
                     || strtoupper(trim((string) data_get($locked->evidence, 'rfiStatus'))) !== 'RFI_REQUESTED')) {
                 throw new RuntimeException('Transaction RFI submission requires the latest authoritative RFI_REQUESTED status.');
             }
-            if ($locked->scope === 'customer' && $locked->status !== 'requested') {
-                throw new RuntimeException('Corporate RFI submission requires the latest authoritative requested status.');
+            if ($locked->scope === 'customer'
+                && ($locked->status !== 'requested'
+                    || strtoupper(trim((string) data_get($locked->evidence, 'rfiStatus'))) !== 'RFI_REQUESTED')) {
+                throw new RuntimeException('Corporate RFI submission requires the latest authoritative RFI_REQUESTED status.');
             }
             if (! in_array($locked->submission_state, ['approved', 'admin_approved'], true) || $locked->approved_at === null) {
                 throw new RuntimeException('Nium RFI submission requires separate human approval and an unclaimed case.');
@@ -129,22 +134,21 @@ final class NiumRfiWorkflowService
             if ($contract[0] !== $officialEndpoint || strtoupper((string) $contract[1]) !== 'POST') {
                 throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Transaction RFI response contract is not configured.');
             }
+        } elseif ($case->origin === 'authoritative_fetch') {
+            $this->corporateContractRegistry->assertVerified($case);
         } else {
             $officialEndpoint = '/api/v1/client/{clientHashId}/corporate/rfi';
-            $requestSchemaVersion = trim((string) $contract[2]);
-            $responseContractVersion = trim((string) $contract[3]);
             if ($contract[0] !== $officialEndpoint
                 || strtoupper((string) $contract[1]) !== 'POST'
-                || $requestSchemaVersion === ''
-                || $responseContractVersion === ''
-                || $case->contract_gate === 'provider_contract_unconfirmed'
-                || ! hash_equals($responseContractVersion, (string) $case->contract_gate)) {
+                || blank($contract[2])
+                || blank($contract[3])
+                || ! hash_equals((string) $contract[3], (string) $case->contract_gate)) {
                 throw new RuntimeException('NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Corporate RFI response contract is not configured.');
             }
         }
     }
 
-    public function listPayload(NiumRfiCase $case): array
+    public function listPayload(NiumRfiCase $case, bool $liveSubmitPermitted = false): array
     {
         $payload = Arr::only($case->toArray(), [
             'id', 'scope', 'origin', 'status', 'contract_gate', 'submission_state', 'approved_at',
@@ -166,20 +170,25 @@ final class NiumRfiWorkflowService
         $templateId = data_get($case->evidence, 'templateId');
         $providerFingerprint = strtolower((string) $case->provider_reference_fingerprint);
         $templateFingerprint = is_string($templateId) && $templateId !== '' ? hash('sha256', $templateId) : null;
+        $contractBlockers = $case->scope === 'customer' ? $this->corporateContractRegistry->blockers($case) : [];
+        $readinessBlockers = array_values(array_filter([
+            config('services.nium.customer_rfi_authoritative_submission_enabled') === true ? null : 'Live Corporate RFI submission is globally disabled.',
+            $case->origin === 'authoritative_fetch' ? null : 'The case is not backed by an authoritative provider fetch.',
+            $case->status === 'requested' && $providerStatus === 'RFI_REQUESTED' ? null : 'The latest authoritative provider status is not RFI_REQUESTED.',
+            in_array($case->submission_state, ['approved', 'admin_approved'], true) && $case->approved_at !== null ? null : 'The factual response has not been approved.',
+            $case->claimed_at === null ? null : 'A provider POST has already been claimed for this case.',
+            ...$contractBlockers,
+        ], static fn (mixed $blocker): bool => is_string($blocker) && $blocker !== ''));
         $submissionEligible = $case->scope === 'customer'
+            && $liveSubmitPermitted
             && $case->origin === 'authoritative_fetch'
             && config('services.nium.customer_rfi_authoritative_submission_enabled') === true
-            && config('services.nium.customer_rfi_response_endpoint') === '/api/v1/client/{clientHashId}/corporate/rfi'
-            && strtoupper((string) config('services.nium.customer_rfi_response_method')) === 'POST'
-            && filled(config('services.nium.customer_rfi_request_schema_version'))
-            && filled(config('services.nium.customer_rfi_response_contract_version'))
-            && hash_equals((string) config('services.nium.customer_rfi_response_contract_version'), (string) $case->contract_gate)
             && $case->status === 'requested'
             && $providerStatus === 'RFI_REQUESTED'
             && in_array($case->submission_state, ['approved', 'admin_approved'], true)
             && $case->approved_at !== null
             && $case->claimed_at === null
-            && $case->contract_gate !== 'provider_contract_unconfirmed';
+            && $readinessBlockers === [];
 
         return [...$payload,
             'customer_id' => $case->account?->user_id,
@@ -189,13 +198,15 @@ final class NiumRfiWorkflowService
             'provider_status' => $providerStatus !== '' ? $providerStatus : null,
             'required_document_count' => is_array($requiredFields) ? count($requiredFields) : 0,
             'submission_eligible' => $submissionEligible,
+            'live_submit_permitted' => $liveSubmitPermitted,
+            'submission_blockers' => $liveSubmitPermitted ? $readinessBlockers : ['Your Admin role does not permit live provider submission.'],
             'provider_reference_fingerprint' => preg_match('/^[a-f0-9]{64}$/', $providerFingerprint) === 1 ? $providerFingerprint : null,
             'template_fingerprint' => $templateFingerprint,
             'status_refresh_eligible' => $case->scope === 'customer' && $case->origin === 'authoritative_fetch',
         ];
     }
 
-    public function detailPayload(NiumRfiCase $case): array
+    public function detailPayload(NiumRfiCase $case, bool $liveSubmitPermitted = false): array
     {
         $case->loadMissing(['account.user.kycProfile', 'documents', 'events']);
         $providerEvidence = is_array($case->provider_response_evidence) && ! array_is_list($case->provider_response_evidence)
@@ -210,7 +221,7 @@ final class NiumRfiWorkflowService
         $reconciliationRequired = $providerEvidence['manual_reconciliation_required'] ?? null;
         $reconciliationRequired = is_bool($reconciliationRequired) ? $reconciliationRequired : null;
 
-        return [...$this->listPayload($case),
+        return [...$this->listPayload($case, $liveSubmitPermitted),
             'origin' => $case->origin,
             'evidence' => array_filter([
                 'template' => data_get($case->evidence, 'template'),
@@ -225,6 +236,7 @@ final class NiumRfiWorkflowService
             'admin_reviewed_at' => $case->admin_reviewed_at,
             'submission_http_status' => $httpStatus,
             'submission_outcome' => $outcome,
+            'authoritative_rfi_status' => strtoupper(trim((string) data_get($case->evidence, 'rfiStatus'))) ?: null,
             'reconciliation_required' => $reconciliationRequired,
             'documents' => $case->documents->whereNull('pivot.detached_at')->map(fn (KycDocument $document): array => [
                 'id' => $document->id,

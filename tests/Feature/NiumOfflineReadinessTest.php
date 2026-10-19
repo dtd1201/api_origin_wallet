@@ -175,6 +175,9 @@ class NiumOfflineReadinessTest extends TestCase
         $admin = User::factory()->create();
         $admin->roles()->create(['role_code' => 'admin']);
         $adminToken = $this->issueTokenFor($admin);
+        $superAdmin = User::factory()->create();
+        $superAdmin->roles()->create(['role_code' => 'super_admin']);
+        $superAdminToken = $this->issueTokenFor($superAdmin);
         $customerToken = $this->issueTokenFor($customer);
         $otherToken = $this->issueTokenFor($otherCustomer);
         $cases = collect(['personal-sow', 'personal-sof'])->map(fn (string $identity) => NiumRfiCase::query()->create([
@@ -190,7 +193,10 @@ class NiumOfflineReadinessTest extends TestCase
         $this->assertSame(2, \App\Models\KycNotificationEvent::query()->where('event_type', 'rfi')->count());
 
         $upload = $this->withToken($customerToken)->post("/api/user/users/{$customer->id}/nium-rfi-documents", [
-            'file' => UploadedFile::fake()->create('bank-statement.pdf', 128, 'application/pdf'),
+            'file' => UploadedFile::fake()->createWithContent(
+                'bank-statement.pdf',
+                "%PDF-1.4\nFactual Corporate RFI bank statement fixture\n%%EOF",
+            ),
         ])->assertCreated();
         $documentId = (int) $upload->json('document.id');
 
@@ -223,6 +229,8 @@ class NiumOfflineReadinessTest extends TestCase
                 ->assertJsonPath('contract_gate', 'provider_contract_unconfirmed');
 
             $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit")
+                ->assertForbidden();
+            $this->withToken($superAdminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit")
                 ->assertUnprocessable()
                 ->assertJsonValidationErrors([
                     'case_id', 'confirmation', 'provider_reference_fingerprint', 'template_fingerprint',
@@ -232,14 +240,14 @@ class NiumOfflineReadinessTest extends TestCase
 
             // Enable only the fake test path so the unconfirmed contract gate is the next guard evaluated.
             config()->set('services.nium.customer_rfi_authoritative_submission_enabled', true);
-            $this->withToken($adminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit", [
+            $this->withToken($superAdminToken)->postJson("/api/admin/nium-rfi-cases/{$case->id}/submit", [
                 'case_id' => $case->id,
-                'confirmation' => 'SUBMIT_TO_NIUM_LIVE',
+                'confirmation' => 'SUBMIT '.$case->id,
                 'provider_reference_fingerprint' => $case->provider_reference_fingerprint,
                 'template_fingerprint' => hash('sha256', (string) data_get($case->evidence, 'templateId')),
             ])
                 ->assertUnprocessable()
-                ->assertJsonPath('message', 'NIUM_RFI_PROVIDER_CONTRACT_GATE: exact Corporate RFI response contract is not configured.');
+                ->assertJsonPath('message', 'NIUM_RFI_PROVIDER_CONTRACT_GATE: this environment, endpoint, version, template, and required-field shape are not verified for live submission.');
             $this->assertSame('admin_approved', $case->fresh()->submission_state);
             $this->assertNull($case->fresh()->claimed_at);
         }

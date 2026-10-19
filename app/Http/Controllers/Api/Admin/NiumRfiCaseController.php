@@ -17,8 +17,6 @@ use RuntimeException;
 
 final class NiumRfiCaseController extends Controller
 {
-    private const LIVE_CONFIRMATION = 'SUBMIT_TO_NIUM_LIVE';
-
     public function __construct(
         private readonly NiumRfiWorkflowService $workflow,
         private readonly NiumTransactionRfiSubmissionService $transactionSubmission,
@@ -66,14 +64,15 @@ final class NiumRfiCaseController extends Controller
             ->latest('id')
             ->paginate((int) ($validated['per_page'] ?? 15));
 
-        return response()->json($cases->through(fn (NiumRfiCase $case) => $this->workflow->listPayload($case)));
+        $canSubmitLive = $request->user()?->hasPermission('rfi.submit.live') === true;
+        return response()->json($cases->through(fn (NiumRfiCase $case) => $this->workflow->listPayload($case, $canSubmitLive)));
     }
 
-    public function show(NiumRfiCase $niumRfiCase): JsonResponse
+    public function show(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
     {
         $this->assertNiumCase($niumRfiCase);
 
-        return response()->json($this->workflow->detailPayload($niumRfiCase));
+        return response()->json($this->workflow->detailPayload($niumRfiCase, $request->user()?->hasPermission('rfi.submit.live') === true));
     }
 
     public function draft(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
@@ -88,7 +87,7 @@ final class NiumRfiCaseController extends Controller
         $this->assertNiumCase($niumRfiCase);
         $case = $this->workflow->saveFactualDraft($niumRfiCase, $validated['answers'], $validated['file_ids'] ?? [], (int) $request->user()->id);
 
-        return response()->json($this->workflow->detailPayload($case));
+        return response()->json($this->workflow->detailPayload($case, $this->canSubmitLive($request)));
     }
 
     public function approve(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
@@ -96,7 +95,7 @@ final class NiumRfiCaseController extends Controller
         $this->assertNiumCase($niumRfiCase);
         $case = $this->workflow->approve($niumRfiCase, (int) $request->user()->id);
 
-        return response()->json($this->workflow->detailPayload($case));
+        return response()->json($this->workflow->detailPayload($case, $this->canSubmitLive($request)));
     }
 
     public function submit(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
@@ -105,7 +104,7 @@ final class NiumRfiCaseController extends Controller
         if ($niumRfiCase->scope === 'customer') {
             $validated = $request->validate([
                 'case_id' => ['required', 'integer', Rule::in([$niumRfiCase->id])],
-                'confirmation' => ['required', Rule::in([self::LIVE_CONFIRMATION])],
+                'confirmation' => ['required', Rule::in(['SUBMIT '.$niumRfiCase->id])],
                 'provider_reference_fingerprint' => ['required', 'string', 'size:64', 'regex:/^[a-f0-9]{64}$/'],
                 'template_fingerprint' => ['required', 'string', 'size:64', 'regex:/^[a-f0-9]{64}$/'],
             ]);
@@ -122,7 +121,7 @@ final class NiumRfiCaseController extends Controller
             $case = $this->transactionSubmission->submit($niumRfiCase);
         }
 
-        return response()->json($this->workflow->detailPayload($case));
+        return response()->json($this->workflow->detailPayload($case, $this->canSubmitLive($request)));
     }
 
     public function refreshStatus(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
@@ -151,26 +150,26 @@ final class NiumRfiCaseController extends Controller
         $case = $case->fresh();
         $this->workflow->recordOperatorEvent($case, (int) $request->user()->id, 'authoritative_provider_status_refreshed', $from, (string) $case->submission_state);
 
-        return response()->json($this->workflow->detailPayload($case->fresh()));
+        return response()->json($this->workflow->detailPayload($case->fresh(), $this->canSubmitLive($request)));
     }
 
     public function sendToUser(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
     {
         $case = $this->workflow->sendToUser($niumRfiCase, (int) $request->user()->id);
-        return response()->json($this->workflow->detailPayload($case));
+        return response()->json($this->workflow->detailPayload($case, $this->canSubmitLive($request)));
     }
 
     public function requestRevision(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
     {
         $validated = $request->validate(['reason' => ['required', 'string', 'max:5000']]);
         $case = $this->workflow->requestRevision($niumRfiCase, (int) $request->user()->id, $validated['reason']);
-        return response()->json($this->workflow->detailPayload($case));
+        return response()->json($this->workflow->detailPayload($case, $this->canSubmitLive($request)));
     }
 
     public function approveUserSubmission(Request $request, NiumRfiCase $niumRfiCase): JsonResponse
     {
         $case = $this->workflow->approveUserSubmission($niumRfiCase, (int) $request->user()->id);
-        return response()->json($this->workflow->detailPayload($case));
+        return response()->json($this->workflow->detailPayload($case, $this->canSubmitLive($request)));
     }
 
     private function assertNiumCase(NiumRfiCase $case): void
@@ -190,5 +189,10 @@ final class NiumRfiCaseController extends Controller
             || ! hash_equals(hash('sha256', $templateId), $validated['template_fingerprint'])) {
             abort(422, 'The selected Corporate RFI fingerprint is stale or invalid.');
         }
+    }
+
+    private function canSubmitLive(Request $request): bool
+    {
+        return $request->user()?->hasPermission('rfi.submit.live') === true;
     }
 }
