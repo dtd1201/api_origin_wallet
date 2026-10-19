@@ -346,6 +346,9 @@ class NiumCorporateRfiSubmissionTest extends TestCase
                 data_get($envelope, 'reviewMetadata.optionalDocumentTypeCandidate'),
             );
             $this->assertSame($hasDocumentTypeBlocker, $envelope['contractBlockers'] !== []);
+            if ($templateName === 'businessRegistrationDocument') {
+                $this->assertStringContainsString('documentType=BUSINESS_REGISTRATION_DOC', $envelope['contractBlockers'][0]);
+            }
             $this->assertArrayNotHasKey('caseId', $envelope['candidateBody']);
             $this->assertArrayNotHasKey('clientId', $envelope['candidateBody']);
         }
@@ -935,6 +938,13 @@ class NiumCorporateRfiSubmissionTest extends TestCase
             $this->assertSame('responded', $case->fresh()->submission_state);
             $this->assertSame('responded_under_review', $case->fresh()->status);
             $this->assertSame('RECONCILED', data_get($case->fresh()->provider_response_evidence, 'outcome'));
+            try {
+                app(NiumRfiWorkflowService::class)->claimForProviderSubmission($case->fresh());
+                $this->fail('Expected a reconciled historical Corporate RFI case to remain non-submittable.');
+            } catch (RuntimeException $exception) {
+                $this->assertStringContainsString('separate human approval', $exception->getMessage());
+            }
+            $this->assertNotNull($case->fresh()->claimed_at);
         }
         Http::assertNothingSent();
     }
