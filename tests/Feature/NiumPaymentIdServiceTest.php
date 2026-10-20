@@ -19,6 +19,13 @@ class NiumPaymentIdServiceTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Http::preventStrayRequests();
+    }
+
     public function test_assign_payment_id_uses_v2_contract_and_persists_safe_virtual_account_reference(): void
     {
         [$provider, $user, $account] = $this->eligibleAccount();
@@ -35,6 +42,7 @@ class NiumPaymentIdServiceTest extends TestCase
             'SGD',
             'SELF_FUNDING_ACCOUNT',
             'LOCAL',
+            operationId: 'service-assignment-001',
         );
 
         $this->assertSame('VA-123456', $virtualAccount->provider_payment_id);
@@ -66,6 +74,7 @@ class NiumPaymentIdServiceTest extends TestCase
         ])]);
 
         $response = $this->withToken($this->issueTokenFor($user))
+            ->withHeader('Idempotency-Key', 'api-assignment-001')
             ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/virtual-account", [
                 'currency' => 'USD',
                 'account_category' => 'SELF_FUNDING_ACCOUNT',
@@ -112,6 +121,27 @@ class NiumPaymentIdServiceTest extends TestCase
                 'account_category',
                 'account_type',
             ]);
+    }
+
+    public function test_virtual_account_endpoint_requires_caller_supplied_idempotency_key(): void
+    {
+        [$provider, $user] = $this->eligibleAccount();
+        $user->profile()->create([
+            'user_type' => 'business',
+            'country_code' => 'HK',
+        ]);
+        Http::fake();
+
+        $this->withToken($this->issueTokenFor($user))
+            ->postJson("/api/user/users/{$user->id}/provider-accounts/{$provider->code}/virtual-account", [
+                'currency' => 'USD',
+                'account_category' => 'COLLECTION_ACCOUNT',
+                'account_type' => 'LOCAL',
+            ])
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'The Idempotency-Key header is required.');
+
+        Http::assertNothingSent();
     }
 
     public function test_virtual_accounts_endpoint_returns_only_matching_provider_accounts_records(): void
@@ -210,6 +240,7 @@ class NiumPaymentIdServiceTest extends TestCase
             'USD',
             'COLLECTION_ACCOUNT',
             'LOCAL',
+            operationId: 'initialized-assignment-001',
         );
 
         $this->assertNull($virtualAccount->provider_payment_id);
@@ -223,6 +254,7 @@ class NiumPaymentIdServiceTest extends TestCase
             'USD',
             'COLLECTION_ACCOUNT',
             'LOCAL',
+            operationId: 'initialized-assignment-002',
         );
 
         $this->assertSame(2, NiumVirtualAccount::query()->where('status', 'pending')->count());
@@ -231,6 +263,7 @@ class NiumPaymentIdServiceTest extends TestCase
     public function test_va_assigned_webhook_is_idempotent_and_maps_customer_wallet_payment_id(): void
     {
         [$provider, $user, $account] = $this->eligibleAccount();
+        $this->fakeVaDetailLookup();
         $pending = NiumVirtualAccount::query()->create([
             'user_provider_account_id' => $account->id,
             'currency' => 'USD',
@@ -271,6 +304,7 @@ class NiumPaymentIdServiceTest extends TestCase
     public function test_real_nium_virtual_account_assigned_webhook_updates_existing_pending_record(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
+        $this->fakeVaDetailLookup();
         $pending = NiumVirtualAccount::query()->create([
             'user_provider_account_id' => $account->id,
             'currency' => 'USD',
@@ -304,6 +338,7 @@ class NiumPaymentIdServiceTest extends TestCase
     public function test_va_assigned_webhook_updates_only_the_pending_record_with_matching_dimensions(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
+        $this->fakeVaDetailLookup();
         $usd = NiumVirtualAccount::query()->create([
             'user_provider_account_id' => $account->id,
             'currency' => 'USD',
@@ -341,9 +376,10 @@ class NiumPaymentIdServiceTest extends TestCase
         $this->assertNull($sgd->fresh()->provider_payment_id);
     }
 
-    public function test_va_assigned_webhooks_assign_identical_pending_records_oldest_first(): void
+    public function test_va_assigned_webhooks_do_not_arbitrarily_bind_identical_pending_records(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
+        $this->fakeVaDetailLookup();
         $oldest = NiumVirtualAccount::query()->create([
             'user_provider_account_id' => $account->id,
             'currency' => 'USD',
@@ -375,10 +411,14 @@ class NiumPaymentIdServiceTest extends TestCase
 
         app(NiumWebhookService::class)->handleWebhook($provider, $firstRequest);
 
-        $this->assertSame('assigned', $oldest->fresh()->status);
-        $this->assertSame('VA-IDENTICAL-001', $oldest->fresh()->provider_payment_id);
+        $this->assertSame('pending', $oldest->fresh()->status);
+        $this->assertNull($oldest->fresh()->provider_payment_id);
         $this->assertSame('pending', $newest->fresh()->status);
         $this->assertNull($newest->fresh()->provider_payment_id);
+        $this->assertDatabaseHas('nium_virtual_accounts', [
+            'provider_payment_id' => 'VA-IDENTICAL-001',
+            'status' => 'assigned',
+        ]);
 
         $payload['eventId'] = 'va-assigned-identical-002';
         $payload['uniquePaymentId'] = 'VA-IDENTICAL-002';
@@ -389,14 +429,19 @@ class NiumPaymentIdServiceTest extends TestCase
 
         app(NiumWebhookService::class)->handleWebhook($provider, $secondRequest);
 
-        $this->assertSame('assigned', $newest->fresh()->status);
-        $this->assertSame('VA-IDENTICAL-002', $newest->fresh()->provider_payment_id);
+        $this->assertSame('pending', $oldest->fresh()->status);
+        $this->assertSame('pending', $newest->fresh()->status);
+        $this->assertDatabaseHas('nium_virtual_accounts', [
+            'provider_payment_id' => 'VA-IDENTICAL-002',
+            'status' => 'assigned',
+        ]);
         $this->assertSame(2, NiumVirtualAccount::query()->where('status', 'assigned')->count());
     }
 
     public function test_va_assigned_webhook_falls_back_to_creating_an_assigned_record(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
+        $this->fakeVaDetailLookup();
         $payload = [
             'eventId' => 'va-assigned-fallback-001',
             'template' => 'VA_ASSIGNED',
@@ -484,6 +529,13 @@ class NiumPaymentIdServiceTest extends TestCase
         ]);
 
         return [$provider, $user, $account];
+    }
+
+    private function fakeVaDetailLookup(): void
+    {
+        Http::fake([
+            'https://gateway.sandbox.nium.test/api/v2/client/client-test/customer/customer-test/wallet/wallet-test/paymentIds*' => Http::response(['content' => []]),
+        ]);
     }
 
     private function issueTokenFor(User $user): string

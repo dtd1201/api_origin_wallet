@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class NiumVirtualAccount extends Model
@@ -37,4 +38,8 @@ class NiumVirtualAccount extends Model
         return $this->hasOne(NiumVirtualAccountDetail::class);
     }
 
+    public function assignmentOperations(): HasMany
+    {
+        return $this->hasMany(NiumVirtualAccountOperation::class);
+    }
 }

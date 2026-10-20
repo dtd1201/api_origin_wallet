@@ -204,6 +204,17 @@ class ProviderAccountController extends Controller
             'account_category' => ['required', 'string', 'in:SELF_FUNDING_ACCOUNT,COLLECTION_ACCOUNT,SELF_FUNDING_AND_COLLECTION_ACCOUNT'],
             'account_type' => ['required', 'string', 'in:LOCAL,WIRES,LOCAL_AND_WIRES'],
         ]);
+        $operationId = trim((string) $request->header('Idempotency-Key'));
+        if ($operationId === '') {
+            return response()->json([
+                'message' => 'The Idempotency-Key header is required.',
+            ], 422);
+        }
+        if (strlen($operationId) > 100 || preg_match('/^[A-Za-z0-9._:-]+$/', $operationId) !== 1) {
+            return response()->json([
+                'message' => 'The Idempotency-Key header format is invalid.',
+            ], 422);
+        }
 
         $account = UserProviderAccount::query()
             ->where('user_id', $user->id)
@@ -218,6 +229,7 @@ class ProviderAccountController extends Controller
                 $validated['account_category'],
                 $validated['account_type'],
                 $bankResolver->resolve($user, $validated['currency']),
+                $operationId,
             );
         } catch (NiumProviderRequestException $exception) {
             return $this->safeNiumErrorResponse($exception);
@@ -229,6 +241,7 @@ class ProviderAccountController extends Controller
 
         return response()->json([
             'message' => 'Virtual account assigned successfully.',
+            'operation_id' => $operationId,
             'virtual_account' => $virtualAccount,
         ], 201);
     }

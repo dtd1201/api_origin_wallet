@@ -52,9 +52,23 @@ class NiumVirtualAccountDetailService
             throw new RuntimeException('Failed fetching Nium virtual account details.');
         }
 
-        $data = $response->json();
+        $data = (array) ($response->json() ?? []);
+        $items = $data['content'] ?? $data['paymentIds'] ?? data_get($data, 'data.content') ?? $data['data'] ?? [];
+        $items = is_array($items) ? $items : [];
+        $requestedPaymentId = (string) $virtualAccount->provider_payment_id;
+        $item = collect($items)->first(function ($candidate) use ($requestedPaymentId): bool {
+            if (! is_array($candidate)) {
+                return false;
+            }
 
-        $item = $data['content'][0] ?? null;
+            $candidatePaymentId = $candidate['uniquePaymentId']
+                ?? $candidate['paymentId']
+                ?? $candidate['virtualAccountNumber']
+                ?? null;
+
+            return is_string($candidatePaymentId)
+                && hash_equals($requestedPaymentId, $candidatePaymentId);
+        });
 
         if (! $item) {
             return null;

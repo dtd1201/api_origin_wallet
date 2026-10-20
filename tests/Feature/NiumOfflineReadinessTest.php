@@ -100,7 +100,7 @@ class NiumOfflineReadinessTest extends TestCase
     {
         [$provider, $user, $account] = $this->account(null, true);
         Http::fake(['*' => Http::response(['uniquePaymentId' => 'VA-CANONICAL', 'currencyCode' => 'HKD'])]);
-        app(NiumPaymentIdService::class)->assign($account, 'HKD', 'COLLECTION_ACCOUNT', 'LOCAL', 'Confirmed Bank');
+        app(NiumPaymentIdService::class)->assign($account, 'HKD', 'COLLECTION_ACCOUNT', 'LOCAL', 'Confirmed Bank', 'offline-readiness-assignment');
         $this->assertDatabaseHas('api_request_logs', ['user_id' => $user->id, 'operation' => 'assign_payment_id']);
     }
 

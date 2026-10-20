@@ -7,6 +7,7 @@ use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\NiumVirtualAccount;
 use App\Models\NiumVirtualAccountDetail;
+use App\Models\NiumVirtualAccountOperation;
 use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\UserProviderAccount;
@@ -474,17 +475,35 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             $payload,
             $paymentId
         ): NiumVirtualAccount {
-            $virtualAccount = null;
+            $virtualAccount = NiumVirtualAccount::query()
+                ->where('user_provider_account_id', $account->id)
+                ->where('provider_payment_id', (string) $paymentId)
+                ->lockForUpdate()
+                ->first();
 
-            if ($accountType !== '') {
-                $virtualAccount = NiumVirtualAccount::query()
+            if ($virtualAccount === null && $accountType !== '') {
+                $pending = NiumVirtualAccount::query()
                     ->where('user_provider_account_id', $account->id)
                     ->where('currency', $currency)
                     ->where('account_type', $accountType)
                     ->where('status', 'pending')
-                    ->oldest('id')
+                    ->when($accountCategory !== '', fn ($query) => $query->where('account_category', $accountCategory))
+                    ->orderBy('id')
                     ->lockForUpdate()
-                    ->first();
+                    ->get();
+
+                if ($pending->count() === 1) {
+                    $virtualAccount = $pending->sole();
+                } elseif ($pending->count() > 1) {
+                    NiumVirtualAccountOperation::query()
+                        ->whereIn('nium_virtual_account_id', $pending->modelKeys())
+                        ->whereNotIn('status', [NiumVirtualAccountOperation::ASSIGNED, NiumVirtualAccountOperation::FAILED])
+                        ->update([
+                            'status' => NiumVirtualAccountOperation::MANUAL_REVIEW,
+                            'resolution_code' => 'ambiguous_webhook_without_correlation',
+                            'updated_at' => now(),
+                        ]);
+                }
             }
 
             if ($virtualAccount === null) {
@@ -510,6 +529,17 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
                 ]);
             }
+
+            NiumVirtualAccountOperation::query()
+                ->where('nium_virtual_account_id', $virtualAccount->id)
+                ->whereNotIn('status', [NiumVirtualAccountOperation::ASSIGNED, NiumVirtualAccountOperation::FAILED])
+                ->update([
+                    'provider_payment_id' => (string) $paymentId,
+                    'status' => NiumVirtualAccountOperation::ASSIGNED,
+                    'resolution_code' => 'provider_webhook_payment_id',
+                    'resolved_at' => now(),
+                    'updated_at' => now(),
+                ]);
 
             return $virtualAccount->fresh();
         });
