@@ -3,26 +3,26 @@
 namespace Tests\Feature;
 
 use App\Console\Commands\SubmitNiumAuthoritativeCorporateRfi;
-use App\Models\IntegrationProvider;
 use App\Models\ApiRequestLog;
+use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
 use App\Models\NiumApiExchangeEvidence;
 use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use App\Services\Nium\NiumCorporateRfiSubmissionService;
-use App\Services\Nium\NiumCorporateRfiAuthoritativeTransport;
 use App\Services\Nium\NiumCorporateRfiAuthoritativeSubmissionService;
+use App\Services\Nium\NiumCorporateRfiAuthoritativeTransport;
+use App\Services\Nium\NiumCorporateRfiSubmissionService;
 use App\Services\Nium\NiumEvidencePersistenceException;
-use App\Services\Nium\NiumService;
-use App\Services\Nium\NiumRfiWorkflowService;
 use App\Services\Nium\NiumRegionResolver;
+use App\Services\Nium\NiumRfiWorkflowService;
+use App\Services\Nium\NiumService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\StrayRequestException;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -937,7 +937,17 @@ class NiumCorporateRfiSubmissionTest extends TestCase
         $account->update(['provider_status' => 'pending', 'provider_sub_status' => 'under_review', 'customer_id_verified_at' => now()]);
 
         app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account->fresh(), $providerRfis);
+        $firstReconciliation = $cases[0]->fresh();
+        $businessUpdatedAt = $firstReconciliation->getRawOriginal('updated_at');
+        $providerRespondedAt = data_get($firstReconciliation->provider_response_evidence, 'provider_responded_at');
+        $firstSyncedAt = $firstReconciliation->reconciled_at;
+        $this->travel(1)->minute();
         app(NiumRfiWorkflowService::class)->reconcileCustomerEvidence($account->fresh(), $providerRfis);
+
+        $repeated = $cases[0]->fresh();
+        $this->assertSame($businessUpdatedAt, $repeated->getRawOriginal('updated_at'));
+        $this->assertSame($providerRespondedAt, data_get($repeated->provider_response_evidence, 'provider_responded_at'));
+        $this->assertTrue($repeated->reconciled_at->greaterThan($firstSyncedAt));
 
         foreach ($cases as $case) {
             $this->assertSame('responded', $case->fresh()->submission_state);

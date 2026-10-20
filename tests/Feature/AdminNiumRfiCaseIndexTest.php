@@ -8,6 +8,7 @@ use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -195,6 +196,37 @@ class AdminNiumRfiCaseIndexTest extends TestCase
         $this->withToken($token)->getJson('/api/admin/nium-rfi-cases?per_page=101')
             ->assertUnprocessable()
             ->assertJsonValidationErrors('per_page');
+    }
+
+    public function test_business_activity_timestamps_are_distinct_and_unknown_provider_times_remain_null(): void
+    {
+        $provider = $this->provider();
+        [, $account] = $this->customer($provider, 'GREENTECH LEGAL LIMITED', 'Greentech Trading');
+        $cases = collect([2, 3, 4, 5, 7])->map(function (int $day) use ($provider, $account): NiumRfiCase {
+            $approvedAt = Carbon::parse("2026-10-{$day} 09:00:00");
+
+            return $this->rfi($provider, $account, [
+                'status' => 'responded_under_review',
+                'submission_state' => 'responded',
+                'approved_at' => $approvedAt,
+                'admin_reviewed_at' => $approvedAt,
+                'reconciled_at' => Carbon::parse('2026-10-20 12:00:00'),
+                'provider_response_evidence' => [
+                    'submission_mode' => 'authoritative_legacy',
+                    'outcome' => 'RECONCILED',
+                ],
+            ]);
+        });
+
+        $data = $this->withToken($this->adminToken())->getJson('/api/admin/nium-rfi-cases')
+            ->assertOk()
+            ->assertJsonStructure(['data' => [['updated_at', 'reconciled_at', 'last_activity_at', 'customer_submitted_at', 'admin_approved_at', 'provider_acknowledged_at', 'provider_responded_at', 'last_synced_at']]])
+            ->json('data');
+
+        $returned = collect($data)->whereIn('id', $cases->pluck('id'));
+        $this->assertCount(5, $returned->pluck('last_activity_at')->unique());
+        $this->assertTrue($returned->every(fn (array $case): bool => $case['provider_responded_at'] === null));
+        $this->assertTrue($returned->every(fn (array $case): bool => $case['last_synced_at'] !== null));
     }
 
     private function provider(): IntegrationProvider

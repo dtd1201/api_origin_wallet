@@ -8,6 +8,7 @@ use App\Models\NiumRfiCase;
 use App\Models\UserProviderAccount;
 use App\Support\NiumOperationalData;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -190,7 +191,10 @@ final class NiumRfiWorkflowService
             && $case->claimed_at === null
             && $readinessBlockers === [];
 
+        $timestamps = $this->businessTimestamps($case);
+
         return [...$payload,
+            ...$timestamps,
             'customer_id' => $case->account?->user_id,
             'customer_name' => $customerName !== '' ? $customerName : null,
             'template_name' => $templateName !== '' ? Str::limit($templateName, 160, '') : null,
@@ -448,6 +452,7 @@ final class NiumRfiWorkflowService
                         'evidence' => [],
                     ]);
 
+                    $wasCreated = $case->wasRecentlyCreated;
                     $updates = [
                         'status' => $providerRfi['status'] === 'RFI_RESPONDED'
                             ? 'responded_under_review'
@@ -483,28 +488,43 @@ final class NiumRfiWorkflowService
                                 throw new RuntimeException('Authoritative Corporate RFI reconciliation evidence does not match the claimed submission.');
                             }
                             $updates['submission_state'] = 'responded';
-                            $updates['provider_response_evidence'] = [
-                                ...$existingEvidence,
-                                'outcome' => 'RECONCILED',
-                                'reason' => 'authoritative_get_confirmed_rfi_responded',
-                                'manual_reconciliation_required' => false,
-                                'authoritative_rfi_status' => 'RFI_RESPONDED',
-                                'provider_reference_fingerprint' => $fingerprint,
-                                'template_fingerprint' => hash('sha256', (string) $providerRfi['templateId']),
-                                'reconciled_source' => 'authoritative_provider_rfi_fetch',
-                                'reconciled_at' => now()->toISOString(),
-                            ];
+                            if (! $alreadyReconciled) {
+                                $updates['provider_response_evidence'] = [
+                                    ...$existingEvidence,
+                                    'outcome' => 'RECONCILED',
+                                    'reason' => 'authoritative_get_confirmed_rfi_responded',
+                                    'manual_reconciliation_required' => false,
+                                    'authoritative_rfi_status' => 'RFI_RESPONDED',
+                                    'provider_reference_fingerprint' => $fingerprint,
+                                    'template_fingerprint' => hash('sha256', (string) $providerRfi['templateId']),
+                                    'reconciled_source' => 'authoritative_provider_rfi_fetch',
+                                    'reconciled_at' => now()->toISOString(),
+                                    'provider_acknowledged_at' => $existingEvidence['provider_acknowledged_at'] ?? $existingEvidence['recorded_at'] ?? null,
+                                    'provider_responded_at' => $existingEvidence['provider_responded_at'] ?? now()->toISOString(),
+                                ];
+                            }
                         } else {
-                            $updates['provider_response_evidence'] = array_filter([
-                                'rfi_status' => 'RFI_RESPONDED',
-                                'rfi_hash_id' => $providerRfi['rfiHashId'],
-                                'template_id' => $providerRfi['templateId'],
-                                'source' => 'authoritative_provider_rfi_fetch',
-                                'recorded_at' => now()->toISOString(),
-                            ], static fn (mixed $value): bool => $value !== null && $value !== '');
+                            $responseWasNewlyConfirmed = ! $wasCreated
+                                && strtoupper(trim((string) data_get($case->evidence, 'rfiStatus'))) !== 'RFI_RESPONDED';
+                            $updates['provider_response_evidence'] = $existingEvidence !== []
+                                ? $existingEvidence
+                                : array_filter([
+                                    'rfi_status' => 'RFI_RESPONDED',
+                                    'rfi_hash_id' => $providerRfi['rfiHashId'],
+                                    'template_id' => $providerRfi['templateId'],
+                                    'source' => 'authoritative_provider_rfi_fetch',
+                                    'provider_responded_at' => $responseWasNewlyConfirmed ? now()->toISOString() : null,
+                                ], static fn (mixed $value): bool => $value !== null && $value !== '');
                         }
                     }
 
+                    $businessUpdates = Arr::except($updates, ['reconciled_at']);
+                    $businessChanged = collect($businessUpdates)->contains(
+                        fn (mixed $value, string $key): bool => $case->getAttribute($key) != $value,
+                    );
+                    if (! $businessChanged) {
+                        $updates['updated_at'] = $case->updated_at;
+                    }
                     NiumRfiCase::query()->whereKey($case->id)->update($updates);
                     if ($updates['status'] === 'requested') {
                         $this->kycNotifications->recordConfirmedRfi(
@@ -528,6 +548,54 @@ final class NiumRfiWorkflowService
             NiumRfiCase::query()->where('user_provider_account_id', $account->id)
                 ->whereIn('status', ['provisional', 'requested', 'responded_under_review'])
                 ->update(['status' => 'resolved_authoritative_clear', 'reconciled_at' => now()]);
+        }
+    }
+
+    private function businessTimestamps(NiumRfiCase $case): array
+    {
+        $evidence = is_array($case->provider_response_evidence) ? $case->provider_response_evidence : [];
+        $providerAcknowledgedAt = $this->safeTimestamp($evidence['provider_acknowledged_at'] ?? null);
+        if ($providerAcknowledgedAt === null && ($evidence['outcome'] ?? null) === 'ACKNOWLEDGED') {
+            $providerAcknowledgedAt = $this->safeTimestamp($evidence['recorded_at'] ?? null);
+        }
+        $providerRespondedAt = $this->safeTimestamp($evidence['provider_responded_at'] ?? null);
+        if ($providerRespondedAt === null
+            && $case->submission_state === 'responded'
+            && ($evidence['outcome'] ?? null) !== 'RECONCILED') {
+            $providerRespondedAt = $this->safeTimestamp($evidence['recorded_at'] ?? null);
+        }
+
+        $activity = collect([
+            $case->sent_to_user_at,
+            $case->user_submitted_at,
+            $case->admin_reviewed_at,
+            $case->approved_at,
+            $case->claimed_at,
+            $providerAcknowledgedAt,
+            $providerRespondedAt,
+        ])->filter()->sortByDesc(fn ($value) => $value instanceof \DateTimeInterface ? $value->getTimestamp() : Carbon::parse($value)->getTimestamp())->first()
+            ?? $case->created_at;
+
+        return [
+            'last_activity_at' => $activity,
+            'customer_submitted_at' => $case->user_submitted_at,
+            'admin_approved_at' => $case->approved_at,
+            'provider_acknowledged_at' => $providerAcknowledgedAt,
+            'provider_responded_at' => $providerRespondedAt,
+            'last_synced_at' => $case->reconciled_at,
+        ];
+    }
+
+    private function safeTimestamp(mixed $value): ?Carbon
+    {
+        if (! is_string($value) || trim($value) === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($value);
+        } catch (\Throwable) {
+            return null;
         }
     }
 
