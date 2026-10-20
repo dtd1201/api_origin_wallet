@@ -12,6 +12,7 @@ use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumPaymentIdBankResolver;
 use App\Services\Nium\NiumPaymentIdService;
+use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
@@ -21,8 +22,11 @@ use RuntimeException;
 
 class ProviderAccountController extends Controller
 {
-    public function index(User $user, IntegrationProviderCatalog $providerCatalog): JsonResponse
-    {
+    public function index(
+        User $user,
+        IntegrationProviderCatalog $providerCatalog,
+        NiumProviderAccountStateService $accountStateService,
+    ): JsonResponse {
         $user->load([
             'providerAccounts.provider',
             'integrationLinks.provider',
@@ -35,7 +39,7 @@ class ProviderAccountController extends Controller
         return response()->json([
             'data' => $providers
                 ->filter(fn (IntegrationProvider $provider) => $provider->supportsOnboarding() || PrimaryProvider::isPrimary($provider))
-                ->map(function (IntegrationProvider $provider) use ($user): array {
+                ->map(function (IntegrationProvider $provider) use ($user, $accountStateService): array {
                     $integrationLink = $user->integrationLinks->firstWhere('provider_id', $provider->id);
                     $integrationRequest = $user->integrationRequests->firstWhere('provider_id', $provider->id);
                     $kycProviderSubmission = $user->kycProviderSubmissions->firstWhere('provider_id', $provider->id);
@@ -50,6 +54,12 @@ class ProviderAccountController extends Controller
                         );
                     $internalKycVerified = in_array(strtolower((string) $user->kyc_status), ['verified', 'approved'], true);
                     $providerSubmissionReady = in_array($kycProviderSubmission?->status, ['pending', 'submitted'], true);
+                    $virtualAccountEligibility = PrimaryProvider::isPrimary($provider)
+                        ? $accountStateService->virtualAccountEligibility($user)
+                        : [
+                            'can_request_virtual_account' => false,
+                            'reason' => 'unsupported_provider',
+                        ];
 
                     return [
                         'provider' => $provider->summaryPayload(),
@@ -63,6 +73,8 @@ class ProviderAccountController extends Controller
                         'can_connect' => $linkAvailable && $internalKycVerified && $providerSubmissionReady,
                         'can_request_connect' => ! $linkAvailable,
                         'request_pending' => $integrationRequest?->status === 'pending',
+                        'can_request_virtual_account' => $virtualAccountEligibility['can_request_virtual_account'],
+                        'virtual_account_eligibility_reason' => $virtualAccountEligibility['reason'],
                     ];
                 })->values()->all(),
         ]);

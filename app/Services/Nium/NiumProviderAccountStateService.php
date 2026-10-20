@@ -274,25 +274,13 @@ class NiumProviderAccountStateService
 
     public function assertEligible(User $user, bool $requireWallet = true): UserProviderAccount
     {
-        $providerAccount = $user->providerAccounts()
-            ->whereHas('provider', fn ($query) => $query->whereRaw('LOWER(code) = ?', ['nium']))
-            ->latest('id')
-            ->first();
+        $providerAccount = $this->latestNiumAccount($user);
 
         if ($providerAccount === null) {
             throw new RuntimeException('Nium customer onboarding has not been started.');
         }
 
-        $eligible = $providerAccount->status === 'active'
-            && $this->safeValues->providerStatus($providerAccount->provider_status) === 'clear'
-            && $this->safeValues->providerSubStatus($providerAccount->provider_sub_status) === null
-            && filled($providerAccount->external_customer_id)
-            && $providerAccount->customer_id_verified_at !== null
-            && (! $requireWallet || (
-                filled($providerAccount->external_account_id)
-                && $providerAccount->wallet_id_verified_at !== null
-            ))
-            && $providerAccount->security_conflict_at === null;
+        $eligible = $this->isEligibleAccount($providerAccount, $requireWallet);
 
         if (! $eligible) {
             $state = collect([$providerAccount->provider_status, $providerAccount->provider_sub_status])
@@ -305,6 +293,40 @@ class NiumProviderAccountStateService
         return $providerAccount;
     }
 
+    /**
+     * Return the same eligibility decision used by assertEligible without contacting Nium.
+     *
+     * @return array{can_request_virtual_account: bool, reason: string|null}
+     */
+    public function virtualAccountEligibility(User $user): array
+    {
+        $providerAccount = $this->latestNiumAccount($user);
+
+        if ($providerAccount === null) {
+            return [
+                'can_request_virtual_account' => false,
+                'reason' => 'account_missing',
+            ];
+        }
+
+        if ($this->isEligibleAccount($providerAccount, true)) {
+            return [
+                'can_request_virtual_account' => true,
+                'reason' => null,
+            ];
+        }
+
+        $providerStatus = $this->safeValues->providerStatus($providerAccount->provider_status);
+        $approvalPending = in_array($providerAccount->status, ['pending', 'under_review'], true)
+            || in_array($providerStatus, ['pending', 'under_review'], true)
+            || $this->safeValues->providerSubStatus($providerAccount->provider_sub_status) !== null;
+
+        return [
+            'can_request_virtual_account' => false,
+            'reason' => $approvalPending ? 'kyb_approval_pending' : 'account_verification_incomplete',
+        ];
+    }
+
     public function isCustomerLifecycleTemplate(?string $template): bool
     {
         return in_array(strtoupper((string) $template), [
@@ -314,6 +336,28 @@ class NiumProviderAccountStateService
             'CUSTOMER_ODD_STATUS_WEBHOOK',
             'CARD_CUSTOMER_REGISTRATION_WEBHOOK',
         ], true);
+    }
+
+    private function latestNiumAccount(User $user): ?UserProviderAccount
+    {
+        return $user->providerAccounts()
+            ->whereHas('provider', fn ($query) => $query->whereRaw('LOWER(code) = ?', ['nium']))
+            ->latest('id')
+            ->first();
+    }
+
+    private function isEligibleAccount(UserProviderAccount $providerAccount, bool $requireWallet): bool
+    {
+        return $providerAccount->status === 'active'
+            && $this->safeValues->providerStatus($providerAccount->provider_status) === 'clear'
+            && $this->safeValues->providerSubStatus($providerAccount->provider_sub_status) === null
+            && filled($providerAccount->external_customer_id)
+            && $providerAccount->customer_id_verified_at !== null
+            && (! $requireWallet || (
+                filled($providerAccount->external_account_id)
+                && $providerAccount->wallet_id_verified_at !== null
+            ))
+            && $providerAccount->security_conflict_at === null;
     }
 
     private function assertNotReservedIncompleteCustomerRetryFixture(
