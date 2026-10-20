@@ -12,6 +12,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumKycNotificationService;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
@@ -138,6 +139,60 @@ final class NiumKycNotificationTest extends TestCase
         $this->assertDatabaseHas('kyc_notification_deliveries', ['normalized_email' => 'datlua01@gmail.com']);
     }
 
+    public function test_repeated_confirmed_rfi_does_not_abort_an_enclosing_postgres_transaction(): void
+    {
+        if (DB::getDriverName() !== 'pgsql') {
+            $this->markTestSkipped('Requires PostgreSQL.');
+        }
+
+        $account = $this->account('customer@example.com');
+        $case = NiumRfiCase::query()->create([
+            'provider_id' => $account->provider_id,
+            'user_provider_account_id' => $account->id,
+            'scope' => 'customer',
+            'provider_reference_fingerprint' => hash('sha256', 'transaction-rfi'),
+            'status' => 'requested',
+            'evidence' => ['rfiHashId' => 'transaction-rfi', 'rfiStatus' => 'RFI_REQUESTED'],
+        ]);
+
+        DB::transaction(function () use ($account, $case): void {
+            $this->service()->recordConfirmedRfi($account, $case);
+            $this->service()->recordConfirmedRfi($account, $case);
+
+            $this->assertSame(1, DB::table('kyc_notification_events')->count());
+        });
+
+        $this->assertDatabaseCount('kyc_notification_events', 1);
+        $this->assertDatabaseCount('kyc_notification_deliveries', 1);
+        Queue::assertPushed(DispatchKycNotificationEventJob::class, 1);
+    }
+
+    public function test_insert_or_ignore_does_not_hide_a_genuine_postgres_database_failure(): void
+    {
+        if (DB::getDriverName() !== 'pgsql') {
+            $this->markTestSkipped('Requires PostgreSQL.');
+        }
+
+        $account = $this->account('customer@example.com');
+        $case = NiumRfiCase::query()->create([
+            'provider_id' => $account->provider_id,
+            'user_provider_account_id' => $account->id,
+            'scope' => 'customer',
+            'provider_reference_fingerprint' => hash('sha256', 'foreign-key-failure-rfi'),
+            'status' => 'requested',
+            'evidence' => ['rfiHashId' => 'foreign-key-failure-rfi', 'rfiStatus' => 'RFI_REQUESTED'],
+        ]);
+        $case->delete();
+        $account->delete();
+
+        try {
+            DB::transaction(fn () => $this->service()->recordConfirmedRfi($account, $case));
+            $this->fail('Expected the missing provider account foreign key to fail.');
+        } catch (QueryException $exception) {
+            $this->assertSame('23503', (string) ($exception->errorInfo[0] ?? ''));
+        }
+    }
+
     public function test_outbox_and_queue_dispatch_are_removed_by_transaction_rollback(): void
     {
         $account = $this->account('customer@example.com');
@@ -213,6 +268,7 @@ final class NiumKycNotificationTest extends TestCase
     {
         $user = User::factory()->create(['email' => $email]);
         $provider = IntegrationProvider::query()->firstOrCreate(['code' => 'nium'], ['name' => 'Nium', 'status' => 'active']);
+
         return UserProviderAccount::query()->create(['user_id' => $user->id, 'provider_id' => $provider->id, 'status' => 'submitted']);
     }
 
@@ -221,6 +277,7 @@ final class NiumKycNotificationTest extends TestCase
         $user = User::factory()->create(['email' => $email, 'status' => $status]);
         $role = Role::query()->firstOrCreate(['code' => $roleCode], ['name' => str($roleCode)->headline()]);
         $user->roles()->create(['role_id' => $role->id, 'role_code' => $roleCode]);
+
         return $user;
     }
 }

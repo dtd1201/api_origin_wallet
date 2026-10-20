@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\DispatchKycNotificationEventJob;
 use App\Models\IntegrationProvider;
 use App\Models\KycNotificationEvent;
 use App\Models\NiumRfiCase;
@@ -137,6 +138,60 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
         $this->assertSame(1, KycNotificationEvent::query()->where('event_type', 'rfi')->count());
         Http::assertSentCount(4);
         $this->assertCount(0, collect(Http::recorded())->filter(fn ($pair): bool => $pair[0]->method() !== 'GET'));
+    }
+
+    public function test_multiple_responded_rfis_and_one_requested_rfi_reconcile_repeatedly_without_changing_submission_evidence(): void
+    {
+        Queue::fake();
+        $account = $this->account([
+            'status' => 'under_review',
+            'provider_status' => 'pending',
+            'provider_sub_status' => 'rfi_requested',
+            'rfi_status' => 'requested',
+        ]);
+        $providerRfis = [
+            $this->providerRfi('RFI_RESPONDED', 'historical-rfi-1'),
+            $this->providerRfi('RFI_RESPONDED', 'historical-rfi-2'),
+            $this->providerRfi('RFI_RESPONDED', 'historical-rfi-3'),
+            $this->providerRfi('RFI_REQUESTED', 'requested-rfi'),
+        ];
+        Http::fake(function (Request $request) use ($account, $providerRfis) {
+            return str_contains($request->url(), '/corporate/rfi')
+                ? Http::response(['rfiTemplates' => $providerRfis])
+                : Http::response($this->customerPayload($account, 'pending', 'rfi_requested'));
+        });
+
+        $this->artisan('nium:reconcile-customers')->assertExitCode(0);
+
+        $requested = NiumRfiCase::query()
+            ->where('provider_reference_fingerprint', hash('sha256', 'requested-rfi'))
+            ->sole();
+        $requested->update([
+            'submission_state' => 'sent_to_user',
+            'response_draft' => [['questionId' => 'synthetic-question', 'answer' => 'synthetic-answer']],
+            'provider_response_evidence' => ['preserved' => 'synthetic-submission-evidence'],
+        ]);
+        $this->travel(16)->minutes();
+        $this->artisan('nium:reconcile-customers')->assertExitCode(0);
+
+        $this->assertSame(3, NiumRfiCase::query()->where('status', 'responded_under_review')->count());
+        $this->assertSame(
+            ['historical-rfi-1', 'historical-rfi-2', 'historical-rfi-3'],
+            NiumRfiCase::query()->where('status', 'responded_under_review')->get()
+                ->pluck('provider_response_evidence.rfi_hash_id')->sort()->values()->all(),
+        );
+        $this->assertSame('sent_to_user', $requested->fresh()->submission_state);
+        $this->assertEquals(
+            [['questionId' => 'synthetic-question', 'answer' => 'synthetic-answer']],
+            $requested->fresh()->response_draft,
+        );
+        $this->assertEquals(
+            ['preserved' => 'synthetic-submission-evidence'],
+            $requested->fresh()->provider_response_evidence,
+        );
+        $this->assertSame(1, KycNotificationEvent::query()->where('event_type', 'rfi')->count());
+        Queue::assertPushed(DispatchKycNotificationEventJob::class, 1);
+        Http::assertSentCount(4);
     }
 
     public function test_real_four_rfi_shape_is_parsed_and_persisted_idempotently_without_touching_webhook_history(): void
@@ -361,6 +416,7 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
     private function account(array $overrides = []): UserProviderAccount
     {
         $user = User::factory()->create(['status' => 'active']);
+
         return UserProviderAccount::query()->create(array_replace([
             'user_id' => $user->id, 'provider_id' => $this->provider->id,
             'external_customer_id' => 'customer-'.$user->id, 'external_reference' => 'reference-'.$user->id,
@@ -386,6 +442,7 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
         $account = UserProviderAccount::query()->get()->first(
             fn (UserProviderAccount $candidate): bool => str_contains($url, (string) $candidate->external_customer_id),
         );
+
         return $this->customerPayload($account, 'pending', 'under_review');
     }
 
@@ -396,11 +453,11 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
         $this->assertCount(0, collect(Http::recorded())->filter(fn ($pair): bool => $pair[0]->method() !== 'GET'));
     }
 
-    private function providerRfi(string $status): array
+    private function providerRfi(string $status, string $id = 'synthetic-rfi-hash'): array
     {
         return [
-            'rfiHashId' => 'synthetic-rfi-hash',
-            'templateId' => 'synthetic-template-id',
+            'rfiHashId' => $id,
+            'templateId' => $id.'-template',
             'template' => [
                 'name' => 'otherDocument',
                 'documentType' => 'document',
@@ -419,7 +476,7 @@ final class ReconcileNiumCustomersCommandTest extends TestCase
 
     private function captureLogs(): TestHandler
     {
-        $handler = new TestHandler();
+        $handler = new TestHandler;
         Log::getLogger()->pushHandler($handler);
 
         return $handler;

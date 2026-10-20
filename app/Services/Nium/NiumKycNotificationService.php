@@ -7,7 +7,6 @@ use App\Models\KycNotificationEvent;
 use App\Models\NiumRfiCase;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -51,29 +50,30 @@ final class NiumKycNotificationService
         $user = $account->user;
         $idempotencyKey = hash('sha256', $identity);
 
-        try {
-            $event = KycNotificationEvent::query()->create([
-                'user_provider_account_id' => $account->id,
-                'event_type' => $eventType,
-                'idempotency_key' => $idempotencyKey,
-                'payload' => [
-                    'display_name' => $user->profile?->company_name
-                        ?? $user->kycProfile?->business_name
-                        ?? $user->kycProfile?->legal_name
-                        ?? $user->full_name
-                        ?? 'Customer',
-                    'account_reference' => 'OW-'.$account->id,
-                    'verified_status' => collect([$account->provider_status, $account->provider_sub_status])
-                        ->filter(fn ($value) => filled($value))->implode(' / '),
-                    'admin_review_url' => $this->adminReviewUrl($user),
-                ],
-            ]);
-        } catch (QueryException $exception) {
-            if ($this->isUniqueViolation($exception)) {
-                return;
-            }
-            throw $exception;
+        $event = new KycNotificationEvent([
+            'user_provider_account_id' => $account->id,
+            'event_type' => $eventType,
+            'idempotency_key' => $idempotencyKey,
+            'payload' => [
+                'display_name' => $user->profile?->company_name
+                    ?? $user->kycProfile?->business_name
+                    ?? $user->kycProfile?->legal_name
+                    ?? $user->full_name
+                    ?? 'Customer',
+                'account_reference' => 'OW-'.$account->id,
+                'verified_status' => collect([$account->provider_status, $account->provider_sub_status])
+                    ->filter(fn ($value) => filled($value))->implode(' / '),
+                'admin_review_url' => $this->adminReviewUrl($user),
+            ],
+        ]);
+        $event->updateTimestamps();
+
+        $inserted = KycNotificationEvent::query()->insertOrIgnore($event->getAttributes());
+        if ($inserted === 0) {
+            return;
         }
+
+        $event = KycNotificationEvent::query()->where('idempotency_key', $idempotencyKey)->sole();
 
         foreach ($this->recipients($user, $includeUser) as $recipient) {
             $event->deliveries()->create($recipient);
@@ -135,10 +135,5 @@ final class NiumKycNotificationService
             : '?';
 
         return $url.$separator.'user_id='.$user->id.($fragment === null ? '' : '#'.$fragment);
-    }
-
-    private function isUniqueViolation(QueryException $exception): bool
-    {
-        return in_array((string) ($exception->errorInfo[0] ?? ''), ['23000', '23505'], true);
     }
 }
