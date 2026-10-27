@@ -163,7 +163,7 @@ class UserKycSubmissionController extends Controller
         $profiles = KycProfile::query()
             ->with([
                 'user.providerAccounts' => function ($query) {
-                    $query->where('provider_id', 7);
+                    $query->whereHas('provider', fn (Builder $providerQuery) => $providerQuery->whereRaw('LOWER(code) = ?', ['nium']));
                 },
                 'reviewedBy',
                 'documents',
