@@ -13,7 +13,7 @@ use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Throwable;
 
-/** Inactive Phase 2 orchestrator. Never reconcile or recover by repeating a POST. */
+/** Admitted single-dispatch orchestrator. Never recover by repeating a POST. */
 final class NiumVirtualAccountAssignmentService
 {
     public function __construct(private readonly NiumVirtualAccountSafetyLedger $ledger) {}
@@ -99,8 +99,13 @@ final class NiumVirtualAccountAssignmentService
         if (config('services.nium.va_single_dispatch.allocation_paused') !== false) {
             return 'allocation_paused';
         }
+        if (app()->environment('production')) {
+            // Operator admission follows the runtime cutover; this setting is not its proof.
+            return config('services.nium.va_single_dispatch.production_admission_enabled') === true
+                ? null : 'allocation_production_disabled';
+        }
         if (! app()->environment('testing')) {
-            return 'allocation_testing_only';
+            return 'allocation_unavailable';
         }
         if (config('services.nium.va_single_dispatch.enabled') !== true) {
             return 'allocation_unavailable';
@@ -118,9 +123,12 @@ final class NiumVirtualAccountAssignmentService
         if ($reason === 'allocation_paused') {
             throw new RuntimeException('Nium VA single dispatch is inactive: new allocation is paused; saved requests remain available for status recovery.');
         }
-        if ($reason !== null || (! $confirmedCorridor
-            && ! in_array((int) $account->id, config('services.nium.va_single_dispatch.account_ids', []), true))) {
-            throw new RuntimeException('Nium VA single dispatch is inactive: isolated tests only until Phase 3 reconciliation and fenced cutover.');
+        if ($reason !== null) {
+            throw new RuntimeException('Nium VA allocation is disabled: '.$reason.'; saved requests remain available for status recovery.');
+        }
+        if (! $confirmedCorridor && (! app()->environment('testing')
+            || ! in_array((int) $account->id, config('services.nium.va_single_dispatch.account_ids', []), true))) {
+            throw new RuntimeException('Nium VA allocation supports only USD / SELF_FUNDING_ACCOUNT / JPM_SG / WIRES using V1.');
         }
         if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
             throw new RuntimeException('Nium VA dispatch requires a top-level committed transaction.');

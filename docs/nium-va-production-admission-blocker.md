@@ -1,4 +1,9 @@
-# Final NIUM VA Production admission — blocked for technical-lead review
+# Historical NIUM VA Production admission report
+
+Superseded by [Production release and runtime cutover](nium-va-production-release.md).
+The text below records the earlier testing-only state, before the legacy evidence
+fixes in `45c1f75` and the default-OFF Production admission change. It is not the
+current deployment instruction.
 
 Production admission was not implemented. The requested verifiable legacy-writer
 fence cannot be established by the existing repository controls. Adding a new

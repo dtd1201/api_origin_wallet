@@ -41,6 +41,7 @@ class NiumVirtualAccountCorridorTest extends TestCase
             'services.nium.webhook.static_header_name' => 'x-partner-key',
             'services.nium.webhook.static_header_value' => 'synthetic-partner-key',
             'services.nium.va_single_dispatch.allocation_paused' => false,
+            'services.nium.va_single_dispatch.production_admission_enabled' => false,
             'services.nium.va_single_dispatch.enabled' => true,
             'services.nium.va_single_dispatch.old_workers_fenced' => true,
             'services.nium.va_single_dispatch.account_ids' => [],
@@ -79,8 +80,11 @@ class NiumVirtualAccountCorridorTest extends TestCase
         );
     }
 
-    public function test_greentech_and_another_eligible_customer_use_v1_with_isolated_identities(): void
+    #[DataProvider('allocationEnvironments')]
+    public function test_greentech_and_another_eligible_customer_use_v1_with_isolated_identities(string $environment): void
     {
+        $this->app->instance('env', $environment);
+        config(['services.nium.va_single_dispatch.production_admission_enabled' => true]);
         Http::fake(function ($outgoing) {
             $this->assertSame('POST', $outgoing->method());
             $this->assertStringContainsString('/api/v1/', $outgoing->url());
@@ -112,6 +116,11 @@ class NiumVirtualAccountCorridorTest extends TestCase
         $this->getJson('/api/user/users/'.$first->user_id.'/provider-accounts/nium')->assertForbidden();
         $this->submit($second, 'shared-key')->assertCreated();
         Http::assertSentCount(2);
+    }
+
+    public static function allocationEnvironments(): array
+    {
+        return [['testing'], ['production']];
     }
 
     public function test_normal_api_selects_exact_v1_without_get_and_replays_frozen_contract(): void
@@ -146,8 +155,10 @@ class NiumVirtualAccountCorridorTest extends TestCase
     }
 
     #[DataProvider('uncertainOutcomes')]
-    public function test_uncertain_result_is_persisted_and_no_key_can_automatically_repost(string $outcome, string $state): void
+    public function test_uncertain_result_is_persisted_and_no_key_can_automatically_repost(string $outcome, string $state, string $environment): void
     {
+        $this->app->instance('env', $environment);
+        config(['services.nium.va_single_dispatch.production_admission_enabled' => true]);
         $account = $this->account();
         $calls = 0;
         Http::fake(function ($outgoing) use ($outcome, &$calls) {
@@ -178,10 +189,96 @@ class NiumVirtualAccountCorridorTest extends TestCase
 
     public static function uncertainOutcomes(): array
     {
-        return [
-            ['timeout', Operation::UNKNOWN], ['unknown', Operation::UNKNOWN],
-            ['server error', Operation::UNKNOWN], ['initialized', Operation::PENDING],
-        ];
+        $cases = [];
+        foreach (['testing', 'production'] as $environment) {
+            foreach (['timeout' => Operation::UNKNOWN, 'unknown' => Operation::UNKNOWN,
+                'server error' => Operation::UNKNOWN, 'initialized' => Operation::PENDING] as $outcome => $state) {
+                $cases[$environment.' '.$outcome] = [$outcome, $state, $environment];
+            }
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('productionAdmissionStates')]
+    public function test_production_admission_and_independent_pause_control_new_dispatch(bool $admitted, bool $paused): void
+    {
+        $this->app->instance('env', 'production');
+        config([
+            'services.nium.va_single_dispatch.production_admission_enabled' => $admitted,
+            'services.nium.va_single_dispatch.allocation_paused' => $paused,
+            // These historical test switches cannot authorize Production, or limit its customers.
+            'services.nium.va_single_dispatch.enabled' => ! $admitted,
+            'services.nium.va_single_dispatch.old_workers_fenced' => ! $admitted,
+        ]);
+        $account = $this->account();
+        Http::fake(function ($outgoing) use ($account) {
+            $this->assertSame('POST', $outgoing->method());
+            $this->assertSame('https://nium.test/api/v1/client/'.config('services.nium.client_id')
+                .'/customer/'.$account->external_customer_id.'/wallet/'.$account->external_account_id.'/paymentId', $outgoing->url());
+            $this->assertSame(self::BODY, $outgoing->data());
+
+            return Http::response(['uniquePaymentId' => 'VA-PRODUCTION-CONTRACT']);
+        });
+
+        if (! $admitted || $paused) {
+            $this->submit($account)->assertStatus(422);
+            $this->assertSame(0, Operation::query()->count());
+            $this->assertSame(0, NiumVirtualAccountRequest::query()->count());
+            $this->assertSame(0, NiumVirtualAccount::query()->count());
+            $this->assertSame(0, DB::table('nium_va_dispatch_attempts')->count());
+            Http::assertNothingSent();
+
+            return;
+        }
+
+        // This tests application admission, not whether operators have stopped old binaries.
+        $this->submit($account)->assertCreated();
+        $request = NiumVirtualAccountRequest::query()->sole();
+        config(['services.nium.va_single_dispatch.production_admission_enabled' => false]);
+        $this->submit($account)->assertCreated();
+        $this->assertSame(1, $request->dispatchAttempt()->count());
+        $this->assertSame(1, Operation::query()->count());
+        $this->assertSame(1, NiumVirtualAccount::query()->count());
+        Http::assertSentCount(1);
+    }
+
+    public static function productionAdmissionStates(): array
+    {
+        return [[false, false], [false, true], [true, true], [true, false]];
+    }
+
+    #[DataProvider('unapprovedProductionContracts')]
+    public function test_production_rejects_unapproved_contracts_without_legacy_fallback(string $difference): void
+    {
+        $this->app->instance('env', 'production');
+        $account = $this->account();
+        config([
+            'services.nium.va_single_dispatch.production_admission_enabled' => true,
+            'services.nium.va_single_dispatch.enabled' => false,
+            'services.nium.va_single_dispatch.account_ids' => [$account->id],
+        ]);
+        Http::fake();
+        try {
+            app(NiumPaymentIdService::class)->assign($account,
+                $difference === 'currency' ? 'EUR' : 'USD',
+                $difference === 'category' ? 'COLLECTION_ACCOUNT' : 'SELF_FUNDING_ACCOUNT',
+                $difference === 'rail' ? 'LOCAL' : 'WIRES',
+                $difference === 'bank' ? 'DBS_HK' : 'JPM_SG', 'unapproved-contract',
+                apiVersion: $difference === 'version' ? 'v2' : null);
+            $this->fail('Production must refuse unapproved contracts even for a test-allowlisted account.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('supports only USD / SELF_FUNDING_ACCOUNT / JPM_SG / WIRES using V1', $exception->getMessage());
+        }
+        $this->assertSame(0, Operation::query()->count());
+        $this->assertSame(0, NiumVirtualAccountRequest::query()->count());
+        $this->assertSame(0, NiumVirtualAccount::query()->count());
+        Http::assertNothingSent();
+    }
+
+    public static function unapprovedProductionContracts(): array
+    {
+        return [...self::nonselectedCorridors(), ['version']];
     }
 
     public function test_pause_blocks_new_post_without_changing_history_and_keeps_saved_state_readable(): void
@@ -218,7 +315,7 @@ class NiumVirtualAccountCorridorTest extends TestCase
         config(['services.nium.va_single_dispatch.allocation_paused' => false]);
         $this->app->instance('env', 'production');
         $this->getJson($url)->assertOk()->assertJsonPath('data.0.can_request_virtual_account', true)
-            ->assertJsonPath('data.0.virtual_account_allocation_reason', 'allocation_testing_only');
+            ->assertJsonPath('data.0.virtual_account_allocation_reason', 'allocation_production_disabled');
         $account->update(['status' => 'pending', 'provider_status' => 'pending']);
         $this->getJson($url)->assertOk()->assertJsonPath('data.0.can_request_virtual_account', false)
             ->assertJsonPath('data.0.virtual_account_eligibility_reason', 'kyb_approval_pending');
@@ -365,6 +462,27 @@ class NiumVirtualAccountCorridorTest extends TestCase
         config(['services.nium.va_single_dispatch.enabled' => false]);
         Http::fake();
         $this->submit($account)->assertStatus(422);
+        $this->assertSame($before, Operation::query()->sole()->getAttributes());
+        $this->assertSame(0, NiumVirtualAccount::query()->count());
+        $this->assertSame(0, NiumVirtualAccountRequest::query()->count());
+        Http::assertNothingSent();
+    }
+
+    public function test_production_cannot_redispatch_an_unsupported_legacy_preflight_failure(): void
+    {
+        $this->app->instance('env', 'production');
+        config([
+            'services.nium.va_single_dispatch.production_admission_enabled' => true,
+            'services.nium.va_single_dispatch.enabled' => false,
+        ]);
+        $account = $this->account();
+        $historical = $this->legacyLedgerOperation($account, Operation::PREFLIGHT_FAILED, [
+            'operation_id' => 'controlled-request', 'currency' => 'EUR',
+            'account_category' => 'SELF_FUNDING_ACCOUNT', 'account_type' => 'WIRES',
+        ]);
+        $before = $historical->fresh()->getAttributes();
+        Http::fake();
+        $this->submit($account, overrides: ['currency' => 'EUR'])->assertStatus(422);
         $this->assertSame($before, Operation::query()->sole()->getAttributes());
         $this->assertSame(0, NiumVirtualAccount::query()->count());
         $this->assertSame(0, NiumVirtualAccountRequest::query()->count());

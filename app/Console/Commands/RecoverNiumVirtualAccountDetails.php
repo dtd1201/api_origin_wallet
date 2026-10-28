@@ -9,7 +9,7 @@ class RecoverNiumVirtualAccountDetails extends Command
 {
     protected $signature = 'nium:recover-va-details {--limit=100} {--operation= : Limit recovery to one enrolled operation ID}';
 
-    protected $description = 'Requeue due read-only VA details continuations (testing only)';
+    protected $description = 'Requeue due read-only VA details continuations without allocating accounts';
 
     public function handle(NiumVirtualAccountDetailEnrichmentService $service): int
     {

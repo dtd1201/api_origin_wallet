@@ -2,6 +2,11 @@
 
 This guide is tailored for deploying this Laravel API to a single VPS on Vultr.
 
+For the NIUM VA release on an existing VPS, follow the
+[reviewed runtime cutover and deployment commands](nium-va-production-release.md).
+Do not rerun initial bootstrap, key generation or database seeding as a release
+procedure. Keep NIUM allocation disabled and paused until that cutover is verified.
+
 ## Recommended VPS
 
 Recommended starting plan:
@@ -173,9 +178,11 @@ Set permissions:
 cd /var/www/origin_wallet
 mkdir -p storage/logs bootstrap/cache
 chown -R deploy:www-data /var/www/origin_wallet
-chmod -R 775 storage bootstrap/cache
-find storage -type f -exec chmod 664 {} \;
-find bootstrap/cache -type f -exec chmod 664 {} \;
+chown deploy:www-data .env
+chmod 0640 .env
+chown -R www-data:www-data storage bootstrap/cache
+find storage bootstrap/cache -type d -exec chmod 2770 {} \;
+find storage bootstrap/cache -type f -exec chmod 0660 {} \;
 ```
 
 ## Laravel First Deploy
@@ -186,18 +193,20 @@ Run:
 cd /var/www/origin_wallet
 php artisan migrate --force
 php artisan db:seed --force
-php artisan config:cache
-php artisan route:cache
-php artisan view:cache
+sudo -u www-data /usr/bin/php8.3 artisan config:cache
+sudo -u www-data /usr/bin/php8.3 artisan route:cache
+sudo -u www-data /usr/bin/php8.3 artisan view:cache
 ```
 
-If you are not using queued jobs yet, set:
+NIUM VA banking-detail continuations require the existing database queue:
 
 ```text
-QUEUE_CONNECTION=sync
+QUEUE_CONNECTION=database
+DB_QUEUE_RETRY_AFTER=90
 ```
 
-That is the safest simple starting point for this API.
+Run the worker below. Allocation admission/pause do not disable read-only detail
+recovery. Keep the queue on the same app database and the `jobs` table.
 
 ## Nginx Setup
 
@@ -235,12 +244,10 @@ This server should work fine with default PHP-FPM settings, but for a 4 GB machi
 
 ## Queue Worker
 
-For this codebase right now, queue workers are optional if:
-
-- mail is sent synchronously
-- you are not dispatching queued jobs
-
-If later you switch to queued mail or background jobs:
+The existing worker runs as `www-data` with PHP 8.3 and consumes both `default`
+and `nium-va-details`. For a NIUM VA release, install/restart it only after the
+full runtime cutover in the linked runbook; Supervisor reload alone is not a
+fence for old processes. On a fresh installation:
 
 ```bash
 sudo cp /var/www/origin_wallet/deploy/supervisor/api.originwallet.asia-worker.conf /etc/supervisor/conf.d/origin_wallet-worker.conf
@@ -303,7 +310,7 @@ sudo systemctl status nginx
 sudo systemctl status php8.3-fpm
 sudo systemctl status postgresql
 tail -f /var/www/origin_wallet/storage/logs/laravel.log
-php artisan optimize:clear
+sudo -u www-data /usr/bin/php8.3 /var/www/origin_wallet/artisan optimize:clear
 php artisan about
 ```
 

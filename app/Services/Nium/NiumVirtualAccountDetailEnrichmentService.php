@@ -50,7 +50,7 @@ class NiumVirtualAccountDetailEnrichmentService
     public function enqueue(int $id): bool
     {
         try {
-            $this->assertTesting();
+            $this->assertRecoveryEnvironment();
             $this->assertOutsideTransaction();
 
             return DB::transaction(function () use ($id): bool {
@@ -83,7 +83,7 @@ class NiumVirtualAccountDetailEnrichmentService
     /** Bounded replay of lost callbacks, lost delivery and expired worker leases. */
     public function recover(int $limit = 100, ?int $operationId = null): int
     {
-        $this->assertTesting();
+        $this->assertRecoveryEnvironment();
         $this->assertOutsideTransaction();
         $limit = max(1, min(1000, $limit));
         // Backfill only committed enrolled attachments. GET's existing proof reader
@@ -113,7 +113,7 @@ class NiumVirtualAccountDetailEnrichmentService
 
     public function run(int $id): void
     {
-        $this->assertTesting();
+        $this->assertRecoveryEnvironment();
         $this->assertOutsideTransaction();
         $task = DB::transaction(function () use ($id): ?Enrichment {
             $task = Enrichment::query()->lockForUpdate()->findOrFail($id);
@@ -233,10 +233,11 @@ class NiumVirtualAccountDetailEnrichmentService
             && filled($detail->routing_code_type) && filled($detail->routing_code_value);
     }
 
-    private function assertTesting(): void
+    private function assertRecoveryEnvironment(): void
     {
-        if (! app()->environment('testing')) {
-            throw new RuntimeException('Automatic VA enrichment remains testing-only pending reviewed rollout.');
+        // Read-only continuation of established ownership, independent of allocation gates.
+        if (! app()->environment('testing', 'production')) {
+            throw new RuntimeException('VA detail recovery is available only in Production or isolated tests.');
         }
     }
 

@@ -82,15 +82,17 @@ final class NiumPaymentIdService
             $bankName = 'JPM_SG';
         }
         $enabled = config('services.nium.va_single_dispatch.enabled') === true;
-        // The selected corridor must reach the durable gate even when disabled:
-        // it must never fall back to the legacy GET + V2 POST engine.
-        if ($enrolledRequest !== null || ($confirmedCorridor && $existing === null) || ($enabled && $existing === null)) {
+        // Every new Production request reaches admission/contract validation even
+        // when disabled. The selected corridor never falls back to legacy V2.
+        if ($enrolledRequest !== null || ($existing === null
+            && ($confirmedCorridor || $enabled || app()->environment('production')))) {
             return app(NiumVirtualAccountAssignmentService::class)->assign($account, $operationId, $currency, $accountCategory, $accountType, $bankName, $apiVersion);
         }
         if ($apiVersion !== 'v2') {
             throw new RuntimeException('V1 assignment requires the inactive single-dispatch workflow; legacy operations cannot be enrolled.');
         }
-        if (($enabled || $confirmedCorridor) && $existing?->status === NiumVirtualAccountOperation::PREFLIGHT_FAILED) {
+        if (($enabled || $confirmedCorridor || app()->environment('production'))
+            && $existing?->status === NiumVirtualAccountOperation::PREFLIGHT_FAILED) {
             throw new RuntimeException('Historical assignments cannot be redispatched through the single-dispatch cutover.');
         }
         if ($hasLedger && $existing === null && NiumVirtualAccountRequest::query()

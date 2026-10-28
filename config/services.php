@@ -134,13 +134,14 @@ return [
         'wallet_balance_endpoint' => env('NIUM_WALLET_BALANCE_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}'),
         'wallet_transactions_endpoint' => env('NIUM_WALLET_TRANSACTIONS_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions'),
         'assign_payment_id_endpoint' => env('NIUM_ASSIGN_PAYMENT_ID_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/paymentId'),
-        // Allocation stays testing-only pending a reviewed operational cutover.
-        // The pause never disables authenticated webhook receipt or GET recovery.
+        // Admission is not a fence for already-running binaries. Complete the runtime
+        // cutover before enabling Production. Receipt and GET recovery ignore both gates.
         'va_single_dispatch' => [
             'allocation_paused' => (bool) env('NIUM_VA_ALLOCATION_PAUSED', true),
-            'enabled' => false,
+            'production_admission_enabled' => (bool) env('NIUM_VA_PRODUCTION_ADMISSION_ENABLED', false),
+            'enabled' => false, // Isolated test adapters only; never admits Production.
             'account_ids' => [], // Historical test adapters only; not the confirmed V1 corridor.
-            'old_workers_fenced' => false, // Operator assertion, not an actual worker fence.
+            'old_workers_fenced' => false, // Test interlock only; never proof of a Production cutover.
         ],
         'payment_ids_endpoint' => env('NIUM_PAYMENT_IDS_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/paymentIds'),
         'transaction_sync_days' => env('NIUM_TRANSACTION_SYNC_DAYS', 30),

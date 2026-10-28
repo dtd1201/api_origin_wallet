@@ -11,6 +11,7 @@ use App\Models\NiumVirtualAccountOperation as Operation;
 use App\Models\NiumVirtualAccountRequest;
 use App\Services\Nium\NiumVirtualAccountDetailEnrichmentService as Service;
 use App\Services\Nium\NiumVirtualAccountDetailService;
+use App\Services\Nium\NiumVirtualAccountRequestIdentity;
 use App\Services\Nium\NiumVirtualAccountSafetyLedger;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\Events\TransactionCommitting;
@@ -466,29 +467,76 @@ class NiumVirtualAccountDetailEnrichmentTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_enrichment_and_recovery_remain_inactive_outside_testing(): void
+    public function test_enrichment_and_recovery_remain_inactive_outside_supported_environments(): void
     {
         [, $task] = $this->resolve($this->prepared());
-        app()->instance('env', 'production');
+        app()->instance('env', 'local');
         try {
             $this->assertFalse(app(Service::class)->enqueue($task->id));
             try {
                 app(Service::class)->run($task->id);
-                $this->fail('Automatic worker must remain testing-only.');
+                $this->fail('Automatic worker must refuse unsupported environments.');
             } catch (RuntimeException $exception) {
-                $this->assertStringContainsString('testing-only', $exception->getMessage());
+                $this->assertStringContainsString('Production or isolated tests', $exception->getMessage());
             }
             try {
                 app(Service::class)->recover();
-                $this->fail('Recovery must remain testing-only.');
+                $this->fail('Recovery must refuse unsupported environments.');
             } catch (RuntimeException $exception) {
-                $this->assertStringContainsString('testing-only', $exception->getMessage());
+                $this->assertStringContainsString('Production or isolated tests', $exception->getMessage());
             }
         } finally {
             app()->instance('env', 'testing');
         }
         $this->assertSame(0, $task->fresh()->attempts);
         Http::assertNothingSent();
+    }
+
+    public function test_production_v1_detail_recovery_uses_only_v2_get_while_allocation_is_disabled_and_paused(): void
+    {
+        app()->instance('env', 'production');
+        config([
+            'services.nium.va_single_dispatch.production_admission_enabled' => false,
+            'services.nium.va_single_dispatch.allocation_paused' => true,
+            'services.nium.va_single_dispatch.enabled' => false,
+            'services.nium.va_single_dispatch.old_workers_fenced' => false,
+        ]);
+        $account = $this->ledgerAccount();
+        $ledger = app(NiumVirtualAccountSafetyLedger::class);
+        $request = $ledger->prepare($account, 'production-read-recovery', NiumVirtualAccountRequestIdentity::forAccount(
+            $account, ['currencyCode' => 'USD', 'accountCategory' => 'SELF_FUNDING_ACCOUNT', 'bankName' => 'JPM_SG'], 'v1', 'WIRES',
+        ));
+        $ledger->consumeDispatchAuthorization($request, 0);
+        [$va, $task, $request] = $this->resolve($request->fresh());
+        $assignment = $request->fresh()->getAttributes();
+        $operation = $request->operation()->firstOrFail()->getAttributes();
+        $owner = $va->fresh()->getAttributes();
+        $this->assertSame(1, DB::table('jobs')->where('queue', Service::QUEUE)->count());
+
+        // Simulate lost queue delivery; recovery may replace only that read-only delivery.
+        DB::table('jobs')->delete();
+        $task->update(['delivery_until' => null]);
+        $this->assertSame(1, app(Service::class)->recover(100, $request->operation_id));
+        $this->fake(function (Request $outgoing) use ($account, $va) {
+            $this->assertSame('GET', $outgoing->method());
+            $this->assertStringStartsWith('https://nium.test/api/v2/client/'.config('services.nium.client_id')
+                .'/customer/'.$account->external_customer_id.'/wallet/'.$account->external_account_id.'/paymentIds?', $outgoing->url());
+
+            return Http::response($this->payload($va, ['bankName' => 'JPM_SG']));
+        });
+        $queue = new DatabaseQueue(DB::connection(), 'jobs', Service::QUEUE, 90, false);
+        $queue->setContainer(app());
+        $job = $queue->pop(Service::QUEUE);
+        $this->assertNotNull($job);
+        $job->fire();
+        $job->delete();
+        $this->assertSame('complete', $task->fresh()->state);
+        $this->assertSame(1, $va->detail()->count());
+        $this->assertSame($assignment, $request->fresh()->getAttributes());
+        $this->assertSame($operation, $request->operation()->firstOrFail()->getAttributes());
+        $this->assertSame($owner, $va->fresh()->getAttributes());
+        $this->assertSame(1, $request->dispatchAttempt()->count());
+        Http::assertSentCount(1);
     }
 
     public function test_legacy_sync_remains_direct_read_only_and_does_not_create_tasks(): void
