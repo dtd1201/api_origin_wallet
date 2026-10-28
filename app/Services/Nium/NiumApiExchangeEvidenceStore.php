@@ -41,6 +41,7 @@ final class NiumApiExchangeEvidenceStore
         array $requestHeaders,
         array $responseHeaders,
         bool $responseReceived,
+        ?string $assignmentTarget = null,
     ): NiumApiExchangeEvidence {
         $safeRequestHeaders = $this->safeHeaders($requestHeaders);
         $safeResponseHeaders = $this->safeHeaders($responseHeaders);
@@ -66,6 +67,7 @@ final class NiumApiExchangeEvidenceStore
                 'response_byte_length' => ! $responseReceived || $rawResponseBody === null ? null : strlen($rawResponseBody),
                 'capture_version' => self::CAPTURE_VERSION,
                 'response_received' => $responseReceived,
+                ...($assignmentTarget === null ? [] : ['assignment_target' => $assignmentTarget]),
             ],
         );
     }

@@ -34,6 +34,8 @@ class ProviderHttpClient implements ProviderClient
         private readonly array $operationalContext = [],
         private readonly ?NiumApiExchangeEvidenceStore $niumEvidenceStore = null,
         private readonly bool $persistRawExchange = true,
+        private readonly bool $singleDispatchAssignment = false,
+        private readonly bool $readOnlyVirtualAccountReconciliation = false,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -88,11 +90,33 @@ class ProviderHttpClient implements ProviderClient
     ): Response {
         $capturedRequestBody = null;
         $capturedRequestHeaders = [];
+        $assignmentTarget = null;
+        if ($this->readOnlyVirtualAccountReconciliation
+            && ($this->serviceConfigKey !== 'nium' || $method !== 'GET'
+                || DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()
+                || ! in_array(config('services.nium.auth.mode'), ['header', 'bearer_token', 'basic_auth', 'static_headers'], true))) {
+            throw new RuntimeException('VA reconciliation requires read-only transport and authentication outside transactions.');
+        }
         $request = $this->baseRequest();
+        if ($this->singleDispatchAssignment) {
+            if ($this->serviceConfigKey !== 'nium' || $method !== 'POST'
+                || ($this->operationalContext['operation'] ?? null) !== 'assign_payment_id'
+                || DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
+                throw new RuntimeException('Single-dispatch assignment requires a committed authorization outside transactions.');
+            }
+            $request = $request->withoutRedirecting()->retry(1, 0);
+        }
+        if ($this->readOnlyVirtualAccountReconciliation) {
+            // Authentication must not perform a token-acquisition POST; redirects cannot change target.
+            $request = $request->withoutRedirecting()->retry(1, 0);
+        }
         if ($this->serviceConfigKey === 'nium') {
-            $request = $request->beforeSending(function (Request $outgoing) use (&$capturedRequestBody, &$capturedRequestHeaders): void {
+            $request = $request->beforeSending(function (Request $outgoing) use (&$capturedRequestBody, &$capturedRequestHeaders, &$assignmentTarget): void {
                 $capturedRequestBody = $outgoing->body();
                 $capturedRequestHeaders = $outgoing->headers();
+                if ($this->singleDispatchAssignment) {
+                    $assignmentTarget = $outgoing->url();
+                }
             });
         }
         $url = $this->buildUrl($path);
@@ -125,6 +149,18 @@ class ProviderHttpClient implements ProviderClient
                     $this->connectionOutcome($exception),
                     $capturedRequestBody,
                     $capturedRequestHeaders,
+                    assignmentTarget: $assignmentTarget,
+                );
+            }
+
+            throw $exception;
+        } catch (Throwable $exception) {
+            if ($this->singleDispatchAssignment) {
+                $this->logNiumRequest(
+                    $user, $relatedTransferId, $method, $url, $payload, null, [],
+                    (int) round((microtime(true) - $startedAt) * 1000), $startedAtUtc,
+                    CarbonImmutable::now('UTC'), 'connection_failure', $capturedRequestBody,
+                    $capturedRequestHeaders, assignmentTarget: $assignmentTarget,
                 );
             }
 
@@ -147,6 +183,7 @@ class ProviderHttpClient implements ProviderClient
             $capturedRequestBody,
             $capturedRequestHeaders,
             $rawResponseBody,
+            $assignmentTarget,
         );
 
         return $response;
@@ -423,6 +460,7 @@ class ProviderHttpClient implements ProviderClient
         ?string $capturedRequestBody,
         array $capturedRequestHeaders,
         ?string $rawResponseBody,
+        ?string $assignmentTarget = null,
     ): void {
         if ($this->serviceConfigKey === 'nium') {
             [$responseBody, $malformedJson] = $this->decodedResponse($rawResponseBody ?? '');
@@ -441,6 +479,7 @@ class ProviderHttpClient implements ProviderClient
                 $capturedRequestBody,
                 $capturedRequestHeaders,
                 $rawResponseBody,
+                $assignmentTarget,
             );
 
             return;
@@ -482,6 +521,7 @@ class ProviderHttpClient implements ProviderClient
         ?string $capturedRequestBody,
         array $capturedRequestHeaders,
         ?string $rawResponseBody = null,
+        ?string $assignmentTarget = null,
     ): void {
         $requestId = collect($this->headers)
             ->first(fn ($value, $key) => strtolower((string) $key) === 'x-request-id');
@@ -544,6 +584,7 @@ class ProviderHttpClient implements ProviderClient
                 $capturedRequestBody,
                 $capturedRequestHeaders,
                 $rawResponseBody,
+                $assignmentTarget,
             ): void {
                 $log = ApiRequestLog::create($attributes);
                 $store = $this->niumEvidenceStore ?? app(NiumApiExchangeEvidenceStore::class);
@@ -558,6 +599,7 @@ class ProviderHttpClient implements ProviderClient
                     requestHeaders: $capturedRequestHeaders,
                     responseHeaders: $response?->headers() ?? [],
                     responseReceived: $response !== null,
+                    assignmentTarget: $assignmentTarget,
                 );
             }, 3);
         } catch (Throwable $exception) {

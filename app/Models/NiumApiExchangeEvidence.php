@@ -27,6 +27,7 @@ final class NiumApiExchangeEvidence extends Model
         'response_byte_length',
         'capture_version',
         'response_received',
+        'assignment_target',
     ];
 
     protected $hidden = [
@@ -34,6 +35,7 @@ final class NiumApiExchangeEvidence extends Model
         'raw_response_body',
         'request_headers',
         'response_headers',
+        'assignment_target',
     ];
 
     protected function casts(): array
@@ -47,6 +49,7 @@ final class NiumApiExchangeEvidence extends Model
             'response_byte_length' => 'integer',
             'capture_version' => 'integer',
             'response_received' => 'boolean',
+            'assignment_target' => 'encrypted',
         ];
     }
 

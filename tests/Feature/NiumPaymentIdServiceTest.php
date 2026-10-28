@@ -9,21 +9,32 @@ use App\Models\User;
 use App\Models\WebhookEvent;
 use App\Services\Nium\NiumPaymentIdService;
 use App\Services\Nium\NiumWebhookService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class NiumPaymentIdServiceTest extends TestCase
 {
-    use RefreshDatabase;
-
     protected function setUp(): void
     {
         parent::setUp();
 
+        // Protected VA receipts require independent claim/assignment commits.
+        // Keep this fixture outside RefreshDatabase's test-wide transaction.
+        config(['database.connections.nium_payment_id_service_test' => [
+            'driver' => 'sqlite', 'database' => ':memory:', 'foreign_key_constraints' => true,
+        ]]);
+        DB::setDefaultConnection('nium_payment_id_service_test');
+        $this->artisan('migrate', ['--database' => 'nium_payment_id_service_test', '--force' => true])->assertSuccessful();
         Http::preventStrayRequests();
+    }
+
+    protected function tearDown(): void
+    {
+        DB::purge('nium_payment_id_service_test');
+        parent::tearDown();
     }
 
     public function test_assign_payment_id_uses_v2_contract_and_persists_safe_virtual_account_reference(): void
@@ -288,6 +299,9 @@ class NiumPaymentIdServiceTest extends TestCase
         ], content: json_encode($payload, JSON_THROW_ON_ERROR));
 
         $first = app(NiumWebhookService::class)->handleWebhook($provider, $request);
+        $event = WebhookEvent::query()->where('event_id', 'va-assigned-001')->sole();
+        $receipt = $event->fresh()->getAttributes();
+        $assignment = $pending->fresh()->getAttributes();
         $second = app(NiumWebhookService::class)->handleWebhook($provider, $request);
 
         $this->assertFalse($first['duplicate'] ?? false);
@@ -299,6 +313,13 @@ class NiumPaymentIdServiceTest extends TestCase
         $this->assertSame('VA-654321', $assigned->virtual_account_reference);
         $this->assertSame('assigned', $assigned->status);
         $this->assertSame('2026-09-09 08:30:00', $assigned->assigned_at->utc()->format('Y-m-d H:i:s'));
+        $this->assertSame('processed', $event->fresh()->processing_status);
+        $this->assertSame(1, $event->fresh()->nium_va_recovery['attempts']);
+        $this->assertNotNull($event->fresh()->nium_va_recovery['token']);
+        $this->assertSame($receipt, $event->fresh()->getAttributes());
+        $this->assertSame($assignment, $assigned->getAttributes());
+        Http::assertSentCount(1);
+        Http::assertNotSent(fn ($outgoing): bool => $outgoing->method() !== 'GET');
     }
 
     public function test_real_nium_virtual_account_assigned_webhook_updates_existing_pending_record(): void
@@ -534,7 +555,13 @@ class NiumPaymentIdServiceTest extends TestCase
     private function fakeVaDetailLookup(): void
     {
         Http::fake([
-            'https://gateway.sandbox.nium.test/api/v2/client/client-test/customer/customer-test/wallet/wallet-test/paymentIds*' => Http::response(['content' => []]),
+            'https://gateway.sandbox.nium.test/api/v2/client/client-test/customer/customer-test/wallet/wallet-test/paymentIds*' => function ($outgoing) {
+                $this->assertSame('GET', $outgoing->method());
+                $this->assertSame(0, DB::transactionLevel());
+                $this->assertFalse(DB::connection()->getPdo()->inTransaction());
+
+                return Http::response(['content' => []]);
+            },
         ]);
     }
 

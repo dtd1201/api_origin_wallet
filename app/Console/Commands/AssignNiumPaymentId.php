@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\NiumVirtualAccountOperation;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumPaymentIdService;
 use Illuminate\Console\Command;
@@ -28,7 +29,11 @@ class AssignNiumPaymentId extends Command
             filled($this->option('bank-name')) ? (string) $this->option('bank-name') : null,
             $operationId,
         );
-        $this->info("Assigned Nium payment ID {$virtualAccount->provider_payment_id} for {$virtualAccount->currency}.");
+        if ($virtualAccount instanceof NiumVirtualAccountOperation) {
+            $this->line("Assignment state: {$virtualAccount->status}; do not repeat the provider POST.");
+        } else {
+            $this->info("Assigned Nium payment ID {$virtualAccount->provider_payment_id} for {$virtualAccount->currency}.");
+        }
 
         return self::SUCCESS;
     }

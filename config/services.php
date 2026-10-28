@@ -134,6 +134,11 @@ return [
         'wallet_balance_endpoint' => env('NIUM_WALLET_BALANCE_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}'),
         'wallet_transactions_endpoint' => env('NIUM_WALLET_TRANSACTIONS_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/transactions'),
         'assign_payment_id_endpoint' => env('NIUM_ASSIGN_PAYMENT_ID_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/paymentId'),
+        // Verified GREENTECH user_provider_accounts.id only; unset until identified.
+        // This selects a contract, not permission to dispatch or enable Production.
+        'greentech_v1_account_id' => env('NIUM_GREENTECH_V1_ACCOUNT_ID'),
+        // Phase 2 is test-only until a separately reviewed Phase 3 reconciliation/cutover.
+        'va_single_dispatch' => ['enabled' => false, 'account_ids' => [], 'old_workers_fenced' => false],
         'payment_ids_endpoint' => env('NIUM_PAYMENT_IDS_ENDPOINT', '/api/v2/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/paymentIds'),
         'transaction_sync_days' => env('NIUM_TRANSACTION_SYNC_DAYS', 30),
         'transaction_sync_page_size' => env('NIUM_TRANSACTION_SYNC_PAGE_SIZE', 100),

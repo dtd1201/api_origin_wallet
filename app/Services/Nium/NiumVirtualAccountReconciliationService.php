@@ -2,9 +2,16 @@
 
 namespace App\Services\Nium;
 
+use App\Models\ApiRequestLog;
 use App\Models\NiumVirtualAccount;
 use App\Models\NiumVirtualAccountOperation;
+use App\Models\NiumVirtualAccountRequest;
+use App\Models\WebhookEvent;
+use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 final class NiumVirtualAccountReconciliationService
@@ -17,6 +24,9 @@ final class NiumVirtualAccountReconciliationService
 
     public function captureBaseline(NiumVirtualAccountOperation $operation): NiumVirtualAccountOperation
     {
+        if ($this->enrolledRequest($operation) !== null) {
+            return $operation->fresh();
+        }
         try {
             $result = $this->fetch($operation);
         } catch (Throwable) {
@@ -47,6 +57,9 @@ final class NiumVirtualAccountReconciliationService
     public function reconcile(NiumVirtualAccountOperation $operation): NiumVirtualAccountOperation
     {
         $operation = $operation->fresh();
+        if (($request = $this->enrolledRequest($operation)) !== null) {
+            return $this->reconcileEnrolled($request);
+        }
 
         if ($operation->status === NiumVirtualAccountOperation::ASSIGNED) {
             return $operation;
@@ -134,6 +147,10 @@ final class NiumVirtualAccountReconciliationService
         string $paymentId,
         string $resolutionCode,
     ): NiumVirtualAccountOperation {
+        if ($this->enrolledRequest($operation) !== null) {
+            throw new RuntimeException('Enrolled assignments require verified ledger evidence resolution.');
+        }
+
         return DB::transaction(function () use ($operation, $paymentId, $resolutionCode): NiumVirtualAccountOperation {
             $locked = NiumVirtualAccountOperation::query()->lockForUpdate()->findOrFail($operation->id);
             $exact = NiumVirtualAccount::query()
@@ -184,35 +201,287 @@ final class NiumVirtualAccountReconciliationService
         });
     }
 
+    private function enrolledRequest(NiumVirtualAccountOperation $operation): ?NiumVirtualAccountRequest
+    {
+        return NiumVirtualAccountRequest::query()->find($operation->id);
+    }
+
+    private function reconcileEnrolled(NiumVirtualAccountRequest $request, ?WebhookEvent $webhook = null): NiumVirtualAccountOperation
+    {
+        if (NiumVirtualAccountOperationState::isTerminal($request->operation_state)
+            || ! $request->dispatchAttempt()->exists()) {
+            // A prepared request is not permission to dispatch or to fabricate consumption.
+            return $request->operation()->firstOrFail();
+        }
+        $ledger = app(NiumVirtualAccountSafetyLedger::class);
+        $snapshot = $request->identity()->snapshot();
+        try {
+            $account = $request->operation->providerAccount()->with('user')->firstOrFail();
+            $request->identity()->assertCurrentTarget($account);
+            if ((int) $account->user_id !== $snapshot['user_id'] || (int) $account->provider_id !== $snapshot['provider_id']) {
+                throw new RuntimeException('The assignment account ownership changed.');
+            }
+            $evidence = $this->postEvidence($request);
+            if ($evidence['review'] !== null) {
+                return $this->review($request, $evidence['review'], $webhook);
+            }
+            $successes = $evidence['successes'];
+            if (count($successes) === 1) {
+                if ($webhook !== null && ! NiumVirtualAccountWebhookContract::permitsAssignment($webhook, $request->identity(), (string) array_key_first($successes))) {
+                    return $this->unresolved($request, 'webhook_without_exact_post_agreement');
+                }
+                $ledger->resolveFromPostEvidence($request, $request->state_version, array_values($successes)[0], attachVirtualAccount: true, webhookEvidence: $webhook);
+
+                return $request->operation()->firstOrFail();
+            }
+
+            if ($webhook !== null) {
+                return $this->unresolved($request, 'webhook_without_causal_post_evidence');
+            }
+            $result = $this->fetch($request->operation, $request);
+            if (! $result['complete']) {
+                return $this->unresolved($request, 'incomplete_provider_listing');
+            }
+            $ids = [];
+            foreach ($result['items'] as $item) {
+                if (! NiumPaymentIdValidator::isValid($item['uniquePaymentId'] ?? null)) {
+                    return $this->unresolved($request, 'malformed_listing_payment_id');
+                }
+                if (! NiumVirtualAccountAssignmentResponse::matchesTarget($item, $request->identity())) {
+                    return $this->review($request, 'contradictory_listing_dimensions');
+                }
+                $ids[$item['uniquePaymentId']] = true;
+            }
+            if ($ids !== []) {
+                // Neither response tags nor a GET request's local operation label prove creation.
+                // No operation-tagged GET contract is demonstrably supported in this repository.
+                return $this->review($request, count($ids) > 1 ? 'ambiguous_payment_ids' : 'insufficient_operation_correlation');
+            }
+
+            return $this->unresolved($request, 'no_payment_id_observed');
+        } catch (Throwable $exception) {
+            // Includes stale workers, transport failures and rolled-back resolution writes.
+            // Never overwrite a terminal winner or change state merely because reads failed.
+            Log::notice('Nium VA reconciliation remains unresolved.', [
+                'operation_id' => $request->operation_id, 'failure_type' => $exception::class,
+            ]);
+
+            $current = $request->operation()->firstOrFail();
+            if ($webhook !== null && ! NiumVirtualAccountOperationState::isTerminal($current->status)) {
+                throw new RuntimeException('Nium VA webhook resolution failed.', previous: $exception);
+            }
+
+            return $current;
+        }
+    }
+
+    /** Same exact POST evidence arbitration for polling and authenticated webhook triggers. */
+    private function postEvidence(NiumVirtualAccountRequest $request): array
+    {
+        $snapshot = $request->identity()->snapshot();
+        // Inspect every potentially bound exchange; never choose the first/latest ID.
+        $logs = ApiRequestLog::query()->where('provider_id', $snapshot['provider_id'])
+            ->where('user_id', $snapshot['user_id'])->where('operation', 'assign_payment_id')
+            ->where('external_reference', $request->operation->operation_id)
+            ->whereHas('niumExchangeEvidence')->get();
+        $successes = [];
+        foreach ($logs as $log) {
+            try {
+                $response = app(NiumVirtualAccountSafetyLedger::class)->verifiedPostResponse($request, $log);
+            } catch (Throwable) {
+                // A key alone is not correlation. Wrong UUID/target/hash/payload is unrelated.
+                continue;
+            }
+            if ($log->response_status !== 200) {
+                continue;
+            }
+            if (! NiumVirtualAccountAssignmentResponse::matchesTarget($response, $request->identity())
+                || isset($response['errors'])) {
+                return ['successes' => [], 'review' => 'contradictory_post_evidence'];
+            }
+            if (NiumVirtualAccountAssignmentResponse::isDelayed($response, $request->identity(), 200)) {
+                continue;
+            }
+            if (! NiumPaymentIdValidator::isValid($response['uniquePaymentId'] ?? null)) {
+                return ['successes' => [], 'review' => 'malformed_post_payment_id'];
+            }
+            $successes[$response['uniquePaymentId']] = $log;
+        }
+
+        return ['successes' => $successes, 'review' => count($successes) > 1 ? 'conflicting_post_payment_ids' : null];
+    }
+
+    public function hasCorrelatedPostPaymentId(NiumVirtualAccountRequest $request, string $paymentId): bool
+    {
+        $result = $this->postEvidence($request);
+
+        return $result['review'] === null && count($result['successes']) === 1 && isset($result['successes'][$paymentId]);
+    }
+
+    /** No GET or POST: a webhook may trigger only the existing direct-evidence resolver. */
+    public function reconcileWebhook(NiumVirtualAccountRequest $request, WebhookEvent $event): NiumVirtualAccountOperation
+    {
+        return $this->reconcileEnrolled($request->fresh(), $event);
+    }
+
+    private function review(NiumVirtualAccountRequest $request, string $reason, ?WebhookEvent $webhook = null): NiumVirtualAccountOperation
+    {
+        if ($request->operation_state !== NiumVirtualAccountOperation::MANUAL_REVIEW) {
+            app(NiumVirtualAccountSafetyLedger::class)->transition($request, $request->state_version, NiumVirtualAccountOperation::MANUAL_REVIEW, $webhook);
+        }
+
+        return $this->unresolved($request, $reason);
+    }
+
+    private function unresolved(NiumVirtualAccountRequest $request, string $reason): NiumVirtualAccountOperation
+    {
+        // The immutable snapshot/evidence stay private. Unresolved evidence remains in existing
+        // API logs/exchanges under the operation key; terminal references are ledger-protected.
+        Log::notice('Nium VA reconciliation requires authoritative evidence.', [
+            'operation_id' => $request->operation_id, 'reason' => $reason,
+        ]);
+
+        return $request->operation()->firstOrFail();
+    }
+
+    /** Strict enrolled GET V2 page contract. No short-page or unknown-envelope fallback. */
+    private function enrolledPage(array $data, int $page, ?int &$totalPages): array
+    {
+        if (! array_key_exists('content', $data) || ! is_array($data['content']) || ! array_is_list($data['content'])
+            || count($data['content']) > self::PAGE_SIZE || isset($data['errors'])
+            || array_key_exists('data', $data) || array_key_exists('paymentIds', $data) || array_key_exists('page', $data)) {
+            throw new RuntimeException('Unexpected payment ID listing schema.');
+        }
+        foreach ($data['content'] as $item) {
+            if (! is_array($item) || array_is_list($item)) {
+                throw new RuntimeException('Malformed payment ID listing item.');
+            }
+        }
+        foreach (['number' => $page, 'size' => self::PAGE_SIZE, 'numberOfElements' => count($data['content']),
+            'empty' => $data['content'] === [], 'first' => $page === 0] as $key => $expected) {
+            if (array_key_exists($key, $data) && $data[$key] !== $expected) {
+                throw new RuntimeException('Unexpected payment ID page identity.');
+            }
+        }
+        if (array_key_exists('totalPages', $data)) {
+            if (! is_int($data['totalPages']) || $data['totalPages'] < 0
+                || ($totalPages !== null && $data['totalPages'] !== $totalPages)
+                || ($data['totalPages'] === 0 && ($page !== 0 || $data['content'] !== []))
+                || ($data['totalPages'] > 0 && $page >= $data['totalPages'])) {
+                throw new RuntimeException('Invalid or changing pagination total.');
+            }
+            $totalPages = $data['totalPages'];
+        } elseif ($totalPages !== null) {
+            throw new RuntimeException('Missing pagination total.');
+        }
+        if (array_key_exists('last', $data) && ! is_bool($data['last'])) {
+            throw new RuntimeException('Invalid pagination last flag.');
+        }
+        if ($totalPages === null && ! array_key_exists('last', $data)) {
+            throw new RuntimeException('Pagination completeness is unverified.');
+        }
+        $complete = $totalPages !== null ? $page + 1 >= $totalPages : $data['last'];
+        if ((array_key_exists('last', $data) && $data['last'] !== $complete)
+            || (! $complete && count($data['content']) !== self::PAGE_SIZE)) {
+            throw new RuntimeException('Contradictory or partial payment ID page.');
+        }
+
+        return ['items' => $data['content'], 'complete' => $complete];
+    }
+
     /** @return array{items: list<array>, complete: bool} */
-    private function fetch(NiumVirtualAccountOperation $operation): array
+    private function fetch(NiumVirtualAccountOperation $operation, ?NiumVirtualAccountRequest $request = null): array
     {
         $account = $operation->providerAccount()->with('user')->firstOrFail();
         $items = [];
         $complete = false;
+        $totalPagesSeen = null;
+        $seenIds = [];
+        $totalElements = null;
+        $client = null;
+        if ($request !== null) {
+            $snapshot = $request->identity()->snapshot();
+            $request->identity()->assertCurrentTarget($account);
+            if ((int) $account->user_id !== $snapshot['user_id'] || (int) $account->provider_id !== $snapshot['provider_id']
+                || config('services.nium.payment_ids_endpoint') !== '/api/v2/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/paymentIds') {
+                throw new RuntimeException('The supported read-only assignment target cannot be verified.');
+            }
+            $this->niumService->assertConfigured();
+            $client = new ProviderHttpClient(
+                provider: $account->provider, serviceConfigKey: 'nium',
+                headers: ['x-request-id' => (string) Str::uuid()],
+                operationalContext: ['operation' => 'reconcile_virtual_account_assignment',
+                    'external_reference' => $operation->operation_id, 'client_hash_id' => $snapshot['client_id']],
+                readOnlyVirtualAccountReconciliation: true,
+            );
+        }
 
         for ($page = 0; $page < self::MAX_PAGES; $page++) {
-            $response = $this->niumService->get(
-                $this->niumService->path((string) config('services.nium.payment_ids_endpoint'), [
-                    'client' => $this->niumService->clientId(),
-                    'customer' => $account->external_customer_id,
-                    'wallet' => $account->external_account_id,
-                ]),
-                [
-                    'currencyCode' => $operation->currency,
-                    'status' => 'Active',
-                    'page' => $page,
-                    'size' => self::PAGE_SIZE,
-                    'order' => 'DESC',
-                    'property' => 'createdAt',
-                ],
-                $account->user,
-                'reconcile_virtual_account_assignment',
-                $operation->operation_id,
-            );
+            if ($request !== null) {
+                // V1 POSTs use the existing V2 read contract; no V1 GET contract is invented.
+                $path = '/api/v2/client/'.rawurlencode($snapshot['client_id']).'/customer/'
+                    .rawurlencode($snapshot['customer_id']).'/wallet/'.rawurlencode($snapshot['wallet_id']).'/paymentIds';
+                $response = $client->get($snapshot['provider_origin'].$path, [
+                    'currencyCode' => $request->identity()->currency(), 'status' => 'Active',
+                    'page' => $page, 'size' => self::PAGE_SIZE, 'order' => 'DESC', 'property' => 'createdAt',
+                ], $account->user);
+            } else {
+                $response = $this->niumService->get(
+                    $this->niumService->path((string) config('services.nium.payment_ids_endpoint'), [
+                        'client' => $this->niumService->clientId(),
+                        'customer' => $account->external_customer_id,
+                        'wallet' => $account->external_account_id,
+                    ]),
+                    [
+                        'currencyCode' => $operation->currency,
+                        'status' => 'Active',
+                        'page' => $page,
+                        'size' => self::PAGE_SIZE,
+                        'order' => 'DESC',
+                        'property' => 'createdAt',
+                    ],
+                    $account->user,
+                    'reconcile_virtual_account_assignment',
+                    $operation->operation_id,
+                );
+            }
 
             if (! $response->successful()) {
-                throw new \RuntimeException('Failed fetching Nium payment IDs for reconciliation.');
+                throw new RuntimeException('Failed fetching Nium payment IDs for reconciliation.');
+            }
+
+            if ($request !== null) {
+                $data = $response->json();
+                if ($response->status() !== 200 || ! is_array($data) || array_is_list($data)) {
+                    throw new RuntimeException('Invalid payment ID listing response.');
+                }
+                $parsed = $this->enrolledPage($data, $page, $totalPagesSeen);
+                if (array_key_exists('totalElements', $data)) {
+                    if (! is_int($data['totalElements']) || $data['totalElements'] < 0
+                        || ($totalElements !== null && $totalElements !== $data['totalElements'])) {
+                        throw new RuntimeException('Invalid or changing pagination count.');
+                    }
+                    $totalElements = $data['totalElements'];
+                } elseif ($totalElements !== null) {
+                    throw new RuntimeException('Missing pagination count.');
+                }
+                foreach ($parsed['items'] as $item) {
+                    $id = $item['uniquePaymentId'] ?? null;
+                    if (! NiumPaymentIdValidator::isValid($id) || isset($seenIds[$id])) {
+                        throw new RuntimeException('Malformed or repeated payment ID listing.');
+                    }
+                    $seenIds[$id] = true;
+                }
+                array_push($items, ...$parsed['items']);
+                $complete = $parsed['complete'];
+                if ($complete) {
+                    if ($totalElements !== null && count($items) !== $totalElements) {
+                        throw new RuntimeException('Partial payment ID listing.');
+                    }
+                    break;
+                }
+
+                continue;
             }
 
             $data = (array) ($response->json() ?? []);

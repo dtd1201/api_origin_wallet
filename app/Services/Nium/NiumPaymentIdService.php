@@ -5,9 +5,11 @@ namespace App\Services\Nium;
 use App\Models\ApiRequestLog;
 use App\Models\NiumVirtualAccount;
 use App\Models\NiumVirtualAccountOperation;
+use App\Models\NiumVirtualAccountRequest;
 use App\Models\UserProviderAccount;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 
 final class NiumPaymentIdService
@@ -25,7 +27,12 @@ final class NiumPaymentIdService
         string $accountType,
         ?string $bankName = null,
         ?string $operationId = null,
-    ): NiumVirtualAccount {
+        bool $autoSelectBank = false,
+        ?string $apiVersion = null,
+    ): NiumVirtualAccount|NiumVirtualAccountOperation {
+        if ($apiVersion !== null) {
+            NiumVirtualAccountAssignmentContract::assertVersion($apiVersion);
+        }
         $account->loadMissing('user');
 
         $eligibleAccount = $this->accountStateService->assertEligible($account->user);
@@ -54,6 +61,51 @@ final class NiumPaymentIdService
             throw new RuntimeException('Nium Assign Payment ID operation identifier is too long.');
         }
 
+        $existing = NiumVirtualAccountOperation::query()->where('user_provider_account_id', $account->id)
+            ->where('operation_id', $operationId)->first();
+        $hasLedger = Schema::hasTable('nium_va_requests');
+        $enrolledRequest = $hasLedger && $existing !== null
+            ? NiumVirtualAccountRequest::query()->whereKey($existing->id)->first() : null;
+        // An omitted version resumes the stored contract. Never re-version a saved
+        // operation when the corridor configuration changes; explicit mismatches
+        // still fail the existing immutable identity check in the orchestrator.
+        $selectedV1 = $apiVersion === null && $existing === null
+            && (string) config('services.nium.greentech_v1_account_id') === (string) $account->id
+            && $currency === 'USD'
+            && $accountCategory === 'SELF_FUNDING_ACCOUNT'
+            && $accountType === 'WIRES'
+            && ($bankName === null || $bankName === 'JPM_SG');
+        $apiVersion ??= $enrolledRequest !== null
+            ? $enrolledRequest->identity()->snapshot()['api_version']
+            : ($selectedV1 ? 'v1' : 'v2');
+        if ($selectedV1) {
+            $bankName = 'JPM_SG';
+        }
+        $enabled = config('services.nium.va_single_dispatch.enabled') === true;
+        // The selected corridor must reach the durable gate even when disabled:
+        // it must never fall back to the legacy GET + V2 POST engine.
+        if ($enrolledRequest !== null || $selectedV1 || ($enabled && $existing === null)) {
+            return app(NiumVirtualAccountAssignmentService::class)->assign($account, $operationId, $currency, $accountCategory, $accountType, $bankName, $apiVersion);
+        }
+        if ($apiVersion !== 'v2') {
+            throw new RuntimeException('V1 assignment requires the inactive single-dispatch workflow; legacy operations cannot be enrolled.');
+        }
+        if ($enabled && $existing?->status === NiumVirtualAccountOperation::PREFLIGHT_FAILED) {
+            throw new RuntimeException('Historical assignments cannot be redispatched through the single-dispatch cutover.');
+        }
+        if ($hasLedger && $existing === null && NiumVirtualAccountRequest::query()
+            ->join('nium_virtual_account_operations as o', 'o.id', '=', 'nium_va_requests.operation_id')
+            ->join('user_provider_accounts as a', 'a.id', '=', 'o.user_provider_account_id')
+            ->where(fn ($q) => $q->where('a.id', $account->id)
+                ->orWhereRaw('LOWER(a.external_account_id) = ?', [strtolower((string) $account->external_account_id)]))->exists()) {
+            throw new RuntimeException('A ledger-enrolled wallet cannot fall back to legacy assignment when the feature is disabled.');
+        }
+
+        // The HTTP API has no caller-selected bank. Preserve its legacy selection here;
+        // the ledger path above resolves it only for a new request and freezes replays.
+        if ($autoSelectBank && $bankName === null) {
+            $bankName = app(NiumPaymentIdBankResolver::class)->resolve($account->user, $currency);
+        }
         [$operation, $claimed] = $this->claim(
             $account,
             $operationId,

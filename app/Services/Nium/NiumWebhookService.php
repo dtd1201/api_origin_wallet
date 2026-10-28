@@ -8,6 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\NiumVirtualAccount;
 use App\Models\NiumVirtualAccountDetail;
 use App\Models\NiumVirtualAccountOperation;
+use App\Models\NiumVirtualAccountRequest;
 use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\UserProviderAccount;
@@ -53,11 +54,16 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             $this->verifyCustomerLifecycleEnvelope($payload, $request);
         }
 
+        if (NiumVirtualAccountWebhookContract::isAssignmentEvent($payload)) {
+            NiumVirtualAccountWebhookContract::validateDeliveryIdentity($payload);
+        }
         $eventId = $this->eventId($payload, $request, $isCustomerLifecycle);
         $eventType = $isCustomerLifecycle
             ? $template
             : $this->eventType($payload);
         $resource = $this->resourcePayload($payload);
+        $vaEvidence = NiumVirtualAccountWebhookContract::isAssignmentEvent($payload)
+            ? NiumVirtualAccountWebhookContract::capture($provider, $request, $eventId, $eventType) : null;
 
         $existingEvent = WebhookEvent::query()
             ->where('provider_id', $provider->id)
@@ -65,21 +71,11 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             ->first();
 
         if ($existingEvent !== null) {
-            Log::info('Duplicate Nium webhook ignored.', [
-                'provider_id' => $provider->id,
-                'event_id' => $eventId,
-            ]);
-
-            return [
-                'message' => 'Webhook already received.',
-                'provider' => $provider->code,
-                'event_id' => $eventId,
-                'duplicate' => true,
-            ];
+            return $this->duplicateReceipt($provider, $existingEvent, $vaEvidence);
         }
 
         try {
-            $event = DB::transaction(function () use ($eventId, $eventType, $payload, $provider, $resource): WebhookEvent {
+            $event = DB::transaction(function () use ($eventId, $eventType, $payload, $provider, $resource, $vaEvidence): WebhookEvent {
                 return WebhookEvent::query()->create([
                     'provider_id' => $provider->id,
                     'event_id' => $eventId,
@@ -90,28 +86,35 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                         : $this->sensitiveDataSanitizer->sanitize($payload),
                     'signature' => '[REDACTED]',
                     'processing_status' => 'received',
+                    ...($vaEvidence === null ? [] : ['nium_va_evidence' => $vaEvidence]),
                 ]);
             });
         } catch (QueryException $exception) {
             if ($this->isDuplicateWebhookEventException($exception)) {
-                return [
-                    'message' => 'Webhook already received.',
-                    'provider' => $provider->code,
-                    'event_id' => $eventId,
-                    'duplicate' => true,
-                ];
+                $winner = WebhookEvent::query()->where('provider_id', $provider->id)->where('event_id', $eventId)->firstOrFail();
+
+                return $this->duplicateReceipt($provider, $winner, $vaEvidence);
             }
 
             throw $exception;
         }
 
+        if ($event->nium_va_evidence !== null) {
+            $event = $this->recoverVaReceipt($provider, $event);
+
+            return [
+                'message' => 'Webhook received.', 'provider' => $provider->code,
+                'event_id' => $eventId, 'processing_status' => $event->processing_status,
+            ];
+        }
+
         try {
-            $this->processPayload($provider, $payload, $resource, $request);
+            $this->processPayload($provider, $payload, $resource, $request, $event);
 
             $event->update([
-                'processing_status' => 'processed',
+                'processing_status' => $event->processing_status === 'observed' ? 'observed' : 'processed',
                 'processed_at' => now(),
-                'error_message' => null,
+                'error_message' => $event->processing_status === 'observed' ? $event->error_message : null,
             ]);
             $this->dispatchEntityKyc($event->fresh());
         } catch (Throwable $exception) {
@@ -136,6 +139,9 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     public function reprocessWebhookEvent(IntegrationProvider $provider, WebhookEvent $event): WebhookEvent
     {
+        if ($event->nium_va_evidence !== null) {
+            return $this->recoverVaReceipt($provider, $event);
+        }
         $event = DB::transaction(function () use ($event): WebhookEvent {
             $event = WebhookEvent::query()
                 ->whereKey($event->id)
@@ -157,7 +163,8 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             return $event->fresh('provider');
         }
 
-        $payload = (array) ($event->payload ?? []);
+        $payload = $event->nium_va_evidence !== null
+            ? NiumVirtualAccountWebhookContract::payload($event) : (array) ($event->payload ?? []);
 
         if (
             $this->providerAccountStateService->isCustomerLifecycleTemplate($payload['template'] ?? null) &&
@@ -169,11 +176,11 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         try {
             $retryRequest = Request::create('/internal/nium-webhook-retry', 'POST');
             $retryRequest->headers->set('x-request-id', (string) $event->event_id);
-            $this->processPayload($provider, $payload, $this->resourcePayload($payload), $retryRequest);
+            $this->processPayload($provider, $payload, $this->resourcePayload($payload), $retryRequest, $event);
             $event->update([
-                'processing_status' => 'processed',
+                'processing_status' => $event->processing_status === 'observed' ? 'observed' : 'processed',
                 'processed_at' => now(),
-                'error_message' => null,
+                'error_message' => $event->processing_status === 'observed' ? $event->error_message : null,
             ]);
             $this->dispatchEntityKyc($event->fresh());
         } catch (Throwable $exception) {
@@ -188,11 +195,41 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         return $event->fresh('provider');
     }
 
+    private function duplicateReceipt(IntegrationProvider $provider, WebhookEvent $event, ?array $evidence): array
+    {
+        if ($evidence !== null && $event->nium_va_evidence !== null) {
+            if ($event->nium_va_evidence['body_sha256'] !== $evidence['body_sha256']) {
+                throw new RuntimeException('VA webhook delivery identity conflicts with its immutable receipt.');
+            }
+            $event = $this->recoverVaReceipt($provider, $event);
+        }
+
+        // Existing HTTP acknowledgement contract; status describes internal processing separately.
+        return [
+            'message' => 'Webhook already received.', 'provider' => $provider->code,
+            'event_id' => $event->event_id, 'duplicate' => true,
+            ...($event->nium_va_evidence === null ? [] : ['processing_status' => $event->processing_status]),
+        ];
+    }
+
+    private function recoverVaReceipt(IntegrationProvider $provider, WebhookEvent $event): WebhookEvent
+    {
+        if ((int) $event->provider_id !== (int) $provider->id) {
+            throw new RuntimeException('VA receipt provider does not match recovery context.');
+        }
+
+        return app(NiumVirtualAccountWebhookRecovery::class)->process($event, function (WebhookEvent $claimed) use ($provider): void {
+            $payload = NiumVirtualAccountWebhookContract::payload($claimed);
+            $this->processPayload($provider, $payload, $this->resourcePayload($payload), event: $claimed);
+        });
+    }
+
     private function processPayload(
         IntegrationProvider $provider,
         array $payload,
         array $resource,
         ?Request $request = null,
+        ?WebhookEvent $event = null,
     ): void {
         $template = strtoupper((string) ($payload['template'] ?? ''));
 
@@ -202,8 +239,8 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             return;
         }
 
-        if ($this->isVaAssigned($payload)) {
-            $this->processVaAssigned($provider, $payload);
+        if (NiumVirtualAccountWebhookContract::isAssignmentEvent($payload)) {
+            $this->processVaAssignmentEvent($provider, $payload, $event);
 
             return;
         }
@@ -455,7 +492,72 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         }
     }
 
-    private function processVaAssigned(IntegrationProvider $provider, array $payload): void
+    private function processVaAssignmentEvent(IntegrationProvider $provider, array $payload, ?WebhookEvent $event): void
+    {
+        // Protect enrolled histories and wallet aliases even when a notification has a wrong
+        // target. A mismatching notification must never fall through to the legacy VA writer.
+        $account = $this->findCustomerProviderAccount($provider, $payload);
+        $requests = NiumVirtualAccountRequest::query()->whereIn('operation_id',
+            NiumVirtualAccountOperation::query()->whereIn('user_provider_account_id',
+                UserProviderAccount::query()->where('provider_id', $provider->id)->select('id'))->select('id'))
+            ->get()->filter(function (NiumVirtualAccountRequest $request) use ($payload, $account): bool {
+                $snapshot = $request->identity()->snapshot();
+
+                return ($account !== null && $snapshot['provider_account_id'] === (int) $account->id)
+                    || ($payload['customerHashId'] ?? null) === $snapshot['customer_id']
+                    || ($payload['walletHashId'] ?? null) === $snapshot['wallet_id'];
+            });
+        if ($requests->isEmpty() && NiumVirtualAccountWebhookContract::isAssigned($payload)) {
+            $this->processVaAssigned($provider, $payload, $event);
+
+            return;
+        }
+        if ($event === null || $event->nium_va_evidence === null) {
+            // Historical sanitized payloads are not authenticated exact-target evidence.
+            $this->observeVaEvent($event, 'missing_authenticated_va_evidence');
+
+            return;
+        }
+        if (NiumVirtualAccountWebhookContract::type($payload) === NiumVirtualAccountWebhookContract::FAILED) {
+            // The documented failure contract has neither a Payment ID nor an assignment key.
+            // Delivery UUID, timing, bank/currency and undocumented tags do not prove rejection.
+            $this->observeVaEvent($event, 'uncorrelated_assignment_failure');
+
+            return;
+        }
+        $paymentId = $payload['uniquePaymentId'] ?? null;
+        if (! NiumPaymentIdValidator::isValid($paymentId)) {
+            $this->observeVaEvent($event, 'invalid_assignment_payment_id');
+
+            return;
+        }
+        $reconciliation = app(NiumVirtualAccountReconciliationService::class);
+        $candidates = $requests->filter(fn (NiumVirtualAccountRequest $request): bool =>
+            NiumVirtualAccountWebhookContract::permitsAssignment($event, $request->identity(), $paymentId)
+            && $reconciliation->hasCorrelatedPostPaymentId($request, $paymentId));
+        if ($candidates->count() !== 1) {
+            $this->observeVaEvent($event, $candidates->count() > 1 ? 'ambiguous_assignment_causality' : 'insufficient_assignment_causality_or_dimensions');
+
+            return;
+        }
+        $operation = $reconciliation->reconcileWebhook($candidates->sole(), $event);
+        if ($operation->status !== NiumVirtualAccountOperation::ASSIGNED || $operation->provider_payment_id !== $paymentId) {
+            $this->observeVaEvent($event, 'assignment_remains_unresolved');
+        }
+    }
+
+    private function observeVaEvent(?WebhookEvent $event, string $reason): void
+    {
+        if ($event?->nium_va_evidence !== null) {
+            // The recovery owner publishes status using its fenced claim after processing.
+            $event->fill(['processing_status' => 'observed', 'error_message' => $reason]);
+        } else {
+            $event?->update(['processing_status' => 'observed', 'error_message' => $reason]);
+        }
+        Log::notice('Nium VA webhook retained as observed evidence.', ['webhook_event_id' => $event?->id, 'reason' => $reason]);
+    }
+
+    private function processVaAssigned(IntegrationProvider $provider, array $payload, ?WebhookEvent $event = null): void
     {
         $account = $this->findCustomerProviderAccount($provider, $payload);
         $paymentId = $this->value($payload, ['uniquePaymentId', 'paymentId', 'virtualAccountNumber']);
@@ -463,7 +565,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         $accountCategory = strtoupper((string) $this->value($payload, ['accountCategory']));
         $accountType = strtoupper((string) $this->value($payload, ['accountType']));
 
-        if ($account === null || ! filled($paymentId) || strlen($currency) !== 3) {
+        if ($account === null || ! NiumPaymentIdValidator::isValid($paymentId) || strlen($currency) !== 3) {
             throw new RuntimeException('Nium VA Assigned webhook is missing a mapped customer, payment ID, or currency.');
         }
 
@@ -473,13 +575,42 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             $accountType,
             $currency,
             $payload,
-            $paymentId
+            $paymentId,
+            $event
         ): NiumVirtualAccount {
+            // Legacy writers participate in account-first ordering and literal-ID collision quarantine.
+            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($account->id);
+            if ($event?->nium_va_evidence !== null) {
+                app(NiumVirtualAccountWebhookRecovery::class)->assertClaim($event);
+            }
+            if (NiumVirtualAccountRequest::query()->whereIn('operation_id', NiumVirtualAccountOperation::query()
+                ->where('user_provider_account_id', $account->id)->select('id'))->exists()) {
+                throw new RuntimeException('Enrolled VA histories require ledger evidence resolution.');
+            }
+            foreach (['customerHashId' => $account->external_customer_id, 'walletHashId' => $account->external_account_id,
+                'clientHashId' => config('services.nium.client_id')] as $field => $expected) {
+                if (array_key_exists($field, $payload) && (! is_string($payload[$field]) || $payload[$field] !== $expected)) {
+                    throw new RuntimeException('VA webhook target does not match its provider account.');
+                }
+            }
+            app(NiumVirtualAccountSafetyLedger::class)->lockPaymentIdForWriter($paymentId);
             $virtualAccount = NiumVirtualAccount::query()
                 ->where('user_provider_account_id', $account->id)
                 ->where('provider_payment_id', (string) $paymentId)
                 ->lockForUpdate()
                 ->first();
+
+            $otherOwner = NiumVirtualAccount::query()->where('provider_payment_id', $paymentId)
+                ->when($virtualAccount !== null, fn ($query) => $query->whereKeyNot($virtualAccount->id))->exists();
+            $otherOperation = NiumVirtualAccountOperation::query()->where('provider_payment_id', $paymentId)
+                ->where(function ($query) use ($virtualAccount): void {
+                    if ($virtualAccount !== null) {
+                        $query->whereNull('nium_virtual_account_id')->orWhere('nium_virtual_account_id', '<>', $virtualAccount->id);
+                    }
+                })->exists();
+            if ($otherOwner || $otherOperation) {
+                throw new RuntimeException('VA Payment ID ownership collision requires manual review.');
+            }
 
             if ($virtualAccount === null && $accountType !== '') {
                 $pending = NiumVirtualAccount::query()
@@ -487,6 +618,8 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     ->where('currency', $currency)
                     ->where('account_type', $accountType)
                     ->where('status', 'pending')
+                    ->where(fn ($query) => $query->whereNull('provider_payment_id')->orWhere('provider_payment_id', '')
+                        ->orWhereRaw('UPPER(provider_payment_id) = ?', ['INITIALIZED']))
                     ->when($accountCategory !== '', fn ($query) => $query->where('account_category', $accountCategory))
                     ->orderBy('id')
                     ->lockForUpdate()
@@ -497,6 +630,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 } elseif ($pending->count() > 1) {
                     NiumVirtualAccountOperation::query()
                         ->whereIn('nium_virtual_account_id', $pending->modelKeys())
+                        ->whereNotIn('id', NiumVirtualAccountRequest::query()->select('operation_id'))
                         ->whereNotIn('status', [NiumVirtualAccountOperation::ASSIGNED, NiumVirtualAccountOperation::FAILED])
                         ->update([
                             'status' => NiumVirtualAccountOperation::MANUAL_REVIEW,
@@ -526,12 +660,13 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     'virtual_account_reference' => (string) $paymentId,
                     'provider_payment_id' => (string) $paymentId,
                     'status' => 'assigned',
-                    'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
+                    'assigned_at' => $virtualAccount->assigned_at ?? $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
                 ]);
             }
 
             NiumVirtualAccountOperation::query()
                 ->where('nium_virtual_account_id', $virtualAccount->id)
+                ->whereNotIn('id', NiumVirtualAccountRequest::query()->select('operation_id'))
                 ->whereNotIn('status', [NiumVirtualAccountOperation::ASSIGNED, NiumVirtualAccountOperation::FAILED])
                 ->update([
                     'provider_payment_id' => (string) $paymentId,
@@ -553,11 +688,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     private function isVaAssigned(array $payload): bool
     {
-        return in_array(strtoupper((string) ($payload['template'] ?? $payload['eventType'] ?? '')), [
-            'VA_ASSIGNED',
-            'VIRTUAL_ACCOUNT_ASSIGNED',
-            'VIRTUAL_ACCOUNT_ASSIGNED_WEBHOOK',
-        ], true);
+        return NiumVirtualAccountWebhookContract::isAssigned($payload);
     }
 
     private function verifyCustomerLifecycleEnvelope(array $payload, Request $request): void

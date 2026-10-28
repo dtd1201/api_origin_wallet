@@ -1,0 +1,21 @@
+{
+    "content": [
+        {
+            "uniquePaymentId": "VA-PHASE3C-SYNTHETIC",
+            "currencyCode": "USD",
+            "accountName": "Synthetic Account Holder",
+            "bankName": "JPM_SG",
+            "fullBankName": "Synthetic Bank Display Name",
+            "bankAddress": "1 Synthetic Street, Singapore",
+            "accountType": "GLOBAL",
+            "accountCategory": "SELF_FUNDING_ACCOUNT",
+            "routingCodeType1": "SWIFT",
+            "routingCodeValue1": "TESTSGSGXXX",
+            "routingCodeType2": "Intermediary Bank Code",
+            "routingCodeValue2": "TESTGB2LXXX",
+            "status": "Active"
+        }
+    ],
+    "totalPages": 1,
+    "totalElements": 1
+}

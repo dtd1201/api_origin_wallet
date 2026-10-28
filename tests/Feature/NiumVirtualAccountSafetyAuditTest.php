@@ -12,7 +12,6 @@ use App\Services\Nium\NiumEvidencePersistenceException;
 use App\Services\Nium\NiumPaymentIdService;
 use App\Services\Nium\NiumVirtualAccountDetailService;
 use App\Services\Nium\NiumWebhookService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request as ClientRequest;
 use Illuminate\Http\Request;
@@ -24,13 +23,22 @@ use Tests\TestCase;
 
 class NiumVirtualAccountSafetyAuditTest extends TestCase
 {
-    use RefreshDatabase;
-
     protected function setUp(): void
     {
         parent::setUp();
-
+        // Receipt claims must commit independently, outside a test-wide transaction.
+        config(['database.connections.nium_legacy_webhook_test' => [
+            'driver' => 'sqlite', 'database' => ':memory:', 'foreign_key_constraints' => true,
+        ]]);
+        DB::setDefaultConnection('nium_legacy_webhook_test');
+        $this->artisan('migrate', ['--database' => 'nium_legacy_webhook_test', '--force' => true])->assertSuccessful();
         Http::preventStrayRequests();
+    }
+
+    protected function tearDown(): void
+    {
+        DB::purge('nium_legacy_webhook_test');
+        parent::tearDown();
     }
 
     public function test_two_intentional_usd_assignments_persist_distinct_payment_ids(): void

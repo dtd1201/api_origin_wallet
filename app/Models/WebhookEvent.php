@@ -11,6 +11,7 @@ class WebhookEvent extends Model
     use HasFactory;
 
     public const CREATED_AT = 'received_at';
+
     public const UPDATED_AT = null;
 
     protected $fillable = [
@@ -24,12 +25,18 @@ class WebhookEvent extends Model
         'processed_at',
         'processing_status',
         'error_message',
+        'nium_va_evidence',
+        'nium_va_recovery',
     ];
+
+    protected $hidden = ['nium_va_evidence', 'nium_va_recovery'];
 
     protected function casts(): array
     {
         return [
             'payload' => 'array',
+            'nium_va_evidence' => 'encrypted:array',
+            'nium_va_recovery' => 'array',
             'received_at' => 'datetime',
             'processed_at' => 'datetime',
         ];

@@ -79,39 +79,47 @@ class ProviderWebhookEventController extends Controller
             ], 422);
         }
 
-        $event = DB::transaction(function () use ($request, $providerWebhookEvent): WebhookEvent {
-            $oldData = $this->sensitiveDataSanitizer->sanitize($providerWebhookEvent->toArray());
-            $payload = (array) ($providerWebhookEvent->payload ?? []);
-            $currentRetry = (array) Arr::get($payload, '_origin_retry', []);
-            $retryCount = (int) ($currentRetry['count'] ?? 0) + 1;
-
-            $payload['_origin_retry'] = [
-                'count' => $retryCount,
-                'requested_at' => now()->toISOString(),
-                'requested_by_user_id' => $request->user()?->id,
-            ];
-
-            $providerWebhookEvent->update([
-                'processing_status' => 'retrying',
-                'error_message' => null,
-                'payload' => $payload,
-            ]);
-
-            AuditLog::query()->create([
-                'user_id' => $request->user()?->id,
-                'action' => 'webhook.retry_requested',
-                'entity_type' => 'webhook_event',
-                'entity_id' => (string) $providerWebhookEvent->id,
-                'old_data' => $oldData,
-                'new_data' => $this->sensitiveDataSanitizer->sanitize($providerWebhookEvent->fresh()->toArray()),
-                'ip_address' => $request->ip(),
-                'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
-            ]);
-
-            return $providerWebhookEvent->fresh('provider');
-        });
-
+        $event = $providerWebhookEvent;
         try {
+            $event = DB::transaction(function () use ($request, $providerWebhookEvent): WebhookEvent {
+                $providerWebhookEvent = WebhookEvent::query()->lockForUpdate()->findOrFail($providerWebhookEvent->id);
+                if ($providerWebhookEvent->processing_status === 'processed') {
+                    throw new \RuntimeException('This webhook event is already processed.');
+                }
+                $oldData = $this->sensitiveDataSanitizer->sanitize($providerWebhookEvent->toArray());
+                $retry = [
+                    'requested_at' => now()->toISOString(),
+                    'requested_by_user_id' => $request->user()?->id,
+                ];
+                if ($providerWebhookEvent->nium_va_evidence !== null) {
+                    $metadata = $providerWebhookEvent->nium_va_recovery ?? [];
+                    $providerWebhookEvent->update(['nium_va_recovery' => array_replace($metadata, [
+                        'admin_retries' => ($metadata['admin_retries'] ?? 0) + 1,
+                        'last_admin_retry' => $retry,
+                    ])]);
+                } else {
+                    $payload = (array) ($providerWebhookEvent->payload ?? []);
+                    $retry['count'] = (int) Arr::get($payload, '_origin_retry.count', 0) + 1;
+                    $payload['_origin_retry'] = $retry;
+                    $providerWebhookEvent->update([
+                        'processing_status' => 'retrying', 'error_message' => null, 'payload' => $payload,
+                    ]);
+                }
+
+                AuditLog::query()->create([
+                    'user_id' => $request->user()?->id,
+                    'action' => 'webhook.retry_requested',
+                    'entity_type' => 'webhook_event',
+                    'entity_id' => (string) $providerWebhookEvent->id,
+                    'old_data' => $oldData,
+                    'new_data' => $this->sensitiveDataSanitizer->sanitize($providerWebhookEvent->fresh()->toArray()),
+                    'ip_address' => $request->ip(),
+                    'user_agent' => Str::limit((string) $request->userAgent(), 1000, ''),
+                ]);
+
+                return $providerWebhookEvent->fresh('provider');
+            });
+
             if ($event->provider !== null && $event->provider->supportsWebhooks()) {
                 $webhookProvider = $registry->resolveWebhookProvider($event->provider);
 
@@ -122,13 +130,23 @@ class ProviderWebhookEventController extends Controller
         } catch (Throwable $exception) {
             return response()->json([
                 'message' => 'Webhook retry failed.',
-                'error' => $exception->getMessage(),
+                'error' => $event->nium_va_evidence !== null
+                    ? 'Nium VA webhook recovery failed; original evidence retained.' : $exception->getMessage(),
                 'webhook_event' => $this->payload($event->fresh('provider')),
             ], 422);
         }
 
+        if ($event->nium_va_evidence !== null && $event->processing_status === 'processing') {
+            return response()->json([
+                'message' => 'Webhook recovery is already in progress.',
+                'webhook_event' => $this->payload($event),
+            ], 422);
+        }
+
         return response()->json([
-            'message' => 'Webhook retry has been requested.',
+            'message' => $event->processing_status === 'observed'
+                ? 'Webhook retry evaluated; assignment evidence remains unresolved.'
+                : 'Webhook retry has been requested.',
             'webhook_event' => $this->payload($event),
         ]);
     }
@@ -146,7 +164,8 @@ class ProviderWebhookEventController extends Controller
             'event_type' => $event->event_type,
             'status' => $event->processing_status,
             'related_reference' => $event->external_resource_id,
-            'attempts' => (int) ($retry['count'] ?? 0),
+            'attempts' => $event->nium_va_evidence !== null
+                ? (int) ($event->nium_va_recovery['admin_retries'] ?? 0) : (int) ($retry['count'] ?? 0),
             'received_at' => $event->received_at,
             'processed_at' => $event->processed_at,
             'next_retry_at' => null,

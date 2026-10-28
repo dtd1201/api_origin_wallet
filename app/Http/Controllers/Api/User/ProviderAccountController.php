@@ -4,16 +4,18 @@ namespace App\Http\Controllers\Api\User;
 
 use App\Http\Controllers\Controller;
 use App\Models\IntegrationProvider;
+use App\Models\NiumVirtualAccountDetailEnrichment;
+use App\Models\NiumVirtualAccountOperation;
 use App\Models\User;
 use App\Models\UserIntegrationRequest;
 use App\Models\UserProviderAccount;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use App\Services\Integrations\ProviderOnboardingEligibilityException;
 use App\Services\Integrations\ProviderOnboardingManager;
-use App\Services\Nium\NiumPaymentIdBankResolver;
 use App\Services\Nium\NiumPaymentIdService;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
+use App\Services\Nium\NiumVirtualAccountOperationProjection;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -80,9 +82,21 @@ class ProviderAccountController extends Controller
         ]);
     }
 
-    public function show(User $user, IntegrationProvider $provider): JsonResponse
-    {
+    public function show(
+        Request $request,
+        User $user,
+        IntegrationProvider $provider,
+        NiumVirtualAccountOperationProjection $operations,
+    ): JsonResponse {
         abort_unless(PrimaryProvider::isPrimary($provider), 404);
+
+        $filters = $request->validate([
+            'operations_before_id' => ['sometimes', 'integer', 'min:1', 'max:'.PHP_INT_MAX],
+            'operations_unresolved_only' => ['sometimes', 'boolean'],
+            'provider_account_id' => ['sometimes', 'integer', 'min:1', 'max:'.PHP_INT_MAX],
+            'operation_id' => ['sometimes', 'string', 'max:255'],
+        ]);
+        $operationDiscovery = $operations->discover($user, $provider, $filters);
 
         $user->loadMissing([
             'integrationLinks.provider',
@@ -111,6 +125,7 @@ class ProviderAccountController extends Controller
             return response()->json([
                 'provider' => $provider->summaryPayload(),
                 'provider_account' => null,
+                ...$operationDiscovery,
                 'integration_link' => $integrationLink,
                 'integration_request' => $integrationRequest,
                 'kyc_provider_submission' => $kycProviderSubmission,
@@ -126,6 +141,7 @@ class ProviderAccountController extends Controller
         return response()->json([
             'provider' => $provider->summaryPayload(),
             'provider_account' => $providerAccount,
+            ...$operationDiscovery,
             'integration_link' => $integrationLink,
             'integration_request' => $integrationRequest,
             'kyc_provider_submission' => $kycProviderSubmission,
@@ -184,21 +200,43 @@ class ProviderAccountController extends Controller
         ], 202);
     }
 
-    public function virtualAccounts(User $user, IntegrationProvider $provider): JsonResponse
+    public function virtualAccounts(Request $request, User $user, IntegrationProvider $provider): JsonResponse
     {
         abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
+        // An explicit account ID must still belong to this user/provider. The schema
+        // permits one row per pair; this filter does not add account-history support.
+        $filters = $request->validate([
+            'provider_account_id' => ['sometimes', 'integer', 'min:1', 'max:'.PHP_INT_MAX],
+        ]);
         $account = UserProviderAccount::query()
             ->where('user_id', $user->id)
             ->where('provider_id', $provider->id)
+            ->when(isset($filters['provider_account_id']), fn ($q) => $q->whereKey($filters['provider_account_id']))
             ->latest('id')
             ->first();
 
+        $virtualAccounts = $account?->niumVirtualAccounts()->with('detail')->latest('id')->get() ?? collect();
+        // Select only safe task fields. Never serialize the enrollment/claim model.
+        $enrichments = NiumVirtualAccountDetailEnrichment::query()
+            ->whereIn('nium_virtual_account_id', $virtualAccounts->pluck('id')->all())
+            ->get(['nium_virtual_account_id', 'state', 'available_at', 'updated_at'])
+            ->keyBy('nium_virtual_account_id');
+
         return response()->json([
-            'data' => $account?->niumVirtualAccounts()
-                ->with('detail')
-                ->latest('id')
-                ->get() ?? [],
+            'data' => $virtualAccounts->map(function ($va) use ($enrichments): array {
+                $task = $enrichments->get($va->id);
+
+                return [
+                    ...$va->toArray(),
+                    'enrichment' => [
+                        'status' => $task?->state,
+                        // Running work has no scheduled next attempt; terminal work has none.
+                        'next_attempt_at' => $task?->state === 'pending' ? $task->available_at?->toISOString() : null,
+                        'updated_at' => $task?->updated_at?->toISOString(),
+                    ],
+                ];
+            })->values()->all(),
         ]);
     }
 
@@ -207,7 +245,7 @@ class ProviderAccountController extends Controller
         User $user,
         IntegrationProvider $provider,
         NiumPaymentIdService $service,
-        NiumPaymentIdBankResolver $bankResolver,
+        NiumVirtualAccountOperationProjection $operations,
     ): JsonResponse {
         abort_unless(PrimaryProvider::isPrimary($provider), 404);
 
@@ -215,6 +253,7 @@ class ProviderAccountController extends Controller
             'currency' => ['required', 'string', 'size:3', 'regex:/^[A-Za-z]{3}$/'],
             'account_category' => ['required', 'string', 'in:SELF_FUNDING_ACCOUNT,COLLECTION_ACCOUNT,SELF_FUNDING_AND_COLLECTION_ACCOUNT'],
             'account_type' => ['required', 'string', 'in:LOCAL,WIRES,LOCAL_AND_WIRES'],
+            'expected_provider_account_id' => ['sometimes', 'integer', 'min:1', 'max:'.PHP_INT_MAX],
         ]);
         $operationId = trim((string) $request->header('Idempotency-Key'));
         if ($operationId === '') {
@@ -234,14 +273,23 @@ class ProviderAccountController extends Controller
             ->latest('id')
             ->firstOrFail();
 
+        if (isset($validated['expected_provider_account_id'])
+            && (int) $validated['expected_provider_account_id'] !== (int) $account->id) {
+            return response()->json([
+                'message' => 'The selected provider account has changed. Refresh the account and operation status before continuing.',
+                'code' => 'PROVIDER_ACCOUNT_MISMATCH',
+            ], 409);
+        }
+
         try {
             $virtualAccount = $service->assign(
                 $account,
                 $validated['currency'],
                 $validated['account_category'],
                 $validated['account_type'],
-                $bankResolver->resolve($user, $validated['currency']),
+                null,
                 $operationId,
+                autoSelectBank: true,
             );
         } catch (NiumProviderRequestException $exception) {
             return $this->safeNiumErrorResponse($exception);
@@ -251,10 +299,27 @@ class ProviderAccountController extends Controller
             ], 422);
         }
 
+        if ($virtualAccount instanceof NiumVirtualAccountOperation) {
+            return response()->json([
+                'message' => 'Virtual account assignment remains unresolved.',
+                'operation_id' => $operationId,
+                'operation' => $operations->operation($virtualAccount),
+                'virtual_account' => null,
+            ], 202);
+        }
+
+        // Resolve by both account and caller key, never by a VA/payment ID or latest key.
+        // Legacy INITIALIZED may still return 201: the stored operation remains pending.
+        $operation = NiumVirtualAccountOperation::query()
+            ->where('user_provider_account_id', $account->id)
+            ->where('operation_id', $operationId)
+            ->first();
+
         return response()->json([
             'message' => 'Virtual account assigned successfully.',
             'operation_id' => $operationId,
             'virtual_account' => $virtualAccount,
+            ...($operation === null ? [] : ['operation' => $operations->operation($operation)]),
         ], 201);
     }
 
