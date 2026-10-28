@@ -7,9 +7,11 @@ use App\Models\NiumVirtualAccount;
 use App\Models\NiumVirtualAccountOperation;
 use App\Models\NiumVirtualAccountRequest;
 use App\Models\UserProviderAccount;
+use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 final class NiumPaymentIdService
@@ -69,12 +71,10 @@ final class NiumPaymentIdService
         // An omitted version resumes the stored contract. Never re-version a saved
         // operation when the corridor configuration changes; explicit mismatches
         // still fail the existing immutable identity check in the orchestrator.
-        $selectedV1 = $apiVersion === null && $existing === null
-            && (string) config('services.nium.greentech_v1_account_id') === (string) $account->id
-            && $currency === 'USD'
-            && $accountCategory === 'SELF_FUNDING_ACCOUNT'
-            && $accountType === 'WIRES'
-            && ($bankName === null || $bankName === 'JPM_SG');
+        $confirmedCorridor = NiumVirtualAccountAssignmentContract::isConfirmedV1Corridor(
+            $currency, $accountCategory, $accountType, $bankName,
+        );
+        $selectedV1 = $apiVersion === null && $existing === null && $confirmedCorridor;
         $apiVersion ??= $enrolledRequest !== null
             ? $enrolledRequest->identity()->snapshot()['api_version']
             : ($selectedV1 ? 'v1' : 'v2');
@@ -84,13 +84,13 @@ final class NiumPaymentIdService
         $enabled = config('services.nium.va_single_dispatch.enabled') === true;
         // The selected corridor must reach the durable gate even when disabled:
         // it must never fall back to the legacy GET + V2 POST engine.
-        if ($enrolledRequest !== null || $selectedV1 || ($enabled && $existing === null)) {
+        if ($enrolledRequest !== null || ($confirmedCorridor && $existing === null) || ($enabled && $existing === null)) {
             return app(NiumVirtualAccountAssignmentService::class)->assign($account, $operationId, $currency, $accountCategory, $accountType, $bankName, $apiVersion);
         }
         if ($apiVersion !== 'v2') {
             throw new RuntimeException('V1 assignment requires the inactive single-dispatch workflow; legacy operations cannot be enrolled.');
         }
-        if ($enabled && $existing?->status === NiumVirtualAccountOperation::PREFLIGHT_FAILED) {
+        if (($enabled || $confirmedCorridor) && $existing?->status === NiumVirtualAccountOperation::PREFLIGHT_FAILED) {
             throw new RuntimeException('Historical assignments cannot be redispatched through the single-dispatch cutover.');
         }
         if ($hasLedger && $existing === null && NiumVirtualAccountRequest::query()
@@ -103,6 +103,9 @@ final class NiumPaymentIdService
 
         // The HTTP API has no caller-selected bank. Preserve its legacy selection here;
         // the ledger path above resolves it only for a new request and freezes replays.
+        if ($existing === null && config('services.nium.va_single_dispatch.allocation_paused') !== false) {
+            throw new RuntimeException('New legacy VA allocation is paused; recovery remains available.');
+        }
         if ($autoSelectBank && $bankName === null) {
             $bankName = app(NiumPaymentIdBankResolver::class)->resolve($account->user, $currency);
         }
@@ -119,33 +122,35 @@ final class NiumPaymentIdService
             return $this->resume($operation);
         }
 
+        if ($operation->legacy_target_snapshot === null) {
+            $this->reconciliationService->reconcile($operation);
+            throw new RuntimeException('Historical legacy operations require verified original evidence; no POST was sent.');
+        }
+
         $operation = $this->reconciliationService->captureBaseline($operation);
         if (! $operation->baseline_complete) {
             throw new RuntimeException('Assign Payment ID preflight is unresolved; no provider POST was sent.');
         }
-        $operation->update([
-            'status' => NiumVirtualAccountOperation::SUBMITTING,
-            'submitted_at' => now(),
-            'resolution_code' => null,
-        ]);
-
-        $payload = array_filter([
-            'currency' => $currency,
-            'accountCategory' => $accountCategory,
-            'accountType' => $accountType,
-            'bankName' => $bankName,
-        ], static fn ($value) => $value !== null && $value !== '');
+        // Commit one dispatch claim before HTTP. Build transport exclusively from the
+        // immutable target captured under the account lock when the operation was created.
+        $operation = $this->authorizeLegacyDispatch($operation);
+        $snapshot = $operation->legacy_target_snapshot;
+        $account = $operation->providerAccount()->with(['provider', 'user'])->firstOrFail();
+        app(NiumLegacyVirtualAccountEvidence::class)->target($operation, $account);
+        $this->niumService->assertConfigured();
+        $client = new ProviderHttpClient(
+            provider: $account->provider, serviceConfigKey: 'nium',
+            headers: ['x-request-id' => $operation->legacy_provider_request_id],
+            operationalContext: ['operation' => 'assign_payment_id', 'external_reference' => $operation->operation_id,
+                'client_hash_id' => $snapshot['client_id']],
+            singleDispatchAssignment: true,
+        );
         try {
-            $response = $this->niumService->post(
-                path: $this->niumService->path((string) config('services.nium.assign_payment_id_endpoint'), [
-                    'client' => $this->niumService->clientId(),
-                    'customer' => $this->niumService->customerId($account->user),
-                    'wallet' => $this->niumService->walletId($account->user),
-                ]),
-                payload: $payload,
+            $response = $client->post(
+                path: $snapshot['provider_origin'].$snapshot['endpoint'],
+                payload: NiumVirtualAccountAssignmentContract::payload('v2', $snapshot['payload']['currency'],
+                    $snapshot['payload']['accountCategory'], $snapshot['payload']['accountType'], $snapshot['payload']['bankName'] ?? null),
                 user: $account->user,
-                operation: 'assign_payment_id',
-                externalReference: $operationId,
             );
         } catch (ConnectionException|NiumEvidencePersistenceException $exception) {
             $this->markUnknown($operation, 'provider_outcome_unknown');
@@ -193,6 +198,9 @@ final class NiumPaymentIdService
             'provider_response_payment_id',
         );
         $resolved->update(['api_request_log_id' => $this->requestLogId($resolved)]);
+        if ($resolved->status !== NiumVirtualAccountOperation::ASSIGNED) {
+            throw new RuntimeException('Legacy assignment evidence requires manual review; do not repeat the POST.');
+        }
 
         return $resolved->virtualAccount()->firstOrFail();
     }
@@ -214,7 +222,7 @@ final class NiumPaymentIdService
             $accountType,
             $bankName,
         ): array {
-            UserProviderAccount::query()->whereKey($account->id)->lockForUpdate()->firstOrFail();
+            $account = UserProviderAccount::query()->whereKey($account->id)->lockForUpdate()->firstOrFail();
             $existing = NiumVirtualAccountOperation::query()
                 ->where('user_provider_account_id', $account->id)
                 ->where('operation_id', $operationId)
@@ -233,6 +241,12 @@ final class NiumPaymentIdService
                 return [$existing->fresh('virtualAccount'), false];
             }
 
+            if ($account->customer_id_verified_at === null || $account->wallet_id_verified_at === null) {
+                throw new RuntimeException('A legacy assignment requires verified customer and wallet identifiers.');
+            }
+            $identity = NiumVirtualAccountRequestIdentity::forAccount($account,
+                NiumVirtualAccountAssignmentContract::payload('v2', $currency, $accountCategory, $accountType, $bankName));
+
             $virtualAccount = NiumVirtualAccount::query()->create([
                 'user_provider_account_id' => $account->id,
                 'currency' => $currency,
@@ -250,9 +264,36 @@ final class NiumPaymentIdService
                 'bank_name' => $bankName,
                 'status' => NiumVirtualAccountOperation::CLAIMED,
                 'claimed_at' => now(),
+                'legacy_target_snapshot' => $identity->snapshot(),
+                'legacy_provider_request_id' => (string) Str::uuid(),
             ]);
 
             return [$operation->fresh('virtualAccount'), true];
+        });
+    }
+
+    private function authorizeLegacyDispatch(NiumVirtualAccountOperation $operation): NiumVirtualAccountOperation
+    {
+        return DB::transaction(function () use ($operation): NiumVirtualAccountOperation {
+            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($operation->user_provider_account_id);
+            $locked = NiumVirtualAccountOperation::query()->lockForUpdate()->findOrFail($operation->id);
+            if (config('services.nium.va_single_dispatch.allocation_paused') !== false
+                || (int) $locked->user_provider_account_id !== (int) $account->id
+                || $locked->submitted_at !== null || ! $locked->baseline_complete
+                || ! in_array($locked->status, [NiumVirtualAccountOperation::CLAIMED, NiumVirtualAccountOperation::PREFLIGHT_FAILED], true)
+                || NiumVirtualAccountRequest::query()->whereKey($locked->id)->exists()
+                || $locked->legacy_target_snapshot === null) {
+                throw new RuntimeException('Legacy VA dispatch is paused, already consumed or unproven; no POST was sent.');
+            }
+            app(NiumLegacyVirtualAccountEvidence::class)->target($locked, $account);
+            // Recheck current eligibility without substituting it for original target proof.
+            if ((int) $this->accountStateService->assertEligible($account->user)->id !== (int) $account->id) {
+                throw new RuntimeException('The legacy assignment account is no longer eligible.');
+            }
+            $locked->update(['status' => NiumVirtualAccountOperation::SUBMITTING,
+                'submitted_at' => now(), 'resolution_code' => null]);
+
+            return $locked->fresh();
         });
     }
 
@@ -286,13 +327,16 @@ final class NiumPaymentIdService
 
     private function requestLogId(NiumVirtualAccountOperation $operation): ?int
     {
-        $userId = $operation->providerAccount()->value('user_id');
-
-        return ApiRequestLog::query()
-            ->where('user_id', $userId)
+        $snapshot = $operation->legacy_target_snapshot;
+        if ($snapshot === null) {
+            return null;
+        }
+        $logs = ApiRequestLog::query()
+            ->where('user_id', $snapshot['user_id'])->where('provider_id', $snapshot['provider_id'])
             ->where('operation', 'assign_payment_id')
             ->where('external_reference', $operation->operation_id)
-            ->latest('id')
-            ->value('id');
+            ->where('request_headers->x-request-id', $operation->legacy_provider_request_id)->get();
+
+        return $logs->count() === 1 ? $logs->sole()->id : null;
     }
 }

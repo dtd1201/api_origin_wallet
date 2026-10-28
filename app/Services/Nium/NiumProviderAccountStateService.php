@@ -317,6 +317,13 @@ class NiumProviderAccountStateService
         }
 
         $providerStatus = $this->safeValues->providerStatus($providerAccount->provider_status);
+        if ($providerAccount->security_conflict_at !== null) {
+            return ['can_request_virtual_account' => false, 'reason' => 'account_security_review'];
+        }
+        if (in_array($providerAccount->status, ['blocked', 'suspended', 'closed', 'rejected', 'restricted', 'terminated'], true)
+            || in_array($providerStatus, ['blocked', 'suspended', 'closed', 'rejected', 'terminated'], true)) {
+            return ['can_request_virtual_account' => false, 'reason' => 'account_restricted'];
+        }
         $approvalPending = in_array($providerAccount->status, ['pending', 'under_review'], true)
             || in_array($providerStatus, ['pending', 'under_review'], true)
             || $this->safeValues->providerSubStatus($providerAccount->provider_sub_status) !== null;

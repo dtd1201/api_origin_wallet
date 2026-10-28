@@ -19,6 +19,7 @@ use App\Services\Nium\NiumPaymentIdService;
 use App\Services\Nium\NiumPayoutReadinessService;
 use App\Services\Nium\NiumRfiWorkflowService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
@@ -98,10 +99,23 @@ class NiumOfflineReadinessTest extends TestCase
 
     public function test_assign_payment_id_uses_canonical_operation(): void
     {
-        [$provider, $user, $account] = $this->account(null, true);
-        Http::fake(['*' => Http::response(['uniquePaymentId' => 'VA-CANONICAL', 'currencyCode' => 'HKD'])]);
-        app(NiumPaymentIdService::class)->assign($account, 'HKD', 'COLLECTION_ACCOUNT', 'LOCAL', 'Confirmed Bank', 'offline-readiness-assignment');
-        $this->assertDatabaseHas('api_request_logs', ['user_id' => $user->id, 'operation' => 'assign_payment_id']);
+        // This assignment now requires a committed target before HTTP. Leave the
+        // unrelated readiness tests' RefreshDatabase transaction untouched.
+        $originalConnection = DB::getDefaultConnection();
+        config(['database.connections.nium_readiness_assignment_test' => [
+            'driver' => 'sqlite', 'database' => ':memory:', 'foreign_key_constraints' => true,
+        ]]);
+        DB::setDefaultConnection('nium_readiness_assignment_test');
+        try {
+            $this->artisan('migrate', ['--database' => 'nium_readiness_assignment_test', '--force' => true])->assertSuccessful();
+            [$provider, $user, $account] = $this->account(null, true);
+            Http::fake(['*' => Http::response(['uniquePaymentId' => 'VA-CANONICAL', 'currencyCode' => 'HKD'])]);
+            app(NiumPaymentIdService::class)->assign($account, 'HKD', 'COLLECTION_ACCOUNT', 'LOCAL', 'Confirmed Bank', 'offline-readiness-assignment');
+            $this->assertDatabaseHas('api_request_logs', ['user_id' => $user->id, 'operation' => 'assign_payment_id']);
+        } finally {
+            DB::purge('nium_readiness_assignment_test');
+            DB::setDefaultConnection($originalConnection);
+        }
     }
 
     public function test_rfi_list_redacts_answers_and_raw_file_ids_and_detail_requires_admin(): void

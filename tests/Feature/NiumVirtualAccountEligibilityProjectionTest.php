@@ -80,7 +80,7 @@ class NiumVirtualAccountEligibilityProjectionTest extends TestCase
             ->getJson("/api/user/users/{$conflictedUser->id}/provider-accounts")
             ->assertOk()
             ->assertJsonPath('data.0.can_request_virtual_account', false)
-            ->assertJsonPath('data.0.virtual_account_eligibility_reason', 'account_verification_incomplete');
+            ->assertJsonPath('data.0.virtual_account_eligibility_reason', 'account_security_review');
     }
 
     public function test_approved_clear_account_with_verified_identifiers_is_eligible(): void

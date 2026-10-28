@@ -34,6 +34,7 @@ use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
+use Tests\Concerns\CreatesNiumLegacyVirtualAccountEvidence;
 use Tests\Concerns\CreatesNiumVirtualAccountLedgerFixtures;
 use Tests\TestCase;
 use Throwable;
@@ -42,6 +43,7 @@ use Throwable;
 class NiumVirtualAccountSafetyLedgerPostgresTest extends TestCase
 {
     use CreatesNiumVirtualAccountLedgerFixtures;
+    use CreatesNiumLegacyVirtualAccountEvidence;
 
     protected function setUp(): void
     {
@@ -920,6 +922,8 @@ class NiumVirtualAccountSafetyLedgerPostgresTest extends TestCase
         $this->configureVaWebhookIngress();
         $account = $this->ledgerAccount();
         $legacyAccount = $this->ledgerAccount();
+        $legacyOperation = $this->legacyEvidenceOperation($legacyAccount);
+        $this->legacyPostEvidence($legacyOperation, $this->ledgerIdentity($legacyAccount), 'VA-PG-MIXED-WEBHOOKS');
         $ledger = new NiumVirtualAccountSafetyLedger;
         $request = $ledger->prepare($account, 'pg-mixed-va-webhooks', $this->ledgerIdentity($account));
         $ledger->consumeDispatchAuthorization($request, 0);
@@ -927,25 +931,17 @@ class NiumVirtualAccountSafetyLedgerPostgresTest extends TestCase
         $ledgerPayload = $this->vaWebhookPayload($request, 'pg-mixed-ledger-delivery', 'VA-PG-MIXED-WEBHOOKS');
         $legacyPayload = array_replace($ledgerPayload, [
             'eventId' => 'pg-mixed-legacy-delivery', 'customerHashId' => $legacyAccount->external_customer_id,
-            'walletHashId' => $legacyAccount->external_account_id, 'accountType' => 'LOCAL', 'accountCategory' => 'COLLECTION_ACCOUNT',
+            'walletHashId' => $legacyAccount->external_account_id,
         ]);
-        $results = $this->race(function (int $worker) use ($ledgerPayload, $legacyPayload, $request): string {
+        $results = $this->race(function (int $worker) use ($ledgerPayload, $legacyPayload, $request, $legacyOperation): string {
             Http::fake(fn () => Http::response(['content' => []]));
-            try {
-                $this->deliverVaWebhook($worker === 0 ? $ledgerPayload : $legacyPayload);
-                Http::assertNotSent(fn ($outgoing): bool => $outgoing->method() !== 'GET');
+            $this->deliverVaWebhook($worker === 0 ? $ledgerPayload : $legacyPayload);
+            Http::assertNotSent(fn ($outgoing): bool => $outgoing->method() !== 'GET');
 
-                return $worker === 0 ? $request->operation()->value('status') : 'legacy_assigned';
-            } catch (RuntimeException $exception) {
-                if (! str_contains($exception->getPrevious()?->getMessage() ?? '', 'ownership collision')) {
-                    throw $exception;
-                }
-                Http::assertNothingSent();
-
-                return 'legacy_collision';
-            }
+            return $worker === 0 ? $request->operation()->value('status') : $legacyOperation->fresh()->status;
         });
-        $this->assertContains($results, [[Operation::ASSIGNED, 'legacy_collision'], [Operation::MANUAL_REVIEW, 'legacy_assigned']]);
+        sort($results);
+        $this->assertSame([Operation::ASSIGNED, Operation::MANUAL_REVIEW], $results);
         $this->assertSame(1, NiumVirtualAccount::query()->where('provider_payment_id', 'VA-PG-MIXED-WEBHOOKS')->count());
         $this->assertSame(1, $request->dispatchAttempt()->count());
         if ($request->operation()->value('status') === Operation::MANUAL_REVIEW) {
@@ -954,6 +950,49 @@ class NiumVirtualAccountSafetyLedgerPostgresTest extends TestCase
         } else {
             $this->assertNull($request->assignmentScope()->value('active_operation_id'));
         }
+    }
+
+    public function test_legacy_and_ledger_reconciliation_share_payment_id_lock_under_concurrency(): void
+    {
+        $legacyAccount = $this->ledgerAccount();
+        $legacyOperation = $this->legacyEvidenceOperation($legacyAccount);
+        $this->legacyPostEvidence($legacyOperation, $this->ledgerIdentity($legacyAccount), 'VA-PG-LEGACY-LEDGER-RACE');
+        $account = $this->ledgerAccount();
+        $ledger = new NiumVirtualAccountSafetyLedger;
+        $request = $ledger->prepare($account, 'pg-legacy-ledger-race', $this->ledgerIdentity($account));
+        $ledger->consumeDispatchAuthorization($request, 0);
+        $this->ledgerResponseEvidence($request, ['uniquePaymentId' => 'VA-PG-LEGACY-LEDGER-RACE']);
+
+        $results = $this->race(function (int $worker) use ($legacyOperation, $request): string {
+            $operation = $worker === 0 ? $legacyOperation : $request->operation()->firstOrFail();
+            $result = app(NiumVirtualAccountReconciliationService::class)->reconcile($operation);
+            Http::assertNothingSent();
+
+            return $result->status;
+        });
+        sort($results);
+        $this->assertSame([Operation::ASSIGNED, Operation::MANUAL_REVIEW], $results);
+        $this->assertSame(1, NiumVirtualAccount::query()->where('provider_payment_id', 'VA-PG-LEGACY-LEDGER-RACE')->count());
+        $this->assertSame(1, $request->dispatchAttempt()->count());
+    }
+
+    public function test_two_legacy_resolvers_cannot_attach_the_same_payment_id_to_distinct_accounts(): void
+    {
+        $operations = [];
+        foreach ([0, 1] as $worker) {
+            $account = $this->ledgerAccount();
+            $operations[] = $operation = $this->legacyEvidenceOperation($account);
+            $this->legacyPostEvidence($operation, $this->ledgerIdentity($account), 'VA-PG-TWO-LEGACY-RACE');
+        }
+        $results = $this->race(function (int $worker) use ($operations): string {
+            $result = app(NiumVirtualAccountReconciliationService::class)->reconcile($operations[$worker]);
+            Http::assertNothingSent();
+
+            return $result->status;
+        });
+        sort($results);
+        $this->assertSame([Operation::ASSIGNED, Operation::MANUAL_REVIEW], $results);
+        $this->assertSame(1, NiumVirtualAccount::query()->where('provider_payment_id', 'VA-PG-TWO-LEGACY-RACE')->count());
     }
 
     public function test_webhook_waits_for_account_before_taking_request_operation_or_evidence_locks(): void

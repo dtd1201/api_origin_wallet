@@ -409,7 +409,7 @@ class NiumVirtualAccountV1AdapterTest extends TestCase
         match ($interlock) {
             'disabled' => config(['services.nium.va_single_dispatch.enabled' => false]),
             'production' => $this->app->instance('env', 'production'),
-            'allowlist' => config(['services.nium.va_single_dispatch.account_ids' => []]),
+            'pause' => config(['services.nium.va_single_dispatch.allocation_paused' => true]),
             'workers' => config(['services.nium.va_single_dispatch.old_workers_fenced' => false]),
         };
         try {
@@ -424,7 +424,7 @@ class NiumVirtualAccountV1AdapterTest extends TestCase
 
     public static function interlocks(): array
     {
-        return [['disabled'], ['production'], ['allowlist'], ['workers']];
+        return [['disabled'], ['production'], ['pause'], ['workers']];
     }
 
     public function test_disabled_gate_returns_v1_state_without_legacy_fallback(): void

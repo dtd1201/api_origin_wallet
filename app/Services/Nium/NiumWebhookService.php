@@ -559,128 +559,59 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     private function processVaAssigned(IntegrationProvider $provider, array $payload, ?WebhookEvent $event = null): void
     {
-        $account = $this->findCustomerProviderAccount($provider, $payload);
-        $paymentId = $this->value($payload, ['uniquePaymentId', 'paymentId', 'virtualAccountNumber']);
-        $currency = strtoupper((string) $this->value($payload, ['currencyCode', 'currency']));
-        $accountCategory = strtoupper((string) $this->value($payload, ['accountCategory']));
-        $accountType = strtoupper((string) $this->value($payload, ['accountType']));
+        if ($event === null || $event->nium_va_evidence === null) {
+            $this->observeVaEvent($event, 'legacy_assignment_missing_authenticated_evidence');
 
-        if ($account === null || ! NiumPaymentIdValidator::isValid($paymentId) || strlen($currency) !== 3) {
-            throw new RuntimeException('Nium VA Assigned webhook is missing a mapped customer, payment ID, or currency.');
+            return;
         }
-
-        $virtualAccount = DB::transaction(function () use (
-            $account,
-            $accountCategory,
-            $accountType,
-            $currency,
-            $payload,
-            $paymentId,
-            $event
-        ): NiumVirtualAccount {
-            // Legacy writers participate in account-first ordering and literal-ID collision quarantine.
-            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($account->id);
-            if ($event?->nium_va_evidence !== null) {
-                app(NiumVirtualAccountWebhookRecovery::class)->assertClaim($event);
-            }
-            if (NiumVirtualAccountRequest::query()->whereIn('operation_id', NiumVirtualAccountOperation::query()
-                ->where('user_provider_account_id', $account->id)->select('id'))->exists()) {
-                throw new RuntimeException('Enrolled VA histories require ledger evidence resolution.');
-            }
-            foreach (['customerHashId' => $account->external_customer_id, 'walletHashId' => $account->external_account_id,
-                'clientHashId' => config('services.nium.client_id')] as $field => $expected) {
-                if (array_key_exists($field, $payload) && (! is_string($payload[$field]) || $payload[$field] !== $expected)) {
-                    throw new RuntimeException('VA webhook target does not match its provider account.');
-                }
-            }
-            app(NiumVirtualAccountSafetyLedger::class)->lockPaymentIdForWriter($paymentId);
-            $virtualAccount = NiumVirtualAccount::query()
-                ->where('user_provider_account_id', $account->id)
-                ->where('provider_payment_id', (string) $paymentId)
-                ->lockForUpdate()
-                ->first();
-
-            $otherOwner = NiumVirtualAccount::query()->where('provider_payment_id', $paymentId)
-                ->when($virtualAccount !== null, fn ($query) => $query->whereKeyNot($virtualAccount->id))->exists();
-            $otherOperation = NiumVirtualAccountOperation::query()->where('provider_payment_id', $paymentId)
-                ->where(function ($query) use ($virtualAccount): void {
-                    if ($virtualAccount !== null) {
-                        $query->whereNull('nium_virtual_account_id')->orWhere('nium_virtual_account_id', '<>', $virtualAccount->id);
+        // A receipt can corroborate an original POST; it cannot choose an operation
+        // by today's account mapping or by matching pending dimensions.
+        $payload = NiumVirtualAccountWebhookContract::payload($event);
+        $paymentId = $payload['uniquePaymentId'] ?? null;
+        if (! NiumPaymentIdValidator::isValid($paymentId)) {
+            throw new RuntimeException('Nium VA Assigned webhook is missing a valid payment ID.');
+        }
+        $proof = app(NiumLegacyVirtualAccountEvidence::class);
+        $candidates = NiumVirtualAccountOperation::query()
+            ->whereNotIn('id', NiumVirtualAccountRequest::query()->select('operation_id'))
+            ->whereHas('providerAccount', fn ($q) => $q->where('provider_id', $provider->id))
+            ->where('status', '<>', NiumVirtualAccountOperation::FAILED)
+            ->whereNotNull('submitted_at')
+            ->get()->filter(function (NiumVirtualAccountOperation $operation) use ($proof, $event, $paymentId): bool {
+                try {
+                    $account = $operation->providerAccount()->firstOrFail();
+                    $identity = $proof->target($operation, $account);
+                    if (! NiumVirtualAccountWebhookContract::permitsAssignment($event, $identity, $paymentId)) {
+                        return false;
                     }
-                })->exists();
-            if ($otherOwner || $otherOperation) {
-                throw new RuntimeException('VA Payment ID ownership collision requires manual review.');
-            }
+                    try {
+                        return $proof->assignedPaymentId($operation, $account) === $paymentId;
+                    } catch (Throwable) {
+                        app(NiumVirtualAccountReconciliationService::class)->legacyReview(
+                            $operation, 'legacy_webhook_evidence_unproven', $event,
+                        );
 
-            if ($virtualAccount === null && $accountType !== '') {
-                $pending = NiumVirtualAccount::query()
-                    ->where('user_provider_account_id', $account->id)
-                    ->where('currency', $currency)
-                    ->where('account_type', $accountType)
-                    ->where('status', 'pending')
-                    ->where(fn ($query) => $query->whereNull('provider_payment_id')->orWhere('provider_payment_id', '')
-                        ->orWhereRaw('UPPER(provider_payment_id) = ?', ['INITIALIZED']))
-                    ->when($accountCategory !== '', fn ($query) => $query->where('account_category', $accountCategory))
-                    ->orderBy('id')
-                    ->lockForUpdate()
-                    ->get();
-
-                if ($pending->count() === 1) {
-                    $virtualAccount = $pending->sole();
-                } elseif ($pending->count() > 1) {
-                    NiumVirtualAccountOperation::query()
-                        ->whereIn('nium_virtual_account_id', $pending->modelKeys())
-                        ->whereNotIn('id', NiumVirtualAccountRequest::query()->select('operation_id'))
-                        ->whereNotIn('status', [NiumVirtualAccountOperation::ASSIGNED, NiumVirtualAccountOperation::FAILED])
-                        ->update([
-                            'status' => NiumVirtualAccountOperation::MANUAL_REVIEW,
-                            'resolution_code' => 'ambiguous_webhook_without_correlation',
-                            'updated_at' => now(),
-                        ]);
+                        return false;
+                    }
+                } catch (Throwable) {
+                    return false;
                 }
-            }
+            });
+        if ($candidates->count() !== 1) {
+            $this->observeVaEvent($event, 'legacy_assignment_evidence_missing_conflicting_or_ambiguous');
 
-            if ($virtualAccount === null) {
-                $virtualAccount = NiumVirtualAccount::query()->updateOrCreate(
-                    [
-                        'user_provider_account_id' => $account->id,
-                        'provider_payment_id' => (string) $paymentId,
-                    ],
-                    [
-                        'virtual_account_reference' => (string) $paymentId,
-                        'currency' => $currency,
-                        'account_category' => $accountCategory !== '' ? $accountCategory : null,
-                        'account_type' => $accountType !== '' ? $accountType : null,
-                        'status' => 'assigned',
-                        'assigned_at' => $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
-                    ],
-                );
-            } else {
-                $virtualAccount->update([
-                    'virtual_account_reference' => (string) $paymentId,
-                    'provider_payment_id' => (string) $paymentId,
-                    'status' => 'assigned',
-                    'assigned_at' => $virtualAccount->assigned_at ?? $this->value($payload, ['assignedAt', 'dateTime', 'updatedAt']) ?? now(),
-                ]);
-            }
+            return;
+        }
+        $operation = app(NiumVirtualAccountReconciliationService::class)->assign(
+            $candidates->sole(), $paymentId, 'verified_legacy_webhook_and_post', $event,
+        );
+        if ($operation->status !== NiumVirtualAccountOperation::ASSIGNED || $operation->provider_payment_id !== $paymentId) {
+            $this->observeVaEvent($event, 'legacy_assignment_requires_manual_review');
 
-            NiumVirtualAccountOperation::query()
-                ->where('nium_virtual_account_id', $virtualAccount->id)
-                ->whereNotIn('id', NiumVirtualAccountRequest::query()->select('operation_id'))
-                ->whereNotIn('status', [NiumVirtualAccountOperation::ASSIGNED, NiumVirtualAccountOperation::FAILED])
-                ->update([
-                    'provider_payment_id' => (string) $paymentId,
-                    'status' => NiumVirtualAccountOperation::ASSIGNED,
-                    'resolution_code' => 'provider_webhook_payment_id',
-                    'resolved_at' => now(),
-                    'updated_at' => now(),
-                ]);
-
-            return $virtualAccount->fresh();
-        });
-
+            return;
+        }
         try {
-            $this->virtualAccountDetailService->sync($virtualAccount);
+            $this->virtualAccountDetailService->sync($operation->virtualAccount()->firstOrFail());
         } catch (Throwable $e) {
             report($e);
         }

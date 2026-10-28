@@ -7,6 +7,12 @@ use InvalidArgumentException;
 /** Version-specific wire contracts; a funding rail is local intent for V1. */
 final class NiumVirtualAccountAssignmentContract
 {
+    public static function isConfirmedV1Corridor(string $currency, string $category, string $rail, ?string $bank): bool
+    {
+        return $currency === 'USD' && $category === 'SELF_FUNDING_ACCOUNT'
+            && $rail === 'WIRES' && ($bank === null || $bank === 'JPM_SG');
+    }
+
     public static function endpointTemplate(string $version): string
     {
         self::assertVersion($version);

@@ -100,7 +100,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         )->count());
     }
 
-    public function test_reversed_webhook_order_matches_identical_pending_assignments_accurately(): void
+    public function test_reversed_uncorrelated_webhooks_leave_pending_records_unchanged(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
         $first = NiumVirtualAccount::query()->create([
@@ -130,8 +130,10 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
 
         $this->assertNull($first->fresh()->provider_payment_id);
         $this->assertNull($second->fresh()->provider_payment_id);
-        $this->assertDatabaseHas('nium_virtual_accounts', ['provider_payment_id' => 'VA-FIRST', 'status' => 'assigned']);
-        $this->assertDatabaseHas('nium_virtual_accounts', ['provider_payment_id' => 'VA-SECOND', 'status' => 'assigned']);
+        $this->assertDatabaseMissing('nium_virtual_accounts', ['provider_payment_id' => 'VA-FIRST']);
+        $this->assertDatabaseMissing('nium_virtual_accounts', ['provider_payment_id' => 'VA-SECOND']);
+        $this->assertSame(2, NiumVirtualAccount::query()->count());
+        Http::assertNothingSent();
     }
 
     public function test_detail_sync_selects_the_requested_payment_id_when_it_is_not_first(): void
@@ -165,7 +167,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         $this->assertSame('Requested bank', $detail?->bank_name);
     }
 
-    public function test_ambiguous_post_timeout_is_reconciled_read_only_before_any_retry_post(): void
+    public function test_ambiguous_post_timeout_retains_manual_review_without_retry_post(): void
     {
         [, , $account] = $this->eligibleAccount();
         $postCount = 0;
@@ -209,7 +211,8 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
 
         $reconciled = $service->assign($account, 'USD', 'COLLECTION_ACCOUNT', 'LOCAL', operationId: 'ambiguous-timeout-operation');
 
-        $this->assertSame('VA-ACCEPTED-BEFORE-TIMEOUT', $reconciled->provider_payment_id);
+        $this->assertNull($reconciled->provider_payment_id);
+        $this->assertSame(NiumVirtualAccountOperation::MANUAL_REVIEW, NiumVirtualAccountOperation::query()->sole()->status);
         $this->assertSame(1, $postCount);
     }
 
@@ -234,11 +237,12 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         $this->assertFalse($first['duplicate'] ?? false);
         $this->assertTrue($duplicate['duplicate']);
         $this->assertSame(1, WebhookEvent::query()->where('event_id', 'duplicate-event')->count());
-        $this->assertSame(1, NiumVirtualAccount::query()->where('provider_payment_id', 'VA-DUPLICATE-WEBHOOK')->count());
-        Http::assertSentCount(1);
+        $this->assertSame(0, NiumVirtualAccount::query()->where('provider_payment_id', 'VA-DUPLICATE-WEBHOOK')->count());
+        $this->assertSame('observed', WebhookEvent::query()->where('event_id', 'duplicate-event')->sole()->processing_status);
+        Http::assertNothingSent();
     }
 
-    public function test_missing_webhook_is_recovered_by_get_without_another_provider_post(): void
+    public function test_get_after_initialized_post_retains_manual_review_without_another_provider_post(): void
     {
         [, , $account] = $this->eligibleAccount();
         $getCount = 0;
@@ -280,9 +284,9 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         $reconciled = $pending->fresh();
 
         $this->assertSame($pending->id, $reconciled->id);
-        $this->assertSame('VA-MISSING-WEBHOOK', $reconciled->provider_payment_id);
+        $this->assertNull($reconciled->provider_payment_id);
         $this->assertSame(1, $postCount);
-        $this->assertSame(NiumVirtualAccountOperation::ASSIGNED, $operation->fresh()->status);
+        $this->assertSame(NiumVirtualAccountOperation::MANUAL_REVIEW, $operation->fresh()->status);
     }
 
     public function test_evidence_persistence_failure_enters_unknown_and_blocks_repost(): void
@@ -335,7 +339,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
 
         $this->assertNull($retry->provider_payment_id);
         $this->assertSame(1, $postCount);
-        $this->assertSame(NiumVirtualAccountOperation::UNKNOWN, NiumVirtualAccountOperation::query()->sole()->status);
+        $this->assertSame(NiumVirtualAccountOperation::MANUAL_REVIEW, NiumVirtualAccountOperation::query()->sole()->status);
     }
 
     public function test_concurrent_loser_observes_durable_claim_without_provider_post(): void
@@ -373,7 +377,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_http_503_outcome_remains_unknown_and_is_never_reposted(): void
+    public function test_http_503_outcome_remains_unresolved_and_is_never_reposted(): void
     {
         [, , $account] = $this->eligibleAccount();
         $postCount = 0;
@@ -408,7 +412,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         );
 
         $this->assertSame(1, $postCount);
-        $this->assertSame(NiumVirtualAccountOperation::UNKNOWN, NiumVirtualAccountOperation::query()->sole()->status);
+        $this->assertSame(NiumVirtualAccountOperation::MANUAL_REVIEW, NiumVirtualAccountOperation::query()->sole()->status);
     }
 
     public function test_baseline_get_failure_stops_before_provider_post(): void
@@ -513,7 +517,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         $this->assertSame(1, $postCount);
     }
 
-    public function test_overlapping_same_dimension_operations_cannot_claim_one_observed_payment_id(): void
+    public function test_unproven_reconciliation_cannot_claim_an_id_or_mutate_sibling_history(): void
     {
         [, , $account] = $this->eligibleAccount();
         foreach (['overlap-one', 'overlap-two'] as $operationId) {
@@ -549,7 +553,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         $this->artisan('nium:reconcile-payment-id-operation', ['operation' => $operation->id])->assertSuccessful();
 
         $this->assertSame(
-            [NiumVirtualAccountOperation::MANUAL_REVIEW, NiumVirtualAccountOperation::MANUAL_REVIEW],
+            [NiumVirtualAccountOperation::MANUAL_REVIEW, NiumVirtualAccountOperation::PENDING],
             NiumVirtualAccountOperation::query()->orderBy('id')->pluck('status')->all(),
         );
         $this->assertSame(0, NiumVirtualAccount::query()->whereNotNull('provider_payment_id')->count());
@@ -598,7 +602,7 @@ class NiumVirtualAccountSafetyAuditTest extends TestCase
         $this->artisan('nium:reconcile-payment-id-operation', ['operation' => $operation->id])->assertSuccessful();
 
         $this->assertSame(NiumVirtualAccountOperation::MANUAL_REVIEW, $operation->fresh()->status);
-        $this->assertSame('payment_id_already_owned', $operation->fresh()->resolution_code);
+        $this->assertSame('legacy_assignment_evidence_unproven', $operation->fresh()->resolution_code);
         $this->assertNull($pending->fresh()->provider_payment_id);
     }
 

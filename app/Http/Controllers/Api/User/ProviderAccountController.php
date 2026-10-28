@@ -15,6 +15,7 @@ use App\Services\Integrations\ProviderOnboardingManager;
 use App\Services\Nium\NiumPaymentIdService;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
+use App\Services\Nium\NiumVirtualAccountAssignmentService;
 use App\Services\Nium\NiumVirtualAccountOperationProjection;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
@@ -77,6 +78,8 @@ class ProviderAccountController extends Controller
                         'request_pending' => $integrationRequest?->status === 'pending',
                         'can_request_virtual_account' => $virtualAccountEligibility['can_request_virtual_account'],
                         'virtual_account_eligibility_reason' => $virtualAccountEligibility['reason'],
+                        'virtual_account_allocation_reason' => PrimaryProvider::isPrimary($provider)
+                            ? NiumVirtualAccountAssignmentService::allocationBlockReason() : 'unsupported_provider',
                     ];
                 })->values()->all(),
         ]);

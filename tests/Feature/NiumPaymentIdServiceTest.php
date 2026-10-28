@@ -271,7 +271,7 @@ class NiumPaymentIdServiceTest extends TestCase
         $this->assertSame(2, NiumVirtualAccount::query()->where('status', 'pending')->count());
     }
 
-    public function test_va_assigned_webhook_is_idempotent_and_maps_customer_wallet_payment_id(): void
+    public function test_uncorrelated_va_webhook_is_idempotent_without_assigning_ownership(): void
     {
         [$provider, $user, $account] = $this->eligibleAccount();
         $this->fakeVaDetailLookup();
@@ -301,28 +301,38 @@ class NiumPaymentIdServiceTest extends TestCase
         $first = app(NiumWebhookService::class)->handleWebhook($provider, $request);
         $event = WebhookEvent::query()->where('event_id', 'va-assigned-001')->sole();
         $receipt = $event->fresh()->getAttributes();
+        $firstRecovery = $event->nium_va_recovery;
+        $this->assertSame(1, $firstRecovery['attempts']);
         $assignment = $pending->fresh()->getAttributes();
         $second = app(NiumWebhookService::class)->handleWebhook($provider, $request);
 
         $this->assertFalse($first['duplicate'] ?? false);
         $this->assertTrue($second['duplicate']);
         $this->assertSame(1, WebhookEvent::query()->where('event_id', 'va-assigned-001')->count());
-        $this->assertSame(1, NiumVirtualAccount::query()->where('provider_payment_id', 'VA-654321')->count());
+        $this->assertSame(0, NiumVirtualAccount::query()->where('provider_payment_id', 'VA-654321')->count());
+        $this->assertSame(1, NiumVirtualAccount::query()->count());
         $assigned = $pending->fresh();
         $this->assertSame($account->id, $assigned->user_provider_account_id);
-        $this->assertSame('VA-654321', $assigned->virtual_account_reference);
-        $this->assertSame('assigned', $assigned->status);
-        $this->assertSame('2026-09-09 08:30:00', $assigned->assigned_at->utc()->format('Y-m-d H:i:s'));
-        $this->assertSame('processed', $event->fresh()->processing_status);
-        $this->assertSame(1, $event->fresh()->nium_va_recovery['attempts']);
+        $this->assertNull($assigned->provider_payment_id);
+        $this->assertNull($assigned->virtual_account_reference);
+        $this->assertSame('pending', $assigned->status);
+        $this->assertNull($assigned->assigned_at);
+        $this->assertSame('observed', $event->fresh()->processing_status);
+        $this->assertSame(2, $event->fresh()->nium_va_recovery['attempts']);
         $this->assertNotNull($event->fresh()->nium_va_recovery['token']);
-        $this->assertSame($receipt, $event->fresh()->getAttributes());
+        $this->assertNotSame($firstRecovery['token'], $event->fresh()->nium_va_recovery['token']);
+        $this->assertNotNull($event->fresh()->nium_va_evidence);
+        // Observed receipts are re-evaluated; only recovery metadata and processing time may change.
+        $mutableReceiptFields = array_flip(['nium_va_recovery', 'processed_at']);
+        $this->assertSame(
+            array_diff_key($receipt, $mutableReceiptFields),
+            array_diff_key($event->fresh()->getAttributes(), $mutableReceiptFields),
+        );
         $this->assertSame($assignment, $assigned->getAttributes());
-        Http::assertSentCount(1);
-        Http::assertNotSent(fn ($outgoing): bool => $outgoing->method() !== 'GET');
+        Http::assertNothingSent();
     }
 
-    public function test_real_nium_virtual_account_assigned_webhook_updates_existing_pending_record(): void
+    public function test_documented_webhook_without_original_post_evidence_preserves_pending_record(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
         $this->fakeVaDetailLookup();
@@ -351,12 +361,14 @@ class NiumPaymentIdServiceTest extends TestCase
 
         $this->assertFalse($result['duplicate'] ?? false);
         $this->assertSame($pending->id, NiumVirtualAccount::query()->sole()->id);
-        $this->assertSame('VA-REAL-NIUM-001', $pending->fresh()->provider_payment_id);
-        $this->assertSame('assigned', $pending->fresh()->status);
+        $this->assertNull($pending->fresh()->provider_payment_id);
+        $this->assertSame('pending', $pending->fresh()->status);
+        $this->assertSame('observed', WebhookEvent::query()->sole()->processing_status);
+        Http::assertNothingSent();
         $this->assertSame(1, NiumVirtualAccount::query()->count());
     }
 
-    public function test_va_assigned_webhook_updates_only_the_pending_record_with_matching_dimensions(): void
+    public function test_matching_dimensions_alone_do_not_establish_legacy_ownership(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
         $this->fakeVaDetailLookup();
@@ -391,8 +403,8 @@ class NiumPaymentIdServiceTest extends TestCase
 
         app(NiumWebhookService::class)->handleWebhook($provider, $request);
 
-        $this->assertSame('assigned', $usd->fresh()->status);
-        $this->assertSame('VA-USD-001', $usd->fresh()->provider_payment_id);
+        $this->assertSame('pending', $usd->fresh()->status);
+        $this->assertNull($usd->fresh()->provider_payment_id);
         $this->assertSame('pending', $sgd->fresh()->status);
         $this->assertNull($sgd->fresh()->provider_payment_id);
     }
@@ -436,10 +448,7 @@ class NiumPaymentIdServiceTest extends TestCase
         $this->assertNull($oldest->fresh()->provider_payment_id);
         $this->assertSame('pending', $newest->fresh()->status);
         $this->assertNull($newest->fresh()->provider_payment_id);
-        $this->assertDatabaseHas('nium_virtual_accounts', [
-            'provider_payment_id' => 'VA-IDENTICAL-001',
-            'status' => 'assigned',
-        ]);
+        $this->assertDatabaseMissing('nium_virtual_accounts', ['provider_payment_id' => 'VA-IDENTICAL-001']);
 
         $payload['eventId'] = 'va-assigned-identical-002';
         $payload['uniquePaymentId'] = 'VA-IDENTICAL-002';
@@ -452,14 +461,12 @@ class NiumPaymentIdServiceTest extends TestCase
 
         $this->assertSame('pending', $oldest->fresh()->status);
         $this->assertSame('pending', $newest->fresh()->status);
-        $this->assertDatabaseHas('nium_virtual_accounts', [
-            'provider_payment_id' => 'VA-IDENTICAL-002',
-            'status' => 'assigned',
-        ]);
-        $this->assertSame(2, NiumVirtualAccount::query()->where('status', 'assigned')->count());
+        $this->assertDatabaseMissing('nium_virtual_accounts', ['provider_payment_id' => 'VA-IDENTICAL-002']);
+        $this->assertSame(0, NiumVirtualAccount::query()->where('status', 'assigned')->count());
+        Http::assertNothingSent();
     }
 
-    public function test_va_assigned_webhook_falls_back_to_creating_an_assigned_record(): void
+    public function test_va_webhook_has_no_create_fallback_without_original_post_evidence(): void
     {
         [$provider, , $account] = $this->eligibleAccount();
         $this->fakeVaDetailLookup();
@@ -480,12 +487,9 @@ class NiumPaymentIdServiceTest extends TestCase
 
         app(NiumWebhookService::class)->handleWebhook($provider, $request);
 
-        $this->assertDatabaseHas('nium_virtual_accounts', [
-            'user_provider_account_id' => $account->id,
-            'provider_payment_id' => 'VA-FALLBACK-001',
-            'virtual_account_reference' => 'VA-FALLBACK-001',
-            'status' => 'assigned',
-        ]);
+        $this->assertSame(0, NiumVirtualAccount::query()->count());
+        $this->assertSame('observed', WebhookEvent::query()->sole()->processing_status);
+        Http::assertNothingSent();
     }
 
     public function test_assign_rejects_non_nium_provider_account_when_user_has_current_eligible_nium_account(): void

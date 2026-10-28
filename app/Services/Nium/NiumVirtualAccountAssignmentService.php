@@ -40,7 +40,8 @@ final class NiumVirtualAccountAssignmentService
         if ($existing !== null) {
             return $this->result($existing);
         }
-        $this->assertEnabled($account);
+        $this->assertEnabled($account, $apiVersion === 'v1'
+            && NiumVirtualAccountAssignmentContract::isConfirmedV1Corridor($currency, $category, $type, $effectiveBank));
         app(NiumService::class)->assertConfigured();
         $request = $this->ledger->prepare($account, $operationId, $identity);
         // Concurrent prepare may return the winner's row. Consumption arbitrates both workers.
@@ -92,12 +93,33 @@ final class NiumVirtualAccountAssignmentService
         return $this->result($request->fresh());
     }
 
-    private function assertEnabled(UserProviderAccount $account): void
+    /** Allocation admission only. Receipt, state reads and GET recovery do not call this. */
+    public static function allocationBlockReason(): ?string
     {
-        if (config('services.nium.va_single_dispatch.enabled') !== true
-            || ! app()->environment('testing')
-            || config('services.nium.va_single_dispatch.old_workers_fenced') !== true
-            || ! in_array((int) $account->id, config('services.nium.va_single_dispatch.account_ids', []), true)) {
+        if (config('services.nium.va_single_dispatch.allocation_paused') !== false) {
+            return 'allocation_paused';
+        }
+        if (! app()->environment('testing')) {
+            return 'allocation_testing_only';
+        }
+        if (config('services.nium.va_single_dispatch.enabled') !== true) {
+            return 'allocation_unavailable';
+        }
+        if (config('services.nium.va_single_dispatch.old_workers_fenced') !== true) {
+            return 'allocation_cutover_required';
+        }
+
+        return null;
+    }
+
+    private function assertEnabled(UserProviderAccount $account, bool $confirmedCorridor): void
+    {
+        $reason = self::allocationBlockReason();
+        if ($reason === 'allocation_paused') {
+            throw new RuntimeException('Nium VA single dispatch is inactive: new allocation is paused; saved requests remain available for status recovery.');
+        }
+        if ($reason !== null || (! $confirmedCorridor
+            && ! in_array((int) $account->id, config('services.nium.va_single_dispatch.account_ids', []), true))) {
             throw new RuntimeException('Nium VA single dispatch is inactive: isolated tests only until Phase 3 reconciliation and fenced cutover.');
         }
         if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {

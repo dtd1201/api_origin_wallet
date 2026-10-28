@@ -40,7 +40,11 @@ class NiumVirtualAccountOperation extends Model
         'claimed_at',
         'submitted_at',
         'resolved_at',
+        'legacy_target_snapshot',
+        'legacy_provider_request_id',
     ];
+
+    protected $hidden = ['legacy_target_snapshot', 'legacy_provider_request_id'];
 
     protected function casts(): array
     {
@@ -50,6 +54,7 @@ class NiumVirtualAccountOperation extends Model
             'claimed_at' => 'datetime',
             'submitted_at' => 'datetime',
             'resolved_at' => 'datetime',
+            'legacy_target_snapshot' => 'encrypted:array',
         ];
     }
 

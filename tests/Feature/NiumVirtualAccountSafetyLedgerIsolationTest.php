@@ -7,8 +7,8 @@ use App\Models\NiumVirtualAccountDispatchAttempt;
 use App\Models\NiumVirtualAccountOperation as Operation;
 use App\Models\NiumVirtualAccountRequest;
 use App\Services\Nium\NiumPaymentIdService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
@@ -17,7 +17,24 @@ use Tests\TestCase;
 
 class NiumVirtualAccountSafetyLedgerIsolationTest extends TestCase
 {
-    use CreatesNiumVirtualAccountLedgerFixtures, RefreshDatabase;
+    use CreatesNiumVirtualAccountLedgerFixtures;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Legacy target/dispatch proof must commit before HTTP, like enrolled dispatch.
+        config(['database.connections.nium_legacy_isolation_test' => [
+            'driver' => 'sqlite', 'database' => ':memory:', 'foreign_key_constraints' => true,
+        ]]);
+        DB::setDefaultConnection('nium_legacy_isolation_test');
+        $this->artisan('migrate', ['--database' => 'nium_legacy_isolation_test', '--force' => true])->assertSuccessful();
+    }
+
+    protected function tearDown(): void
+    {
+        DB::purge('nium_legacy_isolation_test');
+        parent::tearDown();
+    }
 
     #[DataProvider('baselineResponses')]
     public function test_existing_assignment_keeps_baseline_and_payload_without_using_the_new_ledger(int $baselineStatus): void
