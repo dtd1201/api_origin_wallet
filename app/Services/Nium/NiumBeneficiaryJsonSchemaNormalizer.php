@@ -9,7 +9,7 @@ final class NiumBeneficiaryJsonSchemaNormalizer
 {
     private const ANNOTATIONS = ['$schema', '$id', 'title', 'description', '$comment', 'default', 'examples', 'errorMessage'];
 
-    public function fields(mixed $schema, array $dimensions, array $routingTypes): array
+    public function fields(mixed $schema, array $dimensions, array $routingTypes, string $clientLegalEntity): array
     {
         $this->object($schema, 'schema');
         $schema = (array) $schema;
@@ -21,7 +21,7 @@ final class NiumBeneficiaryJsonSchemaNormalizer
         }
         // Match the actual beneficiary payload casing, rather than the corridor's account-type casing.
         $facts = [...$dimensions, 'beneficiaryAccountType' => ucfirst(strtolower($dimensions['beneficiaryAccountType'])),
-            'clientLegalEntity' => NiumBeneficiaryService::CLIENT_LEGAL_ENTITY];
+            'clientLegalEntity' => $clientLegalEntity];
         $rules = $this->objectRules((object) $schema, $facts);
         // Pin the facts used to specialize conditions, including their exact case, in preflight too.
         foreach ($facts as $name => $value) {
@@ -127,7 +127,7 @@ final class NiumBeneficiaryJsonSchemaNormalizer
                 && (! isset($field['allowed_values']) || in_array($value, $field['allowed_values'], true))
                 && (! isset($field['min_length']) || mb_strlen($value) >= $field['min_length'])
                 && (! isset($field['max_length']) || mb_strlen($value) <= $field['max_length'])
-                && (! isset($field['pattern']) || preg_match('/'.$field['pattern'].'/u', $value) === 1);
+                && (! isset($field['pattern']) || NiumBeneficiarySchemaPattern::matches($field['pattern'], $value));
         }
 
         return $matches;
@@ -171,10 +171,11 @@ final class NiumBeneficiaryJsonSchemaNormalizer
             }
         }
         if (array_key_exists('pattern', $property)) {
-            if (! is_string($property['pattern']) || @preg_match('/'.$property['pattern'].'/u', '') === false) {
+            if (! is_string($property['pattern']) || NiumBeneficiarySchemaPattern::compile($property['pattern']) === null) {
                 $this->fail('unsupported_pattern', $path);
             }
             $field['pattern'] = $property['pattern'];
+            $field['pattern_dialect'] = NiumBeneficiarySchemaPattern::DIALECT;
         }
 
         return $field;

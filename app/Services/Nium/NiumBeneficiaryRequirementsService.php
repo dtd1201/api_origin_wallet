@@ -19,7 +19,7 @@ final class NiumBeneficiaryRequirementsService
     {
         $dimensions = $this->dimensions($selectedCorridor);
         $routingTypes = $this->routingTypes($selectedCorridor['routingCodeType'] ?? []);
-        $key = 'nium:beneficiary-requirements:v2:'.hash('sha256', json_encode([
+        $key = 'nium:beneficiary-requirements:v3:'.hash('sha256', json_encode([
             $dimensions, $routingTypes, NiumBeneficiaryService::CLIENT_LEGAL_ENTITY, hash('sha256', $this->niumService->clientId()),
             hash('sha256', (string) config('services.nium.beneficiary_validation_schema_endpoint', '')),
         ], JSON_THROW_ON_ERROR));
@@ -109,10 +109,10 @@ final class NiumBeneficiaryRequirementsService
             if (is_array($schema)) {
                 $schema = $schema[0];
             }
-            $normalized = (new NiumBeneficiaryJsonSchemaNormalizer)->fields($schema, $dimensions, $routingTypes);
+            $normalized = (new NiumBeneficiaryJsonSchemaNormalizer)->fields($schema, $dimensions, $routingTypes, NiumBeneficiaryService::CLIENT_LEGAL_ENTITY);
 
             return ['dimensions' => $dimensions, 'routing_code_types' => $routingTypes, 'fields' => $normalized,
-                'fetched_at' => now()->toISOString(), 'cache_version' => 'nium-beneficiary-requirements-v2'];
+                'fetched_at' => now()->toISOString(), 'cache_version' => 'nium-beneficiary-requirements-v3'];
         }
         if (! is_array($fields) || ! array_is_list($fields)) {
             throw new NiumBeneficiarySchemaException('unknown_response_shape', 'response');
@@ -140,7 +140,7 @@ final class NiumBeneficiaryRequirementsService
         }
 
         return ['dimensions' => $dimensions, 'routing_code_types' => $routingTypes, 'fields' => $normalized,
-            'fetched_at' => now()->toISOString(), 'cache_version' => 'nium-beneficiary-requirements-v2'];
+            'fetched_at' => now()->toISOString(), 'cache_version' => 'nium-beneficiary-requirements-v3'];
     }
 
     private function routingTypes(mixed $value): array

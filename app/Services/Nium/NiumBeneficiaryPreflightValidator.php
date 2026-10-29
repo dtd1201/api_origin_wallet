@@ -59,8 +59,15 @@ final class NiumBeneficiaryPreflightValidator
                 $errors[$name] = 'Select a value supported by the selected payment method.';
             }
             if (is_string($value)) {
-                if (isset($field['pattern']) && @preg_match('/'.$field['pattern'].'/u', $value) !== 1) {
-                    $errors[$name] = 'Enter a value in the format required for this payment method.';
+                if (isset($field['pattern'])) {
+                    $matches = match ($field['pattern_dialect'] ?? null) {
+                        null => @preg_match('/'.$field['pattern'].'/u', $value) === 1,
+                        NiumBeneficiarySchemaPattern::DIALECT => NiumBeneficiarySchemaPattern::matches($field['pattern'], $value),
+                        default => false,
+                    };
+                    if (! $matches) {
+                        $errors[$name] = 'Enter a value in the format required for this payment method.';
+                    }
                 }
                 if (isset($field['min_length']) && mb_strlen($value) < $field['min_length']) {
                     $errors[$name] = "Enter at least {$field['min_length']} characters.";

@@ -1,0 +1,206 @@
+[
+  {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "clientLegalEntity",
+      "destinationCountry",
+      "beneficiaryName",
+      "beneficiaryAddress",
+      "beneficiaryCountryCode",
+      "beneficiaryAccountNumber",
+      "routingCodeType1",
+      "routingCodeValue1",
+      "beneficiaryCity",
+      "beneficiaryPostcode"
+    ],
+    "properties": {
+      "clientLegalEntity": {
+        "type": "string",
+        "pattern": "^[A-Z]{2}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "destinationCountry": {
+        "type": "string",
+        "enum": [
+          "HK"
+        ],
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryName": {
+        "type": "string"
+      },
+      "beneficiaryAlias": {
+        "type": "string",
+        "pattern": "^.{5,30}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryAddress": {
+        "type": "string",
+        "maxLength": "200",
+        "pattern": "[A-Za-z]",
+        "errorMessage": {
+          "maxLength": "Validation message redacted.",
+          "pattern": "Beneficiary Address must contain at least one English alphabet character"
+        }
+      },
+      "beneficiaryCity": {
+        "type": "string",
+        "maxLength": "50",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryCountryCode": {
+        "type": "string",
+        "pattern": "^[A-Z]{2}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryEmail": {
+        "type": "string",
+        "maxLength": "100",
+        "pattern": "^([a-zA-Z0-9+_\\-\\.]+)@([a-zA-Z0-9_\\-\\.]+)\\.([a-zA-Z]{2,63})$",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryBankAccountType": {
+        "type": "string",
+        "enum": [
+          "Checking",
+          "Saving",
+          "Maestra",
+          "Current"
+        ],
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryAccountType": {
+        "type": "string",
+        "enum": [
+          "Individual",
+          "Corporate"
+        ],
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryContactNumber": {
+        "type": "string",
+        "pattern": "^[0-9]{1,17}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryState": {
+        "type": "string",
+        "maxLength": "50",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryPostcode": {
+        "type": "string",
+        "maxLength": "15",
+        "errorMessage": "Validation message redacted."
+      },
+      "remitterBeneficiaryRelationship": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9 .-]{1,255}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryAccountNumber": {
+        "type": "string",
+        "pattern": "^[0-9a-zA-Z]{1,34}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryBankName": {
+        "type": "string",
+        "maxLength": "255",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryBankCode": {
+        "type": "string",
+        "maxLength": "15",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryIdentificationType": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9 .():_/-]{1,255}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "beneficiaryIdentificationValue": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9 .():_/-]{1,255}$",
+        "errorMessage": "Validation message redacted."
+      },
+      "routingCodeType1": {
+        "type": "string",
+        "const": "SWIFT",
+        "errorMessage": "Validation message redacted."
+      },
+      "routingCodeValue1": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9]{8}$|^[A-Za-z0-9]{11}$",
+        "errorMessage": "Validation message redacted."
+      }
+    },
+    "allOf": [
+      {
+        "if": {
+          "required": [
+            "beneficiaryAccountType"
+          ],
+          "properties": {
+            "beneficiaryAccountType": {
+              "const": "Individual"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "beneficiaryName": {
+              "type": "string",
+              "pattern": "^(?=^[a-zA-Z0-9\\s\\.,()_'/-]{1,140}$) *\\S+(?: +\\S+)+ *$",
+              "errorMessage": "Validation message redacted."
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "beneficiaryName": {
+              "pattern": "^[a-zA-Z0-9\\s\\.,()_'/-]{1,140}$",
+              "errorMessage": "Validation message redacted."
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "clientLegalEntity": {
+              "const": "AU"
+            }
+          },
+          "required": [
+            "clientLegalEntity"
+          ]
+        },
+        "then": {
+          "required": [
+            "beneficiaryAddress",
+            "beneficiaryCity",
+            "beneficiaryBankName"
+          ]
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "clientLegalEntity": {
+              "const": "CA"
+            }
+          },
+          "required": [
+            "clientLegalEntity"
+          ]
+        },
+        "then": {
+          "required": [
+            "beneficiaryAddress",
+            "beneficiaryCountryCode"
+          ]
+        }
+      }
+    ]
+  }
+]
