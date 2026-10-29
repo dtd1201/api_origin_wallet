@@ -13,6 +13,8 @@ use RuntimeException;
 
 class NiumBeneficiaryService implements BeneficiaryProvider
 {
+    public const CLIENT_LEGAL_ENTITY = 'HK';
+
     public function __construct(
         private readonly NiumService $niumService,
         private readonly NiumSupportedCorridorService $corridorService,
@@ -230,7 +232,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $rawData = (array) ($beneficiary->raw_data ?? []);
         $nium = (array) ($rawData['nium'] ?? []);
         $payload = array_merge([
-            'clientLegalEntity' => 'HK',
+            'clientLegalEntity' => self::CLIENT_LEGAL_ENTITY,
             'beneficiaryContactCountryCode' => $nium['beneficiaryContactCountryCode'] ?? $nium['beneficiary_contact_country_code'] ?? null,
             'beneficiaryContactNumber' => $beneficiary->phone,
             'beneficiaryAccountType' => $this->beneficiaryAccountType($beneficiary),

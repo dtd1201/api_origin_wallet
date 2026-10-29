@@ -449,8 +449,51 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         $this->assertDatabaseCount('beneficiaries', 0);
     }
 
+    public function test_json_schema_requirements_preserve_conditional_preflight_and_creation_isolation(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        // Synthetic clauses exercise the contract; production allOf contents remain unverified.
+        Http::fake([
+            '*validationSchemas*' => Http::response([[
+                '$schema' => 'http://json-schema.org/draft-07/schema#', '$id' => 'urn:test:beneficiary',
+                'type' => 'object', 'title' => 'Beneficiary', 'required' => ['beneficiaryAccountNumber'],
+                'properties' => [
+                    'beneficiaryAccountNumber' => ['type' => 'string', 'minLength' => 6],
+                    'routingCodeType1' => ['type' => 'string', 'enum' => ['SWIFT', 'IFSC']],
+                    'routingCodeValue1' => ['type' => 'string', 'pattern' => '^[A-Z]{8}$'],
+                    'beneficiaryAlias' => ['type' => 'string', 'enum' => ['vendor']],
+                ],
+                'allOf' => [[
+                    'if' => ['properties' => ['payoutMethod' => ['const' => 'SWIFT']]],
+                    'then' => ['required' => ['routingCodeType1', 'routingCodeValue1', 'beneficiaryAlias']],
+                    'else' => ['required' => ['localOnly'], 'properties' => ['localOnly' => ['type' => 'string']]],
+                ]],
+            ]]),
+            '*/beneficiaries' => Http::response(['beneficiaryHashId' => 'json-schema-beneficiary', 'status' => 'ACTIVE']),
+        ]);
+        $query = http_build_query(['provider_id' => $provider->id, 'beneficiary_type' => 'business', 'country_code' => 'HK', 'currency' => 'USD', 'payout_method' => 'SWIFT']);
+        $response = $this->withToken($token)->getJson("/api/user/users/{$user->id}/beneficiaries/requirements?{$query}")
+            ->assertOk()->assertJsonPath('routing_code_types', ['SWIFT']);
+        $fields = array_column($response->json('fields'), null, 'name');
+        $this->assertTrue($fields['beneficiaryAlias']['required']);
+        $this->assertSame(['SWIFT'], $fields['routingCodeType1']['allowed_values']);
+        $this->assertArrayNotHasKey('localOnly', $fields);
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", $this->beneficiaryPayload($provider))
+            ->assertUnprocessable()->assertJsonValidationErrors('beneficiaryAlias');
+        $this->assertDatabaseCount('beneficiaries', 0);
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
+
+        $payload = $this->beneficiaryPayload($provider);
+        $payload['raw_data']['nium']['additionalFields'] = ['beneficiaryAlias' => 'vendor'];
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", $payload)->assertCreated();
+        $this->assertDatabaseCount('beneficiaries', 1);
+        $this->assertTrue(data_get(Beneficiary::query()->sole()->raw_data, 'nium.beneficiary_preflight.valid'));
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && $request['routingCodeType1'] === 'SWIFT' && $request['beneficiaryAlias'] === 'vendor' && ! isset($request['localOnly']));
+    }
+
     #[DataProvider('schemaLookupFailures')]
-    public function test_schema_failure_blocks_requirements_and_creation_without_a_nium_post(array $body, int $status): void
+    public function test_schema_failure_blocks_requirements_and_creation_without_a_nium_post(mixed $body, int $status): void
     {
         [$user, $provider, $token] = $this->customer();
         Http::fake(['*validationSchemas*' => Http::response($body, $status)]);
@@ -468,6 +511,13 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         return [
             'provider failure' => [['message' => 'secret provider details'], 503],
             'unknown schema shape' => [['unexpected' => []], 200],
+            'invalid JSON' => ['secret provider details', 200],
+            'unsupported JSON Schema reference' => [[['type' => 'object', '$ref' => 'secret provider details']], 200],
+            'ambiguous JSON Schema array' => [[['type' => 'object'], ['type' => 'object']], 200],
+            'unresolved payload conditional' => [[['type' => 'object', 'allOf' => [[
+                'if' => ['properties' => ['routingCodeType1' => ['const' => 'SWIFT']]],
+                'then' => ['required' => ['beneficiaryAlias']],
+            ]]]], 200],
         ];
     }
 
