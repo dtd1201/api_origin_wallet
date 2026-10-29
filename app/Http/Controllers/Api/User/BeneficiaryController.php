@@ -13,6 +13,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -61,6 +62,12 @@ class BeneficiaryController extends Controller
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.bankCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.branchCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.routingInfo' => ['sometimes', 'array', 'max:2'],
+            'raw_data.nium.routingInfo.*' => ['required', 'array:type,value'],
+            'raw_data.nium.routingInfo.*.type' => ['required', 'string', 'max:50'],
+            'raw_data.nium.routingInfo.*.value' => ['required', 'string', 'max:100'],
             'raw_data.nium.account_verification' => ['sometimes', 'array'],
             'raw_data.nium.account_verification.request' => ['prohibited'],
             'raw_data.nium.account_verification.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
@@ -83,8 +90,8 @@ class BeneficiaryController extends Controller
 
                 return $manager->createBeneficiary($provider, $beneficiary->load('user'));
             });
-        } catch (RuntimeException|InvalidArgumentException|\Illuminate\Validation\ValidationException $exception) {
-            if ($exception instanceof \Illuminate\Validation\ValidationException) {
+        } catch (RuntimeException|InvalidArgumentException|ValidationException $exception) {
+            if ($exception instanceof ValidationException) {
                 throw $exception;
             }
 
@@ -99,8 +106,7 @@ class BeneficiaryController extends Controller
         User $user,
         Beneficiary $beneficiary,
         ProviderBeneficiaryManager $manager,
-    ): JsonResponse
-    {
+    ): JsonResponse {
         abort_unless($beneficiary->user_id === $user->id, 404);
 
         $validated = $request->validate([
@@ -128,6 +134,12 @@ class BeneficiaryController extends Controller
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.bankCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.branchCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.routingInfo' => ['sometimes', 'array', 'max:2'],
+            'raw_data.nium.routingInfo.*' => ['required', 'array:type,value'],
+            'raw_data.nium.routingInfo.*.type' => ['required', 'string', 'max:50'],
+            'raw_data.nium.routingInfo.*.value' => ['required', 'string', 'max:100'],
             'raw_data.nium.account_verification' => ['sometimes', 'array'],
             'raw_data.nium.account_verification.request' => ['prohibited'],
             'raw_data.nium.account_verification.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],

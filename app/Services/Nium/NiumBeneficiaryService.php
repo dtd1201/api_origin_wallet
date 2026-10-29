@@ -7,6 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Services\Integrations\Contracts\BeneficiaryProvider;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
+use Illuminate\Validation\ValidationException;
 use RuntimeException;
 
 class NiumBeneficiaryService implements BeneficiaryProvider
@@ -16,6 +17,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         private readonly NiumSupportedCorridorService $corridorService,
         private readonly NiumProviderAccountStateService $accountStateService,
         private readonly NiumBeneficiaryPreflightValidator $preflightValidator,
+        private readonly NiumBeneficiaryRequirementsService $requirementsService,
     ) {}
 
     public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
@@ -46,8 +48,13 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     public function createValidatedBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary, array $selectedCorridor, NiumBeneficiaryRequirementsResult $schema): Beneficiary
     {
         $beneficiary->loadMissing('user.profile');
+        $this->requirementsService->assertMatchesCorridor($schema, $selectedCorridor);
+        $this->validateCorridor($beneficiary, $schema);
         $payload = $this->buildBeneficiaryPayload($beneficiary);
-        $evidence = $this->preflightValidator->validate($payload, $selectedCorridor, $schema);
+        // Customer type is a validated corridor dimension, not a beneficiary POST field.
+        $evidence = $this->preflightValidator->validate([
+            ...$payload, 'customerType' => $schema->dimensions['customerType'],
+        ], $selectedCorridor, $schema);
         $raw = (array) ($beneficiary->raw_data ?? []);
         $raw['nium']['beneficiary_preflight'] = $evidence;
         $beneficiary->update(['raw_data' => $raw]);
@@ -278,14 +285,14 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
         if (filled($beneficiary->bank_code)) {
             if (! filled($nium['bankCodeType'] ?? null)) {
-                throw new RuntimeException('Nium beneficiary bank routing type must come from the supported corridor or validation schema.');
+                throw ValidationException::withMessages(['bank_code' => 'The bank code needs a routing type supported by the selected Nium corridor.']);
             }
             $items[] = ['type' => $nium['bankCodeType'], 'value' => $beneficiary->bank_code];
         }
 
         if (filled($beneficiary->branch_code)) {
             if (! filled($nium['branchCodeType'] ?? null)) {
-                throw new RuntimeException('Nium beneficiary branch routing type must come from the supported corridor or validation schema.');
+                throw ValidationException::withMessages(['branch_code' => 'The branch code needs a routing type supported by the selected Nium corridor.']);
             }
             $items[] = ['type' => $nium['branchCodeType'], 'value' => $beneficiary->branch_code];
         }
@@ -416,16 +423,74 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         return $rawData;
     }
 
-    private function validateCorridor(Beneficiary $beneficiary): void
+    private function validateCorridor(Beneficiary $beneficiary, ?NiumBeneficiaryRequirementsResult $schema = null): void
     {
         $nium = (array) (($beneficiary->raw_data ?? [])['nium'] ?? []);
         $payoutMethod = strtoupper((string) ($nium['payoutMethod'] ?? $nium['payout_method'] ?? 'SWIFT'));
-        $routingTypes = array_values(array_filter(array_map(
-            static fn (array $routing): ?string => isset($routing['type']) ? (string) $routing['type'] : null,
-            $this->routingInfo($beneficiary, $nium),
-        )));
+        // Select the corridor before attempting to construct typed routing codes.
+        $corridor = $this->corridorService->assertSupported($beneficiary, $payoutMethod, []);
+        if ($schema !== null) {
+            $this->requirementsService->assertMatchesCorridor($schema, $corridor);
+        }
+        $allowed = array_values(array_unique(array_filter(array_map(
+            static fn ($type): string => strtoupper(trim((string) $type)),
+            (array) ($corridor['routingCodeType'] ?? []),
+        ))));
 
-        $this->corridorService->assertSupported($beneficiary, $payoutMethod, $routingTypes);
+        $explicitRouting = $nium['routingInfo'] ?? $nium['routing_info'] ?? [];
+        if (! is_array($explicitRouting) || $explicitRouting === []) {
+            $used = filled($beneficiary->swift_bic) ? ['SWIFT'] : [];
+            foreach (['bank_code' => 'bankCodeType', 'branch_code' => 'branchCodeType'] as $field => $key) {
+                if (filled($beneficiary->{$field}) && filled($nium[$key] ?? null)) {
+                    $used[] = strtoupper(trim((string) $nium[$key]));
+                }
+            }
+
+            $slot = filled($beneficiary->swift_bic) ? 2 : 1;
+            foreach (['bank_code' => 'bankCodeType', 'branch_code' => 'branchCodeType'] as $field => $key) {
+                if (! filled($beneficiary->{$field})) {
+                    continue;
+                }
+                $candidates = array_values(array_diff($allowed, $used));
+                $schemaField = collect($schema?->fields ?? [])->firstWhere('name', "routingCodeType{$slot}");
+                if (isset($schemaField['allowed_values'])) {
+                    $candidates = array_values(array_intersect($candidates, $schemaField['allowed_values']));
+                }
+                if (! filled($nium[$key] ?? null)) {
+                    if (count($candidates) !== 1) {
+                        throw ValidationException::withMessages([
+                            $field => 'The selected Nium corridor does not identify a unique supported routing type for this code. Supply an explicitly supported routing type.',
+                        ]);
+                    }
+                    $nium[$key] = $candidates[0];
+                    $used[] = $nium[$key];
+                }
+                $nium[$key] = strtoupper(trim((string) $nium[$key]));
+                $slot++;
+            }
+        }
+
+        $routingInfo = $this->routingInfo($beneficiary, $nium);
+        foreach (['bank_code', 'branch_code'] as $field) {
+            if (filled($beneficiary->{$field}) && ! in_array($beneficiary->{$field}, array_column($routingInfo, 'value'), true)) {
+                throw ValidationException::withMessages([$field => 'The supplied code must have a routing type supported by the selected Nium corridor.']);
+            }
+        }
+        foreach ($routingInfo as $index => $routing) {
+            $field = ($routing['value'] ?? null) === $beneficiary->bank_code ? 'bank_code'
+                : ((($routing['value'] ?? null) === $beneficiary->branch_code) ? 'branch_code' : 'raw_data.nium.routingInfo');
+            $type = $routing['type'] ?? null;
+            $schemaField = collect($schema?->fields ?? [])->firstWhere('name', 'routingCodeType'.($index + 1));
+            if ($index >= 2 || ! in_array($type, $allowed, true)
+                || ! filled($routing['value'] ?? null)
+                || (isset($schemaField['allowed_values']) && ! in_array($type, $schemaField['allowed_values'], true))) {
+                throw ValidationException::withMessages([$field => 'The routing code type is not supported by the selected Nium corridor or validation schema.']);
+            }
+        }
+
+        $raw = (array) ($beneficiary->raw_data ?? []);
+        $raw['nium'] = $nium;
+        $beneficiary->raw_data = $raw;
     }
 
     private function normalizeBankAccountType(mixed $value): string

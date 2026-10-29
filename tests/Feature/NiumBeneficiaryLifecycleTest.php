@@ -9,11 +9,14 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
+use App\Services\Nium\NiumBeneficiaryRequirementsService;
 use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\NiumTransferPolicy;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -243,6 +246,204 @@ class NiumBeneficiaryLifecycleTest extends TestCase
 
             $this->assertRepairFailsWithoutMutation($beneficiary, "wrong {$field}");
         }
+    }
+
+    #[DataProvider('supportedBankRouting')]
+    public function test_controller_resolves_and_persists_supported_bank_routing(array|string $types, ?string $swift): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $this->localCorridor($types);
+        Http::preventStrayRequests();
+        Http::fake(['*/beneficiaries' => Http::response(['beneficiaryHashId' => 'resolved-beneficiary', 'status' => 'ACTIVE'])]);
+
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
+            ...$this->localBeneficiaryPayload($provider), 'swift_bic' => $swift,
+        ])->assertCreated();
+
+        $beneficiary = Beneficiary::query()->sole();
+        $this->assertSame('IFSC', data_get($beneficiary->raw_data, 'nium.bankCodeType'));
+        $this->assertSame('LOCAL', data_get($beneficiary->raw_data, 'nium.payoutMethod'));
+        $slot = $swift === null ? 1 : 2;
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && $request["routingCodeType{$slot}"] === 'IFSC'
+            && $request["routingCodeValue{$slot}"] === 'HDFC0001234'
+            && ($swift === null || ($request['routingCodeType1'] === 'SWIFT' && $request['routingCodeValue1'] === $swift)));
+        Http::assertSentCount(1);
+    }
+
+    public static function supportedBankRouting(): array
+    {
+        return [
+            'scalar corridor type' => ['IFSC', null],
+            'array corridor type' => [['IFSC'], null],
+            'normalized corridor type' => [[' ifsc '], null],
+            'bank type alongside explicit swift' => [['IFSC', 'SWIFT'], 'HDFCINBB'],
+        ];
+    }
+
+    #[DataProvider('providedBankRouting')]
+    public function test_controller_preserves_explicit_supported_routing_metadata(array $metadata, string $persistedKey): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $this->localCorridor(['IFSC', 'SWIFT']);
+        Http::preventStrayRequests();
+        Http::fake(['*/beneficiaries' => Http::response(['beneficiaryHashId' => 'explicit-beneficiary', 'status' => 'ACTIVE'])]);
+
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
+            ...$this->localBeneficiaryPayload($provider),
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', ...$metadata]],
+        ])->assertCreated();
+
+        $this->assertSame('IFSC', data_get(Beneficiary::query()->sole()->raw_data, $persistedKey));
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && $request['routingCodeType1'] === 'IFSC' && $request['routingCodeValue1'] === 'HDFC0001234');
+        Http::assertSentCount(1);
+    }
+
+    public static function providedBankRouting(): array
+    {
+        return [
+            'bank code type' => [['bankCodeType' => 'IFSC'], 'nium.bankCodeType'],
+            'routing info' => [['routingInfo' => [['type' => 'IFSC', 'value' => 'HDFC0001234']]], 'nium.routingInfo.0.type'],
+        ];
+    }
+
+    public function test_controller_update_preserves_routing_type_and_rejects_unsupported_replacement(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $this->localCorridor(['IFSC', 'SWIFT']);
+        config()->set('services.nium.beneficiary_update_enabled', true);
+        $beneficiary = $user->beneficiaries()->create([
+            ...$this->localBeneficiaryPayload($provider),
+            'external_beneficiary_id' => 'existing-beneficiary',
+        ]);
+        Http::preventStrayRequests();
+        Http::fake(['*/beneficiaries/existing-beneficiary' => Http::response(['status' => 'ACTIVE'])]);
+
+        $url = "/api/user/users/{$user->id}/beneficiaries/{$beneficiary->id}";
+        $this->withToken($token)->putJson($url, [
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', 'bankCodeType' => 'IFSC']],
+        ])->assertOk();
+        $this->assertSame('IFSC', data_get($beneficiary->fresh()->raw_data, 'nium.bankCodeType'));
+        Http::assertSent(fn ($request) => $request->method() === 'PUT' && $request['routingCodeType1'] === 'IFSC');
+
+        $this->withToken($token)->putJson($url, [
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', 'bankCodeType' => 'NOT_SUPPORTED']],
+        ])->assertUnprocessable()->assertJsonValidationErrors('bank_code');
+        $this->assertSame('IFSC', data_get($beneficiary->fresh()->raw_data, 'nium.bankCodeType'));
+        Http::assertSentCount(1);
+    }
+
+    public function test_missing_branch_routing_type_returns_a_branch_field_error_without_post(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $this->localCorridor(['IFSC']);
+        Http::preventStrayRequests();
+        Http::fake();
+
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
+            ...$this->localBeneficiaryPayload($provider), 'branch_code' => '123',
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', 'bankCodeType' => 'IFSC']],
+        ])->assertUnprocessable()->assertJsonValidationErrors('branch_code');
+        Http::assertNothingSent();
+    }
+
+    #[DataProvider('invalidBankRouting')]
+    public function test_controller_returns_bank_field_error_without_any_nium_post(array|string|null $types, array $metadata): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $this->localCorridor($types);
+        Http::preventStrayRequests();
+        Http::fake();
+
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
+            ...$this->localBeneficiaryPayload($provider),
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', 'verify_before_create' => true, ...$metadata]],
+        ])->assertUnprocessable()->assertJsonValidationErrors('bank_code');
+
+        $this->assertDatabaseCount('beneficiaries', 0);
+        Http::assertNothingSent();
+    }
+
+    public static function invalidBankRouting(): array
+    {
+        return [
+            'missing corridor type' => [null, []],
+            'empty corridor types' => [[], []],
+            'ambiguous corridor types' => [['IFSC', 'SWIFT'], []],
+            'unsupported explicit bank type' => [['IFSC'], ['bankCodeType' => 'SWIFT']],
+            'invented explicit type' => [['IFSC'], ['bankCodeType' => 'NOT_SUPPORTED']],
+            'explicit type cannot bypass absent corridor types' => [[], ['bankCodeType' => 'IFSC']],
+            'unsupported explicit routing info' => [['SWIFT'], ['routingInfo' => [['type' => 'IFSC', 'value' => 'HDFC0001234']]]],
+            'explicit routing cannot silently drop bank code' => [['SWIFT'], ['routingInfo' => [['type' => 'SWIFT', 'value' => 'HDFCINBB']]]],
+        ];
+    }
+
+    public function test_trusted_schema_can_disambiguate_supported_routing_before_payload_construction(): void
+    {
+        [$user, $provider] = $this->customer();
+        $corridor = $this->localCorridor(['IFSC', 'SWIFT']);
+        Http::preventStrayRequests();
+        Http::fake([
+            '*/beneficiaries' => Http::response(['beneficiaryHashId' => 'schema-beneficiary', 'status' => 'ACTIVE']),
+            '*' => Http::response(['fields' => [
+                ['fieldName' => 'routingCodeType1', 'required' => true, 'allowedValues' => ['IFSC']],
+            ]]),
+        ]);
+        $schema = app(NiumBeneficiaryRequirementsService::class)->requirements($user, $corridor);
+        $beneficiary = $user->beneficiaries()->create($this->localBeneficiaryPayload($provider));
+
+        $created = app(NiumBeneficiaryService::class)->createValidatedBeneficiary($provider, $beneficiary, $corridor, $schema);
+
+        $this->assertSame('schema-beneficiary', $created->external_beneficiary_id);
+        $this->assertSame('IFSC', data_get($created->raw_data, 'nium.bankCodeType'));
+        $this->assertTrue(data_get($created->raw_data, 'nium.beneficiary_preflight.valid'));
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['routingCodeType1'] === 'IFSC');
+        Http::assertSentCount(2);
+    }
+
+    public function test_schema_cannot_authorize_a_routing_type_absent_from_the_corridor(): void
+    {
+        [$user, $provider] = $this->customer();
+        $corridor = $this->localCorridor(['IFSC']);
+        Http::preventStrayRequests();
+        Http::fake(['*' => Http::response(['fields' => [
+            ['fieldName' => 'routingCodeType1', 'required' => true, 'allowedValues' => ['SWIFT']],
+        ]])]);
+        $schema = app(NiumBeneficiaryRequirementsService::class)->requirements($user, $corridor);
+        $beneficiary = $user->beneficiaries()->create($this->localBeneficiaryPayload($provider));
+
+        try {
+            app(NiumBeneficiaryService::class)->createValidatedBeneficiary($provider, $beneficiary, $corridor, $schema);
+            $this->fail('Unsupported routing must fail before POST.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('bank_code', $exception->errors());
+        }
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertSentCount(1);
+    }
+
+    private function localCorridor(array|string|null $types): array
+    {
+        $corridor = [
+            'destinationCountry' => 'IN', 'destinationCurrency' => 'INR', 'payoutMethod' => 'LOCAL',
+            'beneficiaryAccountType' => 'CORPORATE', 'customerType' => 'CORPORATE',
+        ];
+        if ($types !== null) {
+            $corridor['routingCodeType'] = $types;
+        }
+        config()->set('services.nium.supported_corridors', [$corridor]);
+
+        return $corridor;
+    }
+
+    private function localBeneficiaryPayload(IntegrationProvider $provider): array
+    {
+        return [
+            ...$this->beneficiaryPayload($provider),
+            'country_code' => 'IN', 'currency' => 'INR', 'bank_code' => 'HDFC0001234', 'swift_bic' => null,
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']],
+        ];
     }
 
     private function assertRepairFailsWithoutMutation(Beneficiary $beneficiary, string $case): void
