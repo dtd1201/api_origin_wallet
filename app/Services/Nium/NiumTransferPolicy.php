@@ -207,7 +207,7 @@ final class NiumTransferPolicy
         $profile = $user->kycProfile;
 
         if (! $profile instanceof KycProfile
-            || strtolower((string) $profile->status) !== 'approved'
+            || ! in_array(strtolower((string) $profile->status), ['approved', 'verified'], true)
             || strtolower((string) $profile->applicant_type) !== 'business'
             || $this->customerRegion($profile) !== 'HK') {
             throw new RuntimeException(
