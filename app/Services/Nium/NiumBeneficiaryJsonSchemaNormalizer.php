@@ -160,10 +160,14 @@ final class NiumBeneficiaryJsonSchemaNormalizer
         }
         foreach (['minLength' => 'min_length', 'maxLength' => 'max_length'] as $source => $target) {
             if (array_key_exists($source, $property)) {
-                if (! is_int($property[$source]) || $property[$source] < 0) {
+                $length = $property[$source];
+                if (is_string($length) && preg_match('/\A(?:0|[1-9][0-9]*)\z/', $length) === 1) {
+                    $length = filter_var($length, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
+                }
+                if (! is_int($length) || $length < 0) {
                     $this->fail('invalid_length', $path);
                 }
-                $field[$target] = $property[$source];
+                $field[$target] = $length;
             }
         }
         if (array_key_exists('pattern', $property)) {

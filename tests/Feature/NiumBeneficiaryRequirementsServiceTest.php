@@ -94,6 +94,110 @@ class NiumBeneficiaryRequirementsServiceTest extends TestCase
         ], $this->corridor(), $result);
     }
 
+    #[DataProvider('productionMaxLengths')]
+    public function test_production_numeric_string_maximum_lengths_are_normalized_and_enforced(string $name, string $maximum): void
+    {
+        $schema = $this->schema();
+        $schema['properties'][$name] = ['type' => 'string', 'maxLength' => $maximum];
+        $service = $this->service([$schema]);
+        $result = $service->requirements(new User, $this->corridor());
+        $result->assertTrusted(3600);
+        $fields = array_column($result->fields, null, 'name');
+        $this->assertSame((int) $maximum, $fields[$name]['max_length']);
+        $validator = new NiumBeneficiaryPreflightValidator($service);
+        $this->assertTrue($validator->validate([
+            ...$this->payload(), $name => str_repeat('a', (int) $maximum),
+        ], $this->corridor(), $result)['valid']);
+        try {
+            $validator->validate([
+                ...$this->payload(), $name => str_repeat('a', (int) $maximum + 1),
+            ], $this->corridor(), $result);
+            $this->fail('Preflight must enforce the normalized maximum.');
+        } catch (ValidationException $exception) {
+            $this->assertSame(["Enter no more than {$maximum} characters."], $exception->errors()[$name]);
+        }
+        Http::assertNothingSent();
+    }
+
+    public static function productionMaxLengths(): array
+    {
+        return [
+            ['beneficiaryAddress', '200'], ['beneficiaryCity', '50'], ['beneficiaryEmail', '100'],
+            ['beneficiaryState', '50'], ['beneficiaryPostcode', '15'], ['beneficiaryBankName', '255'],
+            ['beneficiaryBankCode', '15'],
+        ];
+    }
+
+    #[DataProvider('validLengths')]
+    public function test_length_conversion_preserves_integer_values_in_root_and_conditional_properties(int|string $length): void
+    {
+        foreach (['root', 'then', 'else'] as $location) {
+            Cache::flush();
+            $schema = $this->lengthSchema(['minLength' => $length, 'maxLength' => $length], $location);
+            $result = $this->service([$schema])->requirements(new User, $this->corridor());
+            $fields = array_column($result->fields, null, 'name');
+            $this->assertSame((int) $length, $fields['beneficiaryCity']['min_length']);
+            $this->assertSame((int) $length, $fields['beneficiaryCity']['max_length']);
+        }
+        Http::assertNothingSent();
+    }
+
+    public static function validLengths(): array
+    {
+        return [[0], ['0'], [1], ['1'], [PHP_INT_MAX], [(string) PHP_INT_MAX]];
+    }
+
+    #[DataProvider('invalidLengths')]
+    public function test_invalid_lengths_fail_closed_in_root_and_conditional_properties(mixed $length): void
+    {
+        Log::spy();
+        foreach (['minLength', 'maxLength'] as $keyword) {
+            foreach (['root', 'then', 'else'] as $location) {
+                Cache::flush();
+                $schema = $this->lengthSchema([$keyword => $length], $location);
+                try {
+                    $this->service([$schema])->requirements(new User, $this->corridor());
+                    $this->fail('Invalid length constraints must not produce a trusted schema.');
+                } catch (NiumBeneficiarySchemaException $exception) {
+                    $this->assertSame('invalid_length', $exception->reason);
+                    $this->assertSame('schema.properties.*', $exception->location);
+                }
+            }
+        }
+        Http::assertNothingSent();
+    }
+
+    public static function invalidLengths(): array
+    {
+        return [
+            'negative integer' => [-1], 'negative string' => ['-1'], 'negative zero' => ['-0'],
+            'fractional number' => [1.5], 'whole float' => [50.0], 'fractional string' => ['1.5'], 'decimal string' => ['1.0'],
+            'scientific number' => [1e100], 'scientific string' => ['1e2'],
+            'leading whitespace' => [' 50'], 'trailing whitespace' => ['50 '], 'newline' => ["50\n"],
+            'nonnumeric string' => ['fifty'], 'empty string' => [''], 'null' => [null],
+            'true' => [true], 'false' => [false], 'plus sign' => ['+50'], 'leading zero' => ['050'],
+            'non-ASCII digits' => ['５０'], 'overflow number' => [PHP_INT_MAX + 1],
+            'overflow string' => [substr((string) PHP_INT_MAX, 0, -1).'8'],
+            'very large string' => [str_repeat('9', 100)],
+        ];
+    }
+
+    private function lengthSchema(array $constraints, string $location): array
+    {
+        $schema = $this->schema();
+        $property = ['type' => 'string', ...$constraints];
+        if ($location === 'root') {
+            $schema['properties']['beneficiaryCity'] = $property;
+        } else {
+            $schema['allOf'] = [[
+                'if' => ['required' => ['payoutMethod'], 'properties' => ['payoutMethod' => ['const' => $location === 'then' ? 'SWIFT' : 'LOCAL']]],
+                $location => ['properties' => ['beneficiaryCity' => $property]],
+            ]];
+        }
+
+        return $schema;
+    }
+
     #[DataProvider('productionStructureCases')]
     public function test_confirmed_all_of_structures_select_only_applicable_patterns_and_requirements(
         string $accountType, string $threeFieldEntity, string $twoFieldEntity, array $expectedRequired,
@@ -243,7 +347,7 @@ class NiumBeneficiaryRequirementsServiceTest extends TestCase
         $nium->shouldReceive('clientId')->andReturn('test-client');
         $nium->shouldReceive('customerId')->andReturn('test-customer');
         $nium->shouldReceive('path')->andReturn('/validationSchemas');
-        $nium->shouldReceive('get')->once()->andReturn(new Response(new PsrResponse(200, [], json_encode($body))));
+        $nium->shouldReceive('get')->once()->andReturn(new Response(new PsrResponse(200, [], json_encode($body, JSON_PRESERVE_ZERO_FRACTION))));
 
         return new NiumBeneficiaryRequirementsService($nium);
     }
