@@ -65,6 +65,7 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::get('users/{user}/bank-accounts', [BankAccountController::class, 'index']);
     Route::get('users/{user}/bank-accounts/{bankAccount}', [BankAccountController::class, 'show']);
 
+    Route::get('users/{user}/beneficiaries/requirements', [BeneficiaryController::class, 'requirements']);
     Route::post('users/{user}/beneficiaries', [BeneficiaryController::class, 'store']);
     Route::get('users/{user}/beneficiaries', [BeneficiaryController::class, 'index']);
     Route::put('users/{user}/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'update']);

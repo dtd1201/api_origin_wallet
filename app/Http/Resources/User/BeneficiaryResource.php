@@ -4,6 +4,7 @@ namespace App\Http\Resources\User;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Arr;
 
 class BeneficiaryResource extends JsonResource
 {
@@ -32,6 +33,12 @@ class BeneficiaryResource extends JsonResource
             'state' => $this->state,
             'postal_code' => $this->postal_code,
             'status' => $this->status,
+            'raw_data' => [
+                'nium' => Arr::only((array) data_get($this->raw_data, 'nium', []), [
+                    'payoutMethod', 'bankAccountType', 'beneficiaryBankAccountType', 'beneficiaryContactCountryCode',
+                    'remitterBeneficiaryRelationship', 'bankCodeType', 'branchCodeType', 'routingInfo', 'additionalFields',
+                ]),
+            ],
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

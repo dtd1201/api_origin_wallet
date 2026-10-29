@@ -18,6 +18,7 @@ class NiumBeneficiaryServiceTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        Http::preventStrayRequests();
 
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'test-partner-key');
@@ -84,6 +85,7 @@ class NiumBeneficiaryServiceTest extends TestCase
         ]);
 
         Http::fake([
+            '*validationSchemas*' => Http::response(['fields' => []]),
             'https://gateway.sandbox.nium.com/api/v2/client/client_hash_123/customer/cust_hash_123/beneficiaries' => Http::response([
                 'beneficiaryHashId' => 'bnf_hash_123',
                 'status' => 'ACTIVE',
@@ -168,6 +170,7 @@ class NiumBeneficiaryServiceTest extends TestCase
         ]);
 
         Http::fake([
+            '*validationSchemas*' => Http::response(['fields' => []]),
             'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/accountVerification' => Http::response([], 200),
             'https://gateway.sandbox.nium.com/api/v2/client/client_hash_123/customer/cust_hash_123/beneficiaries' => Http::response([
                 'beneficiaryHashId' => 'bnf_hash_456',
@@ -236,6 +239,10 @@ class NiumBeneficiaryServiceTest extends TestCase
 
         $corridorRequests = 0;
         Http::fake(function ($request) use (&$corridorRequests) {
+            if (str_contains($request->url(), '/validationSchemas')) {
+                return Http::response(['fields' => []]);
+            }
+
             if (str_contains($request->url(), '/api/v3/client/client_hash_123/supportedCorridors')) {
                 $corridorRequests++;
 
@@ -311,7 +318,8 @@ class NiumBeneficiaryServiceTest extends TestCase
             'currency' => 'INR',
             'account_number' => '1234567890',
             'external_beneficiary_id' => 'bnf_hash_123',
-            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']],
+            'bank_code' => 'HDFC0001234',
+            'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', 'bankCodeType' => 'IFSC']],
             'status' => 'active',
         ]);
 
@@ -324,6 +332,7 @@ class NiumBeneficiaryServiceTest extends TestCase
         ]);
 
         Http::fake([
+            '*validationSchemas*' => Http::response(['fields' => []]),
             'https://gateway.sandbox.nium.com/api/v2/client/client_hash_123/customer/cust_hash_123/beneficiaries/bnf_hash_123' => Http::response([
                 'beneficiaryHashId' => 'bnf_hash_123',
                 'status' => 'ACTIVE',
@@ -385,6 +394,7 @@ class NiumBeneficiaryServiceTest extends TestCase
         ]);
 
         Http::fake([
+            '*validationSchemas*' => Http::response(['fields' => []]),
             'https://gateway.sandbox.nium.com/api/v1/client/client_hash_123/customer/cust_hash_123/beneficiaries/bnf_hash_123' => Http::response('', 200),
         ]);
 

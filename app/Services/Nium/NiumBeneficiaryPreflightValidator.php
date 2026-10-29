@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use Illuminate\Validation\ValidationException;
 use RuntimeException;
 
 final class NiumBeneficiaryPreflightValidator
@@ -16,26 +17,63 @@ final class NiumBeneficiaryPreflightValidator
                 throw new RuntimeException("Beneficiary {$key} does not match the selected corridor.");
             }
         }
-        $routingType = strtoupper((string) ($payload['routingCodeType1'] ?? ''));
-        if ($schema->routingCodeTypes !== [] && ($routingType === '' || ! in_array($routingType, $schema->routingCodeTypes, true))) {
-            throw new RuntimeException('Beneficiary routing-code type does not match the selected corridor.');
+        $errors = [];
+        foreach ([1, 2] as $slot) {
+            $type = $payload["routingCodeType{$slot}"] ?? null;
+            $value = $payload["routingCodeValue{$slot}"] ?? null;
+            $typeField = collect($schema->fields)->firstWhere('name', "routingCodeType{$slot}");
+            $valueField = collect($schema->fields)->firstWhere('name', "routingCodeValue{$slot}");
+            $required = ($typeField['required'] ?? false) || ($valueField['required'] ?? false)
+                || ($slot === 1 && $schema->routingCodeTypes !== [] && $typeField === null && $valueField === null);
+            if ($required || filled($type) || filled($value)) {
+                if (! in_array($type, $schema->routingCodeTypes, true)) {
+                    $errors["routingCodeType{$slot}"] = 'Select a routing type supported by this payment method.';
+                }
+                if (! filled($value)) {
+                    $errors["routingCodeValue{$slot}"] = 'Enter the routing code for the selected type.';
+                }
+            }
         }
         foreach ($schema->fields as $field) {
             $name = $field['name'];
             $value = $payload[$name] ?? null;
-            if ($field['required'] && ($value === null || $value === '' || (is_array($value) && $value === []))) {
-                throw new RuntimeException("Beneficiary required field {$name} is missing or null.");
+            if ($field['required'] && ($value === null || $value === '' || $value === [])) {
+                $errors[$name] = 'This field is required for the selected payment method.';
+
+                continue;
             }
             if ($value === null) {
                 continue;
             }
-            if (isset($field['allowed_values']) && ! in_array($value, $field['allowed_values'], true)) {
-                throw new RuntimeException("Beneficiary field {$name} has an unexpected value.");
+            $validType = match ($field['type'] ?? 'string') {
+                'string' => is_string($value),
+                'integer' => is_int($value),
+                'number' => is_int($value) || is_float($value),
+                'boolean' => is_bool($value),
+                default => false,
+            };
+            if (! $validType) {
+                $errors[$name] = 'Enter a value of the type required for this payment method.';
             }
-            if (is_string($value) && isset($field['pattern']) && @preg_match('/'.$field['pattern'].'/u', $value) !== 1) {
-                throw new RuntimeException("Beneficiary field {$name} does not satisfy provider validation.");
+            if (isset($field['allowed_values']) && ! in_array($value, $field['allowed_values'], true)) {
+                $errors[$name] = 'Select a value supported by the selected payment method.';
+            }
+            if (is_string($value)) {
+                if (isset($field['pattern']) && @preg_match('/'.$field['pattern'].'/u', $value) !== 1) {
+                    $errors[$name] = 'Enter a value in the format required for this payment method.';
+                }
+                if (isset($field['min_length']) && mb_strlen($value) < $field['min_length']) {
+                    $errors[$name] = "Enter at least {$field['min_length']} characters.";
+                }
+                if (isset($field['max_length']) && mb_strlen($value) > $field['max_length']) {
+                    $errors[$name] = "Enter no more than {$field['max_length']} characters.";
+                }
             }
         }
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+
         return ['valid' => true, 'schema_fingerprint' => $schema->schemaFingerprint, 'dimensions' => $schema->dimensions];
     }
 }

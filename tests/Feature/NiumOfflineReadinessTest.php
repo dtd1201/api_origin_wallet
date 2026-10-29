@@ -475,7 +475,7 @@ class NiumOfflineReadinessTest extends TestCase
     {
         [$provider, $user] = $this->account(); $corridor = $this->corridor();
         $fabricated = new NiumBeneficiaryRequirementsResult($this->dimensions(), ['IFSC'], [], 'fake', now()->toISOString(), 'v1', 'bad');
-        $payload = [...$this->dimensions(), 'routingCodeType1' => 'IFSC', 'beneficiaryAccountNumber' => '123'];
+        $payload = [...$this->dimensions(), 'routingCodeType1' => 'IFSC', 'routingCodeValue1' => 'HDFC0001234', 'beneficiaryAccountNumber' => '123'];
         try { app(NiumBeneficiaryPreflightValidator::class)->validate($payload, $corridor, $fabricated); $this->fail(); }
         catch (RuntimeException $e) { $this->assertStringContainsString('provenance', $e->getMessage()); }
         $stale = NiumBeneficiaryRequirementsResult::trusted($this->dimensions(), ['IFSC'], [], now()->subDays(2)->toISOString(), 'v1');
@@ -492,7 +492,7 @@ class NiumOfflineReadinessTest extends TestCase
         [$provider, $user] = $this->account(complete: true);
         Http::fake(['*' => Http::response(['fields' => [['fieldName' => 'beneficiaryAccountNumber', 'required' => true]]])]);
         $schema = app(NiumBeneficiaryRequirementsService::class)->requirements($user, $this->corridor());
-        $payload = [...$this->dimensions(), 'routingCodeType1' => 'IFSC', 'beneficiaryAccountNumber' => '123'];
+        $payload = [...$this->dimensions(), 'routingCodeType1' => 'IFSC', 'routingCodeValue1' => 'HDFC0001234', 'beneficiaryAccountNumber' => '123'];
         $this->assertTrue(app(NiumBeneficiaryPreflightValidator::class)->validate($payload, $this->corridor(), $schema)['valid']);
     }
 

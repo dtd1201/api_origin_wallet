@@ -8,6 +8,7 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
+use App\Services\Nium\NiumBeneficiaryService;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -31,6 +32,37 @@ class BeneficiaryController extends Controller
         abort_unless($beneficiary->user_id === $user->id, 404);
 
         return response()->json((new BeneficiaryResource($beneficiary))->resolve());
+    }
+
+    public function requirements(Request $request, User $user, NiumBeneficiaryService $service): JsonResponse
+    {
+        $validated = $request->validate([
+            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'beneficiary_type' => ['required', 'string', 'max:20'],
+            'country_code' => ['required', 'string', 'size:2'],
+            'currency' => ['required', 'string', 'size:3'],
+            'payout_method' => ['required', 'string', 'max:50'],
+        ]);
+        $provider = PrimaryProvider::resolveForRequest((int) $validated['provider_id']);
+        abort_unless($provider->code === 'nium', 422, 'Beneficiary requirements are available for Nium only.');
+        $provider->assertSupportsCapability('beneficiary');
+        $beneficiary = new Beneficiary([
+            ...$validated,
+            'raw_data' => ['nium' => ['payoutMethod' => $validated['payout_method']]],
+        ]);
+        $beneficiary->setRelation('user', $user);
+
+        try {
+            [, $schema] = $service->requirements($beneficiary);
+
+            return response()->json([
+                'dimensions' => $schema->dimensions,
+                'routing_code_types' => $schema->routingCodeTypes,
+                'fields' => $schema->fields,
+            ]);
+        } catch (\Throwable) {
+            return response()->json(['message' => 'Beneficiary requirements are unavailable for these details. Check the country, currency and payment method, then retry.'], 502);
+        }
     }
 
     public function store(Request $request, User $user, ProviderBeneficiaryManager $manager): JsonResponse
@@ -62,6 +94,11 @@ class BeneficiaryController extends Controller
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.additionalFields' => ['sometimes', 'array'],
+            'raw_data.nium.additionalFields.*' => ['nullable', 'string', 'max:1000'],
+            'raw_data.nium.beneficiaryBankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.beneficiaryContactCountryCode' => ['sometimes', 'nullable', 'string', 'max:10'],
+            'raw_data.nium.remitterBeneficiaryRelationship' => ['sometimes', 'nullable', 'string', 'max:100'],
             'raw_data.nium.bankCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.branchCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.routingInfo' => ['sometimes', 'array', 'max:2'],
@@ -134,6 +171,11 @@ class BeneficiaryController extends Controller
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.additionalFields' => ['sometimes', 'array'],
+            'raw_data.nium.additionalFields.*' => ['nullable', 'string', 'max:1000'],
+            'raw_data.nium.beneficiaryBankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'raw_data.nium.beneficiaryContactCountryCode' => ['sometimes', 'nullable', 'string', 'max:10'],
+            'raw_data.nium.remitterBeneficiaryRelationship' => ['sometimes', 'nullable', 'string', 'max:100'],
             'raw_data.nium.bankCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.branchCodeType' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.routingInfo' => ['sometimes', 'array', 'max:2'],
@@ -151,8 +193,12 @@ class BeneficiaryController extends Controller
 
         try {
             $beneficiary = DB::transaction(function () use ($beneficiary, $validated, $manager): Beneficiary {
-                $beneficiary->update($validated);
                 $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+                if ($provider->code === 'nium' && is_array(data_get($validated, 'raw_data.nium.routingInfo'))) {
+                    // A full typed routing replacement also clears obsolete legacy columns.
+                    $validated += ['bank_code' => null, 'branch_code' => null, 'swift_bic' => null];
+                }
+                $beneficiary->update($validated);
                 $provider->assertSupportsCapability('beneficiary');
 
                 return $manager->updateBeneficiary($provider, $beneficiary->fresh()->load('user'));

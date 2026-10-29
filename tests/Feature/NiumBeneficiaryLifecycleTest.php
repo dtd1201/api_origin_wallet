@@ -13,6 +13,7 @@ use App\Services\Nium\NiumBeneficiaryRequirementsService;
 use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\NiumTransferPolicy;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -27,6 +28,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        Http::preventStrayRequests();
 
         config()->set('services.nium', array_replace_recursive((array) config('services.nium'), [
             'base_url' => 'https://gateway.nium.test',
@@ -52,7 +54,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
     public function test_successful_controller_create_persists_authoritative_corridor_and_safe_operational_metadata(): void
     {
         [$user, $provider, $token] = $this->customer();
-        Http::fake(['*' => Http::response([
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => []]), '*' => Http::response([
             'beneficiaryHashId' => 'verified-beneficiary-id',
             'status' => 'ACTIVE',
             'requestId' => 'safe-provider-request-id',
@@ -71,7 +73,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         $this->assertSame('verified-beneficiary-id', $beneficiary->raw_data['beneficiary_id']);
         $this->assertStringNotContainsString('must-not-persist', json_encode($beneficiary->raw_data, JSON_THROW_ON_ERROR));
         $this->assertStringNotContainsString('must-not-persist', $response->getContent());
-        $this->assertSame('verified-beneficiary-id', ApiRequestLog::query()->sole()->response_body['beneficiary_id']);
+        $this->assertSame('verified-beneficiary-id', ApiRequestLog::query()->where('operation', 'beneficiary_create')->sole()->response_body['beneficiary_id']);
 
         app(NiumTransferPolicy::class)->normalizeCreate([
             'transfer_type' => 'payout',
@@ -127,7 +129,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
     {
         [$user, $provider] = $this->customer();
         $beneficiary = $user->beneficiaries()->create($this->beneficiaryAttributes($provider));
-        Http::fake(['*' => Http::response([
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => []]), '*' => Http::response([
             'status' => 'FAILED',
             'code' => 'invalid_input',
             'message' => 'Rejected',
@@ -254,7 +256,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         [$user, $provider, $token] = $this->customer();
         $this->localCorridor($types);
         Http::preventStrayRequests();
-        Http::fake(['*/beneficiaries' => Http::response(['beneficiaryHashId' => 'resolved-beneficiary', 'status' => 'ACTIVE'])]);
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => []]), '*/beneficiaries' => Http::response(['beneficiaryHashId' => 'resolved-beneficiary', 'status' => 'ACTIVE'])]);
 
         $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
             ...$this->localBeneficiaryPayload($provider), 'swift_bic' => $swift,
@@ -268,7 +270,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             && $request["routingCodeType{$slot}"] === 'IFSC'
             && $request["routingCodeValue{$slot}"] === 'HDFC0001234'
             && ($swift === null || ($request['routingCodeType1'] === 'SWIFT' && $request['routingCodeValue1'] === $swift)));
-        Http::assertSentCount(1);
+        Http::assertSentCount(2);
     }
 
     public static function supportedBankRouting(): array
@@ -287,7 +289,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         [$user, $provider, $token] = $this->customer();
         $this->localCorridor(['IFSC', 'SWIFT']);
         Http::preventStrayRequests();
-        Http::fake(['*/beneficiaries' => Http::response(['beneficiaryHashId' => 'explicit-beneficiary', 'status' => 'ACTIVE'])]);
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => []]), '*/beneficiaries' => Http::response(['beneficiaryHashId' => 'explicit-beneficiary', 'status' => 'ACTIVE'])]);
 
         $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
             ...$this->localBeneficiaryPayload($provider),
@@ -297,7 +299,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         $this->assertSame('IFSC', data_get(Beneficiary::query()->sole()->raw_data, $persistedKey));
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && $request['routingCodeType1'] === 'IFSC' && $request['routingCodeValue1'] === 'HDFC0001234');
-        Http::assertSentCount(1);
+        Http::assertSentCount(2);
     }
 
     public static function providedBankRouting(): array
@@ -318,7 +320,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             'external_beneficiary_id' => 'existing-beneficiary',
         ]);
         Http::preventStrayRequests();
-        Http::fake(['*/beneficiaries/existing-beneficiary' => Http::response(['status' => 'ACTIVE'])]);
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => []]), '*/beneficiaries/existing-beneficiary' => Http::response(['status' => 'ACTIVE'])]);
 
         $url = "/api/user/users/{$user->id}/beneficiaries/{$beneficiary->id}";
         $this->withToken($token)->putJson($url, [
@@ -331,7 +333,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', 'bankCodeType' => 'NOT_SUPPORTED']],
         ])->assertUnprocessable()->assertJsonValidationErrors('bank_code');
         $this->assertSame('IFSC', data_get($beneficiary->fresh()->raw_data, 'nium.bankCodeType'));
-        Http::assertSentCount(1);
+        Http::assertSentCount(2);
     }
 
     public function test_missing_branch_routing_type_returns_a_branch_field_error_without_post(): void
@@ -339,13 +341,13 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         [$user, $provider, $token] = $this->customer();
         $this->localCorridor(['IFSC']);
         Http::preventStrayRequests();
-        Http::fake();
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => []])]);
 
         $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
             ...$this->localBeneficiaryPayload($provider), 'branch_code' => '123',
             'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL', 'bankCodeType' => 'IFSC']],
         ])->assertUnprocessable()->assertJsonValidationErrors('branch_code');
-        Http::assertNothingSent();
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
     }
 
     #[DataProvider('invalidBankRouting')]
@@ -354,7 +356,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         [$user, $provider, $token] = $this->customer();
         $this->localCorridor($types);
         Http::preventStrayRequests();
-        Http::fake();
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => []])]);
 
         $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
             ...$this->localBeneficiaryPayload($provider),
@@ -362,12 +364,13 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         ])->assertUnprocessable()->assertJsonValidationErrors('bank_code');
 
         $this->assertDatabaseCount('beneficiaries', 0);
-        Http::assertNothingSent();
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
     }
 
     public static function invalidBankRouting(): array
     {
         return [
+            'swift-only corridor rejects generic bank codes' => [['SWIFT'], []],
             'missing corridor type' => [null, []],
             'empty corridor types' => [[], []],
             'ambiguous corridor types' => [['IFSC', 'SWIFT'], []],
@@ -421,6 +424,144 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         }
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
         Http::assertSentCount(1);
+    }
+
+    public function test_requirements_endpoint_reuses_v3_corridor_and_validation_schema_without_a_nium_post(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $corridor = config('services.nium.supported_corridors.0');
+        config()->set('services.nium.supported_corridors', []);
+        Http::fake([
+            '*supportedCorridors*' => Http::response(['content' => [$corridor]]),
+            '*validationSchemas*' => Http::response(['fields' => [
+                ['fieldName' => 'routingCodeValue1', 'required' => true, 'pattern' => '^[A-Z]{8}$', 'minLength' => 8, 'maxLength' => 11],
+            ]]),
+        ]);
+        $query = http_build_query(['provider_id' => $provider->id, 'beneficiary_type' => 'business', 'country_code' => 'HK', 'currency' => 'USD', 'payout_method' => 'SWIFT']);
+        $this->withToken($token)->getJson("/api/user/users/{$user->id}/beneficiaries/requirements?{$query}")
+            ->assertOk()->assertJsonPath('routing_code_types', ['SWIFT'])
+            ->assertJsonPath('dimensions.customerType', 'CORPORATE')
+            ->assertJsonPath('fields.0.required', true)->assertJsonPath('fields.0.min_length', 8);
+        Http::assertSentCount(2);
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/api/v3/client/')
+            && $request['beneficiaryAccountType'] === 'CORPORATE' && $request['customerType'] === 'CORPORATE');
+        $this->assertDatabaseCount('beneficiaries', 0);
+    }
+
+    #[DataProvider('schemaLookupFailures')]
+    public function test_schema_failure_blocks_requirements_and_creation_without_a_nium_post(array $body, int $status): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        Http::fake(['*validationSchemas*' => Http::response($body, $status)]);
+        $query = http_build_query(['provider_id' => $provider->id, 'beneficiary_type' => 'business', 'country_code' => 'HK', 'currency' => 'USD', 'payout_method' => 'SWIFT']);
+        $response = $this->withToken($token)->getJson("/api/user/users/{$user->id}/beneficiaries/requirements?{$query}")->assertStatus(502);
+        $this->assertStringNotContainsString('secret provider details', $response->getContent());
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", $this->beneficiaryPayload($provider))
+            ->assertUnprocessable()->assertJsonValidationErrors('raw_data.nium');
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
+        $this->assertDatabaseCount('beneficiaries', 0);
+    }
+
+    public static function schemaLookupFailures(): array
+    {
+        return [
+            'provider failure' => [['message' => 'secret provider details'], 503],
+            'unknown schema shape' => [['unexpected' => []], 200],
+        ];
+    }
+
+    public function test_requirements_endpoint_rejects_cross_user_access_before_looking_up_nium(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $other = User::factory()->create();
+        Http::fake();
+        $query = http_build_query(['provider_id' => $provider->id, 'beneficiary_type' => 'business', 'country_code' => 'HK', 'currency' => 'USD', 'payout_method' => 'SWIFT']);
+        $this->withToken($token)->getJson("/api/user/users/{$other->id}/beneficiaries/requirements?{$query}")->assertForbidden();
+        Http::assertNothingSent();
+    }
+
+    public function test_schema_connection_failure_returns_an_actionable_field_error_without_post(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        Http::fake(fn () => throw new ConnectionException('offline'));
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", $this->beneficiaryPayload($provider))
+            ->assertUnprocessable()->assertJsonValidationErrors('raw_data.nium');
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
+        $this->assertDatabaseCount('beneficiaries', 0);
+    }
+
+    public function test_schema_field_rules_are_authoritative_before_beneficiary_creation(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => [
+            ['fieldName' => 'beneficiaryPostcode', 'required' => true, 'minLength' => 6],
+            ['fieldName' => 'routingCodeValue1', 'required' => true, 'pattern' => '^[A-Z]{8}$'],
+        ]])]);
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
+            ...$this->beneficiaryPayload($provider), 'postal_code' => '1', 'swift_bic' => 'invalid',
+        ])->assertUnprocessable()->assertJsonValidationErrors(['beneficiaryPostcode', 'routingCodeValue1']);
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
+        $this->assertDatabaseCount('beneficiaries', 0);
+    }
+
+    public function test_swift_routing_replacement_clears_obsolete_codes_and_preserves_schema_approved_account_details(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        config()->set('services.nium.beneficiary_update_enabled', true);
+        $beneficiary = $user->beneficiaries()->create([
+            ...$this->beneficiaryAttributes($provider), 'bank_code' => 'legacy-bank', 'branch_code' => 'legacy-branch',
+            'external_beneficiary_id' => 'existing-beneficiary',
+        ]);
+        Http::fake([
+            '*validationSchemas*' => Http::response(['fields' => [
+                ['fieldName' => 'beneficiaryBankAccountType', 'required' => true, 'allowedValues' => ['CURRENT']],
+                ['fieldName' => 'beneficiaryAlias', 'required' => false],
+            ]]),
+            '*/beneficiaries/existing-beneficiary' => Http::response(['status' => 'ACTIVE']),
+        ]);
+        $this->withToken($token)->putJson("/api/user/users/{$user->id}/beneficiaries/{$beneficiary->id}", [
+            'swift_bic' => 'HKBCHKHH',
+            'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT', 'beneficiaryBankAccountType' => 'CURRENT',
+                'routingInfo' => [['type' => 'SWIFT', 'value' => 'HKBCHKHH']], 'additionalFields' => ['beneficiaryAlias' => 'Vendor alias']]],
+        ])->assertOk()->assertJsonPath('bank_code', null)->assertJsonPath('branch_code', null)
+            ->assertJsonPath('raw_data.nium.beneficiaryBankAccountType', 'CURRENT');
+        Http::assertSent(fn ($request) => $request->method() === 'PUT' && $request['routingCodeType1'] === 'SWIFT'
+            && $request['beneficiaryBankAccountType'] === 'CURRENT' && $request['beneficiaryAlias'] === 'Vendor alias'
+            && ! isset($request['beneficiaryBankCode']) && ! isset($request['routingCodeType2']));
+        $this->assertSame('123456789', $beneficiary->fresh()->account_number);
+    }
+
+    public function test_routing_explicitly_marked_optional_by_the_schema_can_be_omitted(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        $this->localCorridor(['IFSC', 'SWIFT']);
+        Http::fake([
+            '*validationSchemas*' => Http::response(['fields' => [
+                ['fieldName' => 'routingCodeType1', 'required' => false],
+                ['fieldName' => 'routingCodeValue1', 'required' => false],
+            ]]),
+            '*/beneficiaries' => Http::response(['beneficiaryHashId' => 'optional-routing-beneficiary', 'status' => 'ACTIVE']),
+        ]);
+        $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
+            ...$this->localBeneficiaryPayload($provider), 'bank_code' => null,
+        ])->assertCreated();
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && ! isset($request['routingCodeType1']) && ! isset($request['routingCodeValue1']));
+    }
+
+    public function test_additional_schema_values_cannot_inject_routing_or_undeclared_fields(): void
+    {
+        [$user, $provider, $token] = $this->customer();
+        Http::fake(['*validationSchemas*' => Http::response(['fields' => [
+            ['fieldName' => 'routingCodeType1', 'required' => true],
+        ]])]);
+        foreach (['routingCodeType1', 'undeclared'] as $field) {
+            $this->withToken($token)->postJson("/api/user/users/{$user->id}/beneficiaries", [
+                ...$this->beneficiaryPayload($provider),
+                'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT', 'additionalFields' => [$field => 'IFSC']]],
+            ])->assertUnprocessable()->assertJsonValidationErrors("raw_data.nium.additionalFields.{$field}");
+        }
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
     }
 
     private function localCorridor(array|string|null $types): array
