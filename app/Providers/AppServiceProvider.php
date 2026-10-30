@@ -3,9 +3,10 @@
 namespace App\Providers;
 
 use App\Contracts\Aml\AmlScreeningProvider;
+use App\Contracts\NiumRemittancePricing;
 use App\Models\AmlScreening;
-use App\Models\BankAccount;
 use App\Models\Balance;
+use App\Models\BankAccount;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\KycProfile;
@@ -13,8 +14,8 @@ use App\Models\NiumRfiCase;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Policies\AmlScreeningPolicy;
-use App\Policies\BankAccountPolicy;
 use App\Policies\BalancePolicy;
+use App\Policies\BankAccountPolicy;
 use App\Policies\BeneficiaryPolicy;
 use App\Policies\IntegrationProviderPolicy;
 use App\Policies\KycProfilePolicy;
@@ -22,6 +23,7 @@ use App\Policies\NiumRfiCasePolicy;
 use App\Policies\TransferPolicy;
 use App\Policies\UserPolicy;
 use App\Services\Aml\UnavailableAmlScreeningProvider;
+use App\Services\Nium\NiumConfiguredRemittancePricing;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
 
@@ -33,6 +35,7 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->bind(AmlScreeningProvider::class, UnavailableAmlScreeningProvider::class);
+        $this->app->bind(NiumRemittancePricing::class, NiumConfiguredRemittancePricing::class);
     }
 
     /**

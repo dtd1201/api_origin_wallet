@@ -35,7 +35,12 @@ final class NiumSupportedCorridorService
         $accountType = in_array(strtolower((string) $beneficiary->beneficiary_type), ['company', 'business', 'corporate'], true)
             ? 'CORPORATE'
             : 'INDIVIDUAL';
-        $customerType = in_array(strtolower((string) $beneficiary->user?->profile?->user_type), ['company', 'business', 'corporate'], true)
+        // Payout policy uses the KYC applicant type. Prefer the same authoritative
+        // record here; older beneficiary-only integrations can lack a KYC profile.
+        $customer = $beneficiary->user;
+        $customerTypeValue = $customer?->kycProfile?->applicant_type
+            ?? $customer?->profile?->user_type;
+        $customerType = in_array(strtolower((string) $customerTypeValue), ['company', 'business', 'corporate'], true)
             ? 'CORPORATE'
             : 'INDIVIDUAL';
         $criteria = [
@@ -56,7 +61,12 @@ final class NiumSupportedCorridorService
                 throw new RuntimeException('Nium supported-corridor lookup is not configured.');
             }
 
-            $cacheKey = 'nium:supported-corridor:v3:'.hash('sha256', json_encode($criteria));
+            $cacheKey = 'nium:supported-corridor:v4:'.hash('sha256', json_encode([
+                $criteria,
+                $this->niumService->clientId(),
+                config('services.nium.base_url'),
+                $endpoint,
+            ]));
             $corridors = Cache::remember($cacheKey, (int) config('services.nium.supported_corridors_cache_seconds', 3600), function () use ($endpoint, $criteria, $beneficiary): array {
                 $response = $this->niumService->get(
                     path: $this->niumService->path($endpoint, ['client' => $this->niumService->clientId()]),
@@ -97,6 +107,10 @@ final class NiumSupportedCorridorService
         $allowedRouting = array_values(array_filter(array_map('strtoupper', (array) ($match['routingCodeType'] ?? []))));
         if (is_string($match['routingCodeType'] ?? null)) {
             $allowedRouting = [strtoupper($match['routingCodeType'])];
+        }
+
+        if ($routingTypes !== [] && $allowedRouting === []) {
+            throw new RuntimeException('Nium corridor is missing authoritative routing types.');
         }
 
         foreach ($routingTypes as $routingType) {

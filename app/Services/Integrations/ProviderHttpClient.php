@@ -91,6 +91,12 @@ class ProviderHttpClient implements ProviderClient
         $capturedRequestBody = null;
         $capturedRequestHeaders = [];
         $assignmentTarget = null;
+        if (($this->operationalContext['operation'] ?? null) === 'payout_wallet_activity'
+            && ($this->serviceConfigKey !== 'nium' || $method !== 'GET'
+                || DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()
+                || ! in_array(config('services.nium.auth.mode'), ['header', 'bearer_token', 'basic_auth', 'static_headers'], true))) {
+            throw new RuntimeException('Payout financial evidence requires an authenticated read outside transactions.');
+        }
         if ($this->readOnlyVirtualAccountReconciliation
             && ($this->serviceConfigKey !== 'nium' || $method !== 'GET'
                 || DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()
@@ -98,6 +104,9 @@ class ProviderHttpClient implements ProviderClient
             throw new RuntimeException('VA reconciliation requires read-only transport and authentication outside transactions.');
         }
         $request = $this->baseRequest();
+        if (($this->operationalContext['operation'] ?? null) === 'payout_wallet_activity') {
+            $request = $request->withoutRedirecting()->retry(1, 0);
+        }
         if ($this->singleDispatchAssignment) {
             if ($this->serviceConfigKey !== 'nium' || $method !== 'POST'
                 || ($this->operationalContext['operation'] ?? null) !== 'assign_payment_id'
@@ -108,6 +117,15 @@ class ProviderHttpClient implements ProviderClient
         }
         if ($this->readOnlyVirtualAccountReconciliation) {
             // Authentication must not perform a token-acquisition POST; redirects cannot change target.
+            $request = $request->withoutRedirecting()->retry(1, 0);
+        }
+        if ($this->serviceConfigKey === 'nium'
+            && ($this->operationalContext['operation'] ?? null) === 'create_payout_fx_lock') {
+            // This legacy GET creates a hold. A redirect or retry could create another hold.
+            $request = $request->withoutRedirecting()->retry(1, 0);
+        }
+        if ($this->serviceConfigKey === 'nium' && $method === 'POST'
+            && ($this->operationalContext['operation'] ?? null) === 'transfer_money') {
             $request = $request->withoutRedirecting()->retry(1, 0);
         }
         if ($this->serviceConfigKey === 'nium') {
@@ -537,6 +555,9 @@ class ProviderHttpClient implements ProviderClient
         $requestBody = $stagingTransferDiagnostics
             ? array_replace($projector->transferMoneyRequestBody($payload), $transferIdentifiers)
             : $projector->apiRequestBody($payload);
+        if ($operation === 'payout_wallet_activity') {
+            $requestBody['wallet_activity_query_sha256'] = hash('sha256', json_encode($payload, JSON_THROW_ON_ERROR));
+        }
         $responseHeaders = $projector->apiResponseHeaders($response?->header('x-request-id'));
         $safeResponseBody = $projector->apiResponseBody($responseData, $response?->status());
         if ($stagingTransferDiagnostics) {

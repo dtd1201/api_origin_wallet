@@ -2,6 +2,8 @@
 
 namespace App\Http\Resources\User;
 
+use App\Services\Nium\NiumSgdLocalPayoutAmounts;
+use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -9,6 +11,10 @@ class TransferResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
+        $sgdLocal = $this->source_currency === 'USD' && $this->target_currency === 'SGD'
+            && strtolower((string) $this->provider?->code) === 'nium';
+        $payoutAmounts = $sgdLocal ? app(NiumSgdLocalPayoutAmounts::class)->forTransfer($this->resource) : null;
+
         return [
             'id' => $this->id,
             'transfer_no' => $this->transfer_no,
@@ -20,10 +26,18 @@ class TransferResource extends JsonResource
             'source_currency' => $this->source_currency,
             'target_currency' => $this->target_currency,
             'source_amount' => $this->source_amount,
-            'target_amount' => $this->target_amount,
-            'fx_rate' => $this->fx_rate,
-            'fee_amount' => $this->fee_amount,
-            'fee_currency' => $this->fee_currency,
+            'target_amount' => $sgdLocal ? null : $this->target_amount,
+            'fx_rate' => $sgdLocal ? $payoutAmounts['fx_rate'] : $this->fx_rate,
+            'fee_amount' => $sgdLocal ? null : $this->fee_amount,
+            'fee_currency' => $sgdLocal ? null : $this->fee_currency,
+            'payout_amounts' => $this->when(
+                $sgdLocal,
+                fn () => $payoutAmounts,
+            ),
+            'payout_workflow' => $this->when(
+                $sgdLocal && ($this->raw_data['sgd_local_workflow']['version'] ?? null) === 1,
+                fn () => app(NiumSgdLocalPayoutWorkflow::class)->presentation($this->resource),
+            ),
             'purpose_code' => $this->purpose_code,
             'reference_text' => $this->reference_text,
             'client_reference' => $this->client_reference,

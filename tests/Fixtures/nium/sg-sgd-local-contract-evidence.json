@@ -1,0 +1,211 @@
+{
+  "source_url": "https://docs.nium.com/oas/nium.yaml",
+  "retrieved_on": "2026-10-30",
+  "source_sha256": "57d3ce33c089206684ca7458982a4446278cf004d68438fc96c87e5af30fea17",
+  "scope": "Exact public specification excerpts; examples are illustrative, not Production route entitlement or verified SG beneficiary requirements.",
+  "remittance": {
+    "path": "/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance",
+    "description": "Sends money from a customer's wallet to a registered beneficiary or recipient. For more information, see [Transfer Money](/docs/payouts/transfer-money). Use it after the beneficiary is registered, and optionally after validating the request with the Validate Transfer Money API or locking a rate with the [Create Quote](/api#tag/quotes/POST/api/v1/client/{clientHashId}/quotes) API. Requires a registered beneficiary, a payout source currency that is held in the wallet with the amount, a customer with Clear status, and a wallet balance that covers the amount and fees (unless your client is post-funded); send an x-idempotency-id header to safely retry. Initiates the payout and returns the systemReferenceNumber and a message. **Note:** Track the payout with the Fetch Remittance Life Cycle Status API.",
+    "request_schema": {
+      "$ref": "#/components/schemas/RemittanceTransactionsRequestDTO"
+    },
+    "examples": {
+      "LocalPayout": {
+        "summary": "Send money using a local payout",
+        "value": {
+          "beneficiary": {
+            "id": "62c414d54506678051bd5798"
+          },
+          "customerComments": "Family Maintenance",
+          "payout": {
+            "sourceAmount": 1,
+            "sourceCurrency": "USD"
+          },
+          "purposeCode": "IR002",
+          "sourceOfFunds": "Salary"
+        }
+      },
+      "SwiftPayout": {
+        "summary": "Send money using a SWIFT payout",
+        "value": {
+          "authenticationCode": "authCode",
+          "beneficiary": {
+            "id": "62c414d54506678051bd5798"
+          },
+          "customerComments": "Family Maintenance",
+          "payout": {
+            "sourceAmount": 1,
+            "sourceCurrency": "USD",
+            "swiftFeeType": "OUR"
+          },
+          "purposeCode": "IR002",
+          "sourceOfFunds": "Salary"
+        }
+      }
+    }
+  },
+  "payout_schema": {
+    "description": "This object accepts the payout details.",
+    "properties": {
+      "auditId": {
+        "description": "The audit Id must be taken from [Exchange Rate Lock and Hold](/baas/exchange-rate-lock-and-hold) API.\nNote: This field name can also be passed as `audit_id`.",
+        "example": 112,
+        "format": "int64",
+        "type": "integer"
+      },
+      "destinationAmount": {
+        "description": "Accepts the destination amount for remittance. Either the source or the destination amount is mandatory.\n\nAllowed decimal limit is 2.\nNote: This field name can also be passed as destination_amount.",
+        "example": 0,
+        "type": "number"
+      },
+      "preScreening": {
+        "description": "Details if compliance checks are to be done at the time of payout creation. This field is applicable only for scheduled and Post-Funded payouts.",
+        "example": false,
+        "type": "boolean"
+      },
+      "quoteId": {
+        "description": "The FX quote id must be obtained from the [Create Quote](/api#tag/quotes/POST/api/v1/client/{clientHashId}/quotes) API, used as an alternative to auditId.\nNote: This field name can also be passed as quote_id. Mutually exclusive with auditId.",
+        "example": "q_9c1e2f3a",
+        "type": "string"
+      },
+      "scheduledPayoutDate": {
+        "description": "This field accepts scheduled payout date in `YYYY-MM-DD` format",
+        "example": "2022-11-29",
+        "type": "string"
+      },
+      "serviceTime": {
+        "description": "The date of providing of service/export in yyyy-MM-dd format",
+        "example": "2022-11-29",
+        "type": "string"
+      },
+      "sourceAmount": {
+        "description": "Accepts the source amount for remittance. Either the source or the destination amount is mandatory.\n\nAllowed decimal limit is 2.\nNote: This field name can also be passed as source_amount.",
+        "example": 100,
+        "type": "number"
+      },
+      "sourceCurrency": {
+        "description": "Accepts the source currency for remittance.\nNote: This field name can also be passed as source_currency.",
+        "example": "INR",
+        "type": "string"
+      },
+      "swiftFeeType": {
+        "description": "This field accepts the swift fee type and defines who will bear the SWIFT charges for the given transaction. Clients can send any of the below values basis which, they will be charged for the SWIFT transaction. In case this field is absent SHA will be applied by default.\n\nOUR - SWIFT charges borne by the customer\nSHA - SWIFT charges shared by the customer and beneficiary\n\nNote: Clients should make sure that fee template is configured for each of the swift fee type. To know if the template is configured, clients should call [Fee Details](/apis/reference/feedetails) API",
+        "enum": [
+          "OUR",
+          "SHA"
+        ],
+        "example": "OUR",
+        "type": "string"
+      },
+      "tradeOrderID": {
+        "description": "This field should denote the invoice number relevant to the transaction",
+        "example": "TR012345",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "legacy_lock": {
+    "path": "/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate",
+    "description": "Fetches the exchange rate for a currency pair and locks and holds the rate until the expiry time returned in the response. Use it before calling the Transfer Money API, passing the returned auditId in the payout (the field name can be passed as either `auditId` or `audit_id`). Requires the source currency and destination currency, and optionally an additional FX markup. Returns the auditId, FX rate, markup rate, ECB exchange rate, hold expiry time and status of the locked rate. **Note:** The auditId is valid only for the same client, customer and wallet, and only until it expires.",
+    "response_schema": {
+      "properties": {
+        "additionalFxMarkup": {
+          "description": "The Additional Fx Markup of the given audit ID",
+          "example": "0.2",
+          "type": "string"
+        },
+        "audit_id": {
+          "description": "The audit ID which is generated by Nium as a unique number for internal purposes. Pass this value as `auditId` or `audit_id` in the payout object of the Transfer Money request; both field names are supported.",
+          "example": 112,
+          "type": "string"
+        },
+        "destination_currency": {
+          "description": "The 3-letter [ISO-4217 destination currency code](/docs/getting-started/currency-and-country-codes) for the destination amount.",
+          "example": "INR",
+          "type": "string"
+        },
+        "ecb_fx_rate": {
+          "description": "The ECB exchange rate.",
+          "example": "0.0",
+          "type": "string"
+        },
+        "fx_hold_id": {
+          "description": "The foreign exchange hold ID.",
+          "example": "472e130b-ed14-4829-9e6d-81a9d8dce72e",
+          "type": "string"
+        },
+        "fx_rate": {
+          "description": "Effective FX rate after deducting the `markup_rate`.",
+          "example": "74.719",
+          "type": "string"
+        },
+        "hold_expiry_at": {
+          "description": "The timestamp until the exchange rate will be valid. \nIn other words, the timestamp at which the exchange rate held by Nium shall expire. In the `yyyy-MM-ddTHH:mm:ss.SSSZ` format.",
+          "example": "2021-07-02T10:43:00.514Z",
+          "type": "string"
+        },
+        "markup_rate": {
+          "description": "The markup rate charged by Nium.",
+          "example": "0.0",
+          "type": "string"
+        },
+        "source_currency": {
+          "description": "The 3-letter [ISO-4217 source currency code](/docs/getting-started/currency-and-country-codes) for the source amount.",
+          "example": "USD",
+          "type": "string"
+        },
+        "status": {
+          "description": "The status of the given audit ID",
+          "example": "ACTIVE",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "response_example": {
+      "Default": {
+        "summary": "Exchange rate locked for SGD to USD transfer with 1-hour hold",
+        "value": {
+          "auditId": "4450",
+          "destinationAmount": 1342.5,
+          "destinationCurrency": "USD",
+          "exchangeRate": 1.3425,
+          "expiresAt": "2024-09-15T11:30:00Z",
+          "lockedAt": "2024-09-15T10:30:00Z",
+          "sourceAmount": 1000.0,
+          "sourceCurrency": "SGD"
+        }
+      }
+    }
+  },
+  "sgd_account_verification_example": {
+    "summary": "Local Singapore payout using a SWIFT code",
+    "value": {
+      "accountNumber": "DE3456786546789788778787987",
+      "bankAccountType": "SAVING",
+      "beneficiary": {
+        "accountType": "INDIVIDUAL",
+        "city": "Mumbai",
+        "countryCode": "SG",
+        "name": "John Doe",
+        "postcode": "401107",
+        "remitterBeneficiaryRelationship": "Personal",
+        "state": "Maharashtra"
+      },
+      "destinationCountry": "SG",
+      "destinationCurrency": "SGD",
+      "payoutMethod": "LOCAL",
+      "routingInfo": [
+        {
+          "type": "SWIFT",
+          "value": "DBSSSGSGXXX"
+        }
+      ]
+    }
+  },
+  "purpose_codes": {
+    "path": "/api/v1/remittance/purposeCodes",
+    "description": "Retrieves the list of purpose of transfer codes. Use it before calling the Transfer Money API, to choose the purposeCode to send. Requires no path or query parameters. Returns the list of purpose codes with their descriptions."
+  }
+}

@@ -2,6 +2,8 @@
 
 namespace App\Http\Resources\Admin;
 
+use App\Services\Nium\NiumSgdLocalPayoutAmounts;
+use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -9,6 +11,11 @@ class TransferListResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
+        $controlledSgd = $this->source_currency === 'USD' && $this->target_currency === 'SGD'
+            && ($this->raw_data['sgd_local_workflow']['version'] ?? null) === 1;
+        $amounts = $controlledSgd ? app(NiumSgdLocalPayoutAmounts::class)->forTransfer($this->resource) : null;
+        $workflow = $controlledSgd ? app(NiumSgdLocalPayoutWorkflow::class)->presentation($this->resource) : null;
+
         return [
             'id' => $this->id,
             'transfer_no' => $this->transfer_no,
@@ -22,10 +29,12 @@ class TransferListResource extends JsonResource
             'source_currency' => $this->source_currency,
             'target_currency' => $this->target_currency,
             'source_amount' => $this->source_amount,
-            'target_amount' => $this->target_amount,
-            'fx_rate' => $this->fx_rate,
-            'fee_amount' => $this->fee_amount,
-            'fee_currency' => $this->fee_currency,
+            'target_amount' => $controlledSgd ? null : $this->target_amount,
+            'fx_rate' => $controlledSgd ? $amounts['fx_rate'] : $this->fx_rate,
+            'fee_amount' => $controlledSgd ? null : $this->fee_amount,
+            'fee_currency' => $controlledSgd ? null : $this->fee_currency,
+            'payout_amounts' => $this->when($controlledSgd, fn () => $amounts),
+            'payout_workflow' => $this->when($controlledSgd, fn () => $workflow),
             'purpose_code' => $this->purpose_code,
             'reference_text' => $this->reference_text,
             'client_reference' => $this->client_reference,
@@ -42,7 +51,8 @@ class TransferListResource extends JsonResource
             'provider' => $this->whenLoaded('provider', fn () => (new ProviderSummaryResource($this->provider))->resolve($request)),
             'approvals' => $this->whenLoaded('approvals', fn () => $this->approvalPayloads($request)),
             'allowed_actions' => [
-                'approve' => $request->user()?->hasPermission('transfers.approve') === true,
+                'approve' => (! $controlledSgd || (($workflow['checker_approval_allowed'] ?? false)
+                    && $request->user()?->id !== $this->user_id)) && $request->user()?->hasPermission('transfers.approve') === true,
                 'reject' => $request->user()?->hasPermission('transfers.reject') === true,
                 'sync' => $request->user()?->hasPermission('transfers.manage') === true,
             ],

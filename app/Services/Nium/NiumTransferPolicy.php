@@ -14,6 +14,7 @@ final class NiumTransferPolicy
     public function __construct(
         private readonly NiumRegionResolver $regionResolver,
         private readonly NiumBeneficiaryPayoutMethodResolver $payoutMethodResolver,
+        private readonly NiumSgdLocalPayoutGate $sgdLocalGate,
     ) {}
 
     public const SOURCE_CURRENCY = 'USD';
@@ -77,6 +78,16 @@ final class NiumTransferPolicy
 
     public function assertTransfer(Transfer $transfer, array $authoritativePurposeCodes): void
     {
+        $this->assertTransferPolicy($transfer, $authoritativePurposeCodes, true);
+    }
+
+    public function assertBeforeFxLock(Transfer $transfer, array $authoritativePurposeCodes): void
+    {
+        $this->assertTransferPolicy($transfer, $authoritativePurposeCodes, false);
+    }
+
+    private function assertTransferPolicy(Transfer $transfer, array $authoritativePurposeCodes, bool $requireFxLock): void
+    {
         $provider = $transfer->provider;
         $user = $transfer->user;
         $beneficiary = $transfer->beneficiary;
@@ -93,6 +104,22 @@ final class NiumTransferPolicy
         $targetCurrency = strtoupper(trim((string) $transfer->target_currency));
         $crossCurrency = $sourceCurrency !== $targetCurrency;
 
+        if ($targetCurrency === 'SGD') {
+            app(NiumSgdLocalCugScope::class)->assertTransfer($transfer);
+            NiumSgdLocalPayoutGate::assertSubmissionAllowed($transfer);
+            if (! $this->purposeIsSupported((string) $transfer->purpose_code, $authoritativePurposeCodes)
+                || ! (bool) config('services.nium.payout_fx_enabled', false)) {
+                throw new RuntimeException('Nium SGD requires a supported purpose and enabled explicit FX workflow.');
+            }
+            // The preflight runs outside the claim transaction. The locked check uses local evidence only.
+            if (! $requireFxLock) {
+                $this->sgdLocalGate->assertCandidate($user, $provider, $beneficiary, 'SGD');
+            }
+            app(NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
+
+            return;
+        }
+
         $this->assertCustomerAndBeneficiary(
             $user,
             $provider,
@@ -108,6 +135,9 @@ final class NiumTransferPolicy
 
         if ($transfer->transfer_type !== 'payout'
             || $sourceCurrency !== self::SOURCE_CURRENCY
+            || ! is_numeric($transfer->source_amount)
+            || ! is_finite((float) $transfer->source_amount)
+            || (float) $transfer->source_amount <= 0
             || $transfer->target_amount !== null
             || (float) $transfer->fee_amount !== 0.0
             || strtoupper((string) $transfer->fee_currency) !== self::SOURCE_CURRENCY
@@ -138,7 +168,7 @@ final class NiumTransferPolicy
             throw new RuntimeException('Nium payout FX is not enabled.');
         }
 
-        if ($transfer->fx_quote_id === null || ! is_numeric($transfer->fx_rate)) {
+        if ($requireFxLock && ($transfer->fx_quote_id === null || ! is_numeric($transfer->fx_rate))) {
             throw new RuntimeException(
                 'Nium cross-currency payout requires an authoritative payout FX lock.'
             );
@@ -149,6 +179,9 @@ final class NiumTransferPolicy
         Transfer $transfer,
         array $authoritativePurposeCodes,
     ): array {
+        if (strtoupper((string) $transfer->target_currency) === 'SGD') {
+            return app(NiumSgdLocalRemittancePayload::class)->providerPayload($transfer, $authoritativePurposeCodes);
+        }
         $this->assertTransfer($transfer, $authoritativePurposeCodes);
 
         $sourceCurrency = strtoupper((string) $transfer->source_currency);
@@ -169,13 +202,13 @@ final class NiumTransferPolicy
 
             if ($quote === null
                 || ($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
-                || ! is_numeric($quote->quote_ref)) {
+                || ! NiumPayoutAuditId::isValid($quote->quote_ref)) {
                 throw new RuntimeException(
                     'Nium cross-currency payout requires an authoritative payout FX audit ID.'
                 );
             }
 
-            $payout['auditId'] = (int) $quote->quote_ref;
+            $payout['auditId'] = NiumPayoutAuditId::fromQuote($quote);
         }
 
         return [
@@ -227,6 +260,11 @@ final class NiumTransferPolicy
         }
 
         $payoutMethod = $this->payoutMethodResolver->resolve($beneficiary);
+
+        if (strtoupper((string) $beneficiary->country_code) === 'SG') {
+            $this->sgdLocalGate->assertCandidate($user, $provider, $beneficiary, $targetCurrency);
+            NiumSgdLocalPayoutGate::assertSubmissionAllowed();
+        }
 
         if (strtoupper((string) $beneficiary->country_code) !== 'HK'
             || strtoupper((string) $beneficiary->currency) !== $targetCurrency

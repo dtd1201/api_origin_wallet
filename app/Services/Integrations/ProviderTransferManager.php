@@ -23,6 +23,11 @@ class ProviderTransferManager
         $this->eligibilityService->ensureTransferCanBeSubmitted(
             $transfer->loadMissing(['provider', 'user', 'beneficiary', 'sourceBankAccount'])
         );
+        if (strtolower((string) $provider->code) === 'nium') {
+            // NIUM atomically claims the operation and its reservation. A losing
+            // request must never release the winning dispatch's funds.
+            return $this->registry->resolveTransferProvider($provider)->submitTransfer($provider, $transfer);
+        }
         $this->ledgerService->reserveTransfer($transfer);
 
         try {

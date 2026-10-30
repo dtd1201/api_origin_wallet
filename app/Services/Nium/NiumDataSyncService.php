@@ -4,6 +4,7 @@ namespace App\Services\Nium;
 
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
+use App\Models\LedgerEntry;
 use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\User;
@@ -48,7 +49,6 @@ class NiumDataSyncService implements DataSyncProvider
             ]),
             user: $user,
         );
-
 
         $data = $this->successfulJson($response, 'Nium balance sync failed.');
         $items = $this->balanceItems($data);
@@ -114,6 +114,16 @@ class NiumDataSyncService implements DataSyncProvider
                     (string) $localReserved,
                     8
                 );
+                if ($existing !== null && $existing->user_id !== $user->id) {
+                    throw new RuntimeException('NIUM balance snapshot belongs to another wallet owner.');
+                }
+                $managedByLedger = $existing !== null && LedgerEntry::query()->where('balance_id', $existing->id)->exists();
+                if ($managedByLedger) {
+                    // A provider snapshot may already include a debit awaiting event reconciliation.
+                    // Preserve audited local balances; record the snapshot for discrepancy review.
+                    $localAvailable = $existing->available_balance;
+                    $localLedger = $existing->ledger_balance;
+                }
 
                 $rawData = array_merge(
                     (array) ($existing?->raw_data ?? []),
@@ -124,6 +134,7 @@ class NiumDataSyncService implements DataSyncProvider
                         'provider_available_balance' => $available,
                         'provider_ledger_balance' => $providerLedger,
                         'provider_reserved_balance' => $providerReserved,
+                        'provider_balance_requires_audited_reconciliation' => $managedByLedger,
                     ], static fn ($value) => $value !== null && $value !== '')
                 );
 
@@ -228,7 +239,7 @@ class NiumDataSyncService implements DataSyncProvider
                 ]);
                 $transfer = $this->findTransfer($provider, $transferReference);
                 $currency = strtoupper((string) ($this->value($item, ['currency', 'currencyCode']) ?: $transfer?->source_currency ?: 'USD'));
-                $amount = $this->numericValue($item, ['amount', 'transactionAmount', 'sourceAmount', 'cardTransactionAmount', 'authAmount', 'billingAmount',], 0);
+                $amount = $this->numericValue($item, ['amount', 'transactionAmount', 'sourceAmount', 'cardTransactionAmount', 'authAmount', 'billingAmount'], 0);
 
                 Transaction::query()->updateOrCreate(
                     [
@@ -419,20 +430,17 @@ class NiumDataSyncService implements DataSyncProvider
             'paid',
             'posted',
             'approved',
-            'settled'
-                => 'completed',
+            'settled' => 'completed',
 
             'failed',
             'rejected',
             'returned',
             'error',
-            'declined'
-                => 'failed',
+            'declined' => 'failed',
 
             'cancelled',
             'canceled',
-            'voided'
-                => 'cancelled',
+            'voided' => 'cancelled',
 
             default => 'pending',
         };

@@ -150,6 +150,12 @@ return [
         'wallet_data_sync_enabled' => env('NIUM_WALLET_DATA_SYNC_ENABLED', false),
         'wallet_data_sync_limit' => (int) env('NIUM_WALLET_DATA_SYNC_LIMIT', 50),
         'payout_fx_enabled' => env('NIUM_PAYOUT_FX_ENABLED', false),
+        'payout_pilot' => [
+            'enabled' => (bool) env('NIUM_PAYOUT_PILOT_ENABLED', false),
+            'authorization_id' => env('NIUM_PAYOUT_PILOT_AUTHORIZATION_ID'),
+        ],
+        'fee_details_endpoint' => env('NIUM_FEE_DETAILS_ENDPOINT', '/api/v2/client/{clientHashId}/fees'),
+        'fee_details_max_age_seconds' => (int) env('NIUM_FEE_DETAILS_MAX_AGE_SECONDS', 300),
         'wallet_fx_enabled' => env('NIUM_WALLET_FX_ENABLED', false),
         'payout_fx_lock_endpoint' => env('NIUM_PAYOUT_FX_LOCK_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate'),
         'quote_endpoint' => env('NIUM_QUOTE_ENDPOINT', '/api/v1/client/{clientHashId}/quotes'),

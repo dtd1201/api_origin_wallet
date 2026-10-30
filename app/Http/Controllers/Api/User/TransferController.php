@@ -219,6 +219,9 @@ class TransferController extends Controller
         $provider = IntegrationProvider::query()->findOrFail($transfer->provider_id);
 
         try {
+            if (($transfer->raw_data['sgd_local_workflow']['version'] ?? null) === 1) {
+                throw new \RuntimeException('The independent checker approval workflow owns this payout dispatch.');
+            }
             $provider->assertSupportsCapability('transfer');
             $transfer = $manager->submitTransfer(
                 provider: $provider,
@@ -272,6 +275,9 @@ class TransferController extends Controller
         }
 
         $transfer = DB::transaction(function () use ($transfer): Transfer {
+            $transfer = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+            abort_unless(in_array($transfer->status, ['draft', 'approval_required', 'approved'], true)
+                && $transfer->provider_operation_key === null, 409, 'This operation has entered submission; reconcile it instead.');
             $transfer->update([
                 'status' => 'cancelled',
             ]);

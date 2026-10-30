@@ -8,12 +8,13 @@ use App\Models\Transfer;
 use App\Models\UserProviderAccount;
 use App\Services\Integrations\Contracts\PreparedTransferStatusProvider;
 use App\Services\Transfers\TransferEligibilityService;
-use Illuminate\Http\Client\ConnectionException;
+use App\Services\Wallet\LedgerService;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
+use Throwable;
 
 class NiumTransferService implements PreparedTransferStatusProvider
 {
@@ -23,6 +24,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         private readonly NiumTransferPolicy $policy,
         private readonly NiumPurposeCodeService $purposeCodes,
         private readonly NiumPayoutFxLockService $payoutFxLockService,
+        private readonly LedgerService $ledger,
     ) {}
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
@@ -30,7 +32,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         $authoritativePurposeCodes = $this->purposeCodes->supported($transfer->user()->firstOrFail());
 
         // Provider I/O must remain outside the transfer row-lock transaction.
-        $preparedFxQuote = $this->preparePayoutFxLockIfRequired($provider, $transfer);
+        $preparedFxQuote = $this->preparePayoutFxLockIfRequired($provider, $transfer, $authoritativePurposeCodes);
 
         [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use (
             $provider,
@@ -54,15 +56,31 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 $this->attachPreparedPayoutFxLock($locked, $preparedFxQuote);
             }
 
+            $providerIdentifiers = $this->providerAccountIdentifiers($locked);
             $this->ensureAuthoritativeQuote($locked);
             $this->policy->assertTransfer($locked, $authoritativePurposeCodes);
             $payload = $this->buildTransferPayload($locked, $authoritativePurposeCodes);
-            $providerIdentifiers = $this->providerAccountIdentifiers($locked);
 
+            if ($locked->provider_operation_key !== null) {
+                throw new RuntimeException('This durable operation already claimed its only dispatch attempt.');
+            }
+            $operationKey = 'nium-'.Str::uuid()->toString();
             $locked->update([
-                'provider_operation_key' => $locked->provider_operation_key ?: 'nium-'.Str::uuid()->toString(),
-                'status' => 'submitting',
+                'provider_operation_key' => $operationKey,
+                'raw_data' => array_merge($locked->raw_data ?? [], ['nium_execution' => [
+                    'operation_key' => $operationKey, 'request_uuid' => substr($operationKey, 5),
+                    'dispatch_claimed_at' => now()->toISOString(),
+                ]]),
             ]);
+            if ($this->ledger->reserveTransfer($locked) === null) {
+                throw new RuntimeException('NIUM dispatch requires an enabled reservation ledger.');
+            }
+            if ($locked->target_currency === 'SGD') {
+                // Reserve against the fresh approved snapshot before consuming its audit.
+                $this->payoutFxLockService->consumeForSubmission($locked, $operationKey);
+            }
+            $locked->refresh();
+            $locked->update(['status' => 'submitting']);
 
             return [
                 $locked->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount', 'fxQuote']),
@@ -87,87 +105,64 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 operation: 'transfer_money',
                 externalReference: $transfer->provider_operation_key,
             );
-        } catch (ConnectionException|NiumEvidencePersistenceException) {
-            $transfer->update([
-                'status' => 'submission_unknown',
+        } catch (Throwable) {
+            // Once the durable dispatch claim commits, no exception proves that
+            // the bank did not receive the POST. Keep funds until reconciliation.
+            return $this->recordOutcome($transfer, 'submission_unknown', [
                 'failure_code' => 'provider_submission_unknown',
                 'failure_reason' => 'Provider submission outcome is unknown; do not retry the POST.',
             ]);
-
-            return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         }
 
-        $responseData = $response->json() ?? ['raw' => $response->body()];
-        $systemReferenceNumber = $responseData['system_reference_number']
-            ?? $responseData['systemReferenceNumber']
-            ?? null;
-
-        $paymentId = $responseData['payment_id']
-            ?? $responseData['paymentId']
-            ?? null;
-
-        if (in_array($response->status(), [408, 429], true) || $response->serverError()) {
-            $transfer->update([
-                'external_transfer_id' => filled($systemReferenceNumber)
-                    ? $systemReferenceNumber
-                    : $transfer->external_transfer_id,
-                'external_payment_id' => filled($paymentId)
-                    ? $paymentId
-                    : $transfer->external_payment_id,
-                'status' => 'submission_unknown',
+        $responseData = $response->json();
+        $responseData = is_array($responseData) ? $responseData : [];
+        $reference = $responseData['system_reference_number'] ?? $responseData['systemReferenceNumber'] ?? null;
+        $payment = $responseData['payment_id'] ?? $responseData['paymentId'] ?? null;
+        $fields = ['raw_data' => $this->safeOperationalData($transfer, $responseData)];
+        if (is_string($reference) && trim($reference) !== '') {
+            $fields['external_transfer_id'] = $reference;
+        }
+        if (is_string($payment) && trim($payment) !== '') {
+            $fields['external_payment_id'] = $payment;
+        }
+        if ((! $response->successful() && ! $response->clientError())
+            || in_array($response->status(), [408, 409, 425, 429], true) || $response->serverError()
+            || ($response->successful() && ! isset($fields['external_transfer_id']))) {
+            return $this->recordOutcome($transfer, 'submission_unknown', array_merge($fields, [
                 'failure_code' => 'provider_submission_unknown',
                 'failure_reason' => 'Provider submission outcome is unknown; do not retry the POST.',
-                'raw_data' => $this->safeOperationalData($transfer, $responseData),
-            ]);
-
-            return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
+            ]));
         }
-
         if (! $response->successful()) {
-            $transfer->update([
-                'status' => 'failed',
+            $message = is_string($responseData['message'] ?? null) ? $responseData['message'] : 'Nium transfer submission failed.';
+            $this->recordOutcome($transfer, 'failed', array_merge($fields, [
                 'failure_code' => (string) ($responseData['code'] ?? 'provider_error'),
-                'failure_reason' => $responseData['message'] ?? 'Nium transfer submission failed.',
-                'raw_data' => $this->safeOperationalData($transfer, $responseData),
-            ]);
-
-            throw new RuntimeException($responseData['message'] ?? 'Nium transfer submission failed.');
+                'failure_reason' => $message,
+            ]));
+            throw new RuntimeException($message);
         }
 
-        if (! filled($systemReferenceNumber)) {
-            $transfer->update([
-                'external_payment_id' => filled($paymentId)
-                    ? $paymentId
-                    : $transfer->external_payment_id,
-                'status' => 'submission_unknown',
-                'failure_code' => 'provider_submission_unknown',
-                'failure_reason' => 'Provider accepted the request without an authoritative transfer reference; do not retry the POST.',
-                'raw_data' => $this->safeOperationalData($transfer, $responseData),
-            ]);
+        return $this->recordOutcome($transfer, 'pending', array_merge($fields, [
+            'submitted_at' => now(), 'provider_status_at' => now(),
+        ]));
+    }
 
-            return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
-        }
-
-        return DB::transaction(function () use ($transfer, $responseData, $systemReferenceNumber, $paymentId): Transfer {
-            $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
-
-            if (
-                filled($locked->external_transfer_id)
-                && $locked->status !== 'submitting'
-            ) {
+    private function recordOutcome(Transfer $attempt, string $status, array $fields): Transfer
+    {
+        return DB::transaction(function () use ($attempt, $status, $fields): Transfer {
+            $locked = Transfer::query()->lockForUpdate()->findOrFail($attempt->id);
+            if ($locked->provider_operation_key !== $attempt->provider_operation_key
+                || ! in_array($locked->status, ['submitting', 'submission_unknown'], true)) {
+                // A webhook/reconciliation may already have resolved the operation.
                 return $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
             }
-
-            $locked->update([
-                'external_transfer_id' => $systemReferenceNumber,
-                'external_payment_id' => filled($paymentId)
-                    ? $paymentId
-                    : $transfer->external_payment_id,
-                'status' => 'pending',
-                'submitted_at' => now(),
-                'provider_status_at' => now(),
-                'raw_data' => $this->safeOperationalData($locked, $responseData),
-            ]);
+            $raw = array_merge($locked->raw_data ?? [], $fields['raw_data'] ?? []);
+            $raw['nium_execution'] = $locked->raw_data['nium_execution'] ?? [];
+            if ($status === 'failed') {
+                $raw['nium_execution']['terminal_status'] = 'failed';
+            }
+            $locked->update(array_merge($fields, ['status' => $status, 'raw_data' => $raw]));
+            $this->ledger->applyTransferTerminalStatus($locked);
 
             return $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         });
@@ -183,7 +178,12 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 ->lockForUpdate()
                 ->firstOrFail();
 
-            return $this->applyPreparedTransferStatus($provider, $locked, $prepared);
+            $updated = $this->applyPreparedTransferStatus($provider, $locked, $prepared);
+            if (isset($updated->raw_data['nium_execution'])) {
+                $this->ledger->applyTransferTerminalStatus($updated);
+            }
+
+            return $updated->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         });
     }
 
@@ -217,12 +217,16 @@ class NiumTransferService implements PreparedTransferStatusProvider
         $statusPayload = $this->latestStatusPayload($responseData);
 
         return [
+            'operation_key' => $transfer->provider_operation_key,
+            'system_reference' => $transfer->external_transfer_id,
             'response_data' => $responseData,
             'status_payload' => $statusPayload,
             'status' => $this->normalizeTransferStatus(
                 $statusPayload['status'] ?? $statusPayload['subStatus'] ?? null
             ),
             'status_at' => $this->statusTimestamp($statusPayload),
+            'wallet_activity' => NiumPayoutDebitReconciliation::applies($transfer)
+                ? app(NiumPayoutDebitReconciliation::class)->prepare($transfer) : null,
         ];
     }
 
@@ -231,6 +235,11 @@ class NiumTransferService implements PreparedTransferStatusProvider
         Transfer $transfer,
         array $prepared,
     ): Transfer {
+        if (array_key_exists('operation_key', $prepared)
+            && ($prepared['operation_key'] !== $transfer->provider_operation_key
+                || $prepared['system_reference'] !== $transfer->external_transfer_id)) {
+            throw new RuntimeException('Reconciliation evidence belongs to another payment operation.');
+        }
         $responseData = (array) ($prepared['response_data'] ?? []);
         $statusPayload = (array) ($prepared['status_payload'] ?? []);
         $status = (string) ($prepared['status'] ?? 'pending');
@@ -247,6 +256,11 @@ class NiumTransferService implements PreparedTransferStatusProvider
             && $statusAt->lt($transfer->provider_status_at);
 
         if ($isOlder || ($currentIsTerminal && ! $incomingIsTerminal)) {
+            if (NiumPayoutDebitReconciliation::applies($transfer)) {
+                // Financial observations remain independent of delayed lifecycle timestamps.
+                app(NiumPayoutDebitReconciliation::class)->apply($transfer, $prepared['wallet_activity'] ?? []);
+            }
+
             return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         }
 
@@ -256,6 +270,11 @@ class NiumTransferService implements PreparedTransferStatusProvider
             );
         }
 
+        if ($incomingIsTerminal && isset($transfer->raw_data['nium_execution'])) {
+            $raw = $transfer->raw_data;
+            $raw['nium_execution']['terminal_status'] = $status;
+            $transfer->raw_data = $raw;
+        }
         $transfer->update([
             'external_payment_id' => $statusPayload['paymentReferenceNumber']
                 ?? $statusPayload['payment_id']
@@ -282,12 +301,17 @@ class NiumTransferService implements PreparedTransferStatusProvider
             'raw_data' => $this->safeOperationalData($transfer, $statusPayload),
         ]);
 
+        if (NiumPayoutDebitReconciliation::applies($transfer)) {
+            app(NiumPayoutDebitReconciliation::class)->apply($transfer, $prepared['wallet_activity'] ?? []);
+        }
+
         return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
     }
 
     private function preparePayoutFxLockIfRequired(
         IntegrationProvider $provider,
         Transfer $transfer,
+        array $authoritativePurposeCodes,
     ): ?FxQuote {
         $candidate = Transfer::query()
             ->with([
@@ -314,6 +338,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         // This performs local submission/approval/balance validation only.
         // No Nium HTTP is performed here.
         $this->eligibilityService->ensureTransferCanBeSubmitted($candidate);
+        $this->policy->assertBeforeFxLock($candidate, $authoritativePurposeCodes);
 
         $sourceCurrency = strtoupper(trim((string) $candidate->source_currency));
         $targetCurrency = strtoupper(trim((string) $candidate->target_currency));
@@ -350,7 +375,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
             $candidate->user,
             $sourceCurrency,
             $targetCurrency,
-            (float) $candidate->source_amount,
+            (string) $candidate->source_amount,
         );
     }
 
@@ -364,24 +389,27 @@ class NiumTransferService implements PreparedTransferStatusProvider
             );
         }
 
-        if ($quote->expires_at === null || $quote->expires_at->isPast()) {
+        if ($quote->expires_at === null || $quote->expires_at->lessThanOrEqualTo(now())) {
             throw new RuntimeException(
                 'Prepared Nium payout FX lock has expired.'
             );
         }
 
         if (($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
-            || ! is_numeric($quote->quote_ref)
+            || ! NiumPayoutAuditId::isValid($quote->quote_ref)
             || ! is_numeric($quote->net_rate)
+            || (float) $quote->net_rate <= 0
             || $quote->user_id !== $transfer->user_id
             || $quote->provider_id !== $transfer->provider_id
             || strtoupper((string) $quote->source_currency) !== strtoupper((string) $transfer->source_currency)
             || strtoupper((string) $quote->target_currency) !== strtoupper((string) $transfer->target_currency)
-            || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')) {
+            || NiumPayoutFxLockContract::decimal($quote->source_amount) !== NiumPayoutFxLockContract::decimal($transfer->source_amount)) {
             throw new RuntimeException(
                 'Prepared Nium payout FX lock does not match the authoritative transfer.'
             );
         }
+
+        NiumPayoutAuditId::fromQuote($quote);
 
         $transfer->update([
             'fx_quote_id' => $quote->id,
@@ -395,7 +423,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
     private function buildTransferPayload(Transfer $transfer, array $authoritativePurposeCodes): array
     {
         $payload = array_filter($this->policy->providerPayload($transfer, $authoritativePurposeCodes), static fn ($value) => $value !== null && $value !== '' && $value !== []);
-        $this->validateTransferPayload($payload);
+        $this->validateTransferPayload($payload, $transfer);
 
         return $payload;
     }
@@ -427,7 +455,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         ];
     }
 
-    private function validateTransferPayload(array $payload): void
+    private function validateTransferPayload(array $payload, Transfer $transfer): void
     {
         foreach (['purposeCode', 'sourceOfFunds'] as $field) {
             if (! filled($payload[$field] ?? null)) {
@@ -435,9 +463,20 @@ class NiumTransferService implements PreparedTransferStatusProvider
             }
         }
 
-        foreach (['sourceAmount', 'sourceCurrency', 'destinationCurrency', 'payoutMethod'] as $field) {
+        $fields = $transfer->target_currency === 'SGD'
+            ? ['sourceAmount', 'sourceCurrency', 'auditId']
+            : ['sourceAmount', 'sourceCurrency', 'destinationCurrency', 'payoutMethod'];
+        foreach ($fields as $field) {
             if (! filled(Arr::get($payload, "payout.{$field}"))) {
                 throw new RuntimeException("Nium transfer payout requires {$field}.");
+            }
+        }
+
+        if ($transfer->target_currency === 'SGD') {
+            foreach (['destinationAmount', 'destinationCurrency', 'payoutMethod', 'swiftFeeType', 'tradeOrderID', 'quoteId'] as $field) {
+                if (array_key_exists($field, $payload['payout'])) {
+                    throw new RuntimeException('Nium SGD source-funded LOCAL payload contains an unreviewed field.');
+                }
             }
         }
 
@@ -483,7 +522,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
         try {
             return filled($value) ? Carbon::parse($value) : null;
-        } catch (\Throwable) {
+        } catch (Throwable) {
             return null;
         }
     }
@@ -514,19 +553,28 @@ class NiumTransferService implements PreparedTransferStatusProvider
             throw new RuntimeException('Nium exchange-rate lock is not applicable to a same-currency transfer.');
         }
 
-        if ($quote->expires_at === null || $quote->expires_at->isPast()) {
+        if ($quote->expires_at === null || $quote->expires_at->lessThanOrEqualTo(now())) {
             throw new RuntimeException('Nium exchange-rate lock has expired.');
         }
 
         if (($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
-            || ! is_numeric($quote->quote_ref)
+            || ! NiumPayoutAuditId::isValid($quote->quote_ref)
+            || ! is_numeric($quote->net_rate)
+            || (float) $quote->net_rate <= 0
             || $quote->user_id !== $transfer->user_id
             || $quote->provider_id !== $transfer->provider_id
             || strtoupper($quote->source_currency) !== strtoupper($transfer->source_currency)
             || strtoupper($quote->target_currency) !== strtoupper($transfer->target_currency)
-            || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')
-            || number_format((float) $quote->net_rate, 10, '.', '') !== number_format((float) $transfer->fx_rate, 10, '.', '')) {
+            || NiumPayoutFxLockContract::decimal($quote->source_amount) !== NiumPayoutFxLockContract::decimal($transfer->source_amount)
+            || NiumPayoutFxLockContract::decimal($quote->net_rate) !== NiumPayoutFxLockContract::decimal($transfer->fx_rate)) {
             throw new RuntimeException('Nium payout FX lock ownership, corridor, amount, or rate does not match the transfer.');
         }
+
+        NiumPayoutAuditId::fromQuote($quote);
+        NiumPayoutFxLockContract::assertMatchesTransfer(
+            $quote,
+            $transfer,
+            $this->payoutFxLockService->context($transfer->provider, $transfer->user),
+        );
     }
 }

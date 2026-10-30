@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserProviderAccount;
@@ -75,9 +76,13 @@ class NiumPayoutFxLockServiceTest extends TestCase
         $this->assertSame('EUR', $quote->target_currency);
         $this->assertSame('91.50000000', $quote->target_amount);
         $this->assertSame('payout_fx_lock', $quote->raw_data['provider_fx_type']);
+        $this->assertSame('unavailable', $quote->raw_data['provider_fee_status']);
+        $evidence = ApiRequestLog::query()->where('operation', 'create_payout_fx_lock')->sole()->niumExchangeEvidence;
+        $this->assertSame('0.915', json_decode($evidence->raw_response_body, true)['fx_rate']);
+        $this->assertStringNotContainsString('fx_rate', $evidence->getRawOriginal('raw_response_body'));
+        $this->assertArrayNotHasKey('raw_response_body', $evidence->toArray());
 
-        Http::assertSent(fn ($request): bool =>
-            $request->method() === 'GET'
+        Http::assertSent(fn ($request): bool => $request->method() === 'GET'
             && str_starts_with(
                 $request->url(),
                 'https://gateway.sandbox.nium.test/api/v1/client/client_hash_123/customer/cust_hash_123/wallet/wallet_hash_123/lockExchangeRate?'

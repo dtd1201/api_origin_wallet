@@ -1,0 +1,20 @@
+{
+  "provenance": "User-supplied Phase 4.2 attestation of one authorized Production GET; not a raw provider capture and not independently reverified here.",
+  "request_uuid": "52fe81dc-4581-4dc0-b2b4-81a21908b3b4",
+  "http_status": 200,
+  "reported_audit_id_type": "integer",
+  "reported_fx_hold_id_present": true,
+  "reported_response_fields_without_identifiers": {
+    "fx_rate": "1.275939120",
+    "source_currency": "USD",
+    "destination_currency": "SGD",
+    "hold_expiry_at": "2026-10-30T07:25:03.157Z",
+    "status": "ACTIVE"
+  },
+  "other_reported_keys": ["markup_rate", "ecb_fx_rate", "additionalFxMarkup"],
+  "nium_confirmation_reported_by_user": [
+    "Use legacy auditId.",
+    "USD 5 source-funded registered SGD LOCAL accepts sourceAmount=5 without destinationAmount."
+  ],
+  "restrictions": "Historical expired hold; actual audit_id and fx_hold_id deliberately absent. No authority to acquire a lock or submit remittance. Additional LOCAL fields, fees and purpose eligibility remain unverified."
+}

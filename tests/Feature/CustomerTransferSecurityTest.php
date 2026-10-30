@@ -164,7 +164,9 @@ class CustomerTransferSecurityTest extends TestCase
             ->assertJsonMissingPath('approvals')
             ->assertJsonMissingPath('beneficiary.user_id')
             ->assertJsonMissingPath('beneficiary.external_beneficiary_id')
-            ->assertJsonMissingPath('beneficiary.raw_data')
+            // Registered-beneficiary editing exposes this allowlisted envelope.
+            // Arbitrary provider diagnostics must never enter it.
+            ->assertJsonPath('beneficiary.raw_data', ['nium' => []])
             ->assertJsonMissingPath('source_bank_account.user_id')
             ->assertJsonMissingPath('source_bank_account.external_account_id')
             ->assertJsonMissingPath('source_bank_account.raw_data')

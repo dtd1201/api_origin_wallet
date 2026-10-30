@@ -2,10 +2,14 @@
 
 namespace App\Services\Nium;
 
+use App\Models\Balance;
 use App\Models\IntegrationProvider;
+use App\Models\LedgerEntry;
+use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -21,8 +25,7 @@ class NiumService
         ?User $user = null,
         ?string $operation = null,
         ?string $externalReference = null,
-    ): Response
-    {
+    ): Response {
         return $this->client($operation, $externalReference)->get($path, $query, $user);
     }
 
@@ -34,7 +37,71 @@ class NiumService
         ?string $operation = null,
         ?string $externalReference = null,
     ): Response {
+        if ($operation === 'transfer_money') {
+            if (DB::connection()->transactionLevel() !== 0) {
+                throw new RuntimeException('Remittance dispatch requires committed authorization outside transactions.');
+            }
+            $requestId = $externalReference === null ? '' : substr($externalReference, 5);
+            if (! str_starts_with((string) $externalReference, 'nium-') || ! Str::isUuid($requestId)) {
+                throw new RuntimeException('Remittance requires a durable NIUM operation UUID.');
+            }
+
+            DB::transaction(function () use ($relatedTransferId, $externalReference, $user, $requestId, $payload, $path): void {
+                $locked = Transfer::query()->lockForUpdate()->findOrFail($relatedTransferId);
+                $execution = $locked->raw_data['nium_execution'] ?? [];
+                if ($user === null || $locked->user_id !== $user->id
+                    || strtolower((string) $locked->provider?->code) !== 'nium'
+                    || $locked->provider_operation_key !== $externalReference || $locked->status !== 'submitting'
+                    || ($execution['operation_key'] ?? null) !== $externalReference
+                    || ($execution['request_uuid'] ?? null) !== $requestId
+                    || isset($execution['dispatch_started_at'])) {
+                    throw new RuntimeException('Remittance dispatch authorization has already been consumed or does not match.');
+                }
+                $hold = LedgerEntry::query()->where('reference', "transfer:{$locked->id}:hold")->first();
+                if (($hold?->raw_data['operation_key'] ?? null) !== $externalReference
+                    || LedgerEntry::query()->whereIn('reference', ["transfer:{$locked->id}:release", "transfer:{$locked->id}:debit"])->exists()) {
+                    throw new RuntimeException('Remittance dispatch requires its live owned reservation.');
+                }
+                if ($locked->target_currency === 'SGD') {
+                    app(NiumSgdLocalPayoutAuthorization::class)->assertDispatchSnapshot($locked);
+                    $approved = $locked->raw_data['sgd_local_approval'];
+                    $reservationAmount = $approved['financial_terms']['reservation_amount'] ?? $approved['financial_terms']['total_wallet_debit'];
+                    $balance = Balance::query()->whereKey($hold->balance_id)->where('user_id', $locked->user_id)
+                        ->where('provider_id', $locked->provider_id)->where('currency', $locked->source_currency)
+                        ->where('external_account_id', $approved['provider_context']['wallet'])->lockForUpdate()->first();
+                    if ($balance === null || bccomp($balance->reserved_balance, $reservationAmount, 8) < 0) {
+                        throw new RuntimeException('SGD dispatch requires sufficient reserved funds in its approved source wallet.');
+                    }
+                    $expectedPath = $this->path((string) config('services.nium.transfer_endpoint'), [
+                        'client' => $approved['provider_context']['client'],
+                        'customer' => $approved['provider_context']['customer'],
+                        'wallet' => $approved['provider_context']['wallet'],
+                    ]);
+                    $expected = NiumSgdLocalRemittancePayload::fromSnapshot($approved);
+                    if ($path !== $expectedPath || $payload !== $expected
+                        || ! NiumPayoutFxLockContract::sameBinding($hold->raw_data['financial_authorization'] ?? null, $approved['financial_terms'])
+                        || bccomp((string) $hold->amount, '-'.$reservationAmount, 8) !== 0) {
+                        throw new RuntimeException('SGD wire intent or funding no longer matches the approved operation.');
+                    }
+                }
+                $execution['dispatch_started_at'] = now()->toISOString();
+                $locked->update(['raw_data' => array_merge($locked->raw_data, ['nium_execution' => $execution])]);
+            });
+
+            return $this->client($operation, $externalReference, ['x-request-id' => $requestId])
+                ->post($path, $payload, $user, $relatedTransferId);
+        }
+
         return $this->client($operation, $externalReference)->post($path, $payload, $user, $relatedTransferId);
+    }
+
+    public function getWithRequestId(string $path, array $query, User $user, string $requestId, string $operation, ?string $externalReference = null, ?int $relatedTransferId = null): Response
+    {
+        if (! Str::isUuid($requestId)) {
+            throw new RuntimeException('Nium x-request-id must be a UUID.');
+        }
+
+        return $this->client($operation, $externalReference, additionalHeaders: ['x-request-id' => $requestId])->get($path, $query, $user, $relatedTransferId);
     }
 
     public function postWithRequestId(
@@ -90,8 +157,8 @@ class NiumService
         string $externalReference
     ): Response {
         return $this->client(
-           'transaction_simulation_transition',
-           $externalReference,
+            'transaction_simulation_transition',
+            $externalReference,
         )->post($path, $payload, $user);
     }
 
@@ -215,8 +282,7 @@ class NiumService
         ?string $externalReference = null,
         array $additionalHeaders = [],
         bool $persistRawExchange = true,
-    ): ProviderHttpClient
-    {
+    ): ProviderHttpClient {
         $provider = $this->provider();
 
         if (! $provider->isConfigured()) {

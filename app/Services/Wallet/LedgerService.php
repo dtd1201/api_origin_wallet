@@ -5,6 +5,10 @@ namespace App\Services\Wallet;
 use App\Models\Balance;
 use App\Models\LedgerEntry;
 use App\Models\Transfer;
+use App\Services\Nium\NiumPayoutFxLockContract;
+use App\Services\Nium\NiumPayoutPilotPolicy;
+use App\Services\Nium\NiumSgdLocalPayoutAuthorization;
+use App\Services\Nium\NiumSgdLocalPayoutGate;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -20,16 +24,46 @@ class LedgerService
 
         return DB::transaction(function () use ($transfer): LedgerEntry {
             $transfer = $this->lockTransfer($transfer);
+            $financialTerms = null;
+            $nium = $this->isNium($transfer);
+            if ($nium) {
+                if (! in_array($transfer->status, ['draft', 'approval_required', 'approved'], true)
+                    || LedgerEntry::query()->where('source_type', 'transfer')->where('source_id', (string) $transfer->id)->whereIn('entry_type', ['release', 'debit'])->exists()) {
+                    throw new RuntimeException('A dispatched or terminal NIUM reservation cannot be reserved again.');
+                }
+                if ($transfer->target_currency === 'SGD') {
+                    $financialTerms = NiumSgdLocalPayoutGate::assertSubmissionAllowed($transfer);
+                    app(NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
+                    if ($transfer->provider_operation_key === null) {
+                        throw new RuntimeException('SGD funding requires the atomic dispatch operation claim.');
+                    }
+                }
+            }
             $reference = $this->reference($transfer, 'hold');
 
             $existing = LedgerEntry::query()->where('reference', $reference)->first();
 
             if ($existing !== null) {
+                if ($financialTerms !== null && (! NiumPayoutFxLockContract::sameBinding($existing->raw_data['financial_authorization'] ?? null, $financialTerms)
+                    || $this->compare($this->negative($existing->amount), $financialTerms['reservation_amount'] ?? $financialTerms['total_wallet_debit']) !== 0)) {
+                    throw new RuntimeException('The existing SGD reservation does not match the approved all-in debit.');
+                }
+                if ($nium) {
+                    $owner = $existing->raw_data['operation_key'] ?? null;
+                    if ($owner !== null && $owner !== $transfer->provider_operation_key) {
+                        throw new RuntimeException('Reservation belongs to another NIUM operation.');
+                    }
+                    if ($owner === null && $transfer->provider_operation_key !== null) {
+                        // Adopt a legacy pre-dispatch hold under the same transfer lock.
+                        $existing->update(['raw_data' => array_merge($existing->raw_data ?? [], ['operation_key' => $transfer->provider_operation_key])]);
+                    }
+                }
+
                 return $existing;
             }
 
             $balance = $this->lockTransferBalance($transfer);
-            $amount = $this->decimal($transfer->source_amount);
+            $amount = $this->decimal($financialTerms['reservation_amount'] ?? $financialTerms['total_wallet_debit'] ?? $transfer->source_amount);
 
             if ($this->compare($balance->available_balance, $amount) < 0) {
                 throw new RuntimeException('Insufficient available balance for this transfer.');
@@ -57,6 +91,10 @@ class LedgerService
                 balanceAfter: $newAvailable,
                 description: 'Transfer funds reserved before provider submission.',
             );
+            if ($financialTerms !== null) {
+                $entry->update(['raw_data' => array_merge($entry->raw_data, ['financial_authorization' => $financialTerms])]);
+                app(NiumPayoutPilotPolicy::class)->consume($transfer, $financialTerms);
+            }
 
             $this->mergeTransferWalletData($transfer, [
                 'balance_id' => $balance->id,
@@ -75,8 +113,11 @@ class LedgerService
             return null;
         }
 
-        return DB::transaction(function () use ($transfer): LedgerEntry {
+        $expectedOperation = $transfer->provider_operation_key;
+
+        return DB::transaction(function () use ($transfer, $expectedOperation): ?LedgerEntry {
             $transfer = $this->lockTransfer($transfer);
+            $this->assertNiumTerminalOwner($transfer, $expectedOperation, ['completed']);
             $reference = $this->reference($transfer, 'debit');
 
             $existing = LedgerEntry::query()->where('reference', $reference)->first();
@@ -85,8 +126,14 @@ class LedgerService
                 return $existing;
             }
 
+            // Remittance status proves payout lifecycle, not the USD wallet debit.
+            // The authenticated wallet-activity reconciler owns SGD accounting.
+            if ($this->isNium($transfer) && $transfer->target_currency === 'SGD') {
+                return null;
+            }
+
             $balance = $this->lockTransferBalance($transfer);
-            $amount = $this->decimal($transfer->source_amount);
+            $amount = $this->reservationAmount($transfer);
 
             if ($this->compare($balance->reserved_balance, $amount) < 0) {
                 throw new RuntimeException('Reserved balance is not sufficient to settle this transfer.');
@@ -131,8 +178,11 @@ class LedgerService
             return null;
         }
 
-        return DB::transaction(function () use ($transfer, $reason): ?LedgerEntry {
+        $expectedOperation = $transfer->provider_operation_key;
+
+        return DB::transaction(function () use ($transfer, $reason, $expectedOperation): ?LedgerEntry {
             $transfer = $this->lockTransfer($transfer);
+            $this->assertNiumTerminalOwner($transfer, $expectedOperation, ['failed', 'cancelled', 'rejected']);
             $reference = $this->reference($transfer, 'release');
 
             $existing = LedgerEntry::query()->where('reference', $reference)->first();
@@ -149,8 +199,17 @@ class LedgerService
                 return null;
             }
 
+            if ($this->isNium($transfer) && $transfer->target_currency === 'SGD'
+                && isset($transfer->raw_data['nium_execution']['dispatch_started_at'])) {
+                // Rejection/return does not prove that principal and fees were refunded.
+                return null;
+            }
+
             $balance = $this->lockTransferBalance($transfer);
-            $amount = $this->decimal($transfer->source_amount);
+            $amount = $this->reservationAmount($transfer);
+            if ($this->isNium($transfer) && $this->compare($balance->reserved_balance, $amount) < 0) {
+                throw new RuntimeException('NIUM reservation is incomplete; reconciliation is required.');
+            }
             $releasableAmount = $this->min($amount, $balance->reserved_balance);
 
             if ($this->compare($releasableAmount, '0') <= 0) {
@@ -203,6 +262,45 @@ class LedgerService
         }
     }
 
+    private function isNium(Transfer $transfer): bool
+    {
+        return strtolower((string) $transfer->provider()->value('code')) === 'nium';
+    }
+
+    private function reservationAmount(Transfer $transfer): string
+    {
+        if (! $this->isNium($transfer)) {
+            return $this->decimal($transfer->source_amount);
+        }
+        $hold = LedgerEntry::query()->where('reference', $this->reference($transfer, 'hold'))->first();
+        if ($hold === null) {
+            throw new RuntimeException('NIUM terminal accounting requires the original reservation.');
+        }
+
+        return $this->negative($hold->amount);
+    }
+
+    private function assertNiumTerminalOwner(Transfer $transfer, ?string $expectedOperation, array $statuses): void
+    {
+        if (! $this->isNium($transfer)) {
+            return;
+        }
+        if ($transfer->provider_operation_key !== $expectedOperation || ! in_array($transfer->status, $statuses, true)) {
+            throw new RuntimeException('Only the current terminal NIUM operation may change its reservation.');
+        }
+        $hold = LedgerEntry::query()->where('reference', $this->reference($transfer, 'hold'))->first();
+        $owner = $hold?->raw_data['operation_key'] ?? null;
+        if ($owner !== null && ($owner !== $expectedOperation
+            || ($transfer->raw_data['nium_execution']['operation_key'] ?? null) !== $owner
+            || ($transfer->raw_data['nium_execution']['terminal_status'] ?? null) !== $transfer->status)) {
+            throw new RuntimeException('NIUM terminal evidence does not authorize this reservation owner.');
+        }
+        $opposite = $transfer->status === 'completed' ? 'release' : 'debit';
+        if (LedgerEntry::query()->where('reference', $this->reference($transfer, $opposite))->exists()) {
+            throw new RuntimeException('NIUM reservation already has a conflicting terminal entry.');
+        }
+    }
+
     private function lockTransfer(Transfer $transfer): Transfer
     {
         return Transfer::query()
@@ -226,6 +324,13 @@ class LedgerService
             $query->whereKey($balanceId);
         } else {
             $query->latest('as_of')->latest('id');
+        }
+        if ($this->isNium($transfer) && $transfer->target_currency === 'SGD') {
+            $walletId = $transfer->raw_data['sgd_local_approval']['provider_context']['wallet'] ?? null;
+            if (! is_string($walletId) || $walletId === '') {
+                throw new RuntimeException('SGD reservation requires the approved source wallet.');
+            }
+            $query->where('external_account_id', $walletId);
         }
 
         $balance = $query->first();
@@ -261,6 +366,7 @@ class LedgerService
             'description' => $description,
             'posted_at' => now(),
             'raw_data' => [
+                'operation_key' => $transfer->provider_operation_key,
                 'transfer_no' => $transfer->transfer_no,
                 'external_transfer_id' => $transfer->external_transfer_id,
                 'external_payment_id' => $transfer->external_payment_id,

@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources\User;
 
+use App\Services\Nium\NiumSgdLocalPayoutGate;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Arr;
@@ -22,6 +23,11 @@ class BeneficiaryResource extends JsonResource
             'country_code' => $this->country_code,
             'currency' => $this->currency,
             'payout_method' => $this->payout_method,
+            'payout_admission' => $this->when(
+                $this->country_code === 'SG' && $this->currency === 'SGD'
+                    && strtolower((string) $this->provider?->code) === 'nium',
+                fn () => NiumSgdLocalPayoutGate::admission($this->resource),
+            ),
             'bank_name' => $this->bank_name,
             'bank_code' => $this->bank_code,
             'branch_code' => $this->branch_code,

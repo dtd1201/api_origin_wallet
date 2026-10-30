@@ -5,8 +5,6 @@ namespace App\Services\Nium;
 use App\Jobs\Nium\SubmitNiumHkEntityKycJob;
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
-use App\Models\NiumVirtualAccount;
-use App\Models\NiumVirtualAccountDetail;
 use App\Models\NiumVirtualAccountOperation;
 use App\Models\NiumVirtualAccountRequest;
 use App\Models\Transaction;
@@ -22,6 +20,7 @@ use App\Support\SensitiveDataSanitizer;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -288,7 +287,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 $incomingIsTerminal = in_array($status, $terminalStatuses, true);
 
                 $currentStatusAt = $locked->provider_status_at !== null
-                    ? \Illuminate\Support\Carbon::parse($locked->provider_status_at)
+                    ? Carbon::parse($locked->provider_status_at)
                     : null;
 
                 if (
@@ -314,6 +313,11 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     );
                 }
 
+                if ($incomingIsTerminal && isset($locked->raw_data['nium_execution'])) {
+                    $raw = $locked->raw_data;
+                    $raw['nium_execution']['terminal_status'] = $status;
+                    $locked->raw_data = $raw;
+                }
                 $locked->update([
                     'external_transfer_id' => $this->value($resource, [
                         'systemReferenceNumber',
@@ -532,8 +536,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             return;
         }
         $reconciliation = app(NiumVirtualAccountReconciliationService::class);
-        $candidates = $requests->filter(fn (NiumVirtualAccountRequest $request): bool =>
-            NiumVirtualAccountWebhookContract::permitsAssignment($event, $request->identity(), $paymentId)
+        $candidates = $requests->filter(fn (NiumVirtualAccountRequest $request): bool => NiumVirtualAccountWebhookContract::permitsAssignment($event, $request->identity(), $paymentId)
             && $reconciliation->hasCorrelatedPostPaymentId($request, $paymentId));
         if ($candidates->count() !== 1) {
             $this->observeVaEvent($event, $candidates->count() > 1 ? 'ambiguous_assignment_causality' : 'insufficient_assignment_causality_or_dimensions');
@@ -775,54 +778,52 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     private function findTransfer(IntegrationProvider $provider, array $payload, array $resource): ?Transfer
     {
-    $references = array_filter([
-        $this->value($resource, [
-            'systemReferenceNumber',
-            'system_reference_number',
-            'remittanceId',
-            'remittance_id',
-            'id',
-        ]),
-        $this->value($resource, [
-            'paymentId',
-            'payment_id',
-            'paymentReferenceNumber',
-            'payment_reference_number',
-        ]),
-        $this->value($resource, [
-            'clientReference',
-            'client_reference',
-            'customerComments',
-        ]),
-        $this->value($payload, [
-            'clientReference',
-            'client_reference',
-            'customerComments',
-        ]),
-    ], static fn ($value) => filled($value));
+        $references = array_filter([
+            $this->value($resource, [
+                'systemReferenceNumber',
+                'system_reference_number',
+                'remittanceId',
+                'remittance_id',
+                'id',
+            ]),
+            $this->value($resource, [
+                'paymentId',
+                'payment_id',
+                'paymentReferenceNumber',
+                'payment_reference_number',
+            ]),
+            $this->value($resource, [
+                'clientReference',
+                'client_reference',
+                'customerComments',
+            ]),
+            $this->value($payload, [
+                'clientReference',
+                'client_reference',
+                'customerComments',
+            ]),
+        ], static fn ($value) => filled($value));
 
+        if ($references === []) {
+            return null;
+        }
 
-    if ($references === []) {
-        return null;
+        return Transfer::query()
+            ->where('provider_id', $provider->id)
+            ->where(function ($query) use ($references): void {
+
+                foreach ($references as $reference) {
+                    $query
+                        ->orWhere('external_transfer_id', $reference)
+                        ->orWhere('external_payment_id', $reference)
+                        ->orWhere('transfer_no', $reference)
+                        ->orWhere('client_reference', $reference)
+                        ->orWhere('provider_operation_key', $reference);
+                }
+
+            })
+            ->first();
     }
-
-
-    return Transfer::query()
-        ->where('provider_id', $provider->id)
-        ->where(function ($query) use ($references): void {
-
-            foreach ($references as $reference) {
-                $query
-                    ->orWhere('external_transfer_id', $reference)
-                    ->orWhere('external_payment_id', $reference)
-                    ->orWhere('transfer_no', $reference)
-                    ->orWhere('client_reference', $reference)
-                    ->orWhere('provider_operation_key', $reference);
-            }
-
-        })
-        ->first();
-}
 
     private function eventId(array $payload, Request $request, bool $isCustomerLifecycle = false): string
     {
@@ -901,7 +902,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
     private function transferStatusTimestamp(
         array $resource,
         array $payload,
-    ): ?\Illuminate\Support\Carbon {
+    ): ?Carbon {
         $value = $this->value($resource, [
             'dateTime',
             'updatedAt',
@@ -920,8 +921,8 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         }
 
         try {
-            return \Illuminate\Support\Carbon::parse((string) $value);
-        } catch (\Throwable) {
+            return Carbon::parse((string) $value);
+        } catch (Throwable) {
             return null;
         }
     }

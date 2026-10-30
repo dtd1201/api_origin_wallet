@@ -23,7 +23,7 @@ class ReconcileNiumTransfersCommandTest extends TestCase
 
         config()->set(
             'services.nium.base_url',
-            'https://' . 'gateway.sandbox.nium.test'
+            'https://'.'gateway.sandbox.nium.test'
         );
 
         config()->set(
@@ -273,11 +273,12 @@ class ReconcileNiumTransfersCommandTest extends TestCase
             'source_currency' => 'USD',
             'target_currency' => 'USD',
             'source_amount' => '10.00000000',
-            'status' => 'pending',
+            'status' => 'draft',
         ]);
 
         app(LedgerService::class)
             ->reserveTransfer($transfer);
+        $transfer->update(['status' => 'pending']);
 
         return $transfer->fresh();
     }

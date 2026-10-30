@@ -8,15 +8,15 @@ use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Nium\NiumTransferService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
+use Tests\Concerns\RefreshesCommittedPayoutDatabase;
 use Tests\TestCase;
 
 class NiumTransferKycProfileStatusTest extends TestCase
 {
-    use RefreshDatabase;
+    use RefreshesCommittedPayoutDatabase;
 
     protected function setUp(): void
     {

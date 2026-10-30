@@ -203,6 +203,10 @@ class TransferController extends Controller
         }
 
         $transfer = DB::transaction(function () use ($transfer, $validated): Transfer {
+            $transfer = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+            abort_if(strtolower((string) $transfer->provider?->code) === 'nium'
+                && ($transfer->provider_operation_key !== null || isset($transfer->raw_data['sgd_local_workflow'])),
+                409, 'Controlled NIUM operations require their audited workflow; direct edits are unavailable.');
             $transfer->update($validated);
 
             return $transfer->fresh();
@@ -213,7 +217,13 @@ class TransferController extends Controller
 
     public function destroy(Transfer $transfer): JsonResponse
     {
-        DB::transaction(fn () => $transfer->delete());
+        DB::transaction(function () use ($transfer): void {
+            $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+            abort_if(strtolower((string) $locked->provider?->code) === 'nium'
+                && ($locked->provider_operation_key !== null || isset($locked->raw_data['sgd_local_workflow'])),
+                409, 'Controlled NIUM operation evidence must be preserved.');
+            $locked->delete();
+        });
 
         return response()->json(status: 204);
     }

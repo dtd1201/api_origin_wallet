@@ -6,6 +6,8 @@ use App\Models\Transfer;
 use App\Models\TransferApproval;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumSgdLocalPayoutAuthorization;
+use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -29,6 +31,13 @@ class TransferApprovalService
 
     public function ensureApprovedForSubmission(Transfer $transfer): void
     {
+        $transfer->loadMissing('provider');
+        if (strtolower((string) $transfer->provider?->code) === 'nium' && $transfer->target_currency === 'SGD') {
+            // CUG checker independence never depends on the global approval switch.
+            app(NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
+
+            return;
+        }
         if (! $this->requiresApproval($transfer)) {
             return;
         }
@@ -62,6 +71,14 @@ class TransferApprovalService
                 ->firstOrFail();
 
             if ($transfer->status === 'approved') {
+                $transfer->loadMissing('provider');
+                if (strtolower((string) $transfer->provider?->code) === 'nium' && $transfer->target_currency === 'SGD') {
+                    $this->assertSgdChecker($transfer, $approver);
+                    app(NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
+                    // Recover a crash between approval commit and the separate dispatch claim.
+                    $shouldAutoSubmit = $transfer->provider_operation_key === null;
+                }
+
                 return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
             }
 
@@ -73,11 +90,24 @@ class TransferApprovalService
                 throw new RuntimeException('This transfer cannot be approved in its current status.');
             }
 
-            $transfer->approvals()->create([
+            $transfer->loadMissing('provider');
+            if (strtolower((string) $transfer->provider?->code) === 'nium' && $transfer->target_currency === 'SGD') {
+                $this->assertSgdChecker($transfer, $approver);
+                $snapshot = app(NiumSgdLocalPayoutWorkflow::class)->assertRequestedReview($transfer);
+                $transfer->raw_data = array_merge($transfer->raw_data ?? [], ['sgd_local_approval' => $snapshot]);
+            }
+
+            $approval = $transfer->approvals()->create([
                 'approver_user_id' => $approver->id,
                 'action' => 'approved',
                 'note' => $note,
             ]);
+            if (isset($snapshot)) {
+                $raw = $transfer->raw_data;
+                $raw['sgd_local_workflow']['approval_id'] = $approval->id;
+                $raw['sgd_local_workflow']['state'] = 'approved';
+                $transfer->raw_data = $raw;
+            }
 
             $shouldAutoSubmit = $transfer->status === 'approval_required';
             $transfer->update(['status' => 'approved']);
@@ -120,6 +150,16 @@ class TransferApprovalService
 
             return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
         });
+    }
+
+    private function assertSgdChecker(Transfer $transfer, User $approver): void
+    {
+        if ($approver->id === $transfer->user_id) {
+            throw new RuntimeException('The payment maker cannot approve their own controlled payout.');
+        }
+        if ($approver->status !== 'active' || ! $approver->hasPermission('transfers.approve')) {
+            throw new RuntimeException('An active authorized independent checker is required.');
+        }
     }
 
     private function compare(mixed $left, mixed $right): int

@@ -6,6 +6,7 @@ use App\Models\IntegrationProvider;
 use App\Models\LedgerEntry;
 use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumPayoutDebitReconciliation;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Console\Command;
 use Throwable;
@@ -13,9 +14,9 @@ use Throwable;
 class ReconcileNiumTransfers extends Command
 {
     protected $signature = 'nium:reconcile-transfers
-        {--limit= : Maximum number of non-terminal Nium transfers to reconcile}';
+        {--limit= : Maximum number of Nium transfers to reconcile}';
 
-    protected $description = 'Reconcile non-terminal Nium transfers from the authoritative remittance audit endpoint';
+    protected $description = 'Reconcile Nium payout status and authenticated SGD source-wallet debits';
 
     public function handle(
         ProviderTransferManager $manager,
@@ -52,10 +53,17 @@ class ReconcileNiumTransfers extends Command
 
         $transfers = Transfer::query()
             ->where('provider_id', $provider->id)
-            ->whereIn('status', [
-                'pending',
-                'submission_unknown',
-            ])
+            ->where(function ($query): void {
+                $query->whereIn('status', [
+                    'pending',
+                    'submission_unknown',
+                    'submitting',
+                ])->orWhere(function ($terminal): void {
+                    // Keep observing terminal payouts for delayed financial evidence and separate fees.
+                    $terminal->where('source_currency', 'USD')->where('target_currency', 'SGD')
+                        ->whereNotNull('provider_operation_key')->whereIn('status', ['completed', 'failed', 'cancelled', 'rejected']);
+                });
+            })
             ->whereNotNull('external_transfer_id')
             ->where('external_transfer_id', '<>', '')
             ->with([
@@ -79,7 +87,7 @@ class ReconcileNiumTransfers extends Command
                 ->whereIn('entry_type', ['debit', 'release'])
                 ->exists();
 
-            if ($hasTerminalLedgerEntry) {
+            if ($hasTerminalLedgerEntry && ! NiumPayoutDebitReconciliation::applies($transfer)) {
                 $skipped++;
 
                 $this->warn(
@@ -114,7 +122,7 @@ class ReconcileNiumTransfers extends Command
         }
 
         $this->info(
-            "Nium reconciliation complete: ".
+            'Nium reconciliation complete: '.
             "{$reconciled} reconciled, ".
             "{$skipped} skipped, ".
             "{$failed} failed."

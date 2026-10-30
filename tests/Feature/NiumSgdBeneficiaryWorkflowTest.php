@@ -9,6 +9,7 @@ use App\Models\NiumApiExchangeEvidence;
 use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
 use App\Services\Nium\NiumBeneficiaryWriteException;
+use App\Services\Nium\NiumSgdLocalPayoutGate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -64,6 +65,24 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
             'expires_at' => now()->addDay(),
         ]);
         $this->withToken($this->token);
+    }
+
+    public function test_registered_local_candidate_uses_the_existing_workflow_audit_without_creating_another_beneficiary(): void
+    {
+        $this->customer->providerAccounts()->update(['reconciliation_status' => 'reconciled']);
+        config()->set('services.nium.beneficiary_endpoint', '/api/v2/client/{clientHashId}/customer/{customerHashId}/beneficiaries');
+        Http::fake([
+            '*validationSchemas*' => Http::response([$this->syntheticSchema()]),
+            'https://gateway.nium.test/api/v2/client/fixture-client/customer/fixture-customer/beneficiaries' => Http::response(['beneficiaryHashId' => 'fixture-beneficiary', 'status' => 'ACTIVE']),
+        ]);
+        $created = $this->postJson($this->baseUrl(), $this->payload())->assertCreated();
+        $beneficiary = $this->customer->beneficiaries()->findOrFail($created->json('id'));
+        $match = app(NiumSgdLocalPayoutGate::class)->assertCandidate($this->customer, $this->provider, $beneficiary, 'SGD');
+        $this->assertSame($this->sgCorridor(), $match);
+        $this->assertSame('fixture-beneficiary', $beneficiary->external_beneficiary_id);
+        $this->assertDatabaseCount('beneficiaries', 1);
+        $this->assertCount(1, Http::recorded(fn ($request) => $request->method() === 'POST'));
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/lockExchangeRate') || str_contains($request->url(), '/remittance'));
     }
 
     public function test_discovery_admits_only_local_for_sg_individual_using_authoritative_corridor_gets(): void
