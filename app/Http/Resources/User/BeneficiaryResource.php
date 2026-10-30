@@ -13,6 +13,7 @@ class BeneficiaryResource extends JsonResource
         return [
             'id' => $this->id,
             'provider_id' => $this->provider_id,
+            'is_registered' => filled($this->external_beneficiary_id),
             'beneficiary_type' => $this->beneficiary_type,
             'full_name' => $this->full_name,
             'company_name' => $this->company_name,

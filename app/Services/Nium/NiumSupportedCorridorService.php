@@ -11,6 +11,25 @@ final class NiumSupportedCorridorService
 {
     public function __construct(private readonly NiumService $niumService) {}
 
+    /** Discover only the bank payout methods already supported by the wizard. */
+    public function beneficiaryPayoutMethods(Beneficiary $beneficiary): array
+    {
+        $methods = [];
+        foreach (['LOCAL', 'SWIFT'] as $method) {
+            try {
+                $this->assertSupported($beneficiary, $method, []);
+                $methods[] = $method;
+            } catch (NiumUnsupportedBeneficiaryCorridor) {
+                // A successful lookup without an exact match does not admit this method.
+            }
+        }
+        if ($methods === []) {
+            throw new NiumUnsupportedBeneficiaryCorridor('No supported bank payout method exists for these beneficiary details.');
+        }
+
+        return $methods;
+    }
+
     public function assertSupported(Beneficiary $beneficiary, string $payoutMethod, array $routingTypes): array
     {
         $accountType = in_array(strtolower((string) $beneficiary->beneficiary_type), ['company', 'business', 'corporate'], true)
@@ -72,7 +91,7 @@ final class NiumSupportedCorridorService
         });
 
         if (! is_array($match)) {
-            throw new RuntimeException('The Nium beneficiary corridor, payout method, or account type is not supported.');
+            throw new NiumUnsupportedBeneficiaryCorridor('The Nium beneficiary corridor, payout method, or account type is not supported.');
         }
 
         $allowedRouting = array_values(array_filter(array_map('strtoupper', (array) ($match['routingCodeType'] ?? []))));

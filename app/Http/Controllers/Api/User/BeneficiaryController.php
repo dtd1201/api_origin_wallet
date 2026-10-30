@@ -8,7 +8,9 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
+use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
 use App\Services\Nium\NiumBeneficiaryService;
+use App\Services\Nium\NiumUnsupportedBeneficiaryCorridor;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -45,7 +47,6 @@ class BeneficiaryController extends Controller
         ]);
         $provider = PrimaryProvider::resolveForRequest((int) $validated['provider_id']);
         abort_unless($provider->code === 'nium', 422, 'Beneficiary requirements are available for Nium only.');
-        $provider->assertSupportsCapability('beneficiary');
         $beneficiary = new Beneficiary([
             ...$validated,
             'raw_data' => ['nium' => ['payoutMethod' => $validated['payout_method']]],
@@ -53,6 +54,7 @@ class BeneficiaryController extends Controller
         $beneficiary->setRelation('user', $user);
 
         try {
+            $provider->assertSupportsCapability('beneficiary');
             [, $schema] = $service->requirements($beneficiary);
 
             return response()->json([
@@ -60,8 +62,39 @@ class BeneficiaryController extends Controller
                 'routing_code_types' => $schema->routingCodeTypes,
                 'fields' => $schema->fields,
             ]);
+        } catch (NiumUnsupportedBeneficiaryCorridor) {
+            return response()->json(['code' => 'beneficiary_corridor_unsupported', 'message' => 'This beneficiary country, currency, account type and payout method combination is not supported.'], 422);
+        } catch (ValidationException) {
+            return response()->json(['code' => 'beneficiary_schema_unavailable', 'message' => 'NIUM validation requirements could not be verified. Retry; if this continues, contact support before saving.'], 502);
         } catch (\Throwable) {
-            return response()->json(['message' => 'Beneficiary requirements are unavailable for these details. Check the country, currency and payment method, then retry.'], 502);
+            return response()->json(['code' => 'beneficiary_requirements_unavailable', 'message' => 'Beneficiary requirements are unavailable. Retry; if this continues, contact support.'], 502);
+        }
+    }
+
+    public function payoutMethods(Request $request, User $user, NiumBeneficiaryService $service): JsonResponse
+    {
+        $validated = $request->validate([
+            'provider_id' => ['required', 'exists:integration_providers,id'],
+            'beneficiary_type' => ['required', 'in:individual,personal,business,company,corporate'],
+            'country_code' => ['required', 'string', 'size:2'],
+            'currency' => ['required', 'string', 'size:3'],
+        ]);
+        $provider = PrimaryProvider::resolveForRequest((int) $validated['provider_id']);
+        abort_unless($provider->code === 'nium', 422, 'Payout method discovery is available for Nium only.');
+        $beneficiary = new Beneficiary($validated);
+        $beneficiary->setRelation('user', $user);
+
+        try {
+            $provider->assertSupportsCapability('beneficiary');
+
+            return response()->json([
+                ...$validated, 'provider_id' => $provider->id,
+                'payout_methods' => $service->payoutMethods($beneficiary),
+            ]);
+        } catch (NiumUnsupportedBeneficiaryCorridor) {
+            return response()->json(['code' => 'beneficiary_corridor_unsupported', 'message' => 'No supported bank payout method is available for this country, currency and beneficiary type.'], 422);
+        } catch (\Throwable) {
+            return response()->json(['code' => 'beneficiary_corridors_unavailable', 'message' => 'Supported payout methods could not be verified. Retry before continuing.'], 502);
         }
     }
 
@@ -143,10 +176,12 @@ class BeneficiaryController extends Controller
         User $user,
         Beneficiary $beneficiary,
         ProviderBeneficiaryManager $manager,
+        NiumBeneficiaryPayoutMethodResolver $payoutMethods,
     ): JsonResponse {
         abort_unless($beneficiary->user_id === $user->id, 404);
 
         $validated = $request->validate([
+            'provider_id' => ['sometimes', 'required', 'exists:integration_providers,id', 'in:'.$beneficiary->provider_id],
             'beneficiary_type' => ['sometimes', 'string', 'max:20'],
             'full_name' => ['sometimes', 'string', 'max:255'],
             'company_name' => ['sometimes', 'nullable', 'string', 'max:255'],
@@ -192,8 +227,12 @@ class BeneficiaryController extends Controller
         ]);
 
         try {
-            $beneficiary = DB::transaction(function () use ($beneficiary, $validated, $manager): Beneficiary {
+            $beneficiary = DB::transaction(function () use ($beneficiary, $validated, $manager, $payoutMethods): Beneficiary {
+                $beneficiary = Beneficiary::query()->lockForUpdate()->findOrFail($beneficiary->id);
                 $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+                if ($provider->code === 'nium' && filled($beneficiary->external_beneficiary_id)) {
+                    $this->assertRegisteredCorridorUnchanged($beneficiary, $validated, $payoutMethods);
+                }
                 if ($provider->code === 'nium' && is_array(data_get($validated, 'raw_data.nium.routingInfo'))) {
                     // A full typed routing replacement also clears obsolete legacy columns.
                     $validated += ['bank_code' => null, 'branch_code' => null, 'swift_bic' => null];
@@ -226,6 +265,34 @@ class BeneficiaryController extends Controller
         }
 
         return response()->json(status: 204);
+    }
+
+    private function assertRegisteredCorridorUnchanged(Beneficiary $beneficiary, array $changes, NiumBeneficiaryPayoutMethodResolver $methods): void
+    {
+        $errors = [];
+        $message = 'A registered NIUM beneficiary cannot change country, currency, legal type, provider or payout method. Add a new beneficiary separately for different payment details.';
+        foreach (['provider_id', 'beneficiary_type', 'country_code', 'currency'] as $field) {
+            if (array_key_exists($field, $changes)
+                && strtoupper((string) $changes[$field]) !== strtoupper((string) $beneficiary->{$field})) {
+                $errors[$field] = $message;
+            }
+        }
+        $saved = $methods->resolve($beneficiary);
+        if ($saved === null) {
+            $errors['raw_data.nium.payoutMethod'] = 'The registered NIUM payout method could not be verified. Contact support before editing these payment details.';
+        } elseif (array_key_exists('raw_data', $changes)) {
+            // These are the same precedence and default used by the provider payload builder.
+            $next = data_get($changes, 'raw_data.nium.payoutMethod')
+                ?? data_get($changes, 'raw_data.nium.payout_method') ?? 'SWIFT';
+            foreach ([$next, data_get($changes, 'raw_data.nium.payout_method', $next)] as $method) {
+                if (! filled($saved) || strtoupper((string) $method) !== strtoupper((string) $saved)) {
+                    $errors['raw_data.nium.payoutMethod'] = $message;
+                }
+            }
+        }
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
     }
 
     private function providerFailureResponse(

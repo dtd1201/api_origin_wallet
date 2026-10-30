@@ -23,6 +23,14 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         private readonly NiumBeneficiaryRequirementsService $requirementsService,
     ) {}
 
+    public function payoutMethods(Beneficiary $beneficiary): array
+    {
+        $beneficiary->loadMissing('user.profile');
+        $this->accountStateService->assertEligible($beneficiary->user);
+
+        return $this->corridorService->beneficiaryPayoutMethods($beneficiary);
+    }
+
     public function requirements(Beneficiary $beneficiary): array
     {
         $beneficiary->loadMissing('user.profile');

@@ -318,6 +318,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         $beneficiary = $user->beneficiaries()->create([
             ...$this->localBeneficiaryPayload($provider),
             'external_beneficiary_id' => 'existing-beneficiary',
+            'payout_method' => 'LOCAL',
         ]);
         Http::preventStrayRequests();
         Http::fake(['*validationSchemas*' => Http::response(['fields' => []]), '*/beneficiaries/existing-beneficiary' => Http::response(['status' => 'ACTIVE'])]);
@@ -562,6 +563,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         $beneficiary = $user->beneficiaries()->create([
             ...$this->beneficiaryAttributes($provider), 'bank_code' => 'legacy-bank', 'branch_code' => 'legacy-branch',
             'external_beneficiary_id' => 'existing-beneficiary',
+            'payout_method' => 'SWIFT',
         ]);
         Http::fake([
             '*validationSchemas*' => Http::response(['fields' => [
