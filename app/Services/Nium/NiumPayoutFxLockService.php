@@ -5,8 +5,10 @@ namespace App\Services\Nium;
 use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\User;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
+use Throwable;
 
 final class NiumPayoutFxLockService
 {
@@ -27,6 +29,10 @@ final class NiumPayoutFxLockService
 
         $sourceCurrency = strtoupper(trim($sourceCurrency));
         $targetCurrency = strtoupper(trim($targetCurrency));
+
+        if ($targetCurrency === 'SGD') {
+            NiumSgdLocalPayoutGate::assertSubmissionAllowed();
+        }
 
         if (strlen($sourceCurrency) !== 3
             || strlen($targetCurrency) !== 3
@@ -59,10 +65,29 @@ final class NiumPayoutFxLockService
         $rate = $responseData['fx_rate'] ?? $responseData['fxRate'] ?? null;
 
         if (! $response->successful()
-            || ! is_numeric($auditId)
+            || ! NiumPayoutAuditId::isValid($auditId)
             || ! filled($expiresAt)
-            || ! is_numeric($rate)) {
+            || ! is_numeric($rate)
+            || ! is_finite((float) $rate)
+            || (float) $rate <= 0
+            || (isset($responseData['status']) && strtoupper((string) $responseData['status']) !== 'ACTIVE')) {
             throw new RuntimeException($responseData['message'] ?? 'Nium payout FX lock failed.');
+        }
+
+        try {
+            $expiresAt = Carbon::parse($expiresAt);
+        } catch (Throwable) {
+            throw new RuntimeException('Nium payout FX lock returned an invalid expiry.');
+        }
+
+        if ($expiresAt->lessThanOrEqualTo(now())) {
+            throw new RuntimeException('Nium payout FX lock has expired.');
+        }
+
+        foreach (['source_currency' => $sourceCurrency, 'destination_currency' => $targetCurrency] as $field => $currency) {
+            if (isset($responseData[$field]) && strtoupper((string) $responseData[$field]) !== $currency) {
+                throw new RuntimeException('Nium payout FX lock returned a mismatched currency pair.');
+            }
         }
 
         return DB::transaction(fn () => FxQuote::create([

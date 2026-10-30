@@ -653,6 +653,86 @@ class NiumTransferServiceTest extends TestCase
         );
     }
 
+    public function test_expired_payout_lock_prevents_remittance_without_replacing_the_quote(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+        [$provider, $transfer] = $this->makeSubmittableTransfer([
+            'target_currency' => 'EUR',
+            'fx_rate' => '0.9150000000',
+        ]);
+        $transfer->beneficiary->update(['currency' => 'EUR']);
+        $quote = \App\Models\FxQuote::query()->create([
+            'user_id' => $transfer->user_id,
+            'provider_id' => $provider->id,
+            'quote_ref' => '112',
+            'source_currency' => 'USD',
+            'target_currency' => 'EUR',
+            'source_amount' => '10.00000000',
+            'target_amount' => '9.15000000',
+            'net_rate' => '0.9150000000',
+            'fee_amount' => 0,
+            'expires_at' => now()->subSecond(),
+            'raw_data' => ['provider_fx_type' => 'payout_fx_lock', 'audit_id' => '112'],
+        ]);
+        $transfer->update(['fx_quote_id' => $quote->id]);
+        Http::preventStrayRequests();
+        Http::fake($this->purposeCodesRoute());
+
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer->fresh());
+            $this->fail('An expired lock must never reach remittance.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Nium exchange-rate lock has expired.', $exception->getMessage());
+        }
+
+        $this->assertNoRemittancePost();
+        Http::assertSentCount(1); // Purpose codes only; no replacement FX lock.
+        $this->assertSame($quote->id, $transfer->fresh()->fx_quote_id);
+        $this->assertSame('draft', $transfer->fresh()->status);
+        $this->assertSame('1000.00000000', Balance::query()->sole()->available_balance);
+        $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+    }
+
+    public function test_insufficient_balance_prevents_provider_requests_and_wallet_holds(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer(['source_amount' => '1000.00000001']);
+        Http::preventStrayRequests();
+        Http::fake();
+
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer);
+            $this->fail('An insufficient balance must prevent submission.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Insufficient available balance for this transfer.', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('ledger_entries', 0);
+        $this->assertSame('draft', $transfer->fresh()->status);
+        $this->assertSame('1000.00000000', Balance::query()->sole()->available_balance);
+    }
+
+    public function test_missing_admin_approval_prevents_provider_requests_and_wallet_holds(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer(['status' => 'approval_required']);
+        config()->set('wallet.transfer_controls.require_admin_approval', true);
+        config()->set('wallet.transfer_controls.approval_threshold_amount', 0);
+        Http::preventStrayRequests();
+        Http::fake();
+
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer);
+            $this->fail('Missing approval must prevent submission.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Admin approval is required before submitting this transfer.', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('ledger_entries', 0);
+        $this->assertSame('approval_required', $transfer->fresh()->status);
+        $this->assertSame('1000.00000000', Balance::query()->sole()->available_balance);
+    }
+
     public function test_cross_currency_transfer_with_fx_enabled_but_without_lock_is_rejected(): void
     {
         config()->set('services.nium.payout_fx_enabled', true);
@@ -1588,6 +1668,59 @@ class NiumTransferServiceTest extends TestCase
         $updated = app(NiumTransferService::class)->syncTransferStatus($provider, $transfer);
 
         $this->assertSame('completed', $updated->status);
+    }
+
+    public function test_mismatched_payout_lock_never_posts_remittance_or_acquires_replacement_lock(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+        [$provider, $transfer] = $this->makeSubmittableTransfer(['target_currency' => 'EUR', 'fx_rate' => '0.915']);
+        $transfer->beneficiary->update(['currency' => 'EUR']);
+        $quote = \App\Models\FxQuote::query()->create([
+            'user_id' => $transfer->user_id, 'provider_id' => $provider->id, 'quote_ref' => '112',
+            'source_currency' => 'USD', 'target_currency' => 'EUR', 'source_amount' => 10,
+            'target_amount' => '9.15', 'net_rate' => '0.915', 'expires_at' => now()->addMinutes(10),
+            'raw_data' => ['provider_fx_type' => 'payout_fx_lock', 'audit_id' => '112'],
+        ]);
+        $transfer->update(['fx_quote_id' => $quote->id]);
+        $original = $quote->getAttributes();
+        $otherUser = User::factory()->create();
+        $otherProvider = IntegrationProvider::query()->create(['code' => 'other', 'name' => 'Other', 'status' => 'active']);
+        foreach ([
+            ['user_id' => $otherUser->id], ['provider_id' => $otherProvider->id],
+            ['source_amount' => 11], ['source_currency' => 'EUR'], ['target_currency' => 'USD'],
+            ['net_rate' => '0.916'], ['net_rate' => 0], ['expires_at' => now()], ['expires_at' => null],
+            ['raw_data' => ['provider_fx_type' => 'payout_fx_lock', 'audit_id' => '113']],
+            ['raw_data' => ['provider_fx_type' => 'modern_quote', 'audit_id' => '112']],
+        ] as $overrides) {
+            $quote->setRawAttributes($original);
+            $quote->forceFill($overrides)->save();
+            Http::fake($this->purposeCodesRoute());
+            Http::preventStrayRequests();
+            try {
+                app(NiumTransferService::class)->submitTransfer($provider, $transfer->fresh());
+                $this->fail('A mismatched payout lock must be rejected.');
+            } catch (RuntimeException) {
+                $this->assertNoRemittancePost();
+                Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/lockExchangeRate'));
+                $this->assertSame('draft', $transfer->fresh()->status);
+            }
+        }
+    }
+
+    public function test_invalid_purpose_is_rejected_before_requesting_a_payout_fx_lock(): void
+    {
+        config()->set('services.nium.payout_fx_enabled', true);
+        [$provider, $transfer] = $this->makeSubmittableTransfer(['target_currency' => 'EUR', 'purpose_code' => 'UNSUPPORTED']);
+        $transfer->beneficiary->update(['currency' => 'EUR']);
+        Http::fake($this->purposeCodesRoute());
+        Http::preventStrayRequests();
+        $this->expectException(RuntimeException::class);
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $transfer->fresh());
+        } finally {
+            $this->assertNoRemittancePost();
+            Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/lockExchangeRate'));
+        }
     }
 
     private function makeSubmittableTransfer(array $overrides = []): array

@@ -30,7 +30,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         $authoritativePurposeCodes = $this->purposeCodes->supported($transfer->user()->firstOrFail());
 
         // Provider I/O must remain outside the transfer row-lock transaction.
-        $preparedFxQuote = $this->preparePayoutFxLockIfRequired($provider, $transfer);
+        $preparedFxQuote = $this->preparePayoutFxLockIfRequired($provider, $transfer, $authoritativePurposeCodes);
 
         [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use (
             $provider,
@@ -288,6 +288,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
     private function preparePayoutFxLockIfRequired(
         IntegrationProvider $provider,
         Transfer $transfer,
+        array $authoritativePurposeCodes,
     ): ?FxQuote {
         $candidate = Transfer::query()
             ->with([
@@ -314,6 +315,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         // This performs local submission/approval/balance validation only.
         // No Nium HTTP is performed here.
         $this->eligibilityService->ensureTransferCanBeSubmitted($candidate);
+        $this->policy->assertBeforeFxLock($candidate, $authoritativePurposeCodes);
 
         $sourceCurrency = strtoupper(trim((string) $candidate->source_currency));
         $targetCurrency = strtoupper(trim((string) $candidate->target_currency));
@@ -364,15 +366,16 @@ class NiumTransferService implements PreparedTransferStatusProvider
             );
         }
 
-        if ($quote->expires_at === null || $quote->expires_at->isPast()) {
+        if ($quote->expires_at === null || $quote->expires_at->lessThanOrEqualTo(now())) {
             throw new RuntimeException(
                 'Prepared Nium payout FX lock has expired.'
             );
         }
 
         if (($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
-            || ! is_numeric($quote->quote_ref)
+            || ! NiumPayoutAuditId::isValid($quote->quote_ref)
             || ! is_numeric($quote->net_rate)
+            || (float) $quote->net_rate <= 0
             || $quote->user_id !== $transfer->user_id
             || $quote->provider_id !== $transfer->provider_id
             || strtoupper((string) $quote->source_currency) !== strtoupper((string) $transfer->source_currency)
@@ -382,6 +385,8 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 'Prepared Nium payout FX lock does not match the authoritative transfer.'
             );
         }
+
+        NiumPayoutAuditId::fromQuote($quote);
 
         $transfer->update([
             'fx_quote_id' => $quote->id,
@@ -514,12 +519,14 @@ class NiumTransferService implements PreparedTransferStatusProvider
             throw new RuntimeException('Nium exchange-rate lock is not applicable to a same-currency transfer.');
         }
 
-        if ($quote->expires_at === null || $quote->expires_at->isPast()) {
+        if ($quote->expires_at === null || $quote->expires_at->lessThanOrEqualTo(now())) {
             throw new RuntimeException('Nium exchange-rate lock has expired.');
         }
 
         if (($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'
-            || ! is_numeric($quote->quote_ref)
+            || ! NiumPayoutAuditId::isValid($quote->quote_ref)
+            || ! is_numeric($quote->net_rate)
+            || (float) $quote->net_rate <= 0
             || $quote->user_id !== $transfer->user_id
             || $quote->provider_id !== $transfer->provider_id
             || strtoupper($quote->source_currency) !== strtoupper($transfer->source_currency)
@@ -528,5 +535,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
             || number_format((float) $quote->net_rate, 10, '.', '') !== number_format((float) $transfer->fx_rate, 10, '.', '')) {
             throw new RuntimeException('Nium payout FX lock ownership, corridor, amount, or rate does not match the transfer.');
         }
+
+        NiumPayoutAuditId::fromQuote($quote);
     }
 }
