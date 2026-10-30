@@ -8,6 +8,7 @@ use App\Services\Integrations\Contracts\BeneficiaryProvider;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use RuntimeException;
 
@@ -63,7 +64,8 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $payload = $this->validatedPayload($beneficiary, $schema);
         $this->verifyAccountIfRequested($beneficiary);
 
-        $response = $this->niumService->post(
+        $requestId = (string) Str::uuid();
+        $response = $this->niumService->postWithRequestId(
             path: $this->niumService->path(
                 (string) config('services.nium.beneficiary_endpoint'),
                 [
@@ -73,11 +75,12 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             ),
             payload: $payload,
             user: $beneficiary->user,
+            requestId: $requestId,
             operation: 'beneficiary_create',
             externalReference: (string) $beneficiary->id,
         );
 
-        return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
+        return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload, $requestId);
     }
 
     private function validatedPayload(Beneficiary $beneficiary, NiumBeneficiaryRequirementsResult $schema): array
@@ -128,7 +131,8 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         }
 
         $payload = $this->buildAccountVerificationPayload($beneficiary, $nium);
-        $response = $this->niumService->post(
+        $requestId = (string) Str::uuid();
+        $response = $this->niumService->postWithRequestId(
             path: $this->niumService->path(
                 (string) config('services.nium.account_verification_endpoint'),
                 [
@@ -138,6 +142,9 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             ),
             payload: $payload,
             user: $beneficiary->user,
+            requestId: $requestId,
+            operation: 'beneficiary_account_verification',
+            externalReference: (string) $beneficiary->id,
         );
 
         if (! $response->successful()) {
@@ -148,7 +155,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
                 'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
             ]);
 
-            throw new RuntimeException($responseData['message'] ?? 'Nium account verification failed.');
+            throw new NiumBeneficiaryWriteException($response, 'beneficiary_account_verification', $requestId);
         }
 
         $responseData = $response->json() ?? ['raw' => $response->body()];
@@ -293,6 +300,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         Response $response,
         string $action,
         array $requestPayload,
+        ?string $requestId = null,
     ): Beneficiary {
         $responseData = $response->json() ?? ['raw' => $response->body()];
         $payload = $this->beneficiaryResponsePayload($responseData);
@@ -307,7 +315,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
                 'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
             ]);
 
-            throw new RuntimeException($responseData['message'] ?? "{$provider->name} beneficiary {$action} failed.");
+            throw new NiumBeneficiaryWriteException($response, "beneficiary_{$action}", $requestId);
         }
 
         $beneficiary->update([

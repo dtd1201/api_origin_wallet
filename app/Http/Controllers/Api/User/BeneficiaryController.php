@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
 use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
 use App\Services\Nium\NiumBeneficiaryService;
+use App\Services\Nium\NiumBeneficiaryWriteException;
 use App\Services\Nium\NiumUnsupportedBeneficiaryCorridor;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
@@ -306,7 +307,10 @@ class BeneficiaryController extends Controller
             'user_id' => $userId,
             'beneficiary_id' => $beneficiaryId,
             'exception' => $exception::class,
-            'message' => $exception->getMessage(),
+            // This runs after the transaction rollback, which also removes provider audit rows.
+            ...($exception instanceof NiumBeneficiaryWriteException
+                ? ['provider_diagnostic' => $exception->safeDiagnostic]
+                : []),
         ]);
 
         return response()->json([
