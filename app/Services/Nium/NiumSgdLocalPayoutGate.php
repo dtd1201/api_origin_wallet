@@ -104,7 +104,8 @@ final class NiumSgdLocalPayoutGate
             || $log->response_status < 200 || $log->response_status >= 300
             || $log->client_hash_id !== $this->nium->clientId()
             || $log->request_url !== $expectedUrl
-            || $evidence === null || ! $evidence->response_received) {
+            || $evidence === null || ! $evidence->response_received || $evidence->capture_version !== 1
+            || $evidence->request_method !== 'POST' || $evidence->request_url !== $expectedUrl) {
             throw new RuntimeException('Nium SGD Local requires captured provider registration evidence for this beneficiary and customer.');
         }
 
@@ -117,11 +118,33 @@ final class NiumSgdLocalPayoutGate
         $payload = is_array($response) ? ($response['data'] ?? $response['beneficiary'] ?? $response) : null;
         $registration = $this->payoutMethods->successfulRequestEvidence($beneficiary);
         if (! is_string($raw) || ! hash_equals((string) $evidence->response_body_sha256, hash('sha256', $raw))
-            || ! is_array($payload) || ($payload['status'] ?? null) !== 'ACTIVE'
-            || ($payload['beneficiaryHashId'] ?? $payload['id'] ?? null) !== $beneficiary->external_beneficiary_id
-            || $registration?->apiRequestLogId !== $log->id || $registration->payoutMethod !== 'LOCAL') {
-            throw new RuntimeException('Nium SGD Local requires an explicitly active registered provider beneficiary with matching LOCAL evidence.');
+            || ! is_array($payload) || ! $this->matchesRegistrationResponse($payload, $beneficiary)
+            || $registration?->apiRequestLogId !== $log->id || $registration->payoutMethod !== 'LOCAL'
+            || $registration->externalBeneficiaryId !== $beneficiary->external_beneficiary_id) {
+            throw new RuntimeException('Nium SGD Local requires successful registered provider beneficiary evidence matching this SG/SGD/LOCAL beneficiary.');
         }
+    }
+
+    private function matchesRegistrationResponse(array $payload, Beneficiary $beneficiary): bool
+    {
+        $hasStatus = array_key_exists('status', $payload);
+        if (($hasStatus && $payload['status'] !== 'ACTIVE')
+            || ($payload['beneficiaryHashId'] ?? $payload['id'] ?? null) !== $beneficiary->external_beneficiary_id
+            || (array_key_exists('id', $payload) && $payload['id'] !== $beneficiary->external_beneficiary_id)) {
+            return false;
+        }
+
+        // NIUM also returns a successful registration schema without status. Its
+        // returned corridor and payout identity must be explicit. Legacy ACTIVE
+        // responses may omit these fields, but may never contradict the corridor.
+        foreach (['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD', 'payoutMethod' => 'LOCAL'] as $field => $expected) {
+            if ((! $hasStatus || array_key_exists($field, $payload)) && ($payload[$field] ?? null) !== $expected) {
+                return false;
+            }
+        }
+
+        return $hasStatus || (($payload['beneficiaryHashId'] ?? null) === $beneficiary->external_beneficiary_id
+            && is_string($payload['payoutHashId'] ?? null) && trim($payload['payoutHashId']) !== '');
     }
 
     public static function assertSubmissionAllowed(?Transfer $transfer = null): array

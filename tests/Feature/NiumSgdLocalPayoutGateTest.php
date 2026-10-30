@@ -11,8 +11,10 @@ use App\Models\NiumApiExchangeEvidence;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
 use App\Services\Nium\NiumPayoutFxLockContract;
 use App\Services\Nium\NiumPayoutFxLockService;
+use App\Services\Nium\NiumSgdLocalCugScope;
 use App\Services\Nium\NiumSgdLocalPayoutAmounts;
 use App\Services\Nium\NiumSgdLocalPayoutAuthorization;
 use App\Services\Nium\NiumSgdLocalPayoutGate;
@@ -106,13 +108,13 @@ class NiumSgdLocalPayoutGateTest extends TestCase
         return [
             'missing audit' => ['missing'], 'wrong client' => ['client'], 'wrong endpoint URL' => ['url'],
             'HTTP failure' => ['http'], 'missing raw evidence' => ['evidence'], 'no response' => ['unknown'],
-            'missing status' => ['status'], 'pending status' => ['pending'], 'different external ID' => ['id'],
+            'incomplete status-less response' => ['status'], 'pending status' => ['pending'], 'different external ID' => ['id'],
             'tampered response' => ['hash'], 'invalid JSON' => ['json'], 'wrong method' => ['method'],
         ];
     }
 
     #[DataProvider('invalidRegistrations')]
-    public function test_registration_must_have_bound_explicit_active_provider_evidence(string $failure): void
+    public function test_registration_must_have_bound_successful_provider_evidence(string $failure): void
     {
         [$user, $provider, $beneficiary] = $this->candidate();
         $log = ApiRequestLog::query()->sole();
@@ -142,6 +144,137 @@ class NiumSgdLocalPayoutGateTest extends TestCase
         $this->expectException(RuntimeException::class);
         try {
             app(NiumSgdLocalPayoutGate::class)->assertCandidate($user, $provider, $beneficiary, 'SGD');
+        } finally {
+            Http::assertNothingSent();
+            $this->assertNoMoneyMovement();
+        }
+    }
+
+    private function statuslessRegistration(Beneficiary $beneficiary): array
+    {
+        return ['beneficiaryHashId' => $beneficiary->external_beneficiary_id, 'destinationCountry' => 'SG',
+            'destinationCurrency' => 'SGD', 'payoutMethod' => 'LOCAL', 'payoutHashId' => 'synthetic-local-payout-id'];
+    }
+
+    private function registrationResponse(ApiRequestLog $log, array $body): void
+    {
+        $raw = json_encode($body, JSON_THROW_ON_ERROR);
+        $log->niumExchangeEvidence->update(['raw_response_body' => $raw, 'response_body_sha256' => hash('sha256', $raw)]);
+    }
+
+    public static function verifiedRegistrationSchemas(): array
+    {
+        return [['root', false], ['data', false], ['beneficiary', false], ['root', true]];
+    }
+
+    #[DataProvider('verifiedRegistrationSchemas')]
+    public function test_verified_statusless_registration_enables_preparation_without_provider_requests(string $wrapper, bool $activeStatus): void
+    {
+        [, , $beneficiary] = $this->candidate();
+        $log = ApiRequestLog::query()->sole();
+        $body = $this->statuslessRegistration($beneficiary);
+        if ($activeStatus) {
+            $body['status'] = 'ACTIVE';
+        }
+        $this->registrationResponse($log, $wrapper === 'root' ? $body : [$wrapper => $body]);
+        $registration = app(NiumBeneficiaryPayoutMethodResolver::class)->successfulRequestEvidence($beneficiary);
+        $this->assertSame($log->id, $registration?->apiRequestLogId);
+        $this->assertSame('LOCAL', $registration?->payoutMethod);
+        $this->assertSame($beneficiary->external_beneficiary_id, $registration?->externalBeneficiaryId);
+        Http::fake();
+        $this->assertTrue(app(NiumSgdLocalCugScope::class)->canPrepare($beneficiary));
+        $this->assertTrue(NiumSgdLocalPayoutGate::admission($beneficiary)['preparation_allowed']);
+        $this->assertFalse(NiumSgdLocalPayoutGate::admission($beneficiary)['allowed']);
+        Http::assertNothingSent();
+        $this->assertNoMoneyMovement();
+    }
+
+    public static function invalidStatuslessRegistrations(): array
+    {
+        return [
+            'external ID' => ['beneficiaryHashId', 'different-beneficiary'],
+            'conflicting ID alias' => ['id', 'different-beneficiary'],
+            'country' => ['destinationCountry', 'HK'],
+            'currency' => ['destinationCurrency', 'USD'],
+            'method' => ['payoutMethod', 'SWIFT'],
+            'missing country' => ['destinationCountry', null],
+            'missing currency' => ['destinationCurrency', null],
+            'missing method' => ['payoutMethod', null],
+            'missing payout ID' => ['payoutHashId', null],
+            'blank payout ID' => ['payoutHashId', ' '],
+            'inactive' => ['status', 'INACTIVE'],
+            'rejected' => ['status', 'REJECTED'],
+            'unknown' => ['status', 'UNKNOWN'],
+            'pending' => ['status', 'PENDING'],
+            'blank status' => ['status', ''],
+            'null status' => ['status', null],
+        ];
+    }
+
+    #[DataProvider('invalidStatuslessRegistrations')]
+    public function test_statusless_schema_rejects_mismatched_corridor_identity_and_explicit_nonactive_status(string $field, mixed $value): void
+    {
+        [$user, $provider, $beneficiary] = $this->candidate();
+        $body = $this->statuslessRegistration($beneficiary);
+        $body[$field] = $value;
+        $this->registrationResponse(ApiRequestLog::query()->sole(), $body);
+        Http::fake();
+        $this->assertFalse(app(NiumSgdLocalCugScope::class)->canPrepare($beneficiary));
+        $this->expectException(RuntimeException::class);
+        try {
+            app(NiumSgdLocalPayoutGate::class)->assertLocalCandidate($user, $provider, $beneficiary, 'SGD');
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
+    public static function forgedRegistrationBindings(): array
+    {
+        return array_map(fn ($failure) => [$failure], ['response hash', 'request capture method', 'request capture URL',
+            'capture version', 'request LOCAL method', 'normalized response ID', 'customer owner', 'provider owner',
+            'registration reference', 'request operation', 'request HTTP method', 'older evidence fallback']);
+    }
+
+    #[DataProvider('forgedRegistrationBindings')]
+    public function test_statusless_response_cannot_bypass_registration_evidence_or_request_binding(string $failure): void
+    {
+        [$user, $provider, $beneficiary] = $this->candidate();
+        $log = ApiRequestLog::query()->sole();
+        if ($failure === 'older evidence fallback') {
+            $copy = $log->replicate();
+            $copy->response_body = ['beneficiary_id' => 'different-beneficiary'];
+            $copy->save();
+            $capture = $log->niumExchangeEvidence->replicate();
+            $capture->api_request_log_id = $copy->id;
+            $capture->save();
+            $log = $copy;
+        }
+        $this->registrationResponse($log, $this->statuslessRegistration($beneficiary));
+        match ($failure) {
+            'response hash' => $log->niumExchangeEvidence->update(['response_body_sha256' => 'forged']),
+            'request capture method' => $log->niumExchangeEvidence->update(['request_method' => 'GET']),
+            'request capture URL' => $log->niumExchangeEvidence->update(['request_url' => 'https://another-origin.test/beneficiaries']),
+            'capture version' => $log->niumExchangeEvidence->update(['capture_version' => 99]),
+            'request LOCAL method' => $log->update(['request_body' => ['payout_method' => 'SWIFT']]),
+            'normalized response ID' => $log->update(['response_body' => ['beneficiary_id' => 'different-beneficiary']]),
+            'customer owner' => $log->update(['user_id' => null]),
+            'provider owner' => $log->update(['provider_id' => IntegrationProvider::query()->create([
+                'code' => 'other-provider', 'name' => 'Other provider', 'status' => 'active',
+            ])->id]),
+            'registration reference' => $log->update(['external_reference' => 'another-local-beneficiary']),
+            'request operation' => $log->update(['operation' => 'beneficiary_list']),
+            'request HTTP method' => $log->update(['request_method' => 'GET']),
+            'older evidence fallback' => null,
+        };
+        if ($failure === 'older evidence fallback') {
+            $registration = app(NiumBeneficiaryPayoutMethodResolver::class)->successfulRequestEvidence($beneficiary);
+            $this->assertNotSame($log->id, $registration?->apiRequestLogId);
+            $this->assertSame('LOCAL', $registration?->payoutMethod);
+        }
+        Http::fake();
+        $this->expectException(RuntimeException::class);
+        try {
+            app(NiumSgdLocalPayoutGate::class)->assertLocalCandidate($user, $provider, $beneficiary, 'SGD');
         } finally {
             Http::assertNothingSent();
             $this->assertNoMoneyMovement();
