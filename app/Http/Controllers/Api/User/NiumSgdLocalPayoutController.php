@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\User\TransferResource;
 use App\Models\Transfer;
 use App\Models\User;
+use App\Services\Nium\NiumProvisionalPayoutPricing;
 use App\Services\Nium\NiumSgdLocalCugScope;
 use App\Services\Nium\NiumSgdLocalOutcomeRecovery;
 use App\Services\Nium\NiumSgdLocalPayoutGate;
@@ -59,6 +60,21 @@ final class NiumSgdLocalPayoutController extends Controller
         abort_unless($transfer->user_id === $user->id, 404);
         try {
             return $this->resource($workflow->requestApproval($transfer, $request->validate(['financial_terms_token' => ['required', 'string', 'regex:/^[a-f0-9]{64}$/']])['financial_terms_token']));
+        } catch (Throwable $exception) {
+            return $this->failure($exception, $transfer->fresh());
+        }
+    }
+
+    public function provisionalPricing(Request $request, User $user, Transfer $transfer, NiumProvisionalPayoutPricing $policy): JsonResponse
+    {
+        abort_unless($transfer->user_id === $user->id, 404);
+        $input = $request->validate([
+            'policy_id' => ['required', 'in:'.NiumProvisionalPayoutPricing::POLICY_ID],
+            'fx_quote_id' => ['required', 'integer'], 'confirm_provisional_pricing' => ['required', 'accepted'],
+            'raw_data' => ['prohibited'], 'fee_amount' => ['prohibited'], 'total_wallet_debit' => ['prohibited'],
+        ]);
+        try {
+            return $this->resource($policy->record($transfer, $user, (int) $input['fx_quote_id']));
         } catch (Throwable $exception) {
             return $this->failure($exception, $transfer->fresh());
         }

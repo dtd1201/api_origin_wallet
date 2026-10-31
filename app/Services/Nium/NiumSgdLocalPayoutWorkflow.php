@@ -378,6 +378,7 @@ final class NiumSgdLocalPayoutWorkflow
             'expected_fee' => ['amount' => $uncapped ? null : '0', 'currency' => 'USD',
                 'basis' => $uncapped ? 'unknown_fees_explicitly_accepted' : 'user_expectation'],
             'business_policy' => $businessPolicy,
+            'provisional_pricing' => app(NiumProvisionalPayoutPricing::class)->presentation($transfer),
             ...$this->recovery($transfer), 'can_restart_review' => $this->canRestartReview($transfer),
             'provider_fee_status' => $terms === null || ($terms['fee_status'] ?? null) === 'unverified' ? 'unavailable' : 'confirmed',
             'pilot_policy' => ($terms['funding_basis'] ?? null) === 'principal_only_pilot'
