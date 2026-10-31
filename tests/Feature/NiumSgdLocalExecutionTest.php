@@ -7,6 +7,7 @@ use App\Models\ApiRequestLog;
 use App\Models\Balance;
 use App\Models\LedgerEntry;
 use App\Models\User;
+use App\Models\UserProviderAccount;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumPayoutFxLockService;
 use App\Services\Nium\NiumSgdLocalCugScope;
@@ -325,6 +326,154 @@ class NiumSgdLocalExecutionTest extends TestCase
             ->assertOk()->assertJsonPath('payout_workflow.recovery_kind', 'provider_reference_missing')
             ->assertJsonPath('payout_workflow.can_reconcile_status', false);
         $this->assertSame('5.00000000', Balance::query()->sole()->reserved_balance);
+    }
+
+    public static function expiredRestartStatuses(): array
+    {
+        return [['draft'], ['approval_required']];
+    }
+
+    #[DataProvider('expiredRestartStatuses')]
+    public function test_expired_review_restart_preserves_transfer_and_appends_history(string $status): void
+    {
+        [, $transfer] = $this->sgdExecutionFixture();
+        $workflow = app(NiumSgdLocalPayoutWorkflow::class);
+        if ($status === 'approval_required') {
+            $transfer = $workflow->requestApproval($transfer);
+        }
+        $token = $this->sgdToken($transfer->user);
+        $url = "/api/user/users/12/transfers/{$transfer->id}/sgd-local-restart-review";
+        $history = [];
+        for ($cycle = 0; $cycle < 2; $cycle++) {
+            $before = $transfer->fresh();
+            $quote = $before->fxQuote;
+            $quoteAttributes = $quote->getAttributes();
+            $oldWorkflow = $before->raw_data['sgd_local_workflow'];
+            $this->travel(11)->minutes();
+            $this->withToken($token)->getJson("/api/user/users/12/transfers/{$transfer->id}")
+                ->assertOk()->assertJsonPath('payout_workflow.can_restart_review', true);
+            $calls = count(Http::recorded());
+            $this->withToken($token)->postJson($url, ['confirm_new_review' => true])
+                ->assertOk()->assertJsonPath('id', $transfer->id)->assertJsonPath('status', 'draft')
+                ->assertJsonPath('payout_workflow.state', 'draft')
+                ->assertJsonPath('payout_workflow.can_restart_review', false);
+            $draft = $transfer->fresh();
+            $currentWorkflow = $draft->raw_data['sgd_local_workflow'];
+            $this->assertNull($draft->fx_quote_id);
+            $this->assertNull($draft->fx_rate);
+            $this->assertSame($before->client_reference, $draft->client_reference);
+            $this->assertSame($oldWorkflow['intent'], $currentWorkflow['intent']);
+            $expectedRaw = $before->raw_data;
+            unset($expectedRaw['sgd_local_workflow'], $expectedRaw['sgd_local_approval']);
+            $actualRaw = $draft->raw_data;
+            unset($actualRaw['sgd_local_workflow']);
+            $this->assertSame($expectedRaw, $actualRaw);
+            $this->assertSame($history, array_slice($currentWorkflow['review_history'], 0, $cycle));
+            $entry = $currentWorkflow['review_history'][$cycle];
+            $this->assertSame($quote->id, $entry['fx_quote_id']);
+            $this->assertSame($oldWorkflow['lock_request_id'], $entry['lock_request_id']);
+            $this->assertSame($oldWorkflow['review'] ?? null, $entry['review']);
+            foreach (['review', 'review_revision', 'approval_id', 'lock_request_id', 'lock_requested_at', 'recovery_review'] as $key) {
+                $this->assertArrayNotHasKey($key, $currentWorkflow);
+            }
+            $this->assertArrayNotHasKey('sgd_local_approval', $draft->raw_data);
+            $this->assertSame($quoteAttributes, $quote->fresh()->getAttributes());
+            $history = $currentWorkflow['review_history'];
+            $this->assertCount($cycle + 1, $history);
+            $this->withToken($token)->postJson($url, ['confirm_new_review' => true])->assertUnprocessable();
+            $this->assertSame($draft->getAttributes(), $draft->fresh()->getAttributes());
+            $this->assertSame($calls, count(Http::recorded()), 'Restart must use local evidence only.');
+            $this->assertDatabaseCount('transfers', 1);
+            $this->assertDatabaseCount('transfer_approvals', 0);
+            $this->assertDatabaseCount('ledger_entries', 0);
+            $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+            $transfer = $workflow->requestLock($draft, Str::uuid()->toString());
+            $this->assertSame($draft->id, $transfer->id);
+            $this->assertNotSame($quote->id, $transfer->fx_quote_id);
+        }
+        $this->assertDatabaseCount('fx_quotes', 3);
+        $this->assertSame('approval_required', $workflow->requestApproval($transfer)->status);
+        $this->assertDatabaseCount('transfer_approvals', 0);
+        $this->travelBack();
+    }
+
+    public static function blockedDraftRestarts(): array
+    {
+        return array_map(fn ($case) => [$case], [
+            'active_fx', 'missing_quote', 'missing_expiry', 'consumed_fx', 'payment_operation',
+            'external_reference', 'locking', 'lock_unknown', 'submitted', 'changed_wallet',
+            'changed_intent', 'reservation', 'debit', 'release',
+        ]);
+    }
+
+    #[DataProvider('blockedDraftRestarts')]
+    public function test_draft_restart_rejects_unsafe_conditions_without_mutation(string $case): void
+    {
+        [, $transfer] = $this->sgdExecutionFixture();
+        $this->travel(11)->minutes();
+        $quote = $transfer->fxQuote;
+        if ($case === 'active_fx') {
+            $this->travelBack();
+        } elseif ($case === 'missing_quote') {
+            $transfer->update(['fx_quote_id' => null]);
+        } elseif ($case === 'missing_expiry') {
+            $quote->update(['expires_at' => null]);
+        } elseif ($case === 'consumed_fx') {
+            $quote->update(['raw_data' => array_merge($quote->raw_data, ['consumed_at' => now()->toISOString()])]);
+        } elseif ($case === 'payment_operation') {
+            $transfer->update(['provider_operation_key' => Str::uuid()->toString()]);
+        } elseif ($case === 'external_reference') {
+            $transfer->update(['external_transfer_id' => 'synthetic-existing-payment']);
+        } elseif (in_array($case, ['locking', 'lock_unknown'], true)) {
+            $raw = $transfer->raw_data;
+            $raw['sgd_local_workflow']['state'] = $case;
+            $transfer->update(['raw_data' => $raw]);
+        } elseif ($case === 'submitted') {
+            $transfer->update(['status' => 'pending']);
+        } elseif ($case === 'changed_wallet') {
+            UserProviderAccount::query()->sole()->update(['external_account_id' => 'different-wallet']);
+        } elseif ($case === 'changed_intent') {
+            $transfer->update(['source_amount' => '6']);
+        } else {
+            LedgerEntry::query()->create([
+                'balance_id' => Balance::query()->sole()->id, 'user_id' => $transfer->user_id,
+                'provider_id' => $transfer->provider_id, 'reference' => 'synthetic-existing-ledger-entry',
+                'entry_type' => $case === 'reservation' ? 'hold' : $case, 'currency' => 'USD', 'amount' => '-5',
+                'source_type' => 'transfer', 'source_id' => (string) $transfer->id,
+            ]);
+            Balance::query()->sole()->update(['available_balance' => '80', 'reserved_balance' => '5']);
+        }
+        $before = $transfer->fresh()->getAttributes();
+        $quoteBefore = $quote->fresh()->getAttributes();
+        $balanceBefore = Balance::query()->sole()->getAttributes();
+        $ledgerBefore = LedgerEntry::all()->toArray();
+        $calls = count(Http::recorded());
+        $this->withToken($this->sgdToken($transfer->user))->postJson(
+            "/api/user/users/12/transfers/{$transfer->id}/sgd-local-restart-review", ['confirm_new_review' => true],
+        )->assertUnprocessable();
+        $this->assertSame($before, $transfer->fresh()->getAttributes());
+        $this->assertSame($quoteBefore, $quote->fresh()->getAttributes());
+        $this->assertSame($balanceBefore, Balance::query()->sole()->getAttributes());
+        $this->assertSame($ledgerBefore, LedgerEntry::all()->toArray());
+        $this->assertSame($calls, count(Http::recorded()));
+        $this->travelBack();
+    }
+
+    public function test_expired_draft_restart_requires_authentication_ownership_and_explicit_confirmation(): void
+    {
+        [, $transfer] = $this->sgdExecutionFixture();
+        $this->travel(11)->minutes();
+        $before = $transfer->fresh()->getAttributes();
+        $calls = count(Http::recorded());
+        $url = "/api/user/users/12/transfers/{$transfer->id}/sgd-local-restart-review";
+        $this->postJson($url, ['confirm_new_review' => true])->assertUnauthorized();
+        $other = User::factory()->create(['status' => 'active']);
+        $this->withToken($this->sgdToken($other))->postJson($url, ['confirm_new_review' => true])->assertForbidden();
+        $this->withToken($this->sgdToken($transfer->user))->postJson($url)->assertUnprocessable();
+        $this->assertSame($before, $transfer->fresh()->getAttributes());
+        $this->assertSame($calls, count(Http::recorded()));
+        $this->assertDatabaseCount('ledger_entries', 0);
+        $this->travelBack();
     }
 
     public function test_expired_approved_review_restarts_explicitly_preserves_history_and_requires_new_checker(): void

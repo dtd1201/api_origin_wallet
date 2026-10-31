@@ -260,7 +260,7 @@ final class NiumSgdLocalPayoutWorkflow
 
     private function canRestartReview(Transfer $transfer): bool
     {
-        return in_array($transfer->status, ['approval_required', 'approved'], true)
+        return in_array($transfer->status, ['draft', 'approval_required', 'approved'], true)
             && $transfer->provider_operation_key === null && ! filled($transfer->external_transfer_id)
             && ! in_array($transfer->raw_data['sgd_local_workflow']['state'] ?? null, ['locking', 'lock_unknown'], true)
             && $transfer->fxQuote !== null && $transfer->fxQuote->expires_at !== null
