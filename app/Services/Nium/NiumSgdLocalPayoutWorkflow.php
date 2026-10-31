@@ -164,11 +164,72 @@ final class NiumSgdLocalPayoutWorkflow
         }
     }
 
-    public function requestApproval(Transfer $transfer, ?string $financialTermsToken = null): Transfer
+    /** Authenticated Submit records acceptance and enters the existing maker workflow atomically. */
+    public function submit(Transfer $transfer, User $customer, string $submissionToken, bool $acceptUncappedCharges): Transfer
     {
         $transfer->loadMissing(['user', 'provider', 'beneficiary']);
         $purposes = $this->purposes->supported($transfer->user);
         $this->gate->assertCandidate($transfer->user, $transfer->provider, $transfer->beneficiary, 'SGD');
+
+        return DB::transaction(function () use ($transfer, $customer, $submissionToken, $acceptUncappedCharges, $purposes): Transfer {
+            $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+            if ($customer->id !== $locked->user_id || $customer->status !== 'active') {
+                $this->invalid('Only the active authenticated customer can submit this instruction.');
+            }
+            $instruction = app(NiumSgdLocalPayoutAuthorization::class)->customerInstruction($locked);
+            $this->assertFunding($locked);
+            if (! hash_equals(self::financialTermsToken($instruction), $submissionToken)) {
+                $this->invalid('Payment or financial terms changed. Review the current instruction before submitting.');
+            }
+            $uncapped = ($instruction['financial_terms']['policy'] ?? null) === NiumPayoutPilotPolicy::UNCAPPED_POLICY;
+            if ($uncapped && ! $acceptUncappedCharges) {
+                $this->invalid('Explicitly accept that additional NIUM charges are unknown, uncapped and not reserved.');
+            }
+            if ($locked->status === 'approval_required') {
+                $this->assertRequestedReview($locked);
+
+                return $locked; // Same Submit never replaces the original receipt or dispatches.
+            }
+            if ($locked->status !== 'draft' || $locked->provider_operation_key !== null) {
+                $this->invalid('Only an undispatched draft can be submitted for approval.');
+            }
+            $raw = $locked->raw_data;
+            $raw['sgd_local_workflow']['customer_authorization'] = [
+                'accepted_by' => $customer->id, 'accepted_at' => now()->toISOString(),
+                'basis' => 'authenticated_customer_submit', 'instruction' => $instruction,
+                'payment_terms_accepted' => true, 'purpose_confirmed' => true,
+                'submission_token' => $submissionToken,
+                'risk_acknowledgement' => $uncapped ? NiumPayoutPilotPolicy::UNCAPPED_RISK : null,
+            ];
+            $locked->update(['raw_data' => $raw]);
+
+            return $this->requestApproval($locked, purposes: $purposes);
+        });
+    }
+
+    public function assertCustomerAuthorization(Transfer $transfer, ?string $consumingOperation = null): void
+    {
+        $receipt = $transfer->raw_data['sgd_local_workflow']['customer_authorization'] ?? [];
+        $instruction = app(NiumSgdLocalPayoutAuthorization::class)->customerInstruction($transfer, $consumingOperation);
+        if (($receipt['accepted_by'] ?? null) !== $transfer->user_id
+            || ($receipt['basis'] ?? null) !== 'authenticated_customer_submit'
+            || ($receipt['payment_terms_accepted'] ?? null) !== true || ($receipt['purpose_confirmed'] ?? null) !== true
+            || ! is_string($receipt['accepted_at'] ?? null)
+            || ! NiumPayoutFxLockContract::sameBinding($receipt['instruction'] ?? null, $instruction)
+            || ($receipt['submission_token'] ?? null) !== self::financialTermsToken($instruction)
+            || (($instruction['financial_terms']['policy'] ?? null) === NiumPayoutPilotPolicy::UNCAPPED_POLICY
+                && ($receipt['risk_acknowledgement'] ?? null) !== NiumPayoutPilotPolicy::UNCAPPED_RISK)) {
+            $this->invalid('Authenticated customer acceptance of this exact payment and current financial terms is required.');
+        }
+    }
+
+    public function requestApproval(Transfer $transfer, ?string $financialTermsToken = null, ?array $purposes = null): Transfer
+    {
+        $transfer->loadMissing(['user', 'provider', 'beneficiary']);
+        if ($purposes === null) {
+            $purposes = $this->purposes->supported($transfer->user);
+            $this->gate->assertCandidate($transfer->user, $transfer->provider, $transfer->beneficiary, 'SGD');
+        }
 
         return DB::transaction(function () use ($transfer, $purposes, $financialTermsToken): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
@@ -242,11 +303,12 @@ final class NiumSgdLocalPayoutWorkflow
             $workflow = $raw['sgd_local_workflow'];
             $workflow['review_history'][] = [
                 'review' => $workflow['review'] ?? null, 'approval_id' => $workflow['approval_id'] ?? null,
+                'customer_authorization' => $workflow['customer_authorization'] ?? null,
                 'approval_snapshot' => $raw['sgd_local_approval'] ?? null, 'fx_quote_id' => $locked->fx_quote_id,
                 'lock_request_id' => $workflow['lock_request_id'] ?? null,
                 'invalidated_at' => now()->toISOString(), 'reason' => 'expired_fx_explicit_maker_review',
             ];
-            foreach (['review', 'review_revision', 'approval_id', 'lock_request_id', 'lock_requested_at', 'recovery_review'] as $key) {
+            foreach (['review', 'review_revision', 'customer_authorization', 'approval_id', 'lock_request_id', 'lock_requested_at', 'recovery_review'] as $key) {
                 unset($workflow[$key]);
             }
             $workflow['state'] = 'draft';
@@ -346,14 +408,37 @@ final class NiumSgdLocalPayoutWorkflow
         }
 
         $terms = null;
+        $instruction = null;
         $blockers = [];
         try {
             $terms = NiumSgdLocalPayoutGate::assertSubmissionAllowed($transfer);
         } catch (RuntimeException) {
             $blockers[] = NiumSgdLocalPayoutGate::BLOCK_REASON;
         }
+        if ($active && $terms !== null) {
+            try {
+                $instruction = app(NiumSgdLocalPayoutAuthorization::class)->customerInstruction($transfer);
+            } catch (RuntimeException) {
+                $blockers[] = 'The current payment instruction is unavailable. Refresh its FX and financial terms.';
+            }
+        }
+        $fundingReady = false;
+        if ($active && $terms !== null) {
+            try {
+                $this->assertFunding($transfer);
+                $fundingReady = true;
+            } catch (RuntimeException|ValidationException) {
+                $blockers[] = 'A current verified source-wallet balance covering the principal is required.';
+            }
+        }
         $checkerAllowed = false;
-        if ($active && $terms !== null && in_array($transfer->status, ['approval_required', 'approved'], true)) {
+        if (! $active) {
+            $blockers[] = 'A current FX lock matching this payment instruction is required.';
+        }
+        if ($transfer->status === 'draft') {
+            $blockers[] = 'Customer Submit is required before Admin approval.';
+        }
+        if ($active && $terms !== null && $fundingReady && in_array($transfer->status, ['approval_required', 'approved'], true)) {
             try {
                 if ($transfer->status === 'approved') {
                     app(NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
@@ -389,9 +474,12 @@ final class NiumSgdLocalPayoutWorkflow
                     'risk_acknowledgement' => $terms['risk_acknowledgement'] ?? null,
                     'fee_status' => 'unverified', 'total_wallet_debit' => null] : null,
             'financial_terms_token' => $terms === null ? null : self::financialTermsToken($terms),
+            'submission_token' => $instruction === null ? null : self::financialTermsToken($instruction),
+            'customer_instruction' => $instruction,
+            'customer_authorization' => $workflow['customer_authorization'] ?? null,
             'can_refresh_pricing' => ! $uncapped && $transfer->status === 'draft' && $transfer->provider_operation_key === null,
 
-            'approval_request_allowed' => $active && $terms !== null && $transfer->status === 'draft',
+            'approval_request_allowed' => $active && $terms !== null && $fundingReady && $transfer->status === 'draft',
             'checker_approval_allowed' => $checkerAllowed,
             // The existing checker approval endpoint owns dispatch. No second customer action.
             'dispatch_allowed' => false, 'dispatch_owner' => 'checker_approval',
@@ -409,6 +497,28 @@ final class NiumSgdLocalPayoutWorkflow
         if (($transfer->raw_data['sgd_local_workflow']['release'] ?? null) !== NiumSgdLocalCugScope::RELEASE
             || ! NiumPayoutFxLockContract::sameBinding($transfer->raw_data['sgd_local_workflow']['intent'] ?? null, $this->intent($transfer))) {
             $this->invalid('Payment details or verified account binding changed. Cancel this preparation and request a new review.');
+        }
+    }
+
+    /** The exact source wallet must still have a recent snapshot and sufficient owned funding. */
+    public function assertFunding(Transfer $transfer): void
+    {
+        $context = $this->locks->context($transfer->provider, $transfer->user);
+        $balance = Balance::query()->where('user_id', $transfer->user_id)->where('provider_id', $transfer->provider_id)
+            ->where('external_account_id', $context['wallet'])->whereNull('bank_account_id')
+            ->where('currency', $transfer->source_currency)->sole();
+        $hold = LedgerEntry::query()->where('reference', "transfer:{$transfer->id}:hold")->first();
+        if ($hold !== null && ($hold->balance_id !== $balance->id
+            || ($hold->raw_data['operation_key'] ?? null) !== $transfer->provider_operation_key
+            || $hold->entry_type !== 'hold' || $hold->status !== 'posted'
+            || ! BigDecimal::of($hold->amount)->isEqualTo(BigDecimal::of($transfer->source_amount)->negated()))) {
+            $this->invalid('The source-wallet reservation must belong to this payment operation.');
+        }
+        $amount = $hold === null ? $balance->available_balance : $balance->reserved_balance;
+        if (! config('wallet.ledger.enabled', true) || $balance->as_of === null || $balance->as_of->isFuture()
+            || $balance->as_of->lessThanOrEqualTo(now()->subMinutes(5))
+            || BigDecimal::of($amount)->isLessThan($transfer->source_amount)) {
+            $this->invalid('A current verified source-wallet balance covering the principal is required.');
         }
     }
 

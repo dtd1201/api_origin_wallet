@@ -51,14 +51,32 @@ final class NiumSgdLocalPayoutAuthorization
 
     public function reviewSnapshot(Transfer $transfer, ?string $consumingOperation = null): array
     {
+        app(NiumSgdLocalPayoutWorkflow::class)->assertCustomerAuthorization($transfer, $consumingOperation);
         $snapshot = $this->snapshot($transfer, $consumingOperation);
         $terms = NiumSgdLocalPayoutGate::assertSubmissionAllowed($transfer);
+        app(NiumSgdLocalPayoutWorkflow::class)->assertFunding($transfer);
         $revision = $transfer->raw_data['sgd_local_workflow']['review_revision'] ?? null;
         if (! is_string($revision) || ! Str::isUuid($revision)) {
             throw new RuntimeException('A current maker review is required.');
         }
 
         return [...$snapshot, 'review_revision' => $revision, 'financial_terms' => $terms];
+    }
+
+    /** Exact customer instruction, including local receiving-account changes. No provider I/O. */
+    public function customerInstruction(Transfer $transfer, ?string $consumingOperation = null): array
+    {
+        $snapshot = $this->snapshot($transfer, $consumingOperation);
+        $beneficiary = $transfer->beneficiary;
+        $account = $beneficiary->only(['full_name', 'company_name', 'account_number', 'iban', 'bank_name',
+            'bank_code', 'branch_code', 'swift_bic', 'country_code', 'currency', 'payout_method']);
+
+        return [...$snapshot, 'transfer_id' => $transfer->id, 'transfer_no' => $transfer->transfer_no,
+            'client_reference' => $transfer->client_reference, 'payout_method' => 'LOCAL',
+            'receiving_account' => ['name' => $beneficiary->full_name, 'bank' => $beneficiary->bank_name,
+                'last_four' => substr((string) ($beneficiary->account_number ?: $beneficiary->iban), -4),
+                'sha256' => hash('sha256', json_encode($account, JSON_THROW_ON_ERROR))],
+            'financial_terms' => NiumSgdLocalPayoutGate::assertSubmissionAllowed($transfer)];
     }
 
     public function assertDispatchSnapshot(Transfer $transfer): void

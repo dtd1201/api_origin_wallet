@@ -271,7 +271,7 @@ class NiumProvisionalPayoutPricingTest extends TestCase
         // Explicitly synthetic existing execution fixture: not a claim about NIUM's real pricing.
         // Admission still needs the separate verified-pricing interface; provisional metadata cannot provide it.
         $this->installSyntheticPricing($recorded);
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($recorded);
+        $requested = $this->submitSgd($recorded);
         $pending = app(TransferApprovalService::class)->approve($requested, $checker, manager: app(ProviderTransferManager::class));
         $this->assertSame('awaiting_authenticated_actual_debit', $policy->presentation($pending)['comparison']['status']);
         $this->travel(11)->minutes();

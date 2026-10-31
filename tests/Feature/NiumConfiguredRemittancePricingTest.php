@@ -55,7 +55,7 @@ class NiumConfiguredRemittancePricingTest extends TestCase
         Http::assertNothingSent();
         $this->expectExceptionMessage(NiumSgdLocalPayoutGate::BLOCK_REASON);
         try {
-            app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+            $this->submitSgd($transfer);
         } finally {
             Http::assertNothingSent();
             $this->assertDatabaseCount('ledger_entries', 0);
@@ -212,7 +212,7 @@ class NiumConfiguredRemittancePricingTest extends TestCase
         $this->assertNull($inspection['all_in_source_wallet_debit']);
         $rate = $transfer->fx_rate;
         $this->withToken($this->sgdToken($transfer->user))
-            ->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-request-approval", ['financial_terms_token' => str_repeat('0', 64)])
+            ->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-request-approval", ['submission_token' => str_repeat('0', 64), 'accept_payment_terms' => true, 'purpose_confirmed' => true])
             ->assertUnprocessable();
         $this->assertSame($rate, $transfer->fresh()->fx_rate);
         $this->assertNull($transfer->provider_operation_key);

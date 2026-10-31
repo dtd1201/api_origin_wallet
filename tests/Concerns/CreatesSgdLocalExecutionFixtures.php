@@ -14,7 +14,7 @@ use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumPayoutFinancialControls;
 use App\Services\Nium\NiumPayoutFxLockContract;
-use App\Services\Nium\NiumSgdLocalPayoutGate;
+use App\Services\Nium\NiumSgdLocalPayoutAuthorization;
 use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
 use Brick\Math\BigDecimal;
 use Illuminate\Database\Schema\Blueprint;
@@ -167,8 +167,16 @@ trait CreatesSgdLocalExecutionFixtures
 
     protected function reviewToken(Transfer $transfer): array
     {
-        return ['financial_terms_token' => NiumSgdLocalPayoutWorkflow::financialTermsToken(
-            NiumSgdLocalPayoutGate::assertSubmissionAllowed($transfer))];
+        $instruction = app(NiumSgdLocalPayoutAuthorization::class)->customerInstruction($transfer);
+
+        return ['submission_token' => NiumSgdLocalPayoutWorkflow::financialTermsToken($instruction),
+            'accept_payment_terms' => true, 'purpose_confirmed' => true, 'accept_uncapped_charges' => true];
+    }
+
+    protected function submitSgd(Transfer $transfer): Transfer
+    {
+        return app(NiumSgdLocalPayoutWorkflow::class)->submit($transfer, $transfer->user,
+            $this->reviewToken($transfer)['submission_token'], true);
     }
 
     protected function sgdToken(User $user): string

@@ -294,7 +294,7 @@ class NiumSgdLocalPayoutWorkflowTest extends TestCase
             ->assertOk()->assertJsonPath('payout_workflow.fx_lock_active', false)->assertJsonPath('payout_amounts.fx_rate', null);
         $this->lock($transfer, $uuid)->assertUnprocessable();
         $this->assertSame(1, $this->lockCalls);
-        $this->withToken($this->token)->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-request-approval", ['financial_terms_token' => str_repeat('a', 64)])->assertUnprocessable();
+        $this->withToken($this->token)->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-request-approval", ['submission_token' => str_repeat('a', 64), 'accept_payment_terms' => true, 'purpose_confirmed' => true])->assertUnprocessable();
         $this->assertDatabaseCount('transfer_approvals', 0);
         $this->lock($transfer)->assertOk();
         $this->assertSame(2, $this->lockCalls);
@@ -334,7 +334,7 @@ class NiumSgdLocalPayoutWorkflowTest extends TestCase
     {
         $transfer = $this->prepare();
         $this->lock($transfer)->assertOk();
-        $this->withToken($this->token)->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-request-approval", ['financial_terms_token' => str_repeat('a', 64)])
+        $this->withToken($this->token)->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-request-approval", ['submission_token' => str_repeat('a', 64), 'accept_payment_terms' => true, 'purpose_confirmed' => true])
             ->assertUnprocessable()->assertJsonPath('message', NiumSgdLocalPayoutGate::BLOCK_REASON);
         try {
             app(TransferApprovalService::class)->approve($transfer->fresh(), $this->authorizedChecker());

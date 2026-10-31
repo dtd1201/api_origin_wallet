@@ -64,7 +64,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
         $this->assertNull($projection['pilot_policy']['reserve_amount']);
         $this->assertTrue($projection['approval_request_allowed']);
         $this->withToken($this->sgdToken($transfer->user))->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-request-approval",
-            ['financial_terms_token' => $projection['financial_terms_token']])->assertOk()
+            $this->reviewToken($transfer))->assertOk()
             ->assertJsonPath('payout_amounts.total_wallet_debit', null)->assertJsonPath('payout_amounts.transfer_fee', null);
         $this->denied(fn () => app(TransferApprovalService::class)->approve($transfer->fresh(), $transfer->user));
         $this->fakeSgdProvider($outcome);
@@ -147,7 +147,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
     public function test_uncapped_actual_fee_is_recorded_separately_once_even_if_it_exceeds_available_funds(): void
     {
         [$provider, $transfer, $checker] = $this->stageOneTime('5');
-        $pending = app(TransferApprovalService::class)->approve(app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer),
+        $pending = app(TransferApprovalService::class)->approve($this->submitSgd($transfer),
             $checker, manager: app(ProviderTransferManager::class));
         config()->set('services.nium.payout_pilot.enabled', false);
         $this->travel(11)->minutes();
@@ -205,7 +205,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
         $raw = $transfer->raw_data;
         $raw['pilot_policy'] = ['enabled' => true, 'verified' => true];
         $transfer->update(['raw_data' => $raw]);
-        $this->denied(fn () => app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh()));
+        $this->denied(fn () => $this->submitSgd($transfer->fresh()));
         $this->assertSame('2.00000000', Balance::query()->sole()->reserved_balance);
         $this->assertDatabaseCount('transfer_approvals', 0);
         $this->assertNull($transfer->fresh()->provider_operation_key);
@@ -221,7 +221,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
         $projection = $workflow->presentation($transfer);
         $this->assertSame('unavailable', $projection['provider_fee_status']);
         $this->assertTrue($projection['approval_request_allowed']);
-        $requested = $workflow->requestApproval($transfer, $projection['financial_terms_token']);
+        $requested = $this->submitSgd($transfer);
         $this->denied(fn () => app(TransferApprovalService::class)->approve($requested, $requested->user));
         $token = $this->sgdToken($checker);
         $url = "/api/admin/transfers/{$transfer->id}/approve";
@@ -310,7 +310,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
     public function test_unknown_outcome_consumes_authorization_and_preserves_both_holds(): void
     {
         [$provider, $transfer, $checker, $grant] = $this->stage();
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         $this->fakeSgdProvider('timeout');
         $unknown = app(TransferApprovalService::class)->approve($requested, $checker, manager: app(ProviderTransferManager::class));
         $this->assertSame('submission_unknown', $unknown->status);
@@ -329,7 +329,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
     public function test_actual_fees_consume_only_the_owned_reserve_once_and_breach_is_visible_after_deactivation(): void
     {
         [$provider, $transfer, $checker, $grant] = $this->stage();
-        $pending = app(TransferApprovalService::class)->approve(app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer),
+        $pending = app(TransferApprovalService::class)->approve($this->submitSgd($transfer),
             $checker, manager: app(ProviderTransferManager::class));
         config()->set('services.nium.payout_pilot.enabled', false);
         $this->travel(11)->minutes();

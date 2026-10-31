@@ -70,7 +70,7 @@ class NiumSgdLocalExecutionTest extends TestCase
             'expected_fee_amount' => '0', 'expected_fee_currency' => 'USD']);
         $this->assertNotSame($pending->id, $next->id);
         $next = $workflow->requestLock($next, Str::uuid()->toString());
-        $this->assertSame('approval_required', $workflow->requestApproval($next)->status);
+        $this->assertSame('approval_required', $this->submitSgd($next)->status);
         // Reusable verified configuration authorizes a separately reviewed intent.
         $this->assertDatabaseCount('transfer_approvals', 1);
         $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
@@ -98,7 +98,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     {
         [, $transfer] = $this->sgdExecutionFixture();
         config()->set('services.nium.sgd_local_review_bundle', ['path' => '/not-used', 'sha256' => 'not-used']);
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         $this->assertSame('approval_required', $requested->status);
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertSame(0, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
@@ -154,7 +154,7 @@ class NiumSgdLocalExecutionTest extends TestCase
         $this->installSyntheticPricing($transfer, ['fee_amount' => '1.25']);
         $this->expectExceptionMessage(NiumSgdLocalPayoutGate::BLOCK_REASON);
         try {
-            app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+            $this->submitSgd($transfer);
         } finally {
             $this->assertSame('draft', $transfer->fresh()->status);
             $this->assertDatabaseCount('ledger_entries', 0);
@@ -200,7 +200,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_checker_can_resume_a_committed_approval_only_before_any_dispatch_claim(): void
     {
         [, $transfer, $checker] = $this->sgdExecutionFixture();
-        $request = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $request = $this->submitSgd($transfer);
         $approved = app(TransferApprovalService::class)->approve($request, $checker);
         $this->assertSame('approved', $approved->status);
         $this->assertTrue(app(NiumSgdLocalPayoutWorkflow::class)->presentation($approved)['checker_approval_allowed']);
@@ -241,7 +241,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_pricing_change_after_maker_review_and_checker_permission_revocation_block_dispatch(): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         $originalPricing = app(NiumRemittancePricing::class);
         $this->installSyntheticPricing($requested, ['pricing_version' => 'DIFFERENT-SYNTHETIC-PRICING']);
         try {
@@ -265,7 +265,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_captured_success_restores_missing_reference_but_keeps_unknown_funds_until_reconciliation(): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
-        $request = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $request = $this->submitSgd($transfer);
         $pending = app(TransferApprovalService::class)->approve($request, $checker, manager: app(ProviderTransferManager::class));
         // Simulate an application crash after capture, before persisting the reference.
         $pending->update(['status' => 'submission_unknown', 'external_transfer_id' => null]);
@@ -284,17 +284,17 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_uncaptured_or_tampered_response_cannot_guess_a_reference_or_release_funds(): void
     {
         [, $transfer, $checker] = $this->sgdExecutionFixture();
-        $request = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $request = $this->submitSgd($transfer);
         $this->fakeSgdProvider('timeout');
         $unknown = app(TransferApprovalService::class)->approve($request, $checker, manager: app(ProviderTransferManager::class));
         $url = "/api/user/users/12/transfers/{$unknown->id}/sgd-local-recover-captured";
         $token = $this->sgdToken($unknown->user);
-        $this->withToken($token)->postJson($url, $this->reviewToken($transfer->fresh()))->assertUnprocessable();
+        $this->withToken($token)->postJson($url)->assertUnprocessable();
         $log = ApiRequestLog::query()->where('operation', 'transfer_money')->sole();
         $log->update(['is_success' => true, 'response_status' => 200]);
         $log->niumExchangeEvidence->update(['response_received' => true,
             'raw_response_body' => '{"systemReferenceNumber":"forged"}', 'response_body_sha256' => 'wrong']);
-        $this->withToken($token)->postJson($url, $this->reviewToken($transfer->fresh()))->assertUnprocessable();
+        $this->withToken($token)->postJson($url)->assertUnprocessable();
         $this->assertNull($unknown->fresh()->external_transfer_id);
         $this->assertSame('5.00000000', Balance::query()->sole()->reserved_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
@@ -309,7 +309,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_uncertain_sgd_dispatch_retains_owned_funds_and_never_repeats(string $outcome): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         $this->fakeSgdProvider($outcome);
         $unknown = app(TransferApprovalService::class)->approve($requested, $checker, manager: app(ProviderTransferManager::class));
         $this->assertSame('submission_unknown', $unknown->status);
@@ -339,7 +339,7 @@ class NiumSgdLocalExecutionTest extends TestCase
         [, $transfer] = $this->sgdExecutionFixture();
         $workflow = app(NiumSgdLocalPayoutWorkflow::class);
         if ($status === 'approval_required') {
-            $transfer = $workflow->requestApproval($transfer);
+            $transfer = $this->submitSgd($transfer);
         }
         $token = $this->sgdToken($transfer->user);
         $url = "/api/user/users/12/transfers/{$transfer->id}/sgd-local-restart-review";
@@ -392,7 +392,8 @@ class NiumSgdLocalExecutionTest extends TestCase
             $this->assertNotSame($quote->id, $transfer->fx_quote_id);
         }
         $this->assertDatabaseCount('fx_quotes', 3);
-        $this->assertSame('approval_required', $workflow->requestApproval($transfer)->status);
+        Balance::query()->update(['as_of' => now()]); // Explicit synthetic source-wallet resynchronization.
+        $this->assertSame('approval_required', $this->submitSgd($transfer)->status);
         $this->assertDatabaseCount('transfer_approvals', 0);
         $this->travelBack();
     }
@@ -480,7 +481,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
         $workflow = app(NiumSgdLocalPayoutWorkflow::class);
-        $requested = $workflow->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         $approved = app(TransferApprovalService::class)->approve($requested, $checker);
         $oldApproval = $approved->raw_data['sgd_local_workflow']['approval_id'];
         $oldAudit = $approved->fxQuote->quote_ref;
@@ -502,7 +503,8 @@ class NiumSgdLocalExecutionTest extends TestCase
         $this->assertDatabaseCount('transfer_approvals', 1);
         $locked = $workflow->requestLock($draft, Str::uuid()->toString());
         $this->assertNotSame($oldAudit, $locked->fxQuote->quote_ref);
-        $newRequest = $workflow->requestApproval($locked);
+        Balance::query()->update(['as_of' => now()]); // A new FX lock does not refresh source-wallet funding.
+        $newRequest = $this->submitSgd($locked);
         $this->assertSame('approval_required', $newRequest->status);
         $pending = app(TransferApprovalService::class)->approve($newRequest, $checker, manager: app(ProviderTransferManager::class));
         $this->assertSame('pending', $pending->status);
@@ -514,7 +516,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_maker_or_unauthorized_checker_cannot_approve_even_with_global_approval_disabled(): void
     {
         [, $transfer] = $this->sgdExecutionFixture();
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         config()->set('wallet.transfer_controls.require_admin_approval', false);
         foreach ([$requested->user, User::factory()->create(['status' => 'active'])] as $checker) {
             try {
@@ -557,7 +559,7 @@ class NiumSgdLocalExecutionTest extends TestCase
         $this->installSyntheticPricing($transfer, $changes);
         $this->expectExceptionMessage(NiumSgdLocalPayoutGate::BLOCK_REASON);
         try {
-            app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+            $this->submitSgd($transfer);
         } finally {
             $this->assertSame('draft', $transfer->fresh()->status);
             $this->assertDatabaseCount('transfer_approvals', 0);
@@ -575,7 +577,7 @@ class NiumSgdLocalExecutionTest extends TestCase
         $transfer->update(['fee_amount' => 0, 'raw_data' => $raw]);
         config()->set('services.nium.sgd_local_review_bundle', ['path' => '/missing', 'sha256' => str_repeat('0', 64)]);
         $this->expectExceptionMessage(NiumSgdLocalPayoutGate::BLOCK_REASON);
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+        $this->submitSgd($transfer->fresh());
     }
 
     public static function terminalOutcomes(): array
@@ -587,7 +589,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_reconciliation_uses_original_owned_debit_after_fx_or_pricing_expires(string $outcome, string $entry): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
-        $request = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $request = $this->submitSgd($transfer);
         $pending = app(TransferApprovalService::class)->approve($request, $checker, manager: app(ProviderTransferManager::class));
         $this->installSyntheticPricing($pending, ['status' => 'unavailable']);
         $this->travel(11)->minutes();
@@ -606,7 +608,7 @@ class NiumSgdLocalExecutionTest extends TestCase
     public function test_used_audit_cannot_be_claimed_again_and_a_shared_audit_rolls_back_reservation(): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
-        $request = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $request = $this->submitSgd($transfer);
         $approved = app(TransferApprovalService::class)->approve($request, $checker);
         $copy = $approved->replicate();
         $copy->transfer_no = 'SYNTHETIC-DUPLICATE';

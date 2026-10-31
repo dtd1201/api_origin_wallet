@@ -58,8 +58,15 @@ final class NiumSgdLocalPayoutController extends Controller
     public function requestApproval(Request $request, User $user, Transfer $transfer, NiumSgdLocalPayoutWorkflow $workflow): JsonResponse
     {
         abort_unless($transfer->user_id === $user->id, 404);
+        abort_unless($request->user()?->id === $user->id, 403);
+        $input = $request->validate([
+            'submission_token' => ['required', 'string', 'regex:/^[a-f0-9]{64}$/'],
+            'accept_payment_terms' => ['required', 'accepted'],
+            'purpose_confirmed' => ['required', 'accepted'],
+            'accept_uncapped_charges' => ['sometimes', 'boolean'],
+        ]);
         try {
-            return $this->resource($workflow->requestApproval($transfer, $request->validate(['financial_terms_token' => ['required', 'string', 'regex:/^[a-f0-9]{64}$/']])['financial_terms_token']));
+            return $this->resource($workflow->submit($transfer, $request->user(), $input['submission_token'], (bool) ($input['accept_uncapped_charges'] ?? false)));
         } catch (Throwable $exception) {
             return $this->failure($exception, $transfer->fresh());
         }

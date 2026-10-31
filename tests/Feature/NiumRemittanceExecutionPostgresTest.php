@@ -67,7 +67,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
         [, $transfer] = $this->sgdExecutionFixture();
         $this->race(function () use ($transfer): void {
             $this->fakeSgdProvider();
-            app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+            $this->submitSgd($transfer->fresh());
         });
         $current = $transfer->fresh();
         $this->assertSame('approval_required', $current->status);
@@ -97,7 +97,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
         $this->assertCount(1, $history);
         $this->assertDatabaseCount('nium_payout_pilot_authorizations', 1);
         $this->assertDatabaseCount('ledger_entries', 0);
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+        $this->submitSgd($transfer->fresh());
         $this->race(function () use ($transfer, $checker): void {
             $this->fakeSgdProvider();
             try {
@@ -136,7 +136,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
             ]);
         }
         config()->set('services.nium.payout_pilot', ['enabled' => true, 'authorization_id' => $grant->id]);
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $this->submitSgd($transfer);
         $this->race(function () use ($transfer, $checker): void {
             $this->fakeSgdProvider();
             try {
@@ -158,7 +158,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
     public function test_concurrent_sgd_capture_recovery_and_terminal_reconciliation_keep_one_debit(): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         $pending = app(TransferApprovalService::class)->approve($requested, $checker, manager: app(ProviderTransferManager::class));
         $pending->update(['status' => 'submission_unknown', 'external_transfer_id' => null]);
         $this->race(function () use ($pending): void {
@@ -191,7 +191,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
     public function test_concurrent_financial_reconciliation_posts_principal_and_separate_fee_once(): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture(scenario: ['amount' => '12.34']);
-        $pending = app(TransferApprovalService::class)->approve(app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer),
+        $pending = app(TransferApprovalService::class)->approve($this->submitSgd($transfer),
             $checker, manager: app(ProviderTransferManager::class));
         $this->race(function () use ($provider, $pending): void {
             $this->fakeSgdProvider('completed', '1.25');
@@ -208,7 +208,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
     public function test_concurrent_conflicting_fee_observations_do_not_apply_both_amounts(): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture(scenario: ['amount' => '12.34']);
-        $pending = app(TransferApprovalService::class)->approve(app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer),
+        $pending = app(TransferApprovalService::class)->approve($this->submitSgd($transfer),
             $checker, manager: app(ProviderTransferManager::class));
         $this->race(function (int $worker) use ($provider, $pending): void {
             $this->fakeSgdProvider('completed', $worker === 0 ? '1.25' : '2.50');
@@ -228,7 +228,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
         [, $transfer, $checker] = $this->sgdExecutionFixture(scenario: ['provider_id' => 31, 'user_id' => 72,
             'account_id' => 41, 'beneficiary_id' => 55, 'amount' => $principal]);
         $this->installSyntheticPricing($transfer, ['fee_amount' => $fee]);
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $this->submitSgd($transfer);
         $this->race(function () use ($transfer, $checker, $response): void {
             $this->fakeSgdProvider($response);
             try {
@@ -258,7 +258,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
         $this->race(function () use ($transfer): void {
             $this->fakeSgdProvider();
             try {
-                app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+                $this->submitSgd($transfer->fresh());
                 throw new \LogicException('A provider charge must not expand the principal reservation');
             } catch (RuntimeException $exception) {
                 if ($exception->getMessage() !== NiumSgdLocalPayoutGate::BLOCK_REASON) {
@@ -296,7 +296,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
     public function test_expired_sgd_reset_competing_with_dispatch_cannot_claim_or_reserve(): void
     {
         [$provider, $transfer, $checker] = $this->sgdExecutionFixture();
-        $requested = app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer);
+        $requested = $this->submitSgd($transfer);
         app(TransferApprovalService::class)->approve($requested, $checker);
         $this->travel(11)->minutes();
         $this->race(function (int $worker) use ($provider, $transfer): void {

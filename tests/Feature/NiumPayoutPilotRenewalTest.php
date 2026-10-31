@@ -111,7 +111,7 @@ class NiumPayoutPilotRenewalTest extends TestCase
     {
         [$provider, $transfer, $checker, $grant] = $this->expiredTransferThreePilot();
         $this->renew($transfer, $checker, $this->confirmation($transfer, $checker));
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+        $this->submitSgd($transfer->fresh());
         $this->withToken($this->sgdToken($checker))->postJson('/api/admin/transfers/3/approve')->assertOk();
         $history = $grant->fresh()->verification['one_time_renewals'];
         $this->travel(11)->minutes();
@@ -151,7 +151,7 @@ class NiumPayoutPilotRenewalTest extends TestCase
     {
         [, $transfer] = $this->expiredTransferThreePilot();
         $this->withToken($this->sgdToken($transfer->user))->postJson('/api/user/users/12/transfers/3/sgd-local-request-approval',
-            ['financial_terms_token' => str_repeat('a', 64)])->assertUnprocessable();
+            ['submission_token' => str_repeat('a', 64), 'accept_payment_terms' => true, 'purpose_confirmed' => true])->assertUnprocessable();
         $this->assertSame('draft', $transfer->fresh()->status);
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->travelBack();
@@ -207,7 +207,7 @@ class NiumPayoutPilotRenewalTest extends TestCase
         $input['request_id'] = Str::uuid()->toString();
         $this->withToken($this->sgdToken($checker))->postJson('/api/admin/transfers/3/pilot-authorization/renew', $input)->assertUnprocessable();
         $this->assertCount(1, $grant->fresh()->verification['one_time_renewals']);
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+        $this->submitSgd($transfer->fresh());
         Balance::query()->sole()->update(['available_balance' => '4.99']);
         $this->withToken($this->sgdToken($checker))->postJson('/api/admin/transfers/3/approve')->assertUnprocessable();
         $this->assertNull($transfer->fresh()->provider_operation_key);
@@ -227,7 +227,7 @@ class NiumPayoutPilotRenewalTest extends TestCase
     {
         [, $transfer, $checker, $grant] = $this->expiredTransferThreePilot();
         $this->renew($transfer, $checker, $this->confirmation($transfer, $checker));
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+        $this->submitSgd($transfer->fresh());
         $verification = $grant->fresh()->verification;
         $receipt = &$verification['one_time_renewals'][0];
         match ($case) {
@@ -250,7 +250,7 @@ class NiumPayoutPilotRenewalTest extends TestCase
         [, $transfer, $checker, $grant] = $this->expiredTransferThreePilot();
         $input = $this->confirmation($transfer, $checker);
         $this->renew($transfer, $checker, $input);
-        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+        $this->submitSgd($transfer->fresh());
         $first = $grant->fresh()->verification['one_time_renewals'][0];
         $this->travel(11)->minutes();
         try {

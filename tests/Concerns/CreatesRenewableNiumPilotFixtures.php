@@ -27,7 +27,7 @@ trait CreatesRenewableNiumPilotFixtures
         $transfer = $workflow->requestLock($transfer, Str::uuid()->toString());
         $grant = app(NiumPayoutPilotPolicy::class)->authorizeOneTime($transfer, $checker, 'SYNTHETIC-ORIGINAL-RISK-ACCEPTANCE', true);
         config()->set('services.nium.payout_pilot', ['enabled' => true, 'authorization_id' => $grant->id]);
-        $approved = app(TransferApprovalService::class)->approve($workflow->requestApproval($transfer), $checker);
+        $approved = app(TransferApprovalService::class)->approve($this->submitSgd($transfer), $checker);
         $oldApproval = $approved->approvals()->sole();
         $this->travel(11)->minutes();
         $draft = $workflow->restartExpiredReview($approved->fresh());

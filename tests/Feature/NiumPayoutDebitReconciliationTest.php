@@ -9,7 +9,6 @@ use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumDataSyncService;
 use App\Services\Nium\NiumPayoutDebitReconciliation;
-use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
 use App\Services\Nium\NiumTransferService;
 use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
@@ -30,7 +29,7 @@ class NiumPayoutDebitReconciliationTest extends TestCase
     {
         [, $transfer, $checker] = $this->sgdExecutionFixture(scenario: ['amount' => '12.34']);
 
-        return app(TransferApprovalService::class)->approve(app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer),
+        return app(TransferApprovalService::class)->approve($this->submitSgd($transfer),
             $checker, manager: app(ProviderTransferManager::class));
     }
 
