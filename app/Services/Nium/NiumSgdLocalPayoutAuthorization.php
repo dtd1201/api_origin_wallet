@@ -73,6 +73,8 @@ final class NiumSgdLocalPayoutAuthorization
 
         return [...$snapshot, 'transfer_id' => $transfer->id, 'transfer_no' => $transfer->transfer_no,
             'client_reference' => $transfer->client_reference, 'payout_method' => 'LOCAL',
+            // Preserve existing null-reference receipts; bind every actual payment reference.
+            ...($transfer->reference_text === null ? [] : ['reference_text' => $transfer->reference_text]),
             'receiving_account' => ['name' => $beneficiary->full_name, 'bank' => $beneficiary->bank_name,
                 'last_four' => substr((string) ($beneficiary->account_number ?: $beneficiary->iban), -4),
                 'sha256' => hash('sha256', json_encode($account, JSON_THROW_ON_ERROR))],

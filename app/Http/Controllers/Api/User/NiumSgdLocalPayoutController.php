@@ -28,6 +28,7 @@ final class NiumSgdLocalPayoutController extends Controller
             'source_amount' => ['required', 'numeric', 'gt:0', 'decimal:0,8'],
             'purpose_code' => ['required', 'string', 'max:100'], 'purpose_confirmed' => ['required', 'accepted'],
             'client_reference' => ['required', 'string', 'max:100'],
+            'reference_text' => ['nullable', 'string', 'max:255'],
             'expected_fee_amount' => ['required', 'string', 'regex:/^0(?:\.0+)?$/'],
             'expected_fee_currency' => ['required', 'in:USD'],
             'fx_quote_id' => ['prohibited'], 'fx_rate' => ['prohibited'], 'raw_data' => ['prohibited'],
@@ -39,6 +40,35 @@ final class NiumSgdLocalPayoutController extends Controller
             throw $exception;
         } catch (Throwable $exception) {
             return $this->failure($exception);
+        }
+    }
+
+    public function review(Request $request, User $user, NiumSgdLocalPayoutWorkflow $workflow): JsonResponse
+    {
+        abort_unless($request->user()?->id === $user->id, 403);
+        $input = $request->validate([
+            'transfer_id' => ['nullable', 'integer'], 'preparation_id' => ['required', 'uuid'],
+            'provider_id' => ['required', 'integer'], 'beneficiary_id' => ['required', 'integer'],
+            'source_amount' => ['required', 'numeric', 'gt:0', 'decimal:0,8'],
+            'purpose_code' => ['required', 'string', 'max:100'],
+            'reference_text' => ['nullable', 'string', 'max:255'],
+            'client_reference' => ['required', 'string', 'max:100'],
+            'raw_data' => ['prohibited'], 'fx_quote_id' => ['prohibited'],
+            'fx_rate' => ['prohibited'], 'fee_amount' => ['prohibited'],
+        ]);
+        try {
+            return $this->resource($workflow->prepareReview($request->user(), $input + [
+                'source_currency' => 'USD', 'target_currency' => 'SGD',
+                'expected_fee_amount' => '0', 'expected_fee_currency' => 'USD',
+            ]));
+        } catch (ModelNotFoundException $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            // Recover the claimed draft on uncertain provider outcomes, including first preparation.
+            $transfer = isset($input['transfer_id']) ? $user->transfers()->find($input['transfer_id'])
+                : $user->transfers()->where('provider_id', $input['provider_id'])->where('client_reference', $input['client_reference'])->first();
+
+            return $this->failure($exception, $transfer);
         }
     }
 

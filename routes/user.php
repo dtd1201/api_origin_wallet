@@ -75,6 +75,7 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::get('users/{user}/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'show']);
 
     Route::post('users/{user}/transfers', [TransferController::class, 'store']);
+    Route::post('users/{user}/sgd-local-payouts/review', [NiumSgdLocalPayoutController::class, 'review'])->middleware('throttle:6,1');
     Route::post('users/{user}/sgd-local-payouts', [NiumSgdLocalPayoutController::class, 'store'])->middleware('throttle:6,1');
     Route::post('users/{user}/transfers/{transfer}/sgd-local-fx-lock', [NiumSgdLocalPayoutController::class, 'lock'])->middleware('throttle:6,1');
     Route::post('users/{user}/transfers/{transfer}/sgd-local-refresh-pricing', [NiumSgdLocalPayoutController::class, 'refreshPricing'])->middleware('throttle:6,1');

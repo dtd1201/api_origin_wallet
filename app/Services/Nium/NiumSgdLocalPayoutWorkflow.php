@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Contracts\NiumRemittancePricing;
 use App\Models\Balance;
 use App\Models\LedgerEntry;
 use App\Models\Transfer;
@@ -48,7 +49,8 @@ final class NiumSgdLocalPayoutWorkflow
             $existing = $user->transfers()->where('provider_id', $candidate->provider_id)
                 ->where('client_reference', $input['client_reference'])->first();
             if ($existing !== null) {
-                if (! NiumPayoutFxLockContract::sameBinding($existing->raw_data['sgd_local_workflow']['intent'] ?? null, $intent)) {
+                if (! NiumPayoutFxLockContract::sameBinding($existing->raw_data['sgd_local_workflow']['intent'] ?? null, $intent)
+                    || ($existing->reference_text ?? '') !== ($input['reference_text'] ?? '')) {
                     $this->invalid('This client reference already belongs to a different payment intent.');
                 }
 
@@ -61,7 +63,7 @@ final class NiumSgdLocalPayoutWorkflow
                 'transfer_type' => 'payout', 'source_currency' => $candidate->source_currency, 'target_currency' => $candidate->target_currency,
                 'source_amount' => NiumSgdLocalCugScope::principal($candidate->source_amount), 'target_amount' => null,
                 'fee_amount' => 0, 'fee_currency' => $candidate->source_currency,
-                'purpose_code' => $candidate->purpose_code, 'status' => 'draft',
+                'purpose_code' => $candidate->purpose_code, 'reference_text' => $input['reference_text'] ?? null, 'status' => 'draft',
                 'raw_data' => ['sgd_local_workflow' => [
                     'version' => 1, 'release' => NiumSgdLocalCugScope::RELEASE, 'state' => 'draft',
                     'maker_user_id' => $user->id, 'intent' => $intent,
@@ -71,6 +73,53 @@ final class NiumSgdLocalPayoutWorkflow
                 ]],
             ]);
         });
+    }
+
+    /** Prepare a review only: never authorize, approve, reserve funds or dispatch. */
+    public function prepareReview(User $customer, array $input): Transfer
+    {
+        if (isset($input['transfer_id'])) {
+            $transfer = $customer->transfers()->findOrFail($input['transfer_id']);
+            $this->scope->assertTransfer($transfer);
+            $this->assertIntent($transfer);
+            if ($transfer->provider_id !== (int) $input['provider_id']
+                || $transfer->beneficiary_id !== (int) $input['beneficiary_id']
+                || ! BigDecimal::of($transfer->source_amount)->isEqualTo($input['source_amount'])
+                || $transfer->purpose_code !== $input['purpose_code']
+                || ($transfer->reference_text ?? '') !== ($input['reference_text'] ?? '')) {
+                $this->invalid('The saved payment has different details. Reopen its saved details before reviewing.');
+            }
+        } else {
+            $transfer = $this->prepare($customer, $input);
+        }
+        $this->assertPurpose($transfer);
+        $this->gate->assertCandidate($customer, $transfer->provider, $transfer->beneficiary, 'SGD');
+        $this->assertFunding($transfer);
+        if ($this->canRestartReview($transfer)) {
+            $transfer = $this->restartExpiredReview($transfer);
+        } elseif ($this->canRefreshTermsReview($transfer)) {
+            $transfer = $this->resetReview($transfer, false);
+        }
+        if ($transfer->status !== 'draft' || $transfer->provider_operation_key !== null) {
+            return $transfer; // A retry cannot mutate a submitted/approved payment.
+        }
+        $state = $transfer->raw_data['sgd_local_workflow']['state'] ?? null;
+        if (in_array($state, ['locking', 'lock_unknown'], true)) {
+            $this->invalid('The FX request is pending or uncertain. Refresh or reconcile its status before continuing.');
+        }
+        if ($transfer->fx_quote_id === null && $state === 'draft') {
+            $transfer = $this->requestLock($transfer, $input['preparation_id']);
+        }
+        $this->assertCurrentLock($transfer);
+        try {
+            NiumSgdLocalPayoutGate::assertSubmissionAllowed($transfer);
+        } catch (RuntimeException) {
+            // Never grant or renew pilot risk authorization. Refresh pricing evidence only.
+            app(NiumRemittancePricing::class)->refresh($transfer);
+            $transfer = $transfer->fresh();
+        }
+
+        return $transfer;
     }
 
     public function requestLock(Transfer $transfer, string $requestId): Transfer
@@ -251,12 +300,8 @@ final class NiumSgdLocalPayoutWorkflow
             if ($locked->status !== 'draft' || $locked->provider_operation_key !== null) {
                 $this->invalid('Only a preparation draft can request a new approval.');
             }
-            $this->assertPrincipalAvailable($locked);
-            $balance = Balance::query()->where('user_id', $locked->user_id)->where('provider_id', $locked->provider_id)
-                ->where('currency', $locked->source_currency)->latest('as_of')->first();
-            if ($balance === null || BigDecimal::of($balance->available_balance)->isLessThan($terms['reservation_amount'] ?? $terms['total_wallet_debit'])) {
-                $this->invalid('Available funding must cover the principal and all confirmed provider charges.');
-            }
+            // Use the same exact wallet, freshness and reservation checks as Review/dispatch.
+            $this->assertFunding($locked);
             $raw = $locked->raw_data;
             $raw['sgd_local_workflow']['review_revision'] = Str::uuid()->toString();
             $locked->raw_data = $raw;
@@ -292,12 +337,17 @@ final class NiumSgdLocalPayoutWorkflow
     /** Invalidate only an expired, undispatched review; preserve every historical approval. */
     public function restartExpiredReview(Transfer $transfer): Transfer
     {
-        return DB::transaction(function () use ($transfer): Transfer {
+        return $this->resetReview($transfer, true);
+    }
+
+    private function resetReview(Transfer $transfer, bool $replaceFx): Transfer
+    {
+        return DB::transaction(function () use ($transfer, $replaceFx): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
             $this->scope->assertTransfer($locked);
             $this->assertIntent($locked);
-            if (! $this->canRestartReview($locked)) {
-                $this->invalid('Only an expired review with no payment operation or reservation can restart.');
+            if (! ($replaceFx ? $this->canRestartReview($locked) : $this->canRefreshTermsReview($locked))) {
+                $this->invalid('Only an invalidated review with no payment operation or reservation can restart.');
             }
             $raw = $locked->raw_data;
             $workflow = $raw['sgd_local_workflow'];
@@ -306,15 +356,21 @@ final class NiumSgdLocalPayoutWorkflow
                 'customer_authorization' => $workflow['customer_authorization'] ?? null,
                 'approval_snapshot' => $raw['sgd_local_approval'] ?? null, 'fx_quote_id' => $locked->fx_quote_id,
                 'lock_request_id' => $workflow['lock_request_id'] ?? null,
-                'invalidated_at' => now()->toISOString(), 'reason' => 'expired_fx_explicit_maker_review',
+                'invalidated_at' => now()->toISOString(),
+                'reason' => $replaceFx ? 'expired_fx_explicit_maker_review' : 'changed_terms_customer_review',
             ];
-            foreach (['review', 'review_revision', 'customer_authorization', 'approval_id', 'lock_request_id', 'lock_requested_at', 'recovery_review'] as $key) {
+            $invalidate = ['review', 'review_revision', 'customer_authorization', 'approval_id', 'recovery_review'];
+            if ($replaceFx) {
+                $invalidate = [...$invalidate, 'lock_request_id', 'lock_requested_at'];
+            }
+            foreach ($invalidate as $key) {
                 unset($workflow[$key]);
             }
-            $workflow['state'] = 'draft';
+            $workflow['state'] = $replaceFx ? 'draft' : 'locked';
             unset($raw['sgd_local_approval']);
             $raw['sgd_local_workflow'] = $workflow;
-            $locked->update(['status' => 'draft', 'fx_quote_id' => null, 'fx_rate' => null, 'raw_data' => $raw]);
+            $locked->update(['status' => 'draft', 'raw_data' => $raw]
+                + ($replaceFx ? ['fx_quote_id' => null, 'fx_rate' => null] : []));
 
             return $locked;
         });
@@ -322,11 +378,31 @@ final class NiumSgdLocalPayoutWorkflow
 
     private function canRestartReview(Transfer $transfer): bool
     {
+        return $this->canResetUndispatchedReview($transfer)
+            && $transfer->fxQuote->expires_at->lessThanOrEqualTo(now());
+    }
+
+    private function canRefreshTermsReview(Transfer $transfer): bool
+    {
+        if (! in_array($transfer->status, ['approval_required', 'approved'], true)
+            || ! $this->canResetUndispatchedReview($transfer) || ! $transfer->fxQuote->expires_at->isFuture()) {
+            return false;
+        }
+        try {
+            $this->assertCustomerAuthorization($transfer);
+
+            return false;
+        } catch (RuntimeException|ValidationException) {
+            return true;
+        }
+    }
+
+    private function canResetUndispatchedReview(Transfer $transfer): bool
+    {
         return in_array($transfer->status, ['draft', 'approval_required', 'approved'], true)
             && $transfer->provider_operation_key === null && ! filled($transfer->external_transfer_id)
             && ! in_array($transfer->raw_data['sgd_local_workflow']['state'] ?? null, ['locking', 'lock_unknown'], true)
             && $transfer->fxQuote !== null && $transfer->fxQuote->expires_at !== null
-            && $transfer->fxQuote->expires_at->lessThanOrEqualTo(now())
             && ! isset($transfer->fxQuote->raw_data['consumed_at'])
             && ! LedgerEntry::query()->where('source_type', 'transfer')->where('source_id', (string) $transfer->id)->exists();
     }
@@ -465,6 +541,7 @@ final class NiumSgdLocalPayoutWorkflow
             'business_policy' => $businessPolicy,
             'provisional_pricing' => app(NiumProvisionalPayoutPricing::class)->presentation($transfer),
             ...$this->recovery($transfer), 'can_restart_review' => $this->canRestartReview($transfer),
+            'can_refresh_review' => $this->canRestartReview($transfer) || $this->canRefreshTermsReview($transfer),
             'provider_fee_status' => $terms === null || ($terms['fee_status'] ?? null) === 'unverified' ? 'unavailable' : 'confirmed',
             'pilot_policy' => ($terms['funding_basis'] ?? null) === 'principal_only_pilot'
                 ? ['authorization_id' => $terms['authorization_id'], 'reservation_amount' => $terms['reservation_amount'],
@@ -479,7 +556,7 @@ final class NiumSgdLocalPayoutWorkflow
             'customer_authorization' => $workflow['customer_authorization'] ?? null,
             'can_refresh_pricing' => ! $uncapped && $transfer->status === 'draft' && $transfer->provider_operation_key === null,
 
-            'approval_request_allowed' => $active && $terms !== null && $fundingReady && $transfer->status === 'draft',
+            'approval_request_allowed' => $active && $instruction !== null && $terms !== null && $fundingReady && $transfer->status === 'draft',
             'checker_approval_allowed' => $checkerAllowed,
             // The existing checker approval endpoint owns dispatch. No second customer action.
             'dispatch_allowed' => false, 'dispatch_owner' => 'checker_approval',
@@ -553,8 +630,10 @@ final class NiumSgdLocalPayoutWorkflow
 
     private function assertPrincipalAvailable(Transfer $transfer): void
     {
+        $context = $this->locks->context($transfer->provider, $transfer->user);
         $balance = Balance::query()->where('user_id', $transfer->user_id)->where('provider_id', $transfer->provider_id)
-            ->where('currency', $transfer->source_currency)->latest('as_of')->first();
+            ->where('external_account_id', $context['wallet'])->whereNull('bank_account_id')
+            ->where('currency', $transfer->source_currency)->first();
         if ($balance === null || BigDecimal::of($balance->available_balance)->isLessThan(NiumSgdLocalCugScope::principal($transfer->source_amount))) {
             $this->invalid('A synced funding wallet covering the source principal after reservations is required.');
         }

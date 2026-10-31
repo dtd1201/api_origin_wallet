@@ -97,7 +97,7 @@ class NiumSgdLocalPayoutWorkflowTest extends TestCase
             'response_received' => true, 'capture_version' => 1,
         ]);
         Balance::query()->create([
-            'user_id' => 12, 'provider_id' => 10, 'currency' => 'USD', 'available_balance' => '85',
+            'user_id' => 12, 'provider_id' => 10, 'external_account_id' => 'wallet-test', 'currency' => 'USD', 'available_balance' => '85',
             'ledger_balance' => '85', 'reserved_balance' => '0', 'as_of' => now(),
         ]);
         $this->token = Str::random(64);
