@@ -104,7 +104,7 @@ class ProviderHttpClient implements ProviderClient
             throw new RuntimeException('VA reconciliation requires read-only transport and authentication outside transactions.');
         }
         $request = $this->baseRequest();
-        if (($this->operationalContext['operation'] ?? null) === 'payout_wallet_activity') {
+        if (in_array($this->operationalContext['operation'] ?? null, ['payout_wallet_activity', 'payout_source_balance'], true)) {
             $request = $request->withoutRedirecting()->retry(1, 0);
         }
         if ($this->singleDispatchAssignment) {

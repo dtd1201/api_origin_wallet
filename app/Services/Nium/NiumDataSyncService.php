@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\Integrations\Contracts\DataSyncProvider;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -33,7 +34,8 @@ class NiumDataSyncService implements DataSyncProvider
         ];
     }
 
-    public function syncBalances(IntegrationProvider $provider, User $user): array
+    /** The optional source snapshot enables strict, single-wallet payout-review verification. */
+    public function syncBalances(IntegrationProvider $provider, User $user, ?Balance $sourceBalance = null): array
     {
         $endpoint = (string) config('services.nium.wallet_balance_endpoint', '');
 
@@ -41,6 +43,20 @@ class NiumDataSyncService implements DataSyncProvider
             throw new RuntimeException('NIUM_WALLET_BALANCE_ENDPOINT is not configured.');
         }
 
+        $context = null;
+        if ($sourceBalance !== null) {
+            if (DB::transactionLevel() !== 0) {
+                throw new RuntimeException('Source-wallet refresh requires committed state outside a transaction.');
+            }
+            $context = app(NiumPayoutFxLockService::class)->context($provider, $user);
+            $this->assertSourceIdentity($sourceBalance, $provider, $user, $context);
+            // Missing response identity is acceptable only on this exact authenticated wallet URL.
+            foreach (['client', 'customer', 'wallet'] as $identity) {
+                if (! str_contains($endpoint, '{'.$identity.'}') && ! str_contains($endpoint, '{'.$identity.'HashId}')) {
+                    throw new RuntimeException('Source-wallet balance endpoint must bind client, customer and wallet.');
+                }
+            }
+        }
         $response = $this->niumService->get(
             path: $this->niumService->path($endpoint, [
                 'client' => $this->niumService->clientId(),
@@ -48,13 +64,20 @@ class NiumDataSyncService implements DataSyncProvider
                 'wallet' => $this->niumService->walletId($user),
             ]),
             user: $user,
+            operation: $sourceBalance === null ? null : 'payout_source_balance',
         );
 
         $data = $this->successfulJson($response, 'Nium balance sync failed.');
         $items = $this->balanceItems($data);
+        if ($sourceBalance !== null) {
+            $items = [$this->verifiedSourceItem($data, $items, $sourceBalance, $context)];
+        }
         $count = 0;
 
-        DB::transaction(function () use ($items, $provider, $user, &$count): void {
+        DB::transaction(function () use ($items, $provider, $user, $sourceBalance, $context, &$count): void {
+            if ($context !== null && ! NiumPayoutFxLockContract::sameBinding($context, app(NiumPayoutFxLockService::class)->context($provider, $user))) {
+                throw new RuntimeException('The verified source-wallet identity changed during balance refresh.');
+            }
             foreach ($items as $item) {
                 $currency = strtoupper((string) $this->value($item, [
                     'currency',
@@ -98,12 +121,16 @@ class NiumDataSyncService implements DataSyncProvider
                     'blocked_balance',
                 ]);
 
-                $existing = Balance::query()
+                $existing = $sourceBalance !== null ? Balance::query()->whereKey($sourceBalance->id)->lockForUpdate()->firstOrFail() : Balance::query()
                     ->where('provider_id', $provider->id)
                     ->where('external_account_id', $externalAccountId)
                     ->where('currency', $currency)
                     ->lockForUpdate()
                     ->first();
+
+                if ($sourceBalance !== null) {
+                    $this->assertSourceIdentity($existing, $provider, $user, $context);
+                }
 
                 // reserved_balance is owned by Origin's transfer ledger.
                 // Provider-side reserved/blocked amounts are informational only.
@@ -118,6 +145,9 @@ class NiumDataSyncService implements DataSyncProvider
                     throw new RuntimeException('NIUM balance snapshot belongs to another wallet owner.');
                 }
                 $managedByLedger = $existing !== null && LedgerEntry::query()->where('balance_id', $existing->id)->exists();
+                if ($sourceBalance !== null && $managedByLedger && bccomp((string) $available, (string) $existing->available_balance, 8) !== 0) {
+                    throw new RuntimeException('The source-wallet balance requires audited reconciliation before review.');
+                }
                 if ($managedByLedger) {
                     // A provider snapshot may already include a debit awaiting event reconciliation.
                     // Preserve audited local balances; record the snapshot for discrepancy review.
@@ -138,27 +168,90 @@ class NiumDataSyncService implements DataSyncProvider
                     ], static fn ($value) => $value !== null && $value !== '')
                 );
 
-                Balance::query()->updateOrCreate(
-                    [
-                        'provider_id' => $provider->id,
-                        'external_account_id' => $externalAccountId,
-                        'currency' => $currency,
-                    ],
-                    [
-                        'user_id' => $user->id,
-                        'available_balance' => $localAvailable,
-                        'ledger_balance' => $localLedger,
-                        'reserved_balance' => $localReserved,
-                        'as_of' => $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']) ?? now(),
-                        'raw_data' => $rawData,
-                    ],
-                );
+                $fields = [
+                    'user_id' => $user->id,
+                    'available_balance' => $localAvailable,
+                    'ledger_balance' => $localLedger,
+                    'reserved_balance' => $localReserved,
+                    'as_of' => $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']) ?? now(),
+                    'raw_data' => $rawData,
+                ];
+                if ($sourceBalance !== null) {
+                    $existing->update($fields);
+                } else {
+                    Balance::query()->updateOrCreate(
+                        [
+                            'provider_id' => $provider->id,
+                            'external_account_id' => $externalAccountId,
+                            'currency' => $currency,
+                        ],
+                        $fields,
+                    );
+                }
 
                 $count++;
             }
         });
 
         return ['synced_balances' => $count];
+    }
+
+    private function assertSourceIdentity(Balance $balance, IntegrationProvider $provider, User $user, array $context): void
+    {
+        if ($balance->user_id !== $user->id || $balance->provider_id !== $provider->id
+            || $balance->external_account_id !== $context['wallet'] || $balance->currency !== 'USD'
+            || $balance->bank_account_id !== null) {
+            throw new RuntimeException('Source-wallet balance identity does not match the authenticated NIUM wallet.');
+        }
+    }
+
+    private function verifiedSourceItem(array $data, array $items, Balance $balance, array $context): array
+    {
+        $identities = ['client' => ['clientHashId', 'client_hash_id', 'clientId', 'client_id'],
+            'customer' => ['customerHashId', 'customer_hash_id', 'customerId', 'customer_id'],
+            'wallet' => ['walletHashId', 'wallet_hash_id', 'walletId', 'wallet_id']];
+        $containers = [$data, $data['data'] ?? [], $data['wallet'] ?? [], $data['data']['wallet'] ?? []];
+        foreach ([...$containers, ...$items] as $container) {
+            if (! is_array($container)) {
+                continue;
+            }
+            foreach ($identities as $identity => $aliases) {
+                foreach ($aliases as $alias) {
+                    if (array_key_exists($alias, $container) && $container[$alias] !== $context[$identity]) {
+                        throw new RuntimeException('NIUM returned a different source-wallet identity.');
+                    }
+                }
+            }
+        }
+        $matching = array_values(array_filter($items, fn ($item) => strtoupper((string) $this->value($item, ['currency', 'currencyCode', 'currency_code', 'curSymbol'])) === $balance->currency));
+        if (count($matching) !== 1) {
+            throw new RuntimeException('NIUM did not return a unique source-currency balance.');
+        }
+        $item = $matching[0];
+        foreach (['currency', 'currencyCode', 'currency_code', 'curSymbol'] as $alias) {
+            if (isset($item[$alias]) && strtoupper((string) $item[$alias]) !== $balance->currency) {
+                throw new RuntimeException('NIUM returned conflicting source currencies.');
+            }
+        }
+        $available = $this->value($item, ['availableBalance', 'available_balance', 'available', 'availableAmount', 'balance', 'amount']);
+        if ((! is_string($available) && ! is_int($available) && ! is_float($available))
+            || ! preg_match('/^-?\d{1,12}(?:\.\d{1,8})?$/D', (string) $available)) {
+            throw new RuntimeException('NIUM did not return a verified available source-wallet balance.');
+        }
+        $timestamp = $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']);
+        foreach ($containers as $container) {
+            if ($timestamp === null && is_array($container)) {
+                $timestamp = $this->value($container, ['asOf', 'as_of', 'updatedAt', 'updated_at']);
+            }
+        }
+        $asOf = $timestamp === null ? now() : Carbon::parse(NiumPayoutFxLockContract::expiry($timestamp));
+        if ($asOf->isFuture() || $asOf->lessThanOrEqualTo(now()->subMinutes(5))) {
+            throw new RuntimeException('NIUM returned an expired or future-dated source-wallet snapshot.');
+        }
+
+        // Normalize only this verified row; omitted amounts never re-date an old local balance.
+        return [...$item, 'walletHashId' => $context['wallet'], 'currency' => $balance->currency,
+            'availableBalance' => (string) $available, 'asOf' => $asOf->toISOString()];
     }
 
     public function syncTransactions(IntegrationProvider $provider, User $user): array

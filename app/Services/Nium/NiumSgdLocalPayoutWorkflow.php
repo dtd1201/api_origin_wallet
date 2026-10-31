@@ -8,6 +8,7 @@ use App\Models\LedgerEntry;
 use App\Models\Transfer;
 use App\Models\User;
 use Brick\Math\BigDecimal;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -24,7 +25,7 @@ final class NiumSgdLocalPayoutWorkflow
         private readonly NiumSgdLocalPayoutGate $gate,
     ) {}
 
-    public function prepare(User $user, array $input): Transfer
+    public function prepare(User $user, array $input, bool $refreshFunding = false): Transfer
     {
         $beneficiary = $user->beneficiaries()->findOrFail($input['beneficiary_id']);
         $candidate = new Transfer([
@@ -36,6 +37,9 @@ final class NiumSgdLocalPayoutWorkflow
         $candidate->setRelation('user', $user)->setRelation('beneficiary', $beneficiary);
         $this->scope->assertTransfer($candidate);
         $this->assertPurpose($candidate);
+        if ($refreshFunding) {
+            $this->prepareFunding($candidate);
+        }
         $this->assertPrincipalAvailable($candidate);
         $this->gate->assertCandidate($user, $candidate->provider, $beneficiary, 'SGD');
         if (NiumPayoutFxLockContract::decimal($input['expected_fee_amount']) !== '0' || $input['expected_fee_currency'] !== 'USD') {
@@ -90,11 +94,11 @@ final class NiumSgdLocalPayoutWorkflow
                 $this->invalid('The saved payment has different details. Reopen its saved details before reviewing.');
             }
         } else {
-            $transfer = $this->prepare($customer, $input);
+            $transfer = $this->prepare($customer, $input, refreshFunding: true);
         }
         $this->assertPurpose($transfer);
         $this->gate->assertCandidate($customer, $transfer->provider, $transfer->beneficiary, 'SGD');
-        $this->assertFunding($transfer);
+        $this->prepareFunding($transfer);
         if ($this->canRestartReview($transfer)) {
             $transfer = $this->restartExpiredReview($transfer);
         } elseif ($this->canRefreshTermsReview($transfer)) {
@@ -577,13 +581,59 @@ final class NiumSgdLocalPayoutWorkflow
         }
     }
 
+    /** Only authenticated review preparation may refresh a stale source snapshot. */
+    private function prepareFunding(Transfer $transfer): void
+    {
+        $balance = $this->sourceBalance($transfer);
+        if ($balance->as_of !== null && $balance->as_of->greaterThan(now()->subMinutes(5))) {
+            $this->assertFunding($transfer); // Future timestamps and insufficient current funds fail closed.
+
+            return;
+        }
+        if (! config('wallet.ledger.enabled', true)) {
+            $this->invalid('Source-wallet balance verification requires the wallet ledger.');
+        }
+        // Serialize refreshes across transfers using the same verified wallet. No row lock during HTTP.
+        $key = hash('sha256', json_encode([$balance->user_id, $balance->provider_id, $balance->external_account_id, $balance->currency], JSON_THROW_ON_ERROR));
+        $lock = Cache::lock('nium:payout-source-balance:'.$key, max(60, 2 * (int) config('services.nium.timeout', 30) + 30));
+        if (! $lock->get()) {
+            $this->invalid('The source-wallet balance is being refreshed. Please retry Review shortly. No payment was submitted.');
+        }
+        try {
+            $balance = $this->sourceBalance($transfer);
+            if ($balance->as_of === null || $balance->as_of->lessThanOrEqualTo(now()->subMinutes(5))) {
+                $transfer->provider->assertSupportsCapability('data_sync');
+                app(NiumDataSyncService::class)->syncBalances($transfer->provider, $transfer->user, $balance);
+            }
+            $this->scope->assertTransfer($transfer);
+            if ($transfer->exists) {
+                $this->assertIntent($transfer);
+            }
+            $this->assertFunding($transfer);
+        } catch (Throwable $exception) {
+            throw ValidationException::withMessages(['payout' => 'The source-wallet balance could not be verified. Please retry Review shortly; no payment was submitted.']);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function sourceBalance(Transfer $transfer): Balance
+    {
+        $context = $this->locks->context($transfer->provider, $transfer->user);
+        $balances = Balance::query()->where('user_id', $transfer->user_id)->where('provider_id', $transfer->provider_id)
+            ->where('external_account_id', $context['wallet'])->whereNull('bank_account_id')
+            ->where('currency', $transfer->source_currency)->get();
+        if ($balances->count() !== 1) {
+            $this->invalid('A unique source-wallet balance belonging to this customer and verified provider wallet is required.');
+        }
+
+        return $balances->sole();
+    }
+
     /** The exact source wallet must still have a recent snapshot and sufficient owned funding. */
     public function assertFunding(Transfer $transfer): void
     {
-        $context = $this->locks->context($transfer->provider, $transfer->user);
-        $balance = Balance::query()->where('user_id', $transfer->user_id)->where('provider_id', $transfer->provider_id)
-            ->where('external_account_id', $context['wallet'])->whereNull('bank_account_id')
-            ->where('currency', $transfer->source_currency)->sole();
+        $balance = $this->sourceBalance($transfer);
         $hold = LedgerEntry::query()->where('reference', "transfer:{$transfer->id}:hold")->first();
         if ($hold !== null && ($hold->balance_id !== $balance->id
             || ($hold->raw_data['operation_key'] ?? null) !== $transfer->provider_operation_key
