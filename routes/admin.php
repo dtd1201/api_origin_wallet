@@ -7,8 +7,8 @@ use App\Http\Controllers\Api\Admin\BeneficiaryController;
 use App\Http\Controllers\Api\Admin\ContactSubmissionController;
 use App\Http\Controllers\Api\Admin\FxOrderController;
 use App\Http\Controllers\Api\Admin\IntegrationProviderController;
-use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
 use App\Http\Controllers\Api\Admin\KycProfileCorrectionController;
+use App\Http\Controllers\Api\Admin\KycProviderSubmissionController;
 use App\Http\Controllers\Api\Admin\LedgerEntryController;
 use App\Http\Controllers\Api\Admin\ManagedExchangeRateController;
 use App\Http\Controllers\Api\Admin\NiumComplianceEventController;
@@ -83,6 +83,7 @@ Route::middleware('permission:transfers.manage')->group(function (): void {
     Route::post('fx-orders/{fxOrder}/reject', [FxOrderController::class, 'reject'])->name('fx-orders.reject');
 });
 Route::post('transfers/{transfer}/approve', [TransferController::class, 'approve'])->middleware('permission:transfers.approve')->name('transfers.approve');
+Route::post('transfers/{transfer}/pilot-authorization/renew', [TransferController::class, 'renewPilotAuthorization'])->middleware('permission:transfers.approve')->name('transfers.pilot-authorization.renew');
 Route::post('transfers/{transfer}/reject', [TransferController::class, 'reject'])->middleware('permission:transfers.reject')->name('transfers.reject');
 
 Route::middleware('permission:wallet.view')->group(function (): void {

@@ -7,6 +7,7 @@ use App\Models\LedgerEntry;
 use App\Models\NiumPayoutPilotAuthorization;
 use App\Models\Transfer;
 use App\Models\User;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -19,6 +20,76 @@ final class NiumPayoutPilotPolicy
     public const UNCAPPED_POLICY = 'one_time_uncapped';
 
     public const UNCAPPED_RISK = 'additional_nium_charges_are_unknown_uncapped_and_not_reserved';
+
+    /** Admin preparation only. Never acquire FX, create a maker review or dispatch. */
+    public function renewalPreview(Transfer $transfer, ?User $authorizer): ?array
+    {
+        if ($transfer->id !== 3 || $authorizer === null || ! $authorizer->hasPermission('transfers.approve')) {
+            return null;
+        }
+        $view = ['policy' => self::UNCAPPED_POLICY, 'risk_acknowledgement' => self::UNCAPPED_RISK,
+            'expected_fee' => ['amount' => '0', 'currency' => 'USD', 'basis' => 'internal_expectation_not_provider_verified'],
+            'provider_fee_status' => 'unverified', 'total_wallet_debit' => null, 'renewal_allowed' => false];
+        try {
+            [$grant, $effective, $binding, $revision] = $this->renewalContext($transfer, $authorizer);
+            if ($effective->expires_at->isFuture()) {
+                if (! NiumPayoutFxLockContract::sameBinding($effective->binding, $binding)) {
+                    throw new RuntimeException('The current risk acceptance belongs to different FX terms.');
+                }
+
+                return [...$view, 'state' => 'current_authorization', 'authorization_id' => $grant->id,
+                    'authorization_revision' => $revision,
+                    'expires_at' => $effective->expires_at->toISOString()];
+            }
+
+            return [...$view, 'state' => 'explicit_risk_renewal_required', 'renewal_allowed' => true,
+                'authorization_id' => $grant->id, 'previous_revision' => $revision ?? $grant->id,
+                'fx_quote_id' => $binding['snapshot']['fx_quote_id'], 'fx_rate' => $binding['snapshot']['rate'],
+                'expires_at' => $binding['snapshot']['expires_at'],
+                'confirmation_token' => $this->renewalToken($grant, $binding, $revision, $authorizer)];
+        } catch (RuntimeException $exception) {
+            return [...$view, 'state' => 'blocked', 'reason' => $exception->getMessage()];
+        }
+    }
+
+    /** Append a new risk acceptance; retain the original grant, binding, expiry and approval history. */
+    public function renewOneTime(Transfer $transfer, User $authorizer, string $reference, bool $acceptUncappedCharges, string $requestId, string $confirmationToken): NiumPayoutPilotAuthorization
+    {
+        return DB::transaction(function () use ($transfer, $authorizer, $reference, $acceptUncappedCharges, $requestId, $confirmationToken): NiumPayoutPilotAuthorization {
+            $transfer = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+            [$grant, $effective, $binding, $revision] = $this->renewalContext($transfer, $authorizer, true);
+            if (! $acceptUncappedCharges || trim($reference) === '' || strlen($reference) > 200 || ! Str::isUuid($requestId)) {
+                throw new RuntimeException('A new explicit uncapped-charge acceptance, reference and request UUID are required.');
+            }
+            $verification = $grant->verification;
+            $history = $verification['one_time_renewals'] ?? [];
+            foreach ($history as $receipt) {
+                if ($receipt['request_id'] === $requestId) {
+                    if ($receipt['verified_by'] === $authorizer->id
+                        && $receipt['verification']['authorization_reference'] === trim($reference)
+                        && hash_equals($receipt['confirmation_token'], $confirmationToken)
+                        && NiumPayoutFxLockContract::sameBinding($receipt['binding'], $binding)) {
+                        return $grant; // A repeated preparation click never creates another acceptance.
+                    }
+                    throw new RuntimeException('This risk-acceptance request UUID already belongs to different terms.');
+                }
+            }
+            if ($effective->expires_at->isFuture()
+                || Carbon::parse($binding['snapshot']['expires_at'])->lessThanOrEqualTo(now())
+                || ! hash_equals($this->renewalToken($grant, $binding, $revision, $authorizer), $confirmationToken)) {
+                throw new RuntimeException('Refresh the expired authorization and explicitly review the current FX and risk terms.');
+            }
+            $history[] = ['id' => Str::uuid()->toString(), 'previous_revision' => $revision ?? $grant->id,
+                'request_id' => $requestId, 'confirmation_token' => $confirmationToken, 'verified_by' => $authorizer->id,
+                'binding' => $binding, 'expires_at' => $binding['snapshot']['expires_at'],
+                'verification' => ['authorization_reference' => trim($reference), 'risk_acknowledgement' => self::UNCAPPED_RISK,
+                    'authorized_at' => now()->toISOString(), 'basis' => 'explicit_authenticated_admin_risk_renewal']];
+            $verification['one_time_renewals'] = $history;
+            $grant->forceFill(['verification' => $verification])->save();
+
+            return $grant;
+        });
+    }
 
     /** Explicit business risk acceptance for this one transfer; no provider I/O. */
     public function authorizeOneTime(Transfer $transfer, User $authorizer, string $reference, bool $acceptUncappedCharges): NiumPayoutPilotAuthorization
@@ -120,6 +191,10 @@ final class NiumPayoutPilotPolicy
         }
         $this->assertScope($transfer);
         $grant = NiumPayoutPilotAuthorization::query()->find(config('services.nium.payout_pilot.authorization_id'));
+        $revision = null;
+        if ($grant !== null && $grant->policy === self::UNCAPPED_POLICY) {
+            [$grant, $revision] = $this->effectiveOneTime($grant);
+        }
         if ($grant === null || $grant->pilot !== self::PILOT || $grant->transfer_id !== $transfer->id
             || $grant->revoked_at !== null || $grant->expires_at->lessThanOrEqualTo(now())
             || ($grant->consumed_operation_key !== null && $grant->consumed_operation_key !== $transfer->provider_operation_key)
@@ -129,7 +204,9 @@ final class NiumPayoutPilotPolicy
         }
         $this->assertVerifier(User::query()->findOrFail($grant->verified_by), $transfer);
         if ($grant->policy === self::UNCAPPED_POLICY) {
-            return $this->uncappedTerms($transfer, $grant);
+            $terms = $this->uncappedTerms($transfer, $grant);
+
+            return $revision === null ? $terms : [...$terms, 'authorization_revision' => $revision];
         }
         if ($grant->policy !== 'funded_reserve') {
             throw new RuntimeException('Unrecognized pilot authorization policy.');
@@ -234,6 +311,117 @@ final class NiumPayoutPilotPolicy
             'expires_at' => $grant->expires_at->toISOString(), 'reservation_amount' => '5',
             'fee_amount' => null, 'fee_currency' => 'USD', 'fee_status' => 'unverified', 'total_wallet_debit' => null,
             'pilot_reserve' => null, 'charge_ceiling' => null, 'risk_acknowledgement' => self::UNCAPPED_RISK];
+    }
+
+    private function renewalContext(Transfer $transfer, User $authorizer, bool $lock = false): array
+    {
+        if ($transfer->id !== 3 || config('services.nium.payout_pilot.enabled', false) !== true) {
+            throw new RuntimeException('Risk renewal is limited to Transfer 3 with the existing pilot explicitly enabled.');
+        }
+        $this->assertScope($transfer);
+        $this->assertVerifier($authorizer, $transfer);
+        $historicalApprovals = array_filter(array_column($transfer->raw_data['sgd_local_workflow']['review_history'] ?? [], 'approval_id'));
+        if ($transfer->status !== 'draft' || $transfer->provider_operation_key !== null || filled($transfer->external_transfer_id)
+            || ($transfer->raw_data['sgd_local_workflow']['state'] ?? null) !== 'locked'
+            || bccomp($transfer->source_amount, '5', 8) !== 0
+            || $transfer->approvals()->whereNotIn('id', $historicalApprovals)->exists()
+            || LedgerEntry::query()->where('source_type', 'transfer')->where('source_id', '3')->exists()) {
+            throw new RuntimeException('Restart the undispatched expired review through the maker workflow before renewing risk acceptance.');
+        }
+        if ($transfer->fxQuote?->expires_at === null || $transfer->fxQuote->expires_at->lessThanOrEqualTo(now())) {
+            throw new RuntimeException('The maker must explicitly request and review a fresh FX lock; Admin approval cannot replace the rate.');
+        }
+        $binding = $this->binding($transfer);
+        $query = NiumPayoutPilotAuthorization::query()->whereKey(config('services.nium.payout_pilot.authorization_id'));
+        $grant = ($lock ? $query->lockForUpdate() : $query)->first();
+        if ($grant === null || $grant->transfer_id !== 3 || $grant->pilot !== self::PILOT || $grant->policy !== self::UNCAPPED_POLICY
+            || $grant->revoked_at !== null || $grant->consumed_at !== null || $grant->consumed_operation_key !== null
+            || $grant->charge_ceiling !== null || $grant->reserve_remaining !== null
+            || $grant->reserve_ledger_entry_id !== null || $grant->funding_ledger_entry_id !== null
+            || ($grant->verification['risk_acknowledgement'] ?? null) !== self::UNCAPPED_RISK) {
+            throw new RuntimeException('The selected unconsumed, unrevoked one-time authorization for Transfer 3 is required.');
+        }
+        $this->assertRenewalBinding($grant->binding, $binding);
+        [$effective, $revision] = $this->effectiveOneTime($grant);
+        $balanceQuery = Balance::query()->where('user_id', $transfer->user_id)->where('provider_id', $transfer->provider_id)
+            ->where('external_account_id', $binding['snapshot']['provider_context']['wallet'])->where('currency', 'USD')->whereNull('bank_account_id');
+        $balance = ($lock ? $balanceQuery->lockForUpdate() : $balanceQuery)->sole();
+        $this->assertBalance($transfer, $balance, $binding['snapshot']['provider_context']['wallet']);
+        if (bccomp($balance->available_balance, '5', 8) < 0) {
+            throw new RuntimeException('A current authenticated source-wallet balance must cover USD 5 principal.');
+        }
+
+        return [$grant, $effective, $binding, $revision];
+    }
+
+    /** Read an effective view only; never save it over the original authorization. */
+    private function effectiveOneTime(NiumPayoutPilotAuthorization $grant): array
+    {
+        $history = $grant->verification['one_time_renewals'] ?? [];
+        if (! is_array($history) || ! array_is_list($history)) {
+            throw new RuntimeException('Risk-acceptance history is invalid.');
+        }
+        if ($history === []) {
+            return [$grant, null];
+        }
+        if ($grant->transfer_id !== 3 || $grant->pilot !== self::PILOT || $grant->policy !== self::UNCAPPED_POLICY) {
+            throw new RuntimeException('Renewed risk acceptance cannot be copied to another pilot or transfer.');
+        }
+        $previous = $grant->id;
+        $previousExpiry = $grant->expires_at;
+        $seen = [];
+        foreach ($history as $receipt) {
+            if (! is_array($receipt) || ! is_string($receipt['id'] ?? null) || ! Str::isUuid($receipt['id'])
+                || ! is_string($receipt['request_id'] ?? null) || ! Str::isUuid($receipt['request_id'])
+                || ! is_string($receipt['confirmation_token'] ?? null) || ! preg_match('/^[a-f0-9]{64}$/D', $receipt['confirmation_token'])
+                || isset($seen[$receipt['id']]) || isset($seen[$receipt['request_id']])
+                || ($receipt['previous_revision'] ?? null) !== $previous
+                || ! is_int($receipt['verified_by'] ?? null)
+                || ($receipt['binding']['transfer_id'] ?? null) !== 3
+                || ($receipt['binding']['transfer_no'] ?? null) !== ($grant->binding['transfer_no'] ?? null)
+                || ($receipt['binding']['client_reference'] ?? null) !== ($grant->binding['client_reference'] ?? null)
+                || ($receipt['verification']['risk_acknowledgement'] ?? null) !== self::UNCAPPED_RISK
+                || ($receipt['verification']['basis'] ?? null) !== 'explicit_authenticated_admin_risk_renewal'
+                || ! is_string($receipt['verification']['authorization_reference'] ?? null)
+                || trim($receipt['verification']['authorization_reference']) === ''
+                || strlen($receipt['verification']['authorization_reference']) > 200
+                || ($receipt['expires_at'] ?? null) !== ($receipt['binding']['snapshot']['expires_at'] ?? null)
+                || Carbon::parse(NiumPayoutFxLockContract::expiry($receipt['verification']['authorized_at'] ?? null))->isFuture()
+                || Carbon::parse(NiumPayoutFxLockContract::expiry($receipt['expires_at'] ?? null))->lessThanOrEqualTo(Carbon::parse($receipt['verification']['authorized_at']))) {
+                throw new RuntimeException('Risk-acceptance history is inconsistent or unverifiable.');
+            }
+            $this->assertRenewalBinding($grant->binding, $receipt['binding']);
+            if ($previousExpiry->isAfter(Carbon::parse($receipt['verification']['authorized_at']))) {
+                throw new RuntimeException('An active risk acceptance cannot be superseded by a renewal.');
+            }
+            $seen[$receipt['id']] = true;
+            $seen[$receipt['request_id']] = true;
+            $previous = $receipt['id'];
+            $previousExpiry = Carbon::parse($receipt['expires_at']);
+        }
+        $effective = clone $grant;
+        $effective->forceFill(['binding' => $receipt['binding'], 'expires_at' => $receipt['expires_at'],
+            'verification' => $receipt['verification'], 'verified_by' => $receipt['verified_by']]);
+
+        return [$effective, $previous];
+    }
+
+    /** Renewal changes FX terms only; the original wallet, beneficiary and payment intent remain bound. */
+    private function assertRenewalBinding(array $original, array $binding): void
+    {
+        foreach (['fx_quote_id', 'audit_id', 'rate', 'expires_at'] as $key) {
+            unset($original['snapshot'][$key], $binding['snapshot'][$key]);
+        }
+        if (! NiumPayoutFxLockContract::sameBinding($original, $binding)) {
+            throw new RuntimeException('Risk renewal cannot change the original pilot payment intent or source wallet.');
+        }
+    }
+
+    private function renewalToken(NiumPayoutPilotAuthorization $grant, array $binding, ?string $revision, User $authorizer): string
+    {
+        return NiumSgdLocalPayoutWorkflow::financialTermsToken(['authorization_id' => $grant->id,
+            'previous_revision' => $revision ?? $grant->id, 'binding' => $binding,
+            'authorizer_id' => $authorizer->id, 'risk_acknowledgement' => self::UNCAPPED_RISK]);
     }
 
     private function assertScope(Transfer $transfer): void

@@ -23,9 +23,11 @@ use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\Concerns\CreatesNiumRemittanceSafetyFixtures;
+use Tests\Concerns\CreatesRenewableNiumPilotFixtures;
 use Tests\Concerns\CreatesSgdLocalExecutionFixtures;
 use Tests\TestCase;
 use Throwable;
@@ -33,6 +35,7 @@ use Throwable;
 class NiumRemittanceExecutionPostgresTest extends TestCase
 {
     use CreatesNiumRemittanceSafetyFixtures;
+    use CreatesRenewableNiumPilotFixtures;
     use CreatesSgdLocalExecutionFixtures;
 
     protected function setUp(): void
@@ -78,6 +81,40 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
     public static function pilotFundingPolicies(): array
     {
         return [['funded_reserve'], ['one_time_uncapped']];
+    }
+
+    public function test_competing_pilot_renewals_and_final_approvals_keep_one_acceptance_and_dispatch(): void
+    {
+        [, $transfer, $checker, $grant] = $this->expiredTransferThreePilot();
+        $preview = app(NiumPayoutPilotPolicy::class)->renewalPreview($transfer, $checker);
+        $this->assertTrue($preview['renewal_allowed']);
+        $requestId = Str::uuid()->toString();
+        $this->race(function () use ($transfer, $checker, $preview, $requestId): void {
+            app(NiumPayoutPilotPolicy::class)->renewOneTime($transfer->fresh(), $checker,
+                'SYNTHETIC-CONCURRENT-RISK-ACCEPTANCE', true, $requestId, $preview['confirmation_token']);
+        });
+        $history = $grant->fresh()->verification['one_time_renewals'];
+        $this->assertCount(1, $history);
+        $this->assertDatabaseCount('nium_payout_pilot_authorizations', 1);
+        $this->assertDatabaseCount('ledger_entries', 0);
+        app(NiumSgdLocalPayoutWorkflow::class)->requestApproval($transfer->fresh());
+        $this->race(function () use ($transfer, $checker): void {
+            $this->fakeSgdProvider();
+            try {
+                app(TransferApprovalService::class)->approve($transfer->fresh(), $checker, manager: app(ProviderTransferManager::class));
+            } catch (RuntimeException) {
+                // A losing checker can observe the already-claimed operation.
+            }
+        });
+        $current = $transfer->fresh();
+        $this->assertSame('pending', $current->status);
+        $this->assertDatabaseCount('transfer_approvals', 2); // Retains the expired approval.
+        $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
+        $this->assertSame($current->provider_operation_key, $grant->fresh()->consumed_operation_key);
+        $this->assertSame($history, $grant->fresh()->verification['one_time_renewals']);
+        $this->assertSame('-5.00000000', LedgerEntry::query()->where('source_type', 'transfer')->where('entry_type', 'hold')->sole()->amount);
+        $this->assertSame('5.00000000', Balance::query()->sole()->reserved_balance);
+        $this->travelBack();
     }
 
     #[DataProvider('pilotFundingPolicies')]

@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources\Admin;
 
+use App\Services\Nium\NiumPayoutPilotPolicy;
 use Illuminate\Http\Request;
 
 class TransferDetailResource extends TransferListResource
@@ -10,6 +11,7 @@ class TransferDetailResource extends TransferListResource
     {
         return [
             ...parent::toArray($request),
+            'pilot_authorization_renewal' => app(NiumPayoutPilotPolicy::class)->renewalPreview($this->resource, $request->user()),
             'beneficiary' => $this->whenLoaded('beneficiary', fn () => $this->beneficiary ? [
                 'id' => $this->beneficiary->id,
                 'full_name' => $this->beneficiary->full_name,

@@ -9,6 +9,7 @@ use App\Http\Resources\Admin\TransferListResource;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumPayoutPilotPolicy;
 use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
 use App\Support\PrimaryProvider;
@@ -108,6 +109,32 @@ class TransferController extends Controller
             'message' => 'Transfer status synced successfully.',
             'transfer' => (new TransferDetailResource($transfer))->resolve($request),
         ]);
+    }
+
+    public function renewPilotAuthorization(Request $request, Transfer $transfer, NiumPayoutPilotPolicy $policy): JsonResponse
+    {
+        $input = $request->validate([
+            'request_id' => ['required', 'uuid'], 'confirmation_token' => ['required', 'string', 'regex:/^[a-f0-9]{64}$/'],
+            'authorization_reference' => ['required', 'string', 'max:200'],
+            'accept_uncapped_charges' => ['required', 'accepted'],
+            'risk_acknowledgement' => ['required', 'in:'.NiumPayoutPilotPolicy::UNCAPPED_RISK],
+            'raw_data' => ['prohibited'], 'binding' => ['prohibited'], 'expires_at' => ['prohibited'],
+        ]);
+        try {
+            $grant = $policy->renewOneTime($transfer, $request->user(), $input['authorization_reference'], true,
+                $input['request_id'], $input['confirmation_token']);
+        } catch (RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage(),
+                'pilot_authorization_renewal' => $policy->renewalPreview($transfer->fresh(), $request->user())], 422);
+        }
+        $history = $grant->verification['one_time_renewals'];
+        $receipt = $history[array_key_last($history)];
+        $this->recordAdminAudit($request, 'transfer.pilot_risk_renewed', 'transfer', $transfer->id, null,
+            ['authorization_id' => $grant->id, 'risk_revision' => $receipt['id'],
+                'authorization_reference' => $receipt['verification']['authorization_reference']]);
+
+        return response()->json(['message' => 'New risk acceptance recorded. The maker must review the current FX and pilot terms before Admin approval.',
+            'transfer' => (new TransferDetailResource($transfer->fresh()))->resolve($request)]);
     }
 
     public function approve(
