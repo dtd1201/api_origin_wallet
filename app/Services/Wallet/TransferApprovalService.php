@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumSgdLocalPayoutAuthorization;
 use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -35,6 +36,17 @@ class TransferApprovalService
         if (strtolower((string) $transfer->provider?->code) === 'nium' && $transfer->target_currency === 'SGD') {
             // CUG checker independence never depends on the global approval switch.
             app(NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
+
+            return;
+        }
+        $swift = app(NiumSwiftPayoutAuthorization::class);
+        if ($swift->applies($transfer)) {
+            $swift->assertMaker($transfer);
+            // A configuration change must not bypass an already requested/recorded approval.
+            if ($this->requiresApproval($transfer) || in_array($transfer->status, ['approval_required', 'approved'], true)
+                || $transfer->approvals()->exists()) {
+                $swift->assertApproved($transfer);
+            }
 
             return;
         }
@@ -70,6 +82,13 @@ class TransferApprovalService
                 ->lockForUpdate()
                 ->firstOrFail();
 
+            $swift = app(NiumSwiftPayoutAuthorization::class);
+            $swiftApproval = $swift->applies($transfer);
+            if ($swiftApproval) {
+                // All API and direct service approval/retry paths share this guard.
+                $swift->assertChecker($transfer, $approver);
+            }
+
             if ($transfer->status === 'approved') {
                 $transfer->loadMissing('provider');
                 if (strtolower((string) $transfer->provider?->code) === 'nium' && $transfer->target_currency === 'SGD') {
@@ -77,6 +96,9 @@ class TransferApprovalService
                     app(NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
                     // Recover a crash between approval commit and the separate dispatch claim.
                     $shouldAutoSubmit = $transfer->provider_operation_key === null;
+                } elseif ($swiftApproval) {
+                    $swift->assertApproved($transfer);
+                    // No new SWIFT resume path: repeated approval remains a no-op.
                 }
 
                 return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
@@ -88,6 +110,9 @@ class TransferApprovalService
 
             if (! in_array($transfer->status, ['draft', 'approval_required'], true)) {
                 throw new RuntimeException('This transfer cannot be approved in its current status.');
+            }
+            if ($swiftApproval && ! $swift->canApprove($transfer, $approver)) {
+                throw new RuntimeException('This transfer cannot accept a new independent approval.');
             }
 
             $transfer->loadMissing('provider');

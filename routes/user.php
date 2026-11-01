@@ -74,6 +74,7 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::delete('users/{user}/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'destroy']);
     Route::get('users/{user}/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'show']);
 
+    Route::post('users/{user}/transfers/review', [TransferController::class, 'review'])->middleware('throttle:6,1');
     Route::post('users/{user}/transfers', [TransferController::class, 'store']);
     Route::post('users/{user}/sgd-local-payouts/review', [NiumSgdLocalPayoutController::class, 'review'])->middleware('throttle:6,1');
     Route::post('users/{user}/sgd-local-payouts', [NiumSgdLocalPayoutController::class, 'store'])->middleware('throttle:6,1');

@@ -273,7 +273,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                     $providerStatus = 'COMPLETED';
                 }
             }
-            $status = $this->normalizeTransferStatus($providerStatus);
+            $status = $this->normalizeTransferStatus($providerStatus, $transfer);
             $statusAt = $this->transferStatusTimestamp($resource, $payload);
 
             DB::transaction(function () use ($provider, $payload, $providerStatus, $resource, $status, $statusAt, $transfer): void {
@@ -927,8 +927,15 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
         }
     }
 
-    private function normalizeTransferStatus(mixed $status): string
+    private function normalizeTransferStatus(mixed $status, Transfer $transfer): string
     {
+        // Match the SGD audit response without changing historical HK status behavior.
+        // A returned status never establishes a refund amount or releases the SGD hold.
+        if ($transfer->source_currency === 'USD' && $transfer->target_currency === 'SGD'
+            && strtoupper(trim((string) $status)) === 'RETURN') {
+            return 'failed';
+        }
+
         return match (strtoupper((string) $status)) {
             'PAID', 'SUCCESS', 'SUCCEEDED', 'COMPLETED' => 'completed',
             'FAILED', 'ERROR', 'REJECTED', 'RETURNED' => 'failed',

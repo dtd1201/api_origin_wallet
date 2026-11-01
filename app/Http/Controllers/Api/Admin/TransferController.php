@@ -8,8 +8,10 @@ use App\Http\Resources\Admin\TransferDetailResource;
 use App\Http\Resources\Admin\TransferListResource;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
+use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumPayoutPilotPolicy;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
 use App\Support\PrimaryProvider;
@@ -67,7 +69,13 @@ class TransferController extends Controller
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
-        $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null)->id;
+        $provider = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null);
+        $validated['provider_id'] = $provider->id;
+        if (strtolower((string) $provider->code) === 'nium' && $validated['target_currency'] === 'USD') {
+            $validated['raw_data']['nium_approval'] = NiumSwiftPayoutAuthorization::origin(
+                $request->user(), User::query()->findOrFail($validated['user_id']), $provider,
+            );
+        }
 
         $transfer = DB::transaction(fn () => Transfer::create($validated));
 
@@ -231,8 +239,11 @@ class TransferController extends Controller
 
         $transfer = DB::transaction(function () use ($transfer, $validated): Transfer {
             $transfer = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+            abort_if(array_key_exists('nium_approval', (array) ($validated['raw_data'] ?? [])),
+                409, 'Payment maker attribution is server-owned and cannot be replaced.');
             abort_if(strtolower((string) $transfer->provider?->code) === 'nium'
-                && ($transfer->provider_operation_key !== null || isset($transfer->raw_data['sgd_local_workflow'])),
+                && ($transfer->provider_operation_key !== null || isset($transfer->raw_data['sgd_local_workflow'])
+                    || isset($transfer->raw_data['nium_approval'])),
                 409, 'Controlled NIUM operations require their audited workflow; direct edits are unavailable.');
             $transfer->update($validated);
 

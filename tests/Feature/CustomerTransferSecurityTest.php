@@ -71,6 +71,8 @@ class CustomerTransferSecurityTest extends TestCase
             ->assertJsonPath('beneficiary_id', $beneficiary->id)
             ->assertJsonPath('source_bank_account_id', null)
             ->assertJsonMissingPath('user_id')
+            ->assertJsonMissingPath('nium_approval')
+            ->assertJsonMissingPath('provider_operation_key')
             ->assertJsonMissingPath('raw_data');
 
         $otherProvider = IntegrationProvider::query()->create([
@@ -152,6 +154,7 @@ class CustomerTransferSecurityTest extends TestCase
             ->assertOk()
             ->assertJsonPath('0.id', $transfer->id)
             ->assertJsonMissingPath('0.user_id')
+            ->assertJsonMissingPath('0.nium_approval')
             ->assertJsonMissingPath('0.provider_operation_key')
             ->assertJsonMissingPath('0.raw_data');
 
@@ -159,14 +162,15 @@ class CustomerTransferSecurityTest extends TestCase
             ->getJson("/api/user/users/{$customer->id}/transfers/{$transfer->id}")
             ->assertOk()
             ->assertJsonMissingPath('user_id')
+            ->assertJsonMissingPath('nium_approval')
             ->assertJsonMissingPath('provider_operation_key')
             ->assertJsonMissingPath('raw_data')
             ->assertJsonMissingPath('approvals')
             ->assertJsonMissingPath('beneficiary.user_id')
             ->assertJsonMissingPath('beneficiary.external_beneficiary_id')
-            // Registered-beneficiary editing exposes this allowlisted envelope.
-            // Arbitrary provider diagnostics must never enter it.
-            ->assertJsonPath('beneficiary.raw_data', ['nium' => []])
+            // Customer-owned edit inputs use edit_fields; no raw provider envelope.
+            ->assertJsonMissingPath('beneficiary.raw_data')
+            ->assertJsonPath('beneficiary.edit_fields', [])
             ->assertJsonMissingPath('source_bank_account.user_id')
             ->assertJsonMissingPath('source_bank_account.external_account_id')
             ->assertJsonMissingPath('source_bank_account.raw_data')
@@ -254,7 +258,8 @@ class CustomerTransferSecurityTest extends TestCase
         $this->assertSame('0.00000000', $transfer->fee_amount);
         $this->assertSame('USD', $transfer->fee_currency);
         $this->assertSame('IR01811', $transfer->purpose_code);
-        $this->assertSame(['source' => 'origin_wallet_web'], $transfer->raw_data);
+        $this->assertSame(['source' => 'origin_wallet_web',
+            'nium_approval' => \App\Services\Nium\NiumSwiftPayoutAuthorization::origin($customer, $customer, $provider)], $transfer->raw_data);
     }
 
     public function test_nium_create_is_idempotent_and_conflicts_on_different_payload(): void

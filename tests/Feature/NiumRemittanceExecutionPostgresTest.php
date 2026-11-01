@@ -13,6 +13,7 @@ use App\Services\Nium\NiumPayoutPilotPolicy;
 use App\Services\Nium\NiumSgdLocalOutcomeRecovery;
 use App\Services\Nium\NiumSgdLocalPayoutGate;
 use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use App\Services\Nium\NiumTransferService;
 use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
@@ -29,6 +30,7 @@ use RuntimeException;
 use Tests\Concerns\CreatesNiumRemittanceSafetyFixtures;
 use Tests\Concerns\CreatesRenewableNiumPilotFixtures;
 use Tests\Concerns\CreatesSgdLocalExecutionFixtures;
+use Tests\Support\PayoutPostgresSafety;
 use Tests\TestCase;
 use Throwable;
 
@@ -40,19 +42,24 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
 
     protected function setUp(): void
     {
-        // Check before Laravel's migration traits run, including accidental full-suite selection.
-        if (getenv('DB_HOST') !== '/tmp/origin-wallet-p0-pg' || getenv('DB_DATABASE') !== 'nium_p0_execution_test'
-            || getenv('DB_CONNECTION') !== 'pgsql' || getenv('DB_URL') !== '' || getenv('APP_ENV') !== 'testing') {
-            $this->markTestSkipped('Requires the guarded disposable P0 PostgreSQL cluster.');
+        // Keep ordinary SQLite suite selection opt-out; PostgreSQL targets must pass every guard.
+        if (getenv('DB_CONNECTION') !== 'pgsql') {
+            $this->markTestSkipped('Requires the guarded disposable Phase 4 PostgreSQL database.');
         }
+        // Also protects direct invocation without the dedicated PHPUnit bootstrap.
+        PayoutPostgresSafety::assertBootstrapConnection();
         parent::setUp();
+        Http::preventStrayRequests();
+        $pdo = PayoutPostgresSafety::verifiedLaravelConnection($this->app);
         $this->assertSame('pgsql', DB::getDriverName());
         $this->assertSame('/tmp/origin-wallet-p0-pg', DB::connection()->getConfig('host'));
-        $this->assertSame('nium_p0_execution_test', DB::connection()->getDatabaseName());
+        $this->assertSame('nium_p0_phase4_test', DB::connection()->getDatabaseName());
         // Recreate only this disposable test schema, including old trigger functions.
-        DB::statement('DROP SCHEMA public CASCADE');
-        DB::statement('CREATE SCHEMA public');
-        $this->artisan('migrate', ['--force' => true])->assertExitCode(0);
+        // Use the verified PDO directly so a reconnect cannot redirect the schema reset.
+        $pdo->exec('DROP SCHEMA public CASCADE');
+        $pdo->exec('CREATE SCHEMA public');
+        PayoutPostgresSafety::verifiedLaravelConnection($this->app);
+        $this->artisan('migrate', ['--database' => 'pgsql', '--force' => true])->assertExitCode(0);
         if (! Schema::hasColumn('transfers', 'provider_status')) {
             Schema::table('transfers', function (Blueprint $table): void {
                 $table->string('provider_status', 80)->nullable();
@@ -348,16 +355,53 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer(['status' => 'approval_required']);
         config()->set('wallet.transfer_controls.require_admin_approval', true);
-        $checker = User::factory()->create();
-        $this->race(function () use ($transfer, $checker): void {
+        $authorization = app(NiumSwiftPayoutAuthorization::class);
+        $makerId = $authorization->assertMaker($transfer);
+        $this->assertSame($transfer->user_id, $makerId);
+        $checkerIds = [];
+        for ($worker = 0; $worker < 2; $worker++) {
+            $checker = User::factory()->create(['status' => 'active']);
+            $checker->roles()->create(['role_code' => 'admin']);
+            $this->assertNotSame($makerId, $checker->id);
+            $this->assertNotSame($transfer->user_id, $checker->id);
+            $this->assertSame('active', $checker->fresh()->status);
+            $this->assertTrue($checker->hasRole('admin'));
+            $this->assertTrue($checker->hasPermission('transfers.approve'));
+            $this->assertTrue($authorization->canApprove($transfer, $checker));
+            $checkerIds[] = $checker->id;
+        }
+        $this->assertNotSame($checkerIds[0], $checkerIds[1]);
+        $this->race(function (int $worker) use ($transfer, $checkerIds): void {
             $this->fakeProvider('submission_unknown');
+            // Resolve each committed identity using the worker's own PostgreSQL connection.
+            $checker = User::query()->findOrFail($checkerIds[$worker]);
             app(TransferApprovalService::class)->approve($transfer->fresh(), $checker, manager: app(ProviderTransferManager::class));
         });
         $this->assertSame(1, $transfer->approvals()->count());
+        $approval = $transfer->approvals()->sole();
+        $this->assertSame('approved', $approval->action);
+        $this->assertContains($approval->approver_user_id, $checkerIds);
+        $this->assertNotSame($makerId, $approval->approver_user_id);
+        $this->assertNotSame($transfer->user_id, $approval->approver_user_id);
+        $current = $transfer->fresh();
+        $authorization->assertApproved($current);
         $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
-        $this->assertSame('submission_unknown', $transfer->fresh()->status);
+        $log = ApiRequestLog::query()->where('operation', 'transfer_money')->sole();
+        $this->assertSame($current->id, $log->related_transfer_id);
+        $this->assertSame('POST', $log->request_method);
+        $this->assertNotNull($current->provider_operation_key);
+        $this->assertSame($current->provider_operation_key, $log->external_reference);
+        $this->assertNotNull($current->raw_data['nium_execution']['dispatch_started_at'] ?? null);
+        $this->assertSame('submission_unknown', $current->status);
+        $this->assertDatabaseCount('ledger_entries', 1);
+        $hold = LedgerEntry::query()->where('entry_type', 'hold')->sole();
+        $this->assertSame($current->provider_operation_key, $hold->raw_data['operation_key']);
+        $this->assertSame('-10.00000000', $hold->amount);
         $this->assertSame('10.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertSame('990.00000000', Balance::query()->sole()->available_balance);
+        $this->assertSame('1000.00000000', Balance::query()->sole()->ledger_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
     public function test_concurrent_terminal_reconciliation_releases_once(): void

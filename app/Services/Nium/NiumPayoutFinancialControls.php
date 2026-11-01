@@ -10,7 +10,7 @@ use Illuminate\Support\Carbon;
 use RuntimeException;
 use Throwable;
 
-/** Transaction-level authorization from a verified provider pricing adapter; no release files. */
+/** Bound provider pricing or explicitly activated business terms; never inferred from storage zeros. */
 final class NiumPayoutFinancialControls
 {
     public const BLOCK_REASON = 'NIUM remittance is blocked because the exact total wallet debit is unverified: effective customer pricing, all applicable charges and source-wallet debit allocation must establish a debit matching the principal-only funding policy.';
@@ -50,6 +50,13 @@ final class NiumPayoutFinancialControls
     {
         try {
             $intent = $this->intent($transfer);
+            if ($transfer->source_currency === 'USD' && $transfer->target_currency === 'SGD'
+                && config('services.nium.sgd_local_zero_fee.enabled', false) !== false) {
+                // This is a separate authorization basis, not a confirmed provider quote.
+                // Malformed/expired activation cannot fall back to another admission mechanism.
+                return [...app(NiumSgdLocalZeroFeePolicy::class)->terms($transfer, $intent),
+                    'business_policy' => $this->businessPolicy($transfer)];
+            }
             if (config('services.nium.payout_pilot.enabled', false) === true
                 && NiumPayoutPilotAuthorization::query()
                     ->whereKey(config('services.nium.payout_pilot.authorization_id'))->where('transfer_id', $transfer->id)->exists()) {

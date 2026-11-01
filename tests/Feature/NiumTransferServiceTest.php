@@ -118,6 +118,7 @@ class NiumTransferServiceTest extends TestCase
 
         $transfer = Transfer::query()->create([
             'transfer_no' => 'TRF-NIUM123456',
+            'raw_data' => ['nium_approval' => \App\Services\Nium\NiumSwiftPayoutAuthorization::origin($user, $user, $provider)],
             'user_id' => $user->id,
             'provider_id' => $provider->id,
             'beneficiary_id' => $beneficiary->id,
@@ -207,7 +208,8 @@ class NiumTransferServiceTest extends TestCase
         [$provider, $transfer] = $this->makeSubmittableTransfer([
             'status' => 'approval_required', 'purpose_code' => 'IR004', 'reference_text' => 'INV-APPROVAL-001',
         ]);
-        $approver = User::factory()->create();
+        $approver = User::factory()->create(['status' => 'active']);
+        $approver->roles()->create(['role_code' => 'admin']);
         $levels = [];
         $baselineLevel = DB::transactionLevel();
         Http::fake(function ($request) use (&$levels) {
@@ -240,7 +242,8 @@ class NiumTransferServiceTest extends TestCase
     public function test_admin_approval_auto_submit_unknown_and_rejection_preserve_approval(): void
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer(['status' => 'approval_required']);
-        $approver = User::factory()->create();
+        $approver = User::factory()->create(['status' => 'active']);
+        $approver->roles()->create(['role_code' => 'admin']);
         Http::fake(function ($request) {
             if (str_contains($request->url(), '/purposeCodes')) {
                 return Http::response([
@@ -258,7 +261,8 @@ class NiumTransferServiceTest extends TestCase
     public function test_draft_nium_approval_does_not_auto_submit(): void
     {
         [$provider, $transfer] = $this->makeSubmittableTransfer(['status' => 'draft']);
-        $approver = User::factory()->create();
+        $approver = User::factory()->create(['status' => 'active']);
+        $approver->roles()->create(['role_code' => 'admin']);
         Http::fake([
             '*api/v1/remittance/purposeCodes' => Http::response([
                 ['description' => 'General Goods Trades', 'purposeCode' => 'IR01811'],

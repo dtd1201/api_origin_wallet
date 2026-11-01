@@ -7,6 +7,7 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 
 trait CreatesNiumRemittanceSafetyFixtures
 {
@@ -44,14 +45,19 @@ trait CreatesNiumRemittanceSafetyFixtures
             'currency' => 'USD', 'payout_method' => 'SWIFT', 'status' => 'active',
             'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT']],
         ]);
-        $transfer = Transfer::query()->create(array_merge([
+        $attributes = array_merge([
             'transfer_no' => 'TRF-'.strtoupper(uniqid()), 'user_id' => $user->id, 'provider_id' => $provider->id,
             'beneficiary_id' => $beneficiary->id, 'fx_quote_id' => null, 'transfer_type' => 'payout',
             'source_currency' => 'USD', 'target_currency' => 'USD', 'source_amount' => 10,
             'target_amount' => null, 'fx_rate' => null, 'fee_amount' => 0, 'fee_currency' => 'USD', 'status' => 'draft',
-            'purpose_code' => 'IR01811', 'raw_data' => [],
+            'purpose_code' => 'IR01811',
+            'raw_data' => ['nium_approval' => NiumSwiftPayoutAuthorization::origin($user, $user, $provider)],
             'reference_text' => 'INV-TEST-001',
-        ], $overrides));
+        ], $overrides);
+        // These fixtures have a known customer maker, even when a case overrides
+        // unrelated raw_data to exercise the immutable NIUM payload contract.
+        $attributes['raw_data']['nium_approval'] = NiumSwiftPayoutAuthorization::origin($user, $user, $provider);
+        $transfer = Transfer::query()->create($attributes);
 
         return [$provider, $transfer->fresh(['provider', 'user', 'beneficiary', 'fxQuote'])];
     }

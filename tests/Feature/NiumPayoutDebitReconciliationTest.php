@@ -17,6 +17,7 @@ use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
+use RuntimeException;
 use Tests\Concerns\CreatesSgdLocalExecutionFixtures;
 use Tests\Concerns\RefreshesCommittedPayoutDatabase;
 use Tests\TestCase;
@@ -249,6 +250,192 @@ class NiumPayoutDebitReconciliationTest extends TestCase
         $this->artisan('nium:reconcile-transfers')->assertExitCode(0);
         $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'adjustment')->count());
         $this->assertSame('71.41000000', Balance::query()->sole()->ledger_balance);
+    }
+
+    public static function returnChannels(): array
+    {
+        return ['status polling' => [false], 'authenticated webhook' => [true]];
+    }
+
+    private function returnWebhook(Transfer $transfer): array
+    {
+        return ['eventId' => 'synthetic-return', 'eventType' => 'remittance.returned', 'data' => ['resource' => [
+            'systemReferenceNumber' => $transfer->external_transfer_id, 'status' => 'RETURN']]];
+    }
+
+    #[DataProvider('returnChannels')]
+    public function test_sgd_return_is_a_failed_lifecycle_without_inventing_a_refund(bool $webhook): void
+    {
+        $transfer = $this->pending();
+        $this->activity([], 'RETURN');
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            if ($webhook) {
+                $this->withHeader('x-partner-key', 'synthetic-only')
+                    ->postJson('/api/webhooks/providers/nium', $this->returnWebhook($transfer))->assertOk();
+            } else {
+                $this->sync($transfer);
+            }
+        }
+        // The existing scheduler must continue looking for financial evidence after RETURN.
+        config()->set('services.nium.transfer_reconciliation_enabled', true);
+        $this->artisan('nium:reconcile-transfers')->assertExitCode(0);
+        $this->assertSame('failed', $transfer->fresh()->status);
+        $this->assertSame('RETURN', $transfer->fresh()->provider_status);
+        $this->assertSame('failed', $transfer->fresh()->raw_data['nium_execution']['terminal_status']);
+        $this->assertSame('awaiting_evidence', $transfer->fresh()->raw_data['nium_actual_debit']['state']);
+        $this->assertSame('85.00000000', Balance::query()->sole()->ledger_balance);
+        $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);
+        $this->assertDatabaseCount('ledger_entries', 1);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
+    }
+
+    #[DataProvider('returnChannels')]
+    public function test_return_after_paid_keeps_the_settled_history_until_refund_evidence_is_supported(bool $webhook): void
+    {
+        $transfer = $this->pending();
+        $this->activity([$this->principal($transfer)]);
+        $this->sync($transfer);
+        $before = LedgerEntry::query()->orderBy('id')->get()->toArray();
+        $this->activity([], 'RETURN');
+        if ($webhook) {
+            $this->withHeader('x-partner-key', 'synthetic-only')
+                ->postJson('/api/webhooks/providers/nium', $this->returnWebhook($transfer))->assertUnprocessable();
+        } else {
+            try {
+                $this->sync($transfer);
+                $this->fail('A returned lifecycle cannot reverse a paid debit without refund evidence.');
+            } catch (RuntimeException $exception) {
+                $this->assertStringContainsString('conflicts with an existing terminal status', $exception->getMessage());
+            }
+        }
+        $this->assertSame('completed', $transfer->fresh()->status);
+        $this->assertSame($before, LedgerEntry::query()->orderBy('id')->get()->toArray());
+        $this->assertSame('72.66000000', Balance::query()->sole()->ledger_balance);
+        $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    #[DataProvider('returnChannels')]
+    public function test_return_token_preserves_the_existing_hk_usd_status_behavior(bool $webhook): void
+    {
+        $transfer = $this->pending();
+        $transfer->update(['target_currency' => 'USD']);
+        $transfer->beneficiary->update(['country_code' => 'HK', 'currency' => 'USD', 'payout_method' => 'SWIFT']);
+        $this->activity([], 'RETURN');
+        if ($webhook) {
+            $this->withHeader('x-partner-key', 'synthetic-only')
+                ->postJson('/api/webhooks/providers/nium', $this->returnWebhook($transfer))->assertOk();
+        } else {
+            $this->sync($transfer);
+        }
+        $this->assertSame('pending', $transfer->fresh()->status);
+        $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);
+        $this->assertDatabaseCount('ledger_entries', 1);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public static function missingReferenceStates(): array
+    {
+        return ['crashed before saving response' => ['submitting', null],
+            'unknown with empty reference' => ['submission_unknown', '']];
+    }
+
+    #[DataProvider('missingReferenceStates')]
+    public function test_scheduler_recovers_a_captured_reference_and_reconciles_once_without_customer_action(string $status, ?string $reference): void
+    {
+        $transfer = $this->pending();
+        $principal = $this->principal($transfer);
+        $operation = $transfer->provider_operation_key;
+        $transfer->update(['status' => $status, 'external_transfer_id' => $reference]);
+        $this->travel(2)->days(); // Reconcile the original dispatch even after FX/pricing expiry.
+        $this->activity([$principal]);
+        config()->set('services.nium.transfer_reconciliation_enabled', true);
+        $this->artisan('nium:reconcile-transfers')->assertExitCode(0);
+        $this->artisan('nium:reconcile-transfers')->assertExitCode(0);
+        $current = $transfer->fresh();
+        $this->assertSame('completed', $current->status);
+        $this->assertSame('synthetic-sgd-reference', $current->external_transfer_id);
+        $this->assertSame($operation, $current->provider_operation_key);
+        $this->assertArrayHasKey('captured_outcome_recovery', $current->raw_data['sgd_local_workflow']);
+        $this->assertSame('principal_reconciled', $current->raw_data['nium_actual_debit']['state']);
+        $this->assertSame('72.66000000', Balance::query()->sole()->ledger_balance);
+        $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
+        $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public static function invalidRecoveryEvidence(): array
+    {
+        return ['uncaptured timeout' => ['timeout'], 'invalid response hash' => ['hash'],
+            'mismatched request intent' => ['request'], 'foreign wallet' => ['wallet']];
+    }
+
+    #[DataProvider('invalidRecoveryEvidence')]
+    public function test_scheduler_cannot_guess_a_missing_reference_or_retry_an_unknown_submission(string $case): void
+    {
+        $transfer = $this->pending();
+        $transfer->update(['status' => 'submission_unknown', 'external_transfer_id' => null]);
+        $log = ApiRequestLog::query()->where('operation', 'transfer_money')->sole();
+        if ($case === 'timeout') {
+            $log->update(['is_success' => false, 'response_status' => null]);
+            $log->niumExchangeEvidence->update(['response_received' => false, 'raw_response_body' => null]);
+        } elseif ($case === 'hash') {
+            $log->niumExchangeEvidence->update(['response_body_sha256' => str_repeat('0', 64)]);
+        } elseif ($case === 'request') {
+            $body = json_decode($log->niumExchangeEvidence->raw_request_body, true, 512, JSON_THROW_ON_ERROR);
+            $body['payout']['sourceAmount'] = 99;
+            $raw = json_encode($body, JSON_THROW_ON_ERROR);
+            $log->niumExchangeEvidence->update(['raw_request_body' => $raw, 'request_body_sha256' => hash('sha256', $raw)]);
+        } else {
+            $transfer->user->providerAccounts()->update(['external_account_id' => 'another-wallet']);
+        }
+        $before = LedgerEntry::query()->orderBy('id')->get()->toArray();
+        $this->activity([]);
+        config()->set('services.nium.transfer_reconciliation_enabled', true);
+        $this->artisan('nium:reconcile-transfers')->assertExitCode(1);
+        $this->artisan('nium:reconcile-transfers')->assertExitCode(1);
+        $this->assertNull($transfer->fresh()->external_transfer_id);
+        $this->assertSame('submission_unknown', $transfer->fresh()->status);
+        $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);
+        $this->assertSame($before, LedgerEntry::query()->orderBy('id')->get()->toArray());
+        $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
+        Http::assertNothingSent();
+    }
+
+    public function test_uncaptured_missing_reference_rotates_out_of_a_bounded_reconciliation_batch(): void
+    {
+        $unknown = $this->pending();
+        // updated_at is not fillable; persist the fixture's ordering explicitly.
+        $unknown->forceFill(['status' => 'submission_unknown', 'external_transfer_id' => null, 'updated_at' => now()->subMinutes(2)])->save();
+        ApiRequestLog::query()->where('operation', 'transfer_money')->sole()->niumExchangeEvidence
+            ->update(['response_body_sha256' => str_repeat('0', 64)]);
+        $known = $unknown->replicate(['provider_operation_key']);
+        $known->transfer_no = 'SYNTHETIC-KNOWN-REFERENCE';
+        $known->client_reference = 'SYNTHETIC-KNOWN-REFERENCE';
+        $known->external_transfer_id = 'synthetic-known-reference';
+        $known->status = 'pending';
+        $known->raw_data = [];
+        $known->updated_at = now()->subMinute();
+        $known->save();
+        $this->assertTrue($unknown->fresh()->updated_at->lt($known->fresh()->updated_at));
+        $this->activity([], 'PENDING');
+        config()->set('services.nium.transfer_reconciliation_enabled', true);
+        $this->artisan('nium:reconcile-transfers', ['--limit' => 1])
+            ->expectsOutput('Nium reconciliation complete: 0 reconciled, 0 skipped, 1 failed.')
+            ->assertExitCode(1);
+        Http::assertNothingSent();
+        $this->assertTrue($unknown->fresh()->updated_at->gt($known->fresh()->updated_at));
+        $this->artisan('nium:reconcile-transfers', ['--limit' => 1])
+            ->expectsOutput('Nium reconciliation complete: 1 reconciled, 0 skipped, 0 failed.')
+            ->assertExitCode(0);
+        Http::assertSent(fn ($request) => str_contains($request->url(), 'synthetic-known-reference'));
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        $this->assertNull($unknown->fresh()->external_transfer_id);
+        $this->assertSame('submission_unknown', $unknown->fresh()->status);
+        $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);
     }
 
     public function test_exact_provider_numeric_tokens_and_unexpected_overdrawn_fees_are_accounted_without_clamping(): void

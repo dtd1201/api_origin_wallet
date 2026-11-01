@@ -2,10 +2,11 @@
 
 namespace App\Http\Resources\User;
 
+use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
 use App\Services\Nium\NiumSgdLocalPayoutGate;
+use App\Support\BeneficiaryEditFields;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
-use Illuminate\Support\Arr;
 
 class BeneficiaryResource extends JsonResource
 {
@@ -22,7 +23,10 @@ class BeneficiaryResource extends JsonResource
             'phone' => $this->phone,
             'country_code' => $this->country_code,
             'currency' => $this->currency,
-            'payout_method' => $this->payout_method,
+            'payout_method' => filled($this->payout_method) ? $this->payout_method
+                : (strtolower((string) $this->provider?->code) === 'nium'
+                    ? app(NiumBeneficiaryPayoutMethodResolver::class)->resolve($this->resource) : null),
+            'edit_fields' => (object) BeneficiaryEditFields::forBeneficiary($this->resource),
             'payout_admission' => $this->when(
                 $this->country_code === 'SG' && $this->currency === 'SGD'
                     && strtolower((string) $this->provider?->code) === 'nium',
@@ -40,12 +44,6 @@ class BeneficiaryResource extends JsonResource
             'state' => $this->state,
             'postal_code' => $this->postal_code,
             'status' => $this->status,
-            'raw_data' => [
-                'nium' => Arr::only((array) data_get($this->raw_data, 'nium', []), [
-                    'payoutMethod', 'bankAccountType', 'beneficiaryBankAccountType', 'beneficiaryContactCountryCode',
-                    'remitterBeneficiaryRelationship', 'bankCodeType', 'branchCodeType', 'routingInfo', 'additionalFields',
-                ]),
-            ],
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

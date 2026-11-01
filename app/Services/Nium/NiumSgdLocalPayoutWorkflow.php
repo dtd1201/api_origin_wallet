@@ -467,6 +467,49 @@ final class NiumSgdLocalPayoutWorkflow
         ];
     }
 
+    /** Shared public status contract for standard Review/Submit and saved Customer reads. */
+    public function customerStatus(Transfer $transfer): array
+    {
+        $state = $transfer->raw_data['sgd_local_workflow']['state'] ?? 'unavailable';
+
+        return [
+            'state' => $state,
+            'dispatch_allowed' => false,
+            'dispatch_owner' => 'checker_approval',
+            'customer_accepted_at' => $transfer->raw_data['sgd_local_workflow']['customer_authorization']['accepted_at'] ?? null,
+            'recovery_required' => in_array($state, ['locking', 'lock_unknown'], true)
+                || in_array($transfer->status, ['submitting', 'submission_unknown'], true),
+        ];
+    }
+
+    /** Allowlisted saved Customer projection; internal presentation additions are private by default. */
+    public function customerPresentation(Transfer $transfer): array
+    {
+        $presentation = $this->presentation($transfer);
+
+        return [
+            ...$this->customerStatus($transfer),
+            'fx_lock_active' => $presentation['fx_lock_active'],
+            'fx_lock_enabled' => $presentation['fx_lock_enabled'],
+            'expected_fee' => [
+                'amount' => $presentation['expected_fee']['amount'],
+                'currency' => $presentation['expected_fee']['currency'],
+                'basis' => $presentation['expected_fee']['basis'],
+            ],
+            'provider_fee_status' => $presentation['provider_fee_status'],
+            'recovery_kind' => $presentation['recovery_kind'],
+            'can_request_recovery_review' => $presentation['can_request_recovery_review'],
+            'can_recover_captured_outcome' => $presentation['can_recover_captured_outcome'],
+            'recovery_review_requested_at' => $presentation['recovery_review_requested_at'],
+            'can_reconcile_status' => $presentation['can_reconcile_status'],
+            'can_restart_review' => $presentation['can_restart_review'],
+            'can_refresh_review' => $presentation['can_refresh_review'],
+            'can_refresh_pricing' => $presentation['can_refresh_pricing'],
+            'approval_request_allowed' => $presentation['approval_request_allowed'],
+            'blockers' => $presentation['blockers'],
+        ];
+    }
+
     public function presentation(Transfer $transfer): array
     {
         $workflow = $transfer->raw_data['sgd_local_workflow'] ?? [];

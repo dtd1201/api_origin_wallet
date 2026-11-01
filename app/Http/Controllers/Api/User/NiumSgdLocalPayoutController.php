@@ -158,7 +158,14 @@ final class NiumSgdLocalPayoutController extends Controller
 
     private function resource(Transfer $transfer): JsonResponse
     {
-        return response()->json((new TransferResource($transfer->load(['beneficiary', 'provider', 'user', 'fxQuote'])))->resolve());
+        $payload = (new TransferResource($transfer->load(['beneficiary', 'provider', 'user', 'fxQuote'])))->resolve();
+        // Legacy explicit preparation/consent responses retain their existing handshake.
+        // Saved Customer GETs use TransferResource's public projection exclusively.
+        if (isset($payload['payout_workflow'])) {
+            $payload['payout_workflow'] = app(NiumSgdLocalPayoutWorkflow::class)->presentation($transfer);
+        }
+
+        return response()->json($payload);
     }
 
     public function recoverCaptured(User $user, Transfer $transfer, NiumSgdLocalOutcomeRecovery $recovery): JsonResponse

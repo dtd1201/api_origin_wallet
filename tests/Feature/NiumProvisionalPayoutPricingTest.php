@@ -96,12 +96,17 @@ class NiumProvisionalPayoutPricingTest extends TestCase
         $this->assertSame($evidenceBefore, NiumApiExchangeEvidence::all()->map->getAttributes()->all());
         $this->record($recorded);
         $this->assertSame($history, $recorded->fresh()->raw_data['nium_provisional_pricing_history']);
+        // Preserve the policy assertions on the internal record, never on a Customer disclosure.
+        $policy = app(NiumProvisionalPayoutPricing::class)->presentation($recorded->fresh());
+        $this->assertSame('current', $policy['status']);
+        $this->assertSame('0', $policy['expected']['additional_fee_amount']);
+        $this->assertSame('5', $policy['expected']['total_wallet_debit']);
+        $this->assertFalse($policy['provider_verified']);
+        $this->assertFalse($policy['financial_authorization']);
         $this->withToken($this->sgdToken($transfer->user))->getJson('/api/user/users/12/transfers/3')
-            ->assertOk()->assertJsonPath('payout_workflow.provisional_pricing.status', 'current')
-            ->assertJsonPath('payout_workflow.provisional_pricing.expected.additional_fee_amount', '0')
-            ->assertJsonPath('payout_workflow.provisional_pricing.expected.total_wallet_debit', '5')
-            ->assertJsonPath('payout_workflow.provisional_pricing.provider_verified', false)
-            ->assertJsonPath('payout_workflow.provisional_pricing.financial_authorization', false)
+            ->assertOk()->assertJsonMissingPath('payout_workflow.provisional_pricing')
+            ->assertJsonMissingPath('payout_workflow.business_policy')
+            ->assertJsonMissingPath('payout_workflow.pilot_policy')
             ->assertJsonPath('payout_workflow.provider_fee_status', 'unavailable')
             ->assertJsonPath('payout_workflow.approval_request_allowed', false)
             ->assertJsonPath('fx_rate', $contractRate)

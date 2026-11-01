@@ -83,6 +83,10 @@ class NiumService
                         || bccomp((string) $hold->amount, '-'.$reservationAmount, 8) !== 0) {
                         throw new RuntimeException('SGD wire intent or funding no longer matches the approved operation.');
                     }
+                } elseif ($locked->target_currency === 'USD') {
+                    // Revalidate local maker/checker authority at the final dispatch
+                    // boundary too, including revocation after the reservation claim.
+                    app(\App\Services\Wallet\TransferApprovalService::class)->ensureApprovedForSubmission($locked);
                 }
                 $execution['dispatch_started_at'] = now()->toISOString();
                 $locked->update(['raw_data' => array_merge($locked->raw_data, ['nium_execution' => $execution])]);

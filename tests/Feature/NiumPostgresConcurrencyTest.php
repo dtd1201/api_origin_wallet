@@ -323,6 +323,7 @@ class NiumPostgresConcurrencyTest extends TestCase
         ]);
         $transfer = Transfer::query()->create([
             'transfer_no' => 'TRF-CONCURRENT', 'user_id' => $user->id, 'provider_id' => $provider->id,
+            'raw_data' => ['nium_approval' => \App\Services\Nium\NiumSwiftPayoutAuthorization::origin($user, $user, $provider)],
             'beneficiary_id' => $beneficiary->id, 'transfer_type' => 'payout',
             'source_currency' => 'USD', 'target_currency' => 'USD', 'source_amount' => 10,
             'fee_amount' => 0, 'fee_currency' => 'USD', 'purpose_code' => 'IR01811', 'status' => 'draft',
@@ -390,6 +391,7 @@ class NiumPostgresConcurrencyTest extends TestCase
         ]);
         $transfers = collect([1, 2])->map(fn (int $number): Transfer => Transfer::query()->create([
             'transfer_no' => "TRF-BALANCE-{$number}", 'user_id' => $user->id, 'provider_id' => $provider->id,
+            'raw_data' => ['nium_approval' => \App\Services\Nium\NiumSwiftPayoutAuthorization::origin($user, $user, $provider)],
             'beneficiary_id' => $beneficiary->id, 'transfer_type' => 'payout', 'source_currency' => 'USD',
             'target_currency' => 'USD', 'source_amount' => 80, 'fee_amount' => 0, 'fee_currency' => 'USD',
             'purpose_code' => 'IR01811', 'status' => 'draft',

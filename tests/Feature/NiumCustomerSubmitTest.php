@@ -49,13 +49,15 @@ class NiumCustomerSubmitTest extends TestCase
         Balance::query()->create(['user_id' => 12, 'provider_id' => $transfer->provider_id,
             'external_account_id' => 'unrelated-wallet', 'currency' => 'USD', 'available_balance' => '0',
             'ledger_balance' => '0', 'reserved_balance' => '0', 'as_of' => now()->addSecond()]);
-        $review = $this->withToken($this->sgdToken($transfer->user))
+        $this->withToken($this->sgdToken($transfer->user))
             ->getJson("/api/user/users/12/transfers/{$transfer->id}")->assertOk()
-            ->assertJsonPath('payout_workflow.approval_request_allowed', true);
-        $this->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-submit", [
-            'submission_token' => $review->json('payout_workflow.submission_token'),
-            'accept_payment_terms' => true, 'purpose_confirmed' => true,
-        ])->assertOk()->assertJsonPath('status', 'approval_required');
+            ->assertJsonPath('payout_workflow.approval_request_allowed', true)
+            ->assertJsonMissingPath('payout_workflow.submission_token')
+            ->assertJsonMissingPath('payout_workflow.customer_instruction')
+            ->assertJsonMissingPath('payout_workflow.customer_authorization');
+        // The synthetic consent fixture is bound internally; a saved GET never supplies its token.
+        $this->postJson("/api/user/users/12/transfers/{$transfer->id}/sgd-local-submit", $this->reviewToken($transfer))
+            ->assertOk()->assertJsonPath('status', 'approval_required');
         $this->assertSame(0, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
     }
 

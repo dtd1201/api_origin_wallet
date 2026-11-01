@@ -17,7 +17,6 @@ class TransferResource extends JsonResource
 
         return [
             'id' => $this->id,
-            'user_id' => $this->user_id,
             'transfer_no' => $this->transfer_no,
             'provider_id' => $this->provider_id,
             'source_bank_account_id' => $this->source_bank_account_id,
@@ -37,7 +36,7 @@ class TransferResource extends JsonResource
             ),
             'payout_workflow' => $this->when(
                 $sgdLocal && ($this->raw_data['sgd_local_workflow']['version'] ?? null) === 1,
-                fn () => app(NiumSgdLocalPayoutWorkflow::class)->presentation($this->resource),
+                fn () => app(NiumSgdLocalPayoutWorkflow::class)->customerPresentation($this->resource),
             ),
             'purpose_code' => $this->purpose_code,
             'reference_text' => $this->reference_text,

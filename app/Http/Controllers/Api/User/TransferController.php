@@ -9,7 +9,9 @@ use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumPurposeCodeService;
+use App\Services\Nium\NiumStandardTransferAdapter;
 use App\Services\Nium\NiumTransferPolicy;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use App\Services\Transfers\TransferClientReferenceIdempotency;
 use App\Services\Transfers\TransferEligibilityService;
 use App\Services\Wallet\TransferApprovalService;
@@ -25,6 +27,18 @@ use Throwable;
 
 class TransferController extends Controller
 {
+    public function review(Request $request, User $user, NiumStandardTransferAdapter $adapter): JsonResponse
+    {
+        abort_unless($request->user()?->id === $user->id, 403);
+        $input = $request->validate($this->standardSgdRules());
+
+        try {
+            return response()->json($adapter->review($user, $input));
+        } catch (Throwable $exception) {
+            return $this->standardSgdFailure($exception, $user, $input, $adapter);
+        }
+    }
+
     public function index(User $user): JsonResponse
     {
         return response()->json(
@@ -74,6 +88,27 @@ class TransferController extends Controller
 
         $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
         $validated['provider_id'] = $provider->id;
+
+        if (strtolower((string) $provider->code) === 'nium' && $validated['target_currency'] === 'SGD') {
+            abort_unless($request->user()?->id === $user->id, 403);
+            $input = $request->validate([
+                ...$this->standardSgdRules(),
+                'transfer_type' => ['required', 'in:payout'],
+                'source_currency' => ['required', 'in:USD'],
+                'target_currency' => ['required', 'in:SGD'],
+                'review_token' => ['required', 'string', 'max:20000'],
+                'accept_payment_terms' => ['required', 'accepted'],
+                'purpose_confirmed' => ['required', 'accepted'],
+            ]);
+            $adapter = app(NiumStandardTransferAdapter::class);
+            try {
+                [$transfer, $replayed] = $adapter->submit($user, $input);
+
+                return response()->json($adapter->customerTransfer($transfer), $replayed ? 200 : 201);
+            } catch (Throwable $exception) {
+                return $this->standardSgdFailure($exception, $user, $input, $adapter);
+            }
+        }
 
         if (isset($validated['beneficiary_id'])) {
             $beneficiary = $user->beneficiaries()->findOrFail($validated['beneficiary_id']);
@@ -150,6 +185,11 @@ class TransferController extends Controller
             return $this->idempotentCreateResponse($existing, $validated, $idempotency);
         }
 
+        if (strtolower((string) $provider->code) === 'nium' && $validated['target_currency'] === 'USD') {
+            // Never accept maker attribution from a request or retrofit it on a replay.
+            $validated['raw_data']['nium_approval'] = NiumSwiftPayoutAuthorization::origin($request->user(), $user, $provider);
+        }
+
         try {
             $transfer = DB::transaction(function () use ($approvalService, $user, $validated, $clientReference): Transfer {
                 $transfer = $user->transfers()->create([
@@ -195,6 +235,49 @@ class TransferController extends Controller
     private function decimal(mixed $value): string
     {
         return number_format((float) $value, 8, '.', '');
+    }
+
+    private function standardSgdRules(): array
+    {
+        return [
+            'provider_id' => ['required', 'integer', 'exists:integration_providers,id'],
+            'beneficiary_id' => ['required', 'integer'],
+            'source_amount' => ['required', 'numeric', 'gt:0', 'decimal:0,8'],
+            'purpose_code' => ['required', 'string', 'max:100'],
+            'reference_text' => ['required', 'string', 'max:255'],
+            'client_reference' => ['required', 'string', 'max:100'],
+            'transfer_id' => ['sometimes', 'integer'],
+            'preparation_id' => ['sometimes', 'uuid'],
+            'transfer_type' => ['sometimes', 'in:payout'],
+            'source_currency' => ['sometimes', 'in:USD'],
+            'target_currency' => ['sometimes', 'in:SGD'],
+            'fx_quote_id' => ['prohibited'], 'fx_rate' => ['prohibited'],
+            'fee_amount' => ['prohibited'], 'fee_currency' => ['prohibited'],
+            'total_wallet_debit' => ['prohibited'], 'provider_verified' => ['prohibited'],
+            'target_amount' => ['prohibited'], 'source_bank_account_id' => ['prohibited'],
+            'raw_data' => ['prohibited'], 'accept_uncapped_charges' => ['prohibited'],
+        ];
+    }
+
+    private function standardSgdFailure(
+        Throwable $exception,
+        User $user,
+        array $input,
+        NiumStandardTransferAdapter $adapter,
+    ): JsonResponse {
+        if ($exception instanceof \Illuminate\Database\Eloquent\ModelNotFoundException
+            || $exception instanceof \Symfony\Component\HttpKernel\Exception\HttpExceptionInterface) {
+            throw $exception;
+        }
+        $transfer = $user->transfers()->where('provider_id', $input['provider_id'])
+            ->where('client_reference', $input['client_reference'])->first();
+
+        return response()->json([
+            'message' => $exception->getMessage() === \App\Services\Nium\NiumPayoutFinancialControls::BLOCK_REASON
+                ? \App\Services\Nium\NiumPayoutFinancialControls::BLOCK_REASON
+                : 'SGD LOCAL review or acceptance could not be completed. Check the saved instruction before continuing.',
+            'transfer' => $transfer === null ? null : $adapter->customerTransfer($transfer),
+        ], 422);
     }
 
     private function idempotentCreateResponse(

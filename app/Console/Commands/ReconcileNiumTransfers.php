@@ -7,6 +7,7 @@ use App\Models\LedgerEntry;
 use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumPayoutDebitReconciliation;
+use App\Services\Nium\NiumSgdLocalOutcomeRecovery;
 use App\Support\SensitiveDataSanitizer;
 use Illuminate\Console\Command;
 use Throwable;
@@ -21,6 +22,7 @@ class ReconcileNiumTransfers extends Command
     public function handle(
         ProviderTransferManager $manager,
         SensitiveDataSanitizer $sanitizer,
+        NiumSgdLocalOutcomeRecovery $recovery,
     ): int {
         if (! (bool) config('services.nium.transfer_reconciliation_enabled', false)) {
             $this->info('Nium transfer reconciliation is disabled.');
@@ -64,8 +66,21 @@ class ReconcileNiumTransfers extends Command
                         ->whereNotNull('provider_operation_key')->whereIn('status', ['completed', 'failed', 'cancelled', 'rejected']);
                 });
             })
-            ->whereNotNull('external_transfer_id')
-            ->where('external_transfer_id', '<>', '')
+            ->where(function ($references): void {
+                $references->where(function ($known): void {
+                    $known->whereNotNull('external_transfer_id')->where('external_transfer_id', '<>', '');
+                })->orWhere(function ($missing): void {
+                    // A captured successful POST may survive a crash before reference persistence.
+                    // Only the existing verifier can recover it; never issue another POST.
+                    $missing->where('source_currency', 'USD')->where('target_currency', 'SGD')
+                        ->whereIn('status', ['submitting', 'submission_unknown'])
+                        ->whereNotNull('provider_operation_key')
+                        ->whereNotNull('raw_data->nium_execution->dispatch_started_at')
+                        ->where(function ($empty): void {
+                            $empty->whereNull('external_transfer_id')->orWhere('external_transfer_id', '');
+                        });
+                });
+            })
             ->with([
                 'user',
                 'beneficiary',
@@ -97,7 +112,11 @@ class ReconcileNiumTransfers extends Command
                 continue;
             }
 
+            $recoveringReference = ! filled($transfer->external_transfer_id);
             try {
+                if ($recoveringReference) {
+                    $transfer = $recovery->recover($transfer);
+                }
                 $updated = $manager->syncTransferStatus(
                     $provider,
                     $transfer
@@ -110,6 +129,14 @@ class ReconcileNiumTransfers extends Command
                 );
             } catch (Throwable $exception) {
                 $failed++;
+
+                if ($recoveringReference) {
+                    // Rotate unresolved captures through the bounded batch without changing
+                    // their financial state or letting them permanently starve other payouts.
+                    Transfer::query()->whereKey($transfer->id)
+                        ->where('provider_operation_key', $transfer->provider_operation_key)
+                        ->update(['updated_at' => now()]);
+                }
 
                 $message = (string) $sanitizer->sanitize(
                     $exception->getMessage()

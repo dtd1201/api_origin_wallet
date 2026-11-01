@@ -577,7 +577,8 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             'raw_data' => ['nium' => ['payoutMethod' => 'SWIFT', 'beneficiaryBankAccountType' => 'CURRENT',
                 'routingInfo' => [['type' => 'SWIFT', 'value' => 'HKBCHKHH']], 'additionalFields' => ['beneficiaryAlias' => 'Vendor alias']]],
         ])->assertOk()->assertJsonPath('bank_code', null)->assertJsonPath('branch_code', null)
-            ->assertJsonPath('raw_data.nium.beneficiaryBankAccountType', 'CURRENT');
+            ->assertJsonPath('edit_fields.bank_account_type', 'CURRENT')
+            ->assertJsonMissingPath('raw_data');
         Http::assertSent(fn ($request) => $request->method() === 'PUT' && $request['routingCodeType1'] === 'SWIFT'
             && $request['beneficiaryBankAccountType'] === 'CURRENT' && $request['beneficiaryAlias'] === 'Vendor alias'
             && ! isset($request['beneficiaryBankCode']) && ! isset($request['routingCodeType2']));
@@ -729,10 +730,11 @@ class NiumBeneficiaryLifecycleTest extends TestCase
 
     private function beneficiaryPayload(IntegrationProvider $provider): array
     {
-        return [
-            'provider_id' => $provider->id,
-            ...$this->beneficiaryAttributes($provider),
-        ];
+        $payload = $this->beneficiaryAttributes($provider);
+        // Status belongs to database fixtures and provider responses, never Customer requests.
+        unset($payload['status']);
+
+        return $payload;
     }
 
     private function beneficiaryAttributes(IntegrationProvider $provider): array

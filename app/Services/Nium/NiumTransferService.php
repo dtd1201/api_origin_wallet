@@ -222,7 +222,8 @@ class NiumTransferService implements PreparedTransferStatusProvider
             'response_data' => $responseData,
             'status_payload' => $statusPayload,
             'status' => $this->normalizeTransferStatus(
-                $statusPayload['status'] ?? $statusPayload['subStatus'] ?? null
+                $statusPayload['status'] ?? $statusPayload['subStatus'] ?? null,
+                $transfer,
             ),
             'status_at' => $this->statusTimestamp($statusPayload),
             'wallet_activity' => NiumPayoutDebitReconciliation::applies($transfer)
@@ -505,8 +506,15 @@ class NiumTransferService implements PreparedTransferStatusProvider
         return is_array($items) ? $items : [];
     }
 
-    private function normalizeTransferStatus(?string $status): string
+    private function normalizeTransferStatus(?string $status, Transfer $transfer): string
     {
+        // Singapore documents RETURN as well as the generic RETURNED token.
+        // This is lifecycle evidence only; SGD refund/release still needs financial evidence.
+        if ($transfer->source_currency === 'USD' && $transfer->target_currency === 'SGD'
+            && strtoupper(trim((string) $status)) === 'RETURN') {
+            return 'failed';
+        }
+
         return match (strtoupper((string) $status)) {
             'PAID', 'SUCCESS', 'SUCCEEDED', 'COMPLETED' => 'completed',
             'FAILED', 'ERROR', 'REJECTED', 'RETURNED' => 'failed',

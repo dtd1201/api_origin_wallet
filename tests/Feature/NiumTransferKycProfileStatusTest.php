@@ -7,6 +7,7 @@ use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use App\Services\Nium\NiumTransferService;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -136,6 +137,8 @@ class NiumTransferKycProfileStatusTest extends TestCase
         $transfer = $user->transfers()->create([
             ...$payload,
             'transfer_no' => 'TRF-KYC-STATUS',
+            // This case isolates KYC eligibility; maker attribution is a valid prerequisite.
+            'raw_data' => ['nium_approval' => NiumSwiftPayoutAuthorization::origin($user, $user, $provider)],
             'status' => 'draft',
             'fee_amount' => 0,
             'fee_currency' => 'USD',
@@ -154,6 +157,7 @@ class NiumTransferKycProfileStatusTest extends TestCase
         $this->assertDatabaseCount('transfers', 1);
         $this->assertSame('draft', $transfer->fresh()->status);
         $this->assertNull($transfer->fresh()->provider_operation_key);
+        $this->assertDatabaseCount('ledger_entries', 0);
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST');
     }
 

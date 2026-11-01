@@ -4,6 +4,7 @@ namespace App\Http\Resources\Admin;
 
 use App\Services\Nium\NiumSgdLocalPayoutAmounts;
 use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -15,6 +16,8 @@ class TransferListResource extends JsonResource
             && ($this->raw_data['sgd_local_workflow']['version'] ?? null) === 1;
         $amounts = $controlledSgd ? app(NiumSgdLocalPayoutAmounts::class)->forTransfer($this->resource) : null;
         $workflow = $controlledSgd ? app(NiumSgdLocalPayoutWorkflow::class)->presentation($this->resource) : null;
+        $swift = app(NiumSwiftPayoutAuthorization::class);
+        $swiftApproval = $swift->applies($this->resource);
 
         return [
             'id' => $this->id,
@@ -51,8 +54,9 @@ class TransferListResource extends JsonResource
             'provider' => $this->whenLoaded('provider', fn () => (new ProviderSummaryResource($this->provider))->resolve($request)),
             'approvals' => $this->whenLoaded('approvals', fn () => $this->approvalPayloads($request)),
             'allowed_actions' => [
-                'approve' => (! $controlledSgd || (($workflow['checker_approval_allowed'] ?? false)
-                    && $request->user()?->id !== $this->user_id)) && $request->user()?->hasPermission('transfers.approve') === true,
+                'approve' => $swiftApproval ? $swift->canApprove($this->resource, $request->user())
+                    : (! $controlledSgd || (($workflow['checker_approval_allowed'] ?? false)
+                        && $request->user()?->id !== $this->user_id)) && $request->user()?->hasPermission('transfers.approve') === true,
                 'reject' => $request->user()?->hasPermission('transfers.reject') === true,
                 'sync' => $request->user()?->hasPermission('transfers.manage') === true,
             ],

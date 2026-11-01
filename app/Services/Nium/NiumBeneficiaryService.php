@@ -147,9 +147,11 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             externalReference: (string) $beneficiary->id,
         );
 
+        $responseData = $response->json();
+        if (! is_array($responseData)) {
+            throw new NiumBeneficiaryWriteException($response, 'beneficiary_account_verification', $requestId);
+        }
         if (! $response->successful()) {
-            $responseData = $response->json() ?? ['raw' => $response->body()];
-
             $beneficiary->update([
                 'status' => 'verification_failed',
                 'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
@@ -157,8 +159,6 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
             throw new NiumBeneficiaryWriteException($response, 'beneficiary_account_verification', $requestId);
         }
-
-        $responseData = $response->json() ?? ['raw' => $response->body()];
 
         $beneficiary->update([
             'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
@@ -231,7 +231,8 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         );
 
         if (! $response->successful()) {
-            $responseData = $response->json() ?? ['raw' => $response->body()];
+            $responseData = $response->json();
+            $responseData = is_array($responseData) ? $responseData : [];
 
             $beneficiary->update([
                 'status' => 'delete_failed',
@@ -240,6 +241,40 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
             throw new RuntimeException("{$provider->name} beneficiary deletion failed.");
         }
+    }
+
+    /**
+     * Local authorization evidence from the same effective recipient inputs as registration.
+     * Includes names/account type, bank account, typed routing, proxy/card destination,
+     * recipient identification/address and schema-supplied beneficiary inputs. Never
+     * include provider responses, verification evidence, diagnostics or timestamps.
+     */
+    public function receivingAccountBinding(Beneficiary $beneficiary): array
+    {
+        $payload = $this->buildBeneficiaryPayload($beneficiary);
+        foreach ((array) data_get($beneficiary->raw_data, 'nium.additionalFields', []) as $name => $value) {
+            if ($value !== null && $value !== '' && ! array_key_exists($name, $payload)) {
+                $payload[$name] = $value;
+            }
+        }
+
+        return $this->canonicalReceivingAccount($payload);
+    }
+
+    private function canonicalReceivingAccount(array $values): array
+    {
+        // The registration builder already resolves aliases and omits absent/null/empty
+        // optional inputs. Preserve significant values (including account leading zeros).
+        foreach ($values as $key => $value) {
+            if (is_array($value)) {
+                $values[$key] = $this->canonicalReceivingAccount($value);
+            }
+        }
+        if (! array_is_list($values)) {
+            ksort($values, SORT_STRING);
+        }
+
+        return $values;
     }
 
     private function buildBeneficiaryPayload(Beneficiary $beneficiary): array
@@ -303,13 +338,28 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         ?string $requestId = null,
     ): Beneficiary {
         $responseData = $response->json() ?? ['raw' => $response->body()];
+        if (! is_array($responseData)) {
+            throw new NiumBeneficiaryWriteException($response, "beneficiary_{$action}", $requestId);
+        }
         $payload = $this->beneficiaryResponsePayload($responseData);
         $providerBeneficiaryId = $payload['beneficiaryHashId'] ?? $payload['id'] ?? null;
         $resolvedBeneficiaryId = $action === 'create'
             ? $providerBeneficiaryId
             : ($providerBeneficiaryId ?? $beneficiary->external_beneficiary_id);
 
-        if (! $response->successful() || ! filled($resolvedBeneficiaryId)) {
+        $invalidIdentity = ! is_string($resolvedBeneficiaryId) || trim($resolvedBeneficiaryId) === '';
+        foreach (['beneficiaryHashId', 'id'] as $field) {
+            if (array_key_exists($field, $payload)
+                && (! is_string($payload[$field]) || $payload[$field] !== $resolvedBeneficiaryId)) {
+                $invalidIdentity = true;
+            }
+        }
+        // Updates may omit an ID, but must never reassign a registered provider identity.
+        if ($action === 'update' && $resolvedBeneficiaryId !== $beneficiary->external_beneficiary_id) {
+            $invalidIdentity = true;
+        }
+        if (! $response->successful() || $invalidIdentity
+            || (array_key_exists('status', $payload) && ! is_string($payload['status']))) {
             $beneficiary->update([
                 'status' => "{$action}_failed",
                 'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
@@ -474,9 +524,9 @@ class NiumBeneficiaryService implements BeneficiaryProvider
     {
         $rawData = $this->mergeSafeOperationalData($beneficiary, $responseData);
         $nium = (array) ($rawData['nium'] ?? []);
-        $nium['provider_verified'] = [
+        $nium['provider_verified'] = array_replace((array) ($nium['provider_verified'] ?? []), [
             'payout_method' => strtoupper((string) $requestPayload['payoutMethod']),
-        ];
+        ]);
         $rawData['nium'] = $nium;
 
         return $rawData;

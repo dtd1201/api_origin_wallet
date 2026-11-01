@@ -12,7 +12,9 @@ use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
 use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\NiumBeneficiaryWriteException;
 use App\Services\Nium\NiumUnsupportedBeneficiaryCorridor;
+use App\Support\BeneficiaryEditFields;
 use App\Support\PrimaryProvider;
+use Illuminate\Http\Client\HttpClientException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -103,7 +105,11 @@ class BeneficiaryController extends Controller
     {
         $validated = $request->validate([
             'provider_id' => ['sometimes', 'nullable', 'exists:integration_providers,id'],
+            'id' => ['prohibited'],
+            'user_id' => ['prohibited'],
             'external_beneficiary_id' => ['prohibited'],
+            'payout_method' => ['prohibited'],
+            'status' => ['prohibited'],
             'beneficiary_type' => ['required', 'string', 'max:20'],
             'full_name' => ['required', 'string', 'max:255'],
             'company_name' => ['nullable', 'string', 'max:255'],
@@ -125,6 +131,10 @@ class BeneficiaryController extends Controller
             'raw_data' => ['nullable', 'array'],
             'raw_data.nium' => ['sometimes', 'array'],
             'raw_data.nium.request' => ['prohibited'],
+            'raw_data.nium.provider_verified' => ['prohibited'],
+            'raw_data.nium.beneficiary_preflight' => ['prohibited'],
+            'raw_data.nium.payout_method' => ['prohibited'],
+            'raw_data.nium.routing_info' => ['prohibited'],
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
@@ -151,6 +161,10 @@ class BeneficiaryController extends Controller
         try {
             $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
             $validated['provider_id'] = $provider->id;
+            if ($provider->code === 'nium') {
+                // Only customer form inputs may be supplied; verification is created by Production.
+                $validated['raw_data'] = BeneficiaryEditFields::mergeUpdate(new Beneficiary, (array) ($validated['raw_data'] ?? []));
+            }
 
             $beneficiary = DB::transaction(function () use ($user, $provider, $validated, $manager): Beneficiary {
                 $provider->assertSupportsCapability('beneficiary');
@@ -161,7 +175,7 @@ class BeneficiaryController extends Controller
 
                 return $manager->createBeneficiary($provider, $beneficiary->load('user'));
             });
-        } catch (RuntimeException|InvalidArgumentException|ValidationException $exception) {
+        } catch (RuntimeException|InvalidArgumentException|HttpClientException|ValidationException $exception) {
             if ($exception instanceof ValidationException) {
                 throw $exception;
             }
@@ -183,6 +197,11 @@ class BeneficiaryController extends Controller
 
         $validated = $request->validate([
             'provider_id' => ['sometimes', 'required', 'exists:integration_providers,id', 'in:'.$beneficiary->provider_id],
+            'id' => ['prohibited'],
+            'user_id' => ['prohibited'],
+            'external_beneficiary_id' => ['prohibited'],
+            'payout_method' => ['prohibited'],
+            'status' => ['prohibited'],
             'beneficiary_type' => ['sometimes', 'string', 'max:20'],
             'full_name' => ['sometimes', 'string', 'max:255'],
             'company_name' => ['sometimes', 'nullable', 'string', 'max:255'],
@@ -204,6 +223,10 @@ class BeneficiaryController extends Controller
             'raw_data' => ['sometimes', 'nullable', 'array'],
             'raw_data.nium' => ['sometimes', 'array'],
             'raw_data.nium.request' => ['prohibited'],
+            'raw_data.nium.provider_verified' => ['prohibited'],
+            'raw_data.nium.beneficiary_preflight' => ['prohibited'],
+            'raw_data.nium.payout_method' => ['prohibited'],
+            'raw_data.nium.routing_info' => ['prohibited'],
             'raw_data.nium.verify_before_create' => ['sometimes', 'boolean'],
             'raw_data.nium.payoutMethod' => ['sometimes', 'nullable', 'string', 'max:50'],
             'raw_data.nium.bankAccountType' => ['sometimes', 'nullable', 'string', 'max:50'],
@@ -231,10 +254,17 @@ class BeneficiaryController extends Controller
             $beneficiary = DB::transaction(function () use ($beneficiary, $validated, $manager, $payoutMethods): Beneficiary {
                 $beneficiary = Beneficiary::query()->lockForUpdate()->findOrFail($beneficiary->id);
                 $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+                $replacesRouting = is_array(data_get($validated, 'raw_data.nium.routingInfo'));
+                if ($provider->code === 'nium') {
+                    // Merge under the row lock so omitted form fields and captured evidence survive.
+                    $validated['raw_data'] = BeneficiaryEditFields::mergeUpdate(
+                        $beneficiary, (array) ($validated['raw_data'] ?? []), $payoutMethods->resolve($beneficiary),
+                    );
+                }
                 if ($provider->code === 'nium' && filled($beneficiary->external_beneficiary_id)) {
                     $this->assertRegisteredCorridorUnchanged($beneficiary, $validated, $payoutMethods);
                 }
-                if ($provider->code === 'nium' && is_array(data_get($validated, 'raw_data.nium.routingInfo'))) {
+                if ($provider->code === 'nium' && $replacesRouting) {
                     // A full typed routing replacement also clears obsolete legacy columns.
                     $validated += ['bank_code' => null, 'branch_code' => null, 'swift_bic' => null];
                 }
@@ -243,7 +273,7 @@ class BeneficiaryController extends Controller
 
                 return $manager->updateBeneficiary($provider, $beneficiary->fresh()->load('user'));
             });
-        } catch (RuntimeException|InvalidArgumentException $exception) {
+        } catch (RuntimeException|InvalidArgumentException|HttpClientException $exception) {
             return $this->providerFailureResponse($exception, 'update', $user->id, $beneficiary->id);
         }
 
@@ -261,7 +291,7 @@ class BeneficiaryController extends Controller
                 $manager->deleteBeneficiary($provider, $beneficiary->load('user'));
                 $beneficiary->delete();
             });
-        } catch (RuntimeException|InvalidArgumentException $exception) {
+        } catch (RuntimeException|InvalidArgumentException|HttpClientException $exception) {
             return $this->providerFailureResponse($exception, 'delete', $user->id, $beneficiary->id);
         }
 
@@ -297,7 +327,7 @@ class BeneficiaryController extends Controller
     }
 
     private function providerFailureResponse(
-        RuntimeException|InvalidArgumentException $exception,
+        RuntimeException|InvalidArgumentException|HttpClientException $exception,
         string $operation,
         int $userId,
         ?int $beneficiaryId = null,
