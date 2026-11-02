@@ -1,0 +1,15 @@
+# Reviewed include INSIDE the existing API server. Replace its competing root/
+# location/fastcgi definitions; preserve TLS, auth, upload limits, CORS and callbacks.
+root @RELEASE@/public;
+index index.php;
+location / {
+    try_files $uri $uri/ /index.php?$query_string;
+}
+location = /index.php {
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME @RELEASE@/public/index.php;
+    fastcgi_param DOCUMENT_ROOT @RELEASE@/public;
+    fastcgi_pass unix:/run/origin-wallet-@ID@/fpm.sock;
+}
+location ~ \.php$ { return 404; }
+location ~ /\.(?!well-known).* { deny all; }

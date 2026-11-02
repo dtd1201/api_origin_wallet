@@ -35,6 +35,8 @@ final class NiumProvisionalPayoutPricing
     /** Append metadata after explicit authenticated owner confirmation; never change transfer state. */
     public function record(Transfer $transfer, User $maker, int $fxQuoteId): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquireFor($transfer);
+
         return DB::transaction(function () use ($transfer, $maker, $fxQuoteId): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
             if ($locked->id !== 3 || $locked->user_id !== $maker->id || $maker->status !== 'active'

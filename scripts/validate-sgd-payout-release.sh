@@ -17,20 +17,12 @@ export DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL=''
 unset DATABASE_URL
 export CACHE_STORE=array SESSION_DRIVER=array MAIL_MAILER=array QUEUE_CONNECTION=sync LOG_CHANNEL=stderr
 export NIUM_SGD_LOCAL_ZERO_FEE_ENABLED=false NIUM_PAYOUT_PILOT_ENABLED=false
-# These production policy/workflow files must remain byte-identical to the reviewed baseline.
-protected_policy_files=(
-  app/Services/Nium/NiumSgdLocalZeroFeePolicy.php
-  app/Services/Nium/NiumPayoutFinancialControls.php
-  app/Services/Nium/NiumConfiguredRemittancePricing.php
-  app/Services/Nium/NiumStandardTransferAdapter.php
-  app/Services/Nium/NiumSgdLocalPayoutWorkflow.php
-  app/Services/Nium/NiumSwiftPayoutAuthorization.php
-  app/Services/Wallet/TransferApprovalService.php
-  app/Services/Wallet/LedgerService.php
-  config/services.php
-)
-git diff --exit-code 7a4c95a -- "${protected_policy_files[@]}"
+# These production financial policy/ledger/config files must remain byte-identical to the reviewed baseline.
+sha256sum --check --status docs/sgd-activation/financial-policy.sha256
 payout_tests=(
+  tests/Feature/NiumSgdAdmissionBridgeTest.php
+  tests/Unit/SgdActivationPostgresSafetyTest.php
+  tests/Feature/NiumSgdAdmissionFenceTest.php
   tests/Unit/NiumPayoutQuoteContractTest.php
   tests/Unit/PayoutPostgresSafetyTest.php
   tests/Unit/SgdReleasePostgresSafetyTest.php

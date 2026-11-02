@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Root-owned stable wrapper; only the production cron entry calls this file.
+set -euo pipefail
+exec 9<@SCHEDULER_LOCK@
+flock -s 9
+# Resolve AFTER obtaining the lease. An exclusive cutover lock serializes switches.
+OW_SCHEDULE_RELEASE="$(readlink -e @SCHEDULER_POINTER@)"
+case "$OW_SCHEDULE_RELEASE" in @RELEASES_ROOT@/*) ;; *) exit 1 ;; esac
+[[ -f "$OW_SCHEDULE_RELEASE/artisan" && -f "$OW_SCHEDULE_RELEASE/bootstrap/cache/config.php" ]]
+export APP_CONFIG_CACHE="$OW_SCHEDULE_RELEASE/bootstrap/cache/config.php"
+export NIUM_SGD_ADMISSION_DIRECTORY=@FENCE@
+cd "$OW_SCHEDULE_RELEASE"
+# Keep this shell/lease until the synchronous schedule:run and its children finish.
+@PHP_BINARY@ "$OW_SCHEDULE_RELEASE/artisan" schedule:run

@@ -1,0 +1,17 @@
+; Install as a NEW group; never alter/restart all Supervisor programs.
+[program:origin_wallet_@ID@]
+process_name=%(program_name)s_%(process_num)02d
+directory=@RELEASE@
+command=@PHP_BINARY@ @RELEASE@/artisan queue:work --queue=@QUEUE_LIST@ --sleep=@WORKER_SLEEP@ --tries=@WORKER_TRIES@ --timeout=@WORKER_TIMEOUT@ --max-time=@WORKER_MAX_TIME@
+environment=APP_CONFIG_CACHE="@RELEASE@/bootstrap/cache/config.php",NIUM_SGD_ADMISSION_DIRECTORY="@FENCE@"
+autostart=false
+autorestart=true
+stopsignal=TERM
+stopasgroup=false
+killasgroup=false
+user=@RUNTIME_USER@
+numprocs=@WORKER_PROCESS_COUNT@
+redirect_stderr=true
+stdout_logfile=@STORAGE@/logs/worker-@ID@.log
+; Confirm installed job/queue timeout and retry_after before using this bound.
+stopwaitsecs=@WORKER_STOPWAITSECS@

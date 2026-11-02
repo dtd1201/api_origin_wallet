@@ -1,0 +1,26 @@
+; NEW dedicated master. Never include the shared php8.3 pool directory.
+[global]
+pid = /run/origin-wallet-@ID@/master.pid
+error_log = /var/log/origin-wallet/@ID@-fpm.log
+daemonize = no
+
+[origin_wallet_@ID@]
+user = @RUNTIME_USER@
+group = @RUNTIME_GROUP@
+listen = /run/origin-wallet-@ID@/fpm.sock
+listen.owner = @RUNTIME_USER@
+listen.group = @NGINX_GROUP@
+listen.mode = 0660
+chdir = @RELEASE@
+pm = ondemand
+pm.max_children = @MAX_CHILDREN@
+pm.process_idle_timeout = 20s
+clear_env = yes
+env[APP_CONFIG_CACHE] = @RELEASE@/bootstrap/cache/config.php
+env[NIUM_SGD_ADMISSION_DIRECTORY] = @FENCE@
+catch_workers_output = yes
+php_admin_flag[display_errors] = off
+php_admin_flag[log_errors] = on
+php_admin_value[error_log] = @STORAGE@/logs/php-@ID@.log
+; Do not forcibly terminate a financial request during this cutover.
+request_terminate_timeout = 0

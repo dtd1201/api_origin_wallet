@@ -29,6 +29,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquireFor($transfer->fresh(['provider']));
         $authoritativePurposeCodes = $this->purposeCodes->supported($transfer->user()->firstOrFail());
 
         // Provider I/O must remain outside the transfer row-lock transaction.

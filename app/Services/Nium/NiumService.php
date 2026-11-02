@@ -66,6 +66,10 @@ class NiumService
                         throw new RuntimeException('Remittance dispatch requires its live owned reservation.');
                     }
                     if ($locked->target_currency === 'SGD') {
+                        if (! (bool) config('services.nium.payout_fx_enabled', false)) {
+                            throw new RuntimeException('SGD payout FX is disabled before dispatch.');
+                        }
+                        app(NiumSgdAdmissionFence::class)->assertOpen();
                         app(NiumSgdLocalPayoutAuthorization::class)->assertDispatchSnapshot($locked);
                         $approved = $locked->raw_data['sgd_local_approval'];
                         $reservationAmount = $approved['financial_terms']['reservation_amount'] ?? $approved['financial_terms']['total_wallet_debit'];
@@ -86,6 +90,7 @@ class NiumService
                             || bccomp((string) $hold->amount, '-'.$reservationAmount, 8) !== 0) {
                             throw new RuntimeException('SGD wire intent or funding no longer matches the approved operation.');
                         }
+                        app(NiumSgdAdmissionFence::class)->assertOpen();
                         // The wallet row lock may have waited past quote/policy expiry.
                         // Recheck after every potentially blocking lock, before committing wire authority.
                         app(NiumSgdLocalPayoutAuthorization::class)->assertDispatchSnapshot($locked);

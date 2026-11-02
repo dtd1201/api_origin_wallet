@@ -26,6 +26,7 @@ final class NiumPayoutFxLockService
         string $targetCurrency,
         string|float|int $sourceAmount,
     ): FxQuote {
+        $admissionLease = strtoupper(trim($targetCurrency)) === 'SGD' ? app(NiumSgdAdmissionFence::class)->acquire() : null;
         if (! (bool) config('services.nium.payout_fx_enabled', false)) {
             throw new RuntimeException('Nium payout FX is not enabled.');
         }
@@ -51,6 +52,7 @@ final class NiumPayoutFxLockService
     /** Separate explicit preparation workflow; never used by listing or ordinary submit. */
     public function createSgdPreparationLock(Transfer $transfer, string $requestId): FxQuote
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         if (! (bool) config('services.nium.payout_fx_enabled', false)) {
             throw new RuntimeException('Nium payout FX is not enabled.');
         }

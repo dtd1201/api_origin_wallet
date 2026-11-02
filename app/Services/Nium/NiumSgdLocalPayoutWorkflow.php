@@ -27,6 +27,7 @@ final class NiumSgdLocalPayoutWorkflow
 
     public function prepare(User $user, array $input, bool $refreshFunding = false): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $beneficiary = $user->beneficiaries()->findOrFail($input['beneficiary_id']);
         $candidate = new Transfer([
             'user_id' => $user->id, 'provider_id' => $input['provider_id'],
@@ -82,6 +83,7 @@ final class NiumSgdLocalPayoutWorkflow
     /** Prepare a review only: never authorize, approve, reserve funds or dispatch. */
     public function prepareReview(User $customer, array $input): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         if (isset($input['transfer_id'])) {
             $transfer = $customer->transfers()->findOrFail($input['transfer_id']);
             $this->scope->assertTransfer($transfer);
@@ -128,6 +130,7 @@ final class NiumSgdLocalPayoutWorkflow
 
     public function requestLock(Transfer $transfer, string $requestId): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $this->scope->assertTransfer($transfer);
         $this->assertIntent($transfer);
         $this->assertPurpose($transfer);
@@ -220,6 +223,7 @@ final class NiumSgdLocalPayoutWorkflow
     /** Authenticated Submit records acceptance and enters the existing maker workflow atomically. */
     public function submit(Transfer $transfer, User $customer, string $submissionToken, bool $acceptUncappedCharges): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $transfer->loadMissing(['user', 'provider', 'beneficiary']);
         $purposes = $this->purposes->supported($transfer->user);
         $this->gate->assertCandidate($transfer->user, $transfer->provider, $transfer->beneficiary, 'SGD');
@@ -278,6 +282,7 @@ final class NiumSgdLocalPayoutWorkflow
 
     public function requestApproval(Transfer $transfer, ?string $financialTermsToken = null, ?array $purposes = null): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $transfer->loadMissing(['user', 'provider', 'beneficiary']);
         if ($purposes === null) {
             $purposes = $this->purposes->supported($transfer->user);
@@ -341,6 +346,8 @@ final class NiumSgdLocalPayoutWorkflow
     /** Invalidate only an expired, undispatched review; preserve every historical approval. */
     public function restartExpiredReview(Transfer $transfer): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
+
         return $this->resetReview($transfer, true);
     }
 
@@ -414,6 +421,8 @@ final class NiumSgdLocalPayoutWorkflow
     /** Persist a local review request, never acquire a hold or infer a provider outcome. */
     public function requestRecoveryReview(Transfer $transfer): Transfer
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
+
         return DB::transaction(function () use ($transfer): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
             $this->scope->assertTransfer($locked);

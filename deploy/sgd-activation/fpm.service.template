@@ -1,0 +1,22 @@
+[Unit]
+Description=Origin Wallet isolated release @ID@
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@RELEASE@
+RuntimeDirectory=origin-wallet-@ID@
+# Nginx must traverse this root-owned directory; the socket stays 0660.
+RuntimeDirectoryMode=0755
+ExecStart=@FPM_BINARY@ --nodaemonize --fpm-config @FPM_CONFIG@
+ExecReload=/bin/kill -USR2 $MAINPID
+KillSignal=SIGQUIT
+TimeoutStopSec=infinity
+SendSIGKILL=no
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
