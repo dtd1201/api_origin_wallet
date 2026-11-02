@@ -32,6 +32,8 @@ class NiumQuoteService implements QuoteProvider
             throw new RuntimeException('Nium FX quote requires a valid cross-currency pair and positive source amount.');
         }
 
+        $admissionLease = $targetCurrency === 'SGD' ? app(NiumSgdAdmissionFence::class)->acquire() : null;
+
         $requestPayload = [
             'sourceCurrencyCode' => $sourceCurrency,
             'destinationCurrencyCode' => $targetCurrency,

@@ -4,14 +4,18 @@ namespace App\Services\Integrations;
 
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
+use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
 use App\Services\Nium\NiumApiExchangeEvidenceStore;
 use App\Services\Nium\NiumEvidencePersistenceException;
+use App\Services\Nium\NiumPayoutPreDispatchException;
 use App\Services\Nium\NiumSafeValueProjector;
+use App\Services\Nium\NiumSgdAdmissionFence;
 use App\Support\SensitiveDataSanitizer;
 use Carbon\Carbon;
 use Carbon\CarbonImmutable;
+use Closure;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Request;
@@ -36,6 +40,7 @@ class ProviderHttpClient implements ProviderClient
         private readonly bool $persistRawExchange = true,
         private readonly bool $singleDispatchAssignment = false,
         private readonly bool $readOnlyVirtualAccountReconciliation = false,
+        private readonly ?Closure $beforeDispatch = null,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -88,6 +93,30 @@ class ProviderHttpClient implements ProviderClient
         ?User $user,
         ?int $relatedTransferId,
     ): Response {
+        $sgdWireKind = null;
+        $sgdLease = null;
+        if ($this->serviceConfigKey === 'nium') {
+            $fence = app(NiumSgdAdmissionFence::class);
+            $sgdWireKind = $fence->wireKind($method, $path, $payload, $relatedTransferId);
+            if ($sgdWireKind !== null) {
+                try {
+                    $sgdLease = $fence->acquire();
+                    if ($sgdWireKind === 'remittance' && (
+                        ($this->operationalContext['operation'] ?? null) !== 'transfer_money'
+                        || $this->beforeDispatch === null || $relatedTransferId === null
+                        || ! Transfer::query()->whereKey($relatedTransferId)->where('target_currency', 'SGD')
+                            ->whereHas('provider', fn ($q) => $q->where('code', 'nium'))->exists())) {
+                        throw new RuntimeException('SGD remittance requires the bound guarded dispatch path.');
+                    }
+                } catch (Throwable $exception) {
+                    if ($sgdWireKind === 'remittance') {
+                        throw new NiumPayoutPreDispatchException(
+                            'SGD dispatch was blocked before transport.', previous: $exception);
+                    }
+                    throw $exception;
+                }
+            }
+        }
         $capturedRequestBody = null;
         $capturedRequestHeaders = [];
         $assignmentTarget = null;
@@ -129,7 +158,20 @@ class ProviderHttpClient implements ProviderClient
             $request = $request->withoutRedirecting()->retry(1, 0);
         }
         if ($this->serviceConfigKey === 'nium') {
-            $request = $request->beforeSending(function (Request $outgoing) use (&$capturedRequestBody, &$capturedRequestHeaders, &$assignmentTarget): void {
+            $request = $request->beforeSending(function (Request $outgoing) use (&$capturedRequestBody, &$capturedRequestHeaders, &$assignmentTarget, $sgdWireKind): void {
+                if ($sgdWireKind !== null) {
+                    try {
+                        app(NiumSgdAdmissionFence::class)->assertOpen();
+                    } catch (Throwable $exception) {
+                        if ($sgdWireKind === 'remittance') {
+                            throw new NiumPayoutPreDispatchException('SGD admission closed before transport.', previous: $exception);
+                        }
+                        throw $exception;
+                    }
+                }
+                if ($this->beforeDispatch !== null) {
+                    ($this->beforeDispatch)();
+                }
                 $capturedRequestBody = $outgoing->body();
                 $capturedRequestHeaders = $outgoing->headers();
                 if ($this->singleDispatchAssignment) {

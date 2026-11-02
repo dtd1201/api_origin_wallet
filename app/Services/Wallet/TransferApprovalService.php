@@ -6,6 +6,7 @@ use App\Models\Transfer;
 use App\Models\TransferApproval;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumSgdAdmissionFence;
 use App\Services\Nium\NiumSgdLocalPayoutAuthorization;
 use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
 use App\Services\Nium\NiumSwiftPayoutAuthorization;
@@ -75,12 +76,14 @@ class TransferApprovalService
 
     public function approve(Transfer $transfer, User $approver, ?string $note = null, ?ProviderTransferManager $manager = null): Transfer
     {
+        $admissionLease = null;
         $shouldAutoSubmit = false;
-        $approved = DB::transaction(function () use ($transfer, $approver, $note, &$shouldAutoSubmit): Transfer {
+        $approved = DB::transaction(function () use ($transfer, $approver, $note, &$shouldAutoSubmit, &$admissionLease): Transfer {
             $transfer = Transfer::query()
                 ->whereKey($transfer->id)
                 ->lockForUpdate()
                 ->firstOrFail();
+            $admissionLease = app(NiumSgdAdmissionFence::class)->acquireFor($transfer);
 
             $swift = app(NiumSwiftPayoutAuthorization::class);
             $swiftApproval = $swift->applies($transfer);

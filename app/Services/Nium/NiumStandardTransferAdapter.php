@@ -27,6 +27,7 @@ final class NiumStandardTransferAdapter
 
     public function review(User $customer, array $input): array
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         abort_unless($customer->status === 'active', 403);
         $provider = PrimaryProvider::resolveForRequest((int) $input['provider_id']);
         $provider->assertSupportsCapability('transfer');
@@ -80,6 +81,7 @@ final class NiumStandardTransferAdapter
     /** Replay only a matching recorded receipt; never refresh pricing, FX or dispatch. */
     public function submit(User $customer, array $input): array
     {
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $token = $this->decodeToken($input['review_token']);
         abort_unless(($token['user_id'] ?? null) === $customer->id && $customer->status === 'active', 403);
         $provider = PrimaryProvider::resolveForRequest((int) $input['provider_id']);
@@ -90,6 +92,7 @@ final class NiumStandardTransferAdapter
         }
         try {
             $this->verifiedTerms($transfer);
+
             // Production performs provider preflight before taking its own consent transaction lock.
             return [$this->workflow->submit($transfer, $customer, $token['submission_token'], false), false];
         } catch (Throwable $exception) {

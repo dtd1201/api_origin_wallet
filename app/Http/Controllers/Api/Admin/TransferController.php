@@ -11,6 +11,7 @@ use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumPayoutPilotPolicy;
+use App\Services\Nium\NiumSgdAdmissionFence;
 use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
@@ -71,6 +72,9 @@ class TransferController extends Controller
 
         $provider = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null);
         $validated['provider_id'] = $provider->id;
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquireFor(
+            (new Transfer($validated))->setRelation('provider', $provider),
+        );
         if (strtolower((string) $provider->code) === 'nium' && $validated['target_currency'] === 'USD') {
             $validated['raw_data']['nium_approval'] = NiumSwiftPayoutAuthorization::origin(
                 $request->user(), User::query()->findOrFail($validated['user_id']), $provider,
@@ -129,6 +133,7 @@ class TransferController extends Controller
             'raw_data' => ['prohibited'], 'binding' => ['prohibited'], 'expires_at' => ['prohibited'],
         ]);
         try {
+            $admissionLease = app(NiumSgdAdmissionFence::class)->acquireFor($transfer);
             $grant = $policy->renewOneTime($transfer, $request->user(), $input['authorization_reference'], true,
                 $input['request_id'], $input['confirmation_token']);
         } catch (RuntimeException $exception) {

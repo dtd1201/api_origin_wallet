@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Nium\NiumPayoutPilotPolicy;
+use App\Services\Nium\NiumSgdAdmissionFence;
 use Illuminate\Console\Command;
 
 final class AuthorizeNiumPayoutPilot extends Command
@@ -24,7 +25,9 @@ final class AuthorizeNiumPayoutPilot extends Command
 
             return self::FAILURE;
         }
-        $grant = $policy->authorizeOneTime(Transfer::query()->findOrFail($this->argument('transfer')),
+        $transfer = Transfer::query()->findOrFail($this->argument('transfer'));
+        $admissionLease = app(NiumSgdAdmissionFence::class)->acquireFor($transfer);
+        $grant = $policy->authorizeOneTime($transfer,
             User::query()->findOrFail($this->argument('authorizer')), $this->argument('authorization_reference'), true);
         $this->info('Staged pilot authorization: '.$grant->id);
         $this->warn('Only USD 5 principal will be reserved at dispatch. Additional NIUM charges are unknown and uncapped; no fee reserve is held.');

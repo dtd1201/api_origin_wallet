@@ -28,6 +28,22 @@ use RuntimeException;
 /** Synthetic injected pricing only; never production configuration or NIUM evidence. */
 trait CreatesSgdLocalExecutionFixtures
 {
+    protected string $sgdFenceDirectory;
+
+    protected function setUpCreatesSgdLocalExecutionFixtures(): void
+    {
+        $this->sgdFenceDirectory = sys_get_temp_dir().'/sgd-fence-test-'.bin2hex(random_bytes(10));
+        mkdir($this->sgdFenceDirectory, 0700);
+        file_put_contents($this->sgdFenceDirectory.'/drain.lock', '');
+        file_put_contents($this->sgdFenceDirectory.'/state', "OPEN v1\n");
+        config()->set('sgd_admission.directory', $this->sgdFenceDirectory);
+        $this->beforeApplicationDestroyed(function (): void {
+            unlink($this->sgdFenceDirectory.'/state');
+            unlink($this->sgdFenceDirectory.'/drain.lock');
+            rmdir($this->sgdFenceDirectory);
+        });
+    }
+
     protected function fakeSgdProvider(string $outcome = 'pending', ?string $feeAmount = null): void
     {
         Http::swap(new Factory);
