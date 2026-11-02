@@ -37,7 +37,7 @@ REGEX;
             $depth += in_array($token, ['{', '['], true) ? 1 : (in_array($token, ['}', ']'], true) ? -1 : 0);
             $previous = $token;
         }
-        foreach (['sourceAmount', 'destinationAmount', 'exchangeRate', 'netExchangeRate', 'markupRate', 'clientMarkupRate'] as $field) {
+        foreach (['sourceAmount', 'destinationAmount', 'exchangeRate', 'netExchangeRate', 'markupRate', 'clientMarkupRate', 'destinationMarkupAmount'] as $field) {
             if (is_float($response[$field] ?? null)) {
                 $number = $values[$field];
                 if (strlen($number) > 64 || (preg_match('/[eE]([+-]?[0-9]+)$/D', $number, $exponent)
@@ -58,7 +58,7 @@ REGEX;
             'sourceAmount' => NiumSgdLocalRemittancePayload::wireAmount($sourceAmount),
             'customerHashId' => $customer, 'quoteType' => 'payout',
             'quoteIntent' => 'EXECUTABLE', 'conversionSchedule' => 'immediate',
-            'executionType' => 'manual', 'lockPeriod' => '15_mins',
+            'executionType' => 'at_conversion_time', 'lockPeriod' => '15_mins',
         ];
     }
 
@@ -69,7 +69,8 @@ REGEX;
             || (array_key_exists('quoteType', $response) && $response['quoteType'] !== 'payout')
             || (array_key_exists('quoteIntent', $response) && $response['quoteIntent'] !== 'EXECUTABLE')
             || (array_key_exists('conversionSchedule', $response) && $response['conversionSchedule'] !== 'immediate')
-            || (array_key_exists('executionType', $response) && $response['executionType'] !== 'manual')) {
+            || (array_key_exists('executionType', $response) && $response['executionType'] !== 'at_conversion_time')
+            || (array_key_exists('lockPeriod', $response) && $response['lockPeriod'] !== '15_mins')) {
             throw new RuntimeException('NIUM requires an executable payout quote, not a balance-transfer quote.');
         }
 
@@ -92,7 +93,7 @@ REGEX;
         }
         // The longer lock must not introduce a margin or additional charge. This
         // guard supplements, and never replaces, the unchanged financial policy.
-        foreach (['markupRate', 'clientMarkupRate'] as $field) {
+        foreach (['markupRate', 'clientMarkupRate', 'destinationMarkupAmount'] as $field) {
             if (array_key_exists($field, $response) && NiumPayoutFxLockContract::decimal($response[$field]) !== '0') {
                 throw new RuntimeException('NIUM payout quote contains an unapproved FX markup. Submission is blocked.');
             }

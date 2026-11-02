@@ -53,10 +53,13 @@ trait CreatesSgdLocalExecutionFixtures
                 $this->assertSame('POST', $request->method());
                 $this->assertFalse($options['allow_redirects']);
                 $this->assertSame('payout', $request['quoteType']);
+                $this->assertSame('immediate', $request['conversionSchedule']);
+                $this->assertSame('at_conversion_time', $request['executionType']);
                 $this->assertSame('15_mins', $request['lockPeriod']);
 
                 $data = ['id' => 'synthetic-payout-'.Str::uuid(),
                     'quoteType' => 'payout', 'quoteIntent' => 'EXECUTABLE',
+                    'conversionSchedule' => 'immediate', 'executionType' => 'at_conversion_time', 'lockPeriod' => '15_mins',
                     'sourceAmount' => $request['sourceAmount'], 'sourceCurrencyCode' => 'USD',
                     'destinationCurrencyCode' => 'SGD', 'netExchangeRate' => '1.275939120',
                     // Most legacy safety cases deliberately receive a shorter expiry.
@@ -79,6 +82,7 @@ trait CreatesSgdLocalExecutionFixtures
             }
             if (str_contains($request->url(), 'purposeCodes')) {
                 return Http::response([['purposeCode' => 'SYNTHETIC_PURPOSE', 'description' => 'Synthetic only'],
+                    ['purposeCode' => 'IR008', 'description' => 'Synthetic incident purpose'],
                     ['purposeCode' => 'ALTERNATE_SYNTHETIC_PURPOSE', 'description' => 'Another synthetic purpose']]);
             }
             if (str_contains($request->url(), 'supportedCorridors')) {

@@ -527,7 +527,7 @@ class NiumSgdLocalZeroFeePolicyTest extends TestCase
         Http::assertSent(fn ($request) => str_ends_with($request->url(), '/quotes') && $request->data() === [
             'sourceCurrencyCode' => 'USD', 'destinationCurrencyCode' => 'SGD', 'sourceAmount' => 5,
             'customerHashId' => 'synthetic-customer', 'quoteType' => 'payout', 'quoteIntent' => 'EXECUTABLE',
-            'conversionSchedule' => 'immediate', 'executionType' => 'manual', 'lockPeriod' => '15_mins',
+            'conversionSchedule' => 'immediate', 'executionType' => 'at_conversion_time', 'lockPeriod' => '15_mins',
         ]);
         Http::assertNotSent(fn ($request) => str_contains($request->url(), 'lockExchangeRate'));
     }

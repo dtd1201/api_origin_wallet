@@ -20,6 +20,7 @@ export NIUM_SGD_LOCAL_ZERO_FEE_ENABLED=false NIUM_PAYOUT_PILOT_ENABLED=false
 # These production financial policy/ledger/config files must remain byte-identical to the reviewed baseline.
 sha256sum --check --status docs/sgd-activation/financial-policy.sha256
 payout_tests=(
+  tests/Feature/NiumRejectedPayoutQuoteRecoveryTest.php
   tests/Feature/NiumSgdAdmissionBridgeTest.php
   tests/Unit/SgdActivationPostgresSafetyTest.php
   tests/Feature/NiumSgdAdmissionFenceTest.php

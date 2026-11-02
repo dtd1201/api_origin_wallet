@@ -23,6 +23,7 @@ class NiumPayoutQuoteContractTest extends TestCase
     private function response(): array
     {
         return ['id' => 'synthetic-payout-quote', 'quoteType' => 'payout', 'quoteIntent' => 'EXECUTABLE',
+            'conversionSchedule' => 'immediate', 'executionType' => 'at_conversion_time', 'lockPeriod' => '15_mins',
             'sourceAmount' => '5.00', 'sourceCurrencyCode' => 'USD', 'destinationCurrencyCode' => 'SGD',
             'netExchangeRate' => '1.276738080', 'expiryTime' => '2026-11-02T02:05:00.999Z'];
     }
@@ -32,7 +33,7 @@ class NiumPayoutQuoteContractTest extends TestCase
         $this->assertSame([
             'sourceCurrencyCode' => 'USD', 'destinationCurrencyCode' => 'SGD', 'sourceAmount' => 5,
             'customerHashId' => 'synthetic-customer', 'quoteType' => 'payout', 'quoteIntent' => 'EXECUTABLE',
-            'conversionSchedule' => 'immediate', 'executionType' => 'manual', 'lockPeriod' => '15_mins',
+            'conversionSchedule' => 'immediate', 'executionType' => 'at_conversion_time', 'lockPeriod' => '15_mins',
         ], NiumPayoutQuoteContract::request('synthetic-customer', 'USD', 'SGD', '5.00'));
     }
 
@@ -101,7 +102,8 @@ class NiumPayoutQuoteContractTest extends TestCase
     {
         return [
             'balance transfer' => ['quoteType', 'balance_transfer'], 'indicative' => ['quoteIntent', 'INDICATIVE'],
-            'scheduled' => ['conversionSchedule', 'scheduled'], 'automatic' => ['executionType', 'automatic'],
+            'scheduled' => ['conversionSchedule', 'scheduled'], 'manual payout' => ['executionType', 'manual'], 'invalid execution' => ['executionType', 'automatic'],
+            'wrong lock period' => ['lockPeriod', '1_hour'], 'destination markup' => ['destinationMarkupAmount', '0.01'],
             'no quote ID' => ['id', null], 'unsafe quote ID' => ['id', '../wrong'],
             'legacy integer audit ID' => ['id', 123456], 'wrong principal' => ['sourceAmount', '5.01'],
             'missing principal' => ['sourceAmount', null], 'wrong source currency' => ['sourceCurrencyCode', 'SGD'],

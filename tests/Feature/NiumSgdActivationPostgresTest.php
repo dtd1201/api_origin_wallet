@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Balance;
 use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
+use App\Services\Nium\NiumRejectedPayoutQuoteRecovery;
 use App\Services\Nium\NiumSgdAdmissionFence;
 use App\Services\Wallet\TransferApprovalService;
 use Illuminate\Database\Events\QueryExecuted;
@@ -13,11 +14,39 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
+use Tests\Concerns\CreatesRejectedSgdQuoteIncident;
 use Tests\Support\SgdActivationPostgresSafety;
 
 /** Existing committed/forked SGD and HK suite, plus live admission races. */
 class NiumSgdActivationPostgresTest extends NiumSgdReleasePostgresTest
 {
+    use CreatesRejectedSgdQuoteIncident;
+
+    public function test_concurrent_rejected_quote_recovery_preserves_one_receipt_without_io(): void
+    {
+        [$transfer, $operator, $clearance, $log, $evidence] = $this->rejectedIncident();
+        $requestHash = $evidence->request_body_sha256;
+        $responseHash = $evidence->response_body_sha256;
+        $this->race(function () use ($operator, $clearance): void {
+            try {
+                app(NiumRejectedPayoutQuoteRecovery::class)->recover($operator, $clearance, $this->rejectedProviderArtifact, true);
+            } catch (RuntimeException $e) {
+                // A concurrent exclusive lease may refuse; explicit identical retry is safe.
+                $this->assertSame('SGD must be closed and all cooperating operations drained.', $e->getMessage());
+            }
+        });
+        $current = app(NiumRejectedPayoutQuoteRecovery::class)->recover($operator, $clearance, $this->rejectedProviderArtifact, true);
+        $this->assertSame('draft', $current->raw_data['sgd_local_workflow']['state']);
+        $this->assertCount(1, $current->raw_data['sgd_local_workflow']['rejected_quote_recoveries']);
+        $this->assertSame($requestHash, $evidence->fresh()->request_body_sha256);
+        $this->assertSame($responseHash, $evidence->fresh()->response_body_sha256);
+        $this->assertNull($current->provider_operation_key);
+        $this->assertNull($current->fx_quote_id);
+        $this->assertDatabaseCount('ledger_entries', 0);
+        $this->assertDatabaseCount('transfer_approvals', 0);
+        Http::assertNothingSent();
+    }
+
     protected function postgresSafety(): string
     {
         return SgdActivationPostgresSafety::class;

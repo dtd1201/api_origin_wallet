@@ -151,6 +151,9 @@ final class NiumSgdLocalPayoutWorkflow
                 $this->invalid('Only an unapproved preparation draft can explicitly request a fresh lock.');
             }
             $workflow = $locked->raw_data['sgd_local_workflow'];
+            if (isset($workflow['rejected_quote_recoveries'][$requestId])) {
+                $this->invalid('This FX request was rejected and retired. A new explicit review is required.');
+            }
             if (($workflow['lock_request_id'] ?? null) === $requestId && ($workflow['state'] ?? null) === 'locked') {
                 $this->assertCurrentLock($locked);
 
