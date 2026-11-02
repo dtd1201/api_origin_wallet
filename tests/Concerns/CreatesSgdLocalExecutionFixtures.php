@@ -28,11 +28,28 @@ use RuntimeException;
 /** Synthetic injected pricing only; never production configuration or NIUM evidence. */
 trait CreatesSgdLocalExecutionFixtures
 {
-    protected function fakeSgdProvider(string $outcome = 'pending', ?string $feeAmount = null): void
+    protected function fakeSgdProvider(string $outcome = 'pending', ?string $feeAmount = null, bool $numericQuote = false, int $quoteMinutes = 5): void
     {
-        Http::swap(new Factory);
+        Http::swap(new Factory(app('events')));
         Http::preventStrayRequests();
-        Http::fake(function ($request, $options) use ($outcome, $feeAmount) {
+        Http::fake(function ($request, $options) use ($outcome, $feeAmount, $numericQuote, $quoteMinutes) {
+            if (str_ends_with($request->url(), '/quotes')) {
+                $this->assertSame('POST', $request->method());
+                $this->assertFalse($options['allow_redirects']);
+                $this->assertSame('payout', $request['quoteType']);
+                $this->assertSame('15_mins', $request['lockPeriod']);
+
+                $data = ['id' => 'synthetic-payout-'.Str::uuid(),
+                    'quoteType' => 'payout', 'quoteIntent' => 'EXECUTABLE',
+                    'sourceAmount' => $request['sourceAmount'], 'sourceCurrencyCode' => 'USD',
+                    'destinationCurrencyCode' => 'SGD', 'netExchangeRate' => '1.275939120',
+                    // Most legacy safety cases deliberately receive a shorter expiry.
+                    // Never extend a returned quote merely because 15 minutes was requested.
+                    'expiryTime' => now()->addMinutes($quoteMinutes)->toISOString()];
+
+                return Http::response($numericQuote
+                    ? str_replace('"1.275939120"', '1.276738080', json_encode($data, JSON_THROW_ON_ERROR)) : $data);
+            }
             if ($request->method() === 'POST') {
                 $this->assertFalse($options['allow_redirects']);
                 if ($outcome === 'timeout') {
@@ -51,11 +68,6 @@ trait CreatesSgdLocalExecutionFixtures
             if (str_contains($request->url(), 'supportedCorridors')) {
                 return Http::response(['content' => [['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD',
                     'payoutMethod' => 'LOCAL', 'beneficiaryAccountType' => 'INDIVIDUAL', 'customerType' => 'CORPORATE', 'routingCodeType' => 'SWIFT']]]);
-            }
-            if (str_contains($request->url(), 'lockExchangeRate')) {
-                return Http::response(['audit_id' => random_int(100000, 999999), 'fx_hold_id' => 'synthetic-hold',
-                    'fx_rate' => '1.275939120', 'source_currency' => 'USD', 'destination_currency' => 'SGD',
-                    'status' => 'ACTIVE', 'hold_expiry_at' => now()->addMinutes(10)->toISOString()]);
             }
             if (str_contains($request->url(), '/transactions')) {
                 $transfer = Transfer::query()->whereNotNull('provider_operation_key')->latest('id')->firstOrFail();
@@ -99,7 +111,7 @@ trait CreatesSgdLocalExecutionFixtures
         config()->set('services.nium.beneficiary_endpoint', '/api/v2/client/{clientHashId}/customer/{customerHashId}/beneficiaries');
         config()->set('services.nium.payout_fx_enabled', true);
         config()->set('services.nium.supported_corridors', []);
-        $this->fakeSgdProvider();
+        $this->fakeSgdProvider(quoteMinutes: $scenario['quote_minutes'] ?? 5);
         $provider = IntegrationProvider::query()->forceCreate(['id' => $providerId, 'code' => 'nium', 'name' => 'Nium', 'status' => 'active']);
         $maker = User::factory()->create(['id' => $userId, 'status' => 'active', 'kyc_status' => 'verified']);
         $maker->kycProfile()->create(['status' => 'approved', 'applicant_type' => 'business',

@@ -7,10 +7,10 @@ use App\Models\Beneficiary;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
-use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use App\Services\Nium\NiumService;
-use App\Services\Wallet\TransferApprovalService;
+use App\Services\Nium\NiumSwiftPayoutAuthorization;
 use App\Services\Wallet\LedgerService;
+use App\Services\Wallet\TransferApprovalService;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -55,7 +55,7 @@ class NiumSwiftCheckerAuthorizationTest extends TestCase
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertDatabaseCount('transfer_approvals', $approvals);
         $this->assertSame($calls, count(Http::recorded()));
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public function test_direct_service_self_approval_is_rejected_even_for_an_admin_maker(): void
@@ -196,6 +196,7 @@ class NiumSwiftCheckerAuthorizationTest extends TestCase
             }
             if ($request->method() === 'POST' && str_ends_with($request->url(), '/remittance')) {
                 $this->assertFalse($options['allow_redirects']);
+
                 // Use Laravel's Guzzle connection-failure stub so the attempted POST
                 // reaches its recorder. Throwing Laravel ConnectionException here
                 // bypasses that recorder even when dispatch authorization succeeded.
@@ -214,7 +215,7 @@ class NiumSwiftCheckerAuthorizationTest extends TestCase
         $this->postJson($url.'/approve')->assertOk()->assertJsonPath('transfer.status', 'submission_unknown');
         $this->getJson($url)->assertOk()->assertJsonPath('allowed_actions.approve', false);
         $this->assertSame($operation, $transfer->fresh()->provider_operation_key);
-        $posts = Http::recorded(fn ($request) => $request->method() === 'POST');
+        $posts = Http::recorded(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
         $this->assertCount(1, $posts);
         $request = $posts->sole()[0];
         $this->assertSame(['beneficiary' => ['id' => 'synthetic-hk-beneficiary'],
@@ -273,10 +274,10 @@ class NiumSwiftCheckerAuthorizationTest extends TestCase
         $this->assertNotNull($transfer->fresh()->provider_operation_key);
         $this->assertNull($transfer->fresh()->raw_data['nium_execution']['dispatch_started_at'] ?? null);
         $this->assertSame($calls, count(Http::recorded()));
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
         $this->withToken($this->sgdToken($checker));
         $this->postJson("/api/admin/transfers/{$transfer->id}/approve")->assertForbidden();
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public function test_admin_creation_records_the_actor_and_neither_actor_nor_owner_can_self_approve(): void

@@ -28,15 +28,22 @@ final class NiumSgdLocalRemittancePayload
     {
         $id = $snapshot['external_beneficiary_id'] ?? null;
         $purpose = $snapshot['purpose_code'] ?? null;
+        $hasQuote = array_key_exists('quote_id', $snapshot);
+        $validFx = $hasQuote
+            ? is_string($snapshot['quote_id']) && preg_match('/^[A-Za-z0-9_-]{1,100}$/D', $snapshot['quote_id'])
+                && ! array_key_exists('audit_id', $snapshot)
+            : NiumPayoutAuditId::isValid($snapshot['audit_id'] ?? null);
         if (! is_string($id) || trim($id) === '' || ! is_string($purpose) || trim($purpose) === ''
             || ($snapshot['source_currency'] ?? null) !== 'USD' || ($snapshot['destination_currency'] ?? null) !== 'SGD'
-            || ! NiumPayoutAuditId::isValid($snapshot['audit_id'] ?? null)) {
+            || ! $validFx) {
             throw new RuntimeException('A complete approved registered LOCAL intent is required.');
         }
 
         return ['beneficiary' => ['id' => $id],
             'payout' => ['sourceAmount' => self::wireAmount($snapshot['source_amount'] ?? null),
-                'sourceCurrency' => $snapshot['source_currency'], 'auditId' => (int) $snapshot['audit_id']],
+                'sourceCurrency' => $snapshot['source_currency'],
+                // Legacy snapshots are read only for captured-outcome reconciliation.
+                ...($hasQuote ? ['quoteId' => $snapshot['quote_id']] : ['auditId' => (int) $snapshot['audit_id']])],
             'purposeCode' => $purpose, 'sourceOfFunds' => NiumTransferPolicy::SOURCE_OF_FUNDS];
     }
 

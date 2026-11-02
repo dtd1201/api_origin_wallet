@@ -34,8 +34,8 @@ final class NiumSgdLocalPayoutAuthorization
             'source_currency' => $transfer->source_currency, 'destination_currency' => $transfer->target_currency,
             'source_amount' => NiumSgdLocalCugScope::principal($transfer->source_amount),
             'purpose_code' => $transfer->purpose_code, 'fx_quote_id' => $transfer->fx_quote_id,
-            'audit_id' => (string) NiumPayoutAuditId::fromQuote($transfer->fxQuote),
-            'rate' => $transfer->fxQuote->raw_data['payout_fx_lock_contract']['rate'],
+            'quote_id' => $transfer->fxQuote->quote_ref,
+            'rate' => $transfer->fxQuote->raw_data['payout_quote_contract']['rate'],
             'expires_at' => $transfer->fxQuote->expires_at->toISOString(),
         ];
     }

@@ -105,6 +105,13 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 operation: 'transfer_money',
                 externalReference: $transfer->provider_operation_key,
             );
+        } catch (NiumPayoutPreDispatchException $exception) {
+            // Only the final beforeSending guard proves this attempt never reached transport.
+            // Retain its operation key and consumed quote: a new payment needs fresh consent.
+            return $this->recordOutcome($transfer, 'failed', [
+                'failure_code' => 'payout_authorization_expired_before_dispatch',
+                'failure_reason' => $exception->getMessage(),
+            ]);
         } catch (Throwable) {
             // Once the durable dispatch claim commits, no exception proves that
             // the bank did not receive the POST. Keep funds until reconciliation.
@@ -158,6 +165,14 @@ class NiumTransferService implements PreparedTransferStatusProvider
             }
             $raw = array_merge($locked->raw_data ?? [], $fields['raw_data'] ?? []);
             $raw['nium_execution'] = $locked->raw_data['nium_execution'] ?? [];
+            if (($fields['failure_code'] ?? null) === 'payout_authorization_expired_before_dispatch'
+                && isset($raw['nium_execution']['dispatch_started_at'])) {
+                // A competing transport caller may already have consumed this wire authority.
+                // Prove known-unsent under the same row lock as terminal release, never from an exception alone.
+                $status = 'submission_unknown';
+                $fields['failure_code'] = 'provider_submission_unknown';
+                $fields['failure_reason'] = 'Provider submission outcome is unknown; do not retry the POST.';
+            }
             if ($status === 'failed') {
                 $raw['nium_execution']['terminal_status'] = 'failed';
             }
@@ -465,7 +480,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         }
 
         $fields = $transfer->target_currency === 'SGD'
-            ? ['sourceAmount', 'sourceCurrency', 'auditId']
+            ? ['sourceAmount', 'sourceCurrency', 'quoteId']
             : ['sourceAmount', 'sourceCurrency', 'destinationCurrency', 'payoutMethod'];
         foreach ($fields as $field) {
             if (! filled(Arr::get($payload, "payout.{$field}"))) {
@@ -474,7 +489,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         }
 
         if ($transfer->target_currency === 'SGD') {
-            foreach (['destinationAmount', 'destinationCurrency', 'payoutMethod', 'swiftFeeType', 'tradeOrderID', 'quoteId'] as $field) {
+            foreach (['destinationAmount', 'destinationCurrency', 'payoutMethod', 'swiftFeeType', 'tradeOrderID', 'auditId'] as $field) {
                 if (array_key_exists($field, $payload['payout'])) {
                     throw new RuntimeException('Nium SGD source-funded LOCAL payload contains an unreviewed field.');
                 }
@@ -563,6 +578,13 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
         if ($quote->expires_at === null || $quote->expires_at->lessThanOrEqualTo(now())) {
             throw new RuntimeException('Nium exchange-rate lock has expired.');
+        }
+
+        if ($transfer->source_currency === 'USD' && $transfer->target_currency === 'SGD') {
+            NiumPayoutFxLockContract::assertMatchesTransfer($quote, $transfer,
+                $this->payoutFxLockService->context($transfer->provider, $transfer->user));
+
+            return;
         }
 
         if (($quote->raw_data['provider_fx_type'] ?? null) !== 'payout_fx_lock'

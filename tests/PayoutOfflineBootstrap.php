@@ -16,6 +16,8 @@ Facade::instance()->registerSubscriber(new class implements PreparedSubscriber
 {
     public function notify(Prepared $event): void
     {
-        Http::preventStrayRequests();
+        if (Http::getFacadeRoot() !== null) {
+            Http::preventStrayRequests();
+        }
     }
 });

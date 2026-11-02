@@ -286,7 +286,7 @@ class NiumPayoutDebitReconciliationTest extends TestCase
         $this->assertSame('85.00000000', Balance::query()->sole()->ledger_balance);
         $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);
         $this->assertDatabaseCount('ledger_entries', 1);
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
         $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
     }
 
@@ -313,7 +313,7 @@ class NiumPayoutDebitReconciliationTest extends TestCase
         $this->assertSame($before, LedgerEntry::query()->orderBy('id')->get()->toArray());
         $this->assertSame('72.66000000', Balance::query()->sole()->ledger_balance);
         $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     #[DataProvider('returnChannels')]
@@ -332,7 +332,7 @@ class NiumPayoutDebitReconciliationTest extends TestCase
         $this->assertSame('pending', $transfer->fresh()->status);
         $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);
         $this->assertDatabaseCount('ledger_entries', 1);
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public static function missingReferenceStates(): array
@@ -364,7 +364,7 @@ class NiumPayoutDebitReconciliationTest extends TestCase
         $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
         $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public static function invalidRecoveryEvidence(): array
@@ -432,7 +432,7 @@ class NiumPayoutDebitReconciliationTest extends TestCase
             ->expectsOutput('Nium reconciliation complete: 1 reconciled, 0 skipped, 0 failed.')
             ->assertExitCode(0);
         Http::assertSent(fn ($request) => str_contains($request->url(), 'synthetic-known-reference'));
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
         $this->assertNull($unknown->fresh()->external_transfer_id);
         $this->assertSame('submission_unknown', $unknown->fresh()->status);
         $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);

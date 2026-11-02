@@ -41,14 +41,14 @@ class NiumSgdLocalExecutionTest extends TestCase
         $this->assertTrue(app(NiumSgdLocalCugScope::class)->canPrepare($transfer->beneficiary));
         $this->withToken($this->sgdToken($transfer->user))->postJson("/api/user/users/72/transfers/{$transfer->id}/sgd-local-request-approval", $this->reviewToken($transfer))
             ->assertOk()->assertJsonPath('payout_amounts.total_wallet_debit', '12.34');
-        $audit = (int) $transfer->fresh()->fxQuote->quote_ref;
+        $audit = $transfer->fresh()->fxQuote->quote_ref;
         $pending = app(TransferApprovalService::class)->approve($transfer->fresh(), $checker, manager: app(ProviderTransferManager::class));
         $this->assertSame('pending', $pending->status);
         $this->assertSame('12.34000000', Balance::query()->sole()->reserved_balance);
         $this->assertSame('72.66000000', Balance::query()->sole()->available_balance);
         Http::assertSent(fn ($r) => $r->method() === 'POST' && $r->data() === [
             'beneficiary' => ['id' => $transfer->beneficiary->external_beneficiary_id],
-            'payout' => ['sourceAmount' => 12.34, 'sourceCurrency' => 'USD', 'auditId' => $audit],
+            'payout' => ['sourceAmount' => 12.34, 'sourceCurrency' => 'USD', 'quoteId' => $audit],
             'purposeCode' => 'ALTERNATE_SYNTHETIC_PURPOSE', 'sourceOfFunds' => 'Corporate Account',
         ]);
         $pending->update(['status' => 'submission_unknown', 'external_transfer_id' => null]);
@@ -126,7 +126,7 @@ class NiumSgdLocalExecutionTest extends TestCase
         $this->assertDatabaseCount('transfer_approvals', 0);
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->withToken($makerToken)->postJson("/api/user/users/12/transfers/{$transfer->id}/submit")->assertUnprocessable();
-        $approvedAudit = (int) $transfer->fresh()->fxQuote->quote_ref;
+        $approvedAudit = $transfer->fresh()->fxQuote->quote_ref;
         $this->withToken($this->sgdToken($checker))->postJson("/api/admin/transfers/{$transfer->id}/approve")
             ->assertOk();
         $current = $transfer->fresh();
@@ -141,7 +141,7 @@ class NiumSgdLocalExecutionTest extends TestCase
         $this->assertSame('5.00000000', Balance::query()->sole()->reserved_balance);
         Http::assertSent(fn ($r) => $r->method() === 'POST' && $r->data() === [
             'beneficiary' => ['id' => 'synthetic-external-beneficiary'],
-            'payout' => ['sourceAmount' => 5, 'sourceCurrency' => 'USD', 'auditId' => $approvedAudit],
+            'payout' => ['sourceAmount' => 5, 'sourceCurrency' => 'USD', 'quoteId' => $approvedAudit],
             'purposeCode' => 'SYNTHETIC_PURPOSE', 'sourceOfFunds' => 'Corporate Account',
         ] && $r->hasHeader('x-request-id', substr($current->provider_operation_key, 5)));
         app(TransferApprovalService::class)->approve($current, $checker, manager: app(ProviderTransferManager::class));

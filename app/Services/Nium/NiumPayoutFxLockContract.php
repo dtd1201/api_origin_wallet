@@ -117,6 +117,11 @@ final class NiumPayoutFxLockContract
 
     public static function assertMatchesTransfer(FxQuote $quote, Transfer $transfer, array $context, ?string $consumingOperation = null): void
     {
+        if ($transfer->source_currency === 'USD' && $transfer->target_currency === 'SGD') {
+            NiumPayoutQuoteContract::assertMatchesTransfer($quote, $transfer, $context, $consumingOperation);
+
+            return;
+        }
         NiumPayoutAuditId::fromQuote($quote);
         if (isset($quote->raw_data['consumed_at']) && ($consumingOperation === null
             || $transfer->status !== 'submitting' || $transfer->provider_operation_key !== $consumingOperation

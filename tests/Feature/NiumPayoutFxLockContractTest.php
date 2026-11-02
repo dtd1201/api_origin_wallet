@@ -74,7 +74,13 @@ class NiumPayoutFxLockContractTest extends TestCase
         $this->assertSame('1.32', $contract['rate']);
         $this->assertNull($contract['conversion_amount']);
         $this->assertArrayNotHasKey('fee_amount', $contract);
+    }
+
+    public function test_readable_legacy_sgd_audit_cannot_authorize_a_new_payout(): void
+    {
         [$quote, $transfer] = $this->boundModels();
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('NIUM payout quote type, ownership, expiry or accepted instruction does not match');
         NiumPayoutFxLockContract::assertMatchesTransfer($quote, $transfer, $this->binding());
     }
 

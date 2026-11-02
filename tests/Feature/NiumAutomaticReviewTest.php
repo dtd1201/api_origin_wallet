@@ -30,7 +30,7 @@ class NiumAutomaticReviewTest extends TestCase
 
     private function locksSent(): int
     {
-        return Http::recorded(fn ($request) => str_contains($request->url(), 'lockExchangeRate'))->count();
+        return Http::recorded(fn ($request) => str_ends_with($request->url(), '/quotes'))->count();
     }
 
     public function test_automatic_review_submit_and_admin_approval_dispatch_once_even_with_retries(): void

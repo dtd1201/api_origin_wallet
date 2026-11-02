@@ -68,7 +68,7 @@ class NiumProvisionalPayoutPricingTest extends TestCase
     public function test_explicit_confirmation_appends_only_internal_metadata_and_does_not_admit_payment(): void
     {
         [$transfer, $checker] = $this->transferThree();
-        $contractRate = $transfer->fxQuote->raw_data['payout_fx_lock_contract']['rate'];
+        $contractRate = $transfer->fxQuote->raw_data['payout_quote_contract']['rate'];
         $this->assertSame('1.275939120', $contractRate);
         $this->assertSame('1.2759391200', $transfer->fx_rate);
         $this->assertSame('1.2759391200', $transfer->fxQuote->net_rate);

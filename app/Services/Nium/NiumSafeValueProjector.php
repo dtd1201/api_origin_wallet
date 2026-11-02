@@ -444,6 +444,7 @@ final class NiumSafeValueProjector
             'payout.destinationCurrency',
             'payout.payoutMethod',
             'payout.auditId',
+            'payout.quoteId',
             'payout.scheduledPayoutDate',
             'payout.serviceTime',
             'payout.tradeOrderID',

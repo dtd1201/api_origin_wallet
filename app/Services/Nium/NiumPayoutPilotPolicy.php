@@ -409,7 +409,7 @@ final class NiumPayoutPilotPolicy
     /** Renewal changes FX terms only; the original wallet, beneficiary and payment intent remain bound. */
     private function assertRenewalBinding(array $original, array $binding): void
     {
-        foreach (['fx_quote_id', 'audit_id', 'rate', 'expires_at'] as $key) {
+        foreach (['fx_quote_id', 'audit_id', 'quote_id', 'rate', 'expires_at'] as $key) {
             unset($original['snapshot'][$key], $binding['snapshot'][$key]);
         }
         if (! NiumPayoutFxLockContract::sameBinding($original, $binding)) {

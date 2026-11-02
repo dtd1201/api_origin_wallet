@@ -19,6 +19,11 @@ class PayoutPostgresSafetyTest extends TestCase
 {
     private array $originalEnvironment = [];
 
+    protected function safety(): string
+    {
+        return PayoutPostgresSafety::class;
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -45,6 +50,21 @@ class PayoutPostgresSafetyTest extends TestCase
         parent::tearDown();
     }
 
+    public static function unsafeEnvironments(): array
+    {
+        return [['APP_ENV', 'production'], ['APP_ENV', 'staging'], ['DB_CONNECTION', 'sqlite'],
+            ['DB_HOST', '127.0.0.1'], ['DB_PORT', '5432'], ['DB_DATABASE', 'production'],
+            ['DB_DATABASE', 'staging'], ['DB_URL', 'postgresql://localhost/production']];
+    }
+
+    #[DataProvider('unsafeEnvironments')]
+    public function test_unsafe_environment_is_rejected_before_connecting(string $key, string $value): void
+    {
+        putenv($key.'='.$value);
+        $this->expectException(LogicException::class);
+        ($this->safety())::assertBootstrapConnection();
+    }
+
     public static function absentUrls(): array
     {
         return [
@@ -66,7 +86,7 @@ class PayoutPostgresSafetyTest extends TestCase
         $resolved = array_replace($resolved, $resolvedUrl);
         $pdo = $this->writer($this->identity());
 
-        $this->assertSame($pdo, PayoutPostgresSafety::verifiedLaravelConnection($this->application($raw, $resolved, $pdo)));
+        $this->assertSame($pdo, ($this->safety())::verifiedLaravelConnection($this->application($raw, $resolved, $pdo)));
     }
 
     public static function laravelAbsentUrls(): array
@@ -82,7 +102,7 @@ class PayoutPostgresSafetyTest extends TestCase
         $this->assertArrayNotHasKey('url', $resolved);
         $pdo = $this->writer($this->identity());
 
-        $this->assertSame($pdo, PayoutPostgresSafety::verifiedLaravelConnection($this->application($raw, $resolved, $pdo)));
+        $this->assertSame($pdo, ($this->safety())::verifiedLaravelConnection($this->application($raw, $resolved, $pdo)));
     }
 
     public static function unsafeUrls(): iterable
@@ -108,7 +128,7 @@ class PayoutPostgresSafetyTest extends TestCase
 
         $this->expectException(LogicException::class);
         $this->expectExceptionMessage('Unsafe resolved PostgreSQL connection setting: url');
-        PayoutPostgresSafety::verifiedLaravelConnection($app);
+        ($this->safety())::verifiedLaravelConnection($app);
     }
 
     public static function unsafeConfigurations(): iterable
@@ -142,7 +162,7 @@ class PayoutPostgresSafetyTest extends TestCase
 
         $this->expectException(LogicException::class);
         $this->expectExceptionMessage('Unsafe resolved PostgreSQL connection setting: '.$setting);
-        PayoutPostgresSafety::verifiedLaravelConnection($app);
+        ($this->safety())::verifiedLaravelConnection($app);
     }
 
     public static function unsafeWriterIdentities(): array
@@ -173,10 +193,10 @@ class PayoutPostgresSafetyTest extends TestCase
 
         $this->expectException(LogicException::class);
         $this->expectExceptionMessage('Connected PostgreSQL identity does not match');
-        PayoutPostgresSafety::verifiedLaravelConnection($app);
+        ($this->safety())::verifiedLaravelConnection($app);
     }
 
-    private function configuration(): array
+    protected function configuration(): array
     {
         return [
             'driver' => 'pgsql',
@@ -187,7 +207,7 @@ class PayoutPostgresSafetyTest extends TestCase
         ];
     }
 
-    private function identity(): array
+    protected function identity(): array
     {
         return [
             'database' => 'nium_p0_phase4_test',

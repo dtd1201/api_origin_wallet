@@ -7,6 +7,7 @@ use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\NiumSgdLocalPayoutAuthorization;
+use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
 use App\Services\Wallet\TransferApprovalService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
@@ -57,7 +58,7 @@ class NiumPayoutAuthorizationSecurityTest extends TestCase
         $this->assertDatabaseCount('transfer_approvals', 0);
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertSame($calls, count(Http::recorded()));
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public function test_equivalent_optional_inputs_aliases_and_unrelated_metadata_preserve_acceptance(): void
@@ -82,7 +83,7 @@ class NiumPayoutAuthorizationSecurityTest extends TestCase
         $this->assertSame($instruction, app(NiumSgdLocalPayoutAuthorization::class)->customerInstruction($accepted));
         $this->withToken($this->sgdToken($checker))->postJson("/api/admin/transfers/{$accepted->id}/approve")
             ->assertOk()->assertJsonPath('transfer.status', 'pending');
-        $this->assertCount(1, Http::recorded(fn ($request) => $request->method() === 'POST'));
+        $this->assertCount(1, Http::recorded(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance')));
         $this->assertDatabaseCount('ledger_entries', 1);
     }
 
@@ -117,7 +118,7 @@ class NiumPayoutAuthorizationSecurityTest extends TestCase
         $instruction['receiving_account']['sha256'] = hash('sha256', json_encode($account, JSON_THROW_ON_ERROR));
         $raw['sgd_local_workflow']['customer_authorization']['instruction'] = $instruction;
         $raw['sgd_local_workflow']['customer_authorization']['submission_token'] =
-            \App\Services\Nium\NiumSgdLocalPayoutWorkflow::financialTermsToken($instruction);
+            NiumSgdLocalPayoutWorkflow::financialTermsToken($instruction);
 
         return $raw;
     }

@@ -52,7 +52,7 @@ final class NiumSgdLocalPayoutAmounts
             NiumPayoutFxLockContract::assertMatchesTransfer(
                 $quote, $transfer, $this->locks->context($transfer->provider, $transfer->user),
             );
-            $contract = $quote->raw_data['payout_fx_lock_contract'];
+            $contract = $quote->raw_data['payout_quote_contract'];
             $amounts['fx_rate'] = $contract['rate'];
             $amounts['fx_lock_expires_at'] = $contract['expires_at'];
             if (($transfer->raw_data['sgd_local_workflow']['version'] ?? null) === 1) {

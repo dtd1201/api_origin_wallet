@@ -12,6 +12,7 @@ use App\Services\Nium\NiumSafeValueProjector;
 use App\Support\SensitiveDataSanitizer;
 use Carbon\Carbon;
 use Carbon\CarbonImmutable;
+use Closure;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Request;
@@ -36,6 +37,7 @@ class ProviderHttpClient implements ProviderClient
         private readonly bool $persistRawExchange = true,
         private readonly bool $singleDispatchAssignment = false,
         private readonly bool $readOnlyVirtualAccountReconciliation = false,
+        private readonly ?Closure $beforeDispatch = null,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -130,6 +132,9 @@ class ProviderHttpClient implements ProviderClient
         }
         if ($this->serviceConfigKey === 'nium') {
             $request = $request->beforeSending(function (Request $outgoing) use (&$capturedRequestBody, &$capturedRequestHeaders, &$assignmentTarget): void {
+                if ($this->beforeDispatch !== null) {
+                    ($this->beforeDispatch)();
+                }
                 $capturedRequestBody = $outgoing->body();
                 $capturedRequestHeaders = $outgoing->headers();
                 if ($this->singleDispatchAssignment) {

@@ -44,7 +44,8 @@ final class NiumSgdLocalOutcomeRecovery
             }
             $log = $logs->sole();
             $evidence = $log->niumExchangeEvidence;
-            $endpoint = (string) config('services.nium.'.($fx ? 'payout_fx_lock_endpoint' : 'transfer_endpoint'));
+            $modern = $fx && $log->request_method === 'POST';
+            $endpoint = (string) config('services.nium.'.($fx ? ($modern ? 'quote_endpoint' : 'payout_fx_lock_endpoint') : 'transfer_endpoint'));
             $redacted = app(NiumService::class)->path($endpoint, ['client' => '[REDACTED]', 'customer' => '[REDACTED]', 'wallet' => '[REDACTED]']);
             $redacted = str_replace(urlencode('[REDACTED]'), '[REDACTED]', $redacted);
             $expectedUrl = rtrim($context['base_url'], '/').'/'.ltrim($redacted, '/');
@@ -53,7 +54,7 @@ final class NiumSgdLocalOutcomeRecovery
             $response = $evidence?->raw_response_body;
             $capturedHeaders = array_change_key_case($evidence?->request_headers ?? [], CASE_LOWER);
             if (! $log->is_success || $log->response_status < 200 || $log->response_status >= 300
-                || $log->request_method !== ($fx ? 'GET' : 'POST') || $log->client_hash_id !== $context['client']
+                || $log->request_method !== ($fx && ! $modern ? 'GET' : 'POST') || $log->client_hash_id !== $context['client']
                 || strtok($log->request_url, '?') !== $expectedUrl || $evidence === null || ! $evidence->response_received
                 || ! is_string($response) || ! hash_equals((string) $evidence->response_body_sha256, hash('sha256', $response))
                 || ($capturedHeaders['x-request-id'] ?? null) !== [$uuid]
@@ -66,26 +67,37 @@ final class NiumSgdLocalOutcomeRecovery
             }
             $raw = $locked->raw_data;
             if ($fx) {
-                $contract = NiumPayoutFxLockContract::parse($data, $locked->source_currency, $locked->target_currency,
+                if (! $modern) {
+                    throw new RuntimeException('Legacy SGD rate locks cannot authorize payout quotes. Start a fresh explicit review after expiry.');
+                }
+                $request = $evidence->raw_request_body;
+                $payload = is_string($request) ? json_decode($request, true, 512, JSON_THROW_ON_ERROR) : null;
+                $expectedRequest = NiumPayoutQuoteContract::request($context['customer'], $locked->source_currency,
+                    $locked->target_currency, NiumSgdLocalCugScope::principal($locked->source_amount));
+                if (! is_string($request) || ! hash_equals((string) $evidence->request_body_sha256, hash('sha256', $request))
+                    || ! NiumPayoutFxLockContract::sameBinding($payload, $expectedRequest)) {
+                    throw new RuntimeException('Captured payout quote request does not match the fixed source intent.');
+                }
+                $contract = NiumPayoutQuoteContract::parse(NiumPayoutQuoteContract::decodeResponse($response), $locked->source_currency, $locked->target_currency,
                     NiumSgdLocalCugScope::principal($locked->source_amount));
                 $quotes = FxQuote::query()->where('provider_id', $locked->provider_id)->where('user_id', $locked->user_id)
-                    ->where('quote_ref', $contract['audit_id'])->lockForUpdate()->get();
+                    ->where('quote_ref', $contract['quote_id'])->lockForUpdate()->get();
                 if ($quotes->count() > 1) {
                     throw new RuntimeException('Captured audit has ambiguous local bindings.');
                 }
                 $quote = $quotes->first();
                 if ($quote === null) {
-                    $quote = FxQuote::query()->create(['user_id' => $locked->user_id, 'provider_id' => $locked->provider_id, 'quote_ref' => $contract['audit_id'],
+                    $quote = FxQuote::query()->create(['user_id' => $locked->user_id, 'provider_id' => $locked->provider_id, 'quote_ref' => $contract['quote_id'],
                         'source_currency' => $locked->source_currency, 'target_currency' => $locked->target_currency,
                         'source_amount' => $contract['source_amount'],
                         'target_amount' => (string) BigDecimal::of($contract['source_amount'])->multipliedBy($contract['rate'])->toScale(8, RoundingMode::DOWN),
                         'net_rate' => $contract['rate'], 'fee_amount' => 0, 'expires_at' => $contract['expires_at'],
-                        'raw_data' => ['provider_fx_type' => 'payout_fx_lock', 'audit_id' => $contract['audit_id'],
-                            'payout_fx_lock_contract' => $contract, 'provider_context' => $context,
+                        'raw_data' => ['provider_fx_type' => 'modern_quote', 'provider_quote_id' => $contract['quote_id'],
+                            'quote_type' => 'payout', 'quote_intent' => 'EXECUTABLE', 'payout_quote_contract' => $contract, 'provider_context' => $context,
                             'lock_request_uuid' => $uuid, 'recovered_api_request_log_id' => $log->id, 'provider_fee_status' => 'unavailable']]);
                 }
                 if (Transfer::query()->where('fx_quote_id', $quote->id)->whereKeyNot($locked->id)->exists()
-                    || ! NiumPayoutFxLockContract::sameBinding($quote->raw_data['payout_fx_lock_contract'] ?? null, $contract)) {
+                    || ! NiumPayoutFxLockContract::sameBinding($quote->raw_data['payout_quote_contract'] ?? null, $contract)) {
                     throw new RuntimeException('Captured audit is already bound or its stored evidence changed.');
                 }
                 $locked->fx_quote_id = $quote->id;

@@ -72,8 +72,9 @@ final class NiumPayoutFxLockService
         string $sourceAmount, ?string $requestId = null,
     ): FxQuote {
         $context = $this->context($provider, $user);
+        $modern = $sourceCurrency === 'USD' && $targetCurrency === 'SGD';
         $path = $this->niumService->path(
-            (string) config('services.nium.payout_fx_lock_endpoint'),
+            (string) config($modern ? 'services.nium.quote_endpoint' : 'services.nium.payout_fx_lock_endpoint'),
             [
                 'client' => $context['client'],
                 'customer' => $context['customer'],
@@ -84,21 +85,32 @@ final class NiumPayoutFxLockService
             'sourceCurrency' => $sourceCurrency,
             'destinationCurrency' => $targetCurrency,
         ];
-        $response = $requestId === null
-            ? $this->niumService->get(path: $path, query: $query, user: $user, operation: 'create_payout_fx_lock')
-            : $this->niumService->getWithRequestId($path, $query, $user, $requestId, 'create_payout_fx_lock');
+        if ($modern) {
+            $payload = NiumPayoutQuoteContract::request($context['customer'], $sourceCurrency, $targetCurrency, $sourceAmount);
+            $response = $requestId === null
+                ? $this->niumService->post(path: $path, payload: $payload, user: $user, operation: 'create_payout_fx_lock')
+                : $this->niumService->postWithRequestId($path, $payload, $user, $requestId, 'create_payout_fx_lock');
+        } else {
+            $response = $requestId === null
+                ? $this->niumService->get(path: $path, query: $query, user: $user, operation: 'create_payout_fx_lock')
+                : $this->niumService->getWithRequestId($path, $query, $user, $requestId, 'create_payout_fx_lock');
+        }
 
-        $responseData = $response->json() ?? ['raw' => $response->body()];
+        $responseData = $modern && $response->successful()
+            ? NiumPayoutQuoteContract::decodeResponse($response->body())
+            : ($response->json() ?? ['raw' => $response->body()]);
 
         if (! $response->successful() || ! is_array($responseData)) {
             throw new RuntimeException('Nium payout FX lock failed.');
         }
-        $contract = NiumPayoutFxLockContract::parse($responseData, $sourceCurrency, $targetCurrency, (string) $sourceAmount);
+        $contract = $modern
+            ? NiumPayoutQuoteContract::parse($responseData, $sourceCurrency, $targetCurrency, $sourceAmount)
+            : NiumPayoutFxLockContract::parse($responseData, $sourceCurrency, $targetCurrency, $sourceAmount);
 
         return DB::transaction(fn () => FxQuote::create([
             'user_id' => $user->id,
             'provider_id' => $provider->id,
-            'quote_ref' => $contract['audit_id'],
+            'quote_ref' => $modern ? $contract['quote_id'] : $contract['audit_id'],
             'source_currency' => $sourceCurrency,
             'target_currency' => $targetCurrency,
             'source_amount' => $sourceAmount,
@@ -110,9 +122,12 @@ final class NiumPayoutFxLockService
             'fee_amount' => 0,
             'expires_at' => $contract['expires_at'],
             'raw_data' => array_filter([
-                'provider_fx_type' => 'payout_fx_lock',
-                'audit_id' => $contract['audit_id'],
-                'payout_fx_lock_contract' => $contract,
+                'provider_fx_type' => $modern ? 'modern_quote' : 'payout_fx_lock',
+                'audit_id' => $modern ? null : $contract['audit_id'],
+                'provider_quote_id' => $modern ? $contract['quote_id'] : null,
+                'quote_type' => $modern ? 'payout' : null,
+                'quote_intent' => $modern ? 'EXECUTABLE' : null,
+                $modern ? 'payout_quote_contract' : 'payout_fx_lock_contract' => $contract,
                 'provider_context' => $context,
                 'lock_request_uuid' => $requestId,
                 'fx_hold_id' => $responseData['fx_hold_id'] ?? $responseData['fxHoldId'] ?? null,

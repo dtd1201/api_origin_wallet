@@ -7,25 +7,25 @@ use LogicException;
 use PDO;
 
 /** Safety boundary for the destructive remittance concurrency harness only. */
-final class PayoutPostgresSafety
+class PayoutPostgresSafety
 {
-    private const DATABASE = 'nium_p0_phase4_test';
+    protected const DATABASE = 'nium_p0_phase4_test';
 
-    private const HOST = '/tmp/origin-wallet-p0-pg';
+    protected const HOST = '/tmp/origin-wallet-p0-pg';
 
-    private const PORT = '55439';
+    protected const PORT = '55439';
 
     // Dedicated local cluster identity, also recorded in its Unix-socket lock file.
-    private const DATA_DIRECTORY = '/home/dtd1201/.local/share/origin-wallet-p0-pgdata';
+    protected const DATA_DIRECTORY = '/home/dtd1201/.local/share/origin-wallet-p0-pgdata';
 
     public static function assertEnvironment(): void
     {
         foreach ([
             'APP_ENV' => 'testing',
             'DB_CONNECTION' => 'pgsql',
-            'DB_HOST' => self::HOST,
-            'DB_PORT' => self::PORT,
-            'DB_DATABASE' => self::DATABASE,
+            'DB_HOST' => static::HOST,
+            'DB_PORT' => static::PORT,
+            'DB_DATABASE' => static::DATABASE,
             'DB_URL' => '',
         ] as $name => $expected) {
             if (getenv($name) !== $expected) {
@@ -37,31 +37,31 @@ final class PayoutPostgresSafety
 
     public static function assertBootstrapConnection(): void
     {
-        self::assertEnvironment();
+        static::assertEnvironment();
 
         // A fixed DSN prevents URL/libpq defaults from choosing another endpoint.
         $pdo = new PDO(
-            'pgsql:host='.self::HOST.';port='.self::PORT.';dbname='.self::DATABASE.';connect_timeout=5',
+            'pgsql:host='.static::HOST.';port='.static::PORT.';dbname='.static::DATABASE.';connect_timeout=5',
             getenv('DB_USERNAME') === false ? 'root' : getenv('DB_USERNAME'),
             getenv('DB_PASSWORD') === false ? '' : getenv('DB_PASSWORD'),
             [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
         );
-        self::assertIdentity($pdo);
+        static::assertIdentity($pdo);
     }
 
     public static function verifiedLaravelConnection(Application $app): PDO
     {
-        self::assertEnvironment();
+        static::assertEnvironment();
         if ($app->environment() !== 'testing' || $app['config']->get('database.default') !== 'pgsql') {
             throw new LogicException('Resolved application configuration must use testing and pgsql.');
         }
 
         // Check before Laravel merges away read/write configuration keys.
-        self::assertConfiguration($app['config']->get('database.connections.pgsql'));
+        static::assertConfiguration($app['config']->get('database.connections.pgsql'));
         $connection = $app['db']->connection('pgsql');
-        self::assertConfiguration($connection->getConfig());
+        static::assertConfiguration($connection->getConfig());
         $pdo = $connection->getPdo();
-        self::assertIdentity($pdo);
+        static::assertIdentity($pdo);
 
         return $pdo;
     }
@@ -76,9 +76,9 @@ final class PayoutPostgresSafety
 
         foreach ([
             'driver' => 'pgsql',
-            'host' => self::HOST,
-            'port' => self::PORT,
-            'database' => self::DATABASE,
+            'host' => static::HOST,
+            'port' => static::PORT,
+            'database' => static::DATABASE,
         ] as $name => $expected) {
             if (($config[$name] ?? null) !== $expected) {
                 throw new LogicException('Unsafe resolved PostgreSQL connection setting: '.$name);
@@ -106,10 +106,10 @@ final class PayoutPostgresSafety
             SQL)->fetch(PDO::FETCH_ASSOC);
 
         if ($identity !== [
-            'database' => self::DATABASE,
-            'port' => self::PORT,
-            'socket_directories' => self::HOST,
-            'data_directory' => self::DATA_DIRECTORY,
+            'database' => static::DATABASE,
+            'port' => static::PORT,
+            'socket_directories' => static::HOST,
+            'data_directory' => static::DATA_DIRECTORY,
             'listen_addresses' => '',
             'server_address' => null,
             'server_port' => null,

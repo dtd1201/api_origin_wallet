@@ -59,7 +59,7 @@ class NiumReviewBalanceFreshnessTest extends TestCase
         Http::swap(new Factory);
         Http::preventStrayRequests();
         Http::fake(function ($request, $options) use ($response, $status) {
-            $this->assertSame('GET', $request->method(), 'Review can never dispatch a payout.');
+            $this->assertSame(str_ends_with($request->url(), '/quotes') ? 'POST' : 'GET', $request->method(), 'Review may acquire a quote but never dispatch a payout.');
             if (str_ends_with($request->url(), '/wallet/synthetic-wallet')) {
                 $this->assertSame(0, DB::transactionLevel(), 'Never hold a DB transaction across NIUM I/O.');
                 $this->assertFalse($options['allow_redirects']);
@@ -74,10 +74,10 @@ class NiumReviewBalanceFreshnessTest extends TestCase
                 return Http::response(['content' => [['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD',
                     'payoutMethod' => 'LOCAL', 'beneficiaryAccountType' => 'INDIVIDUAL', 'customerType' => 'CORPORATE', 'routingCodeType' => 'SWIFT']]]);
             }
-            if (str_contains($request->url(), 'lockExchangeRate')) {
-                return Http::response(['audit_id' => 123456, 'fx_hold_id' => 'synthetic-new-hold',
-                    'fx_rate' => '1.275939120', 'source_currency' => 'USD', 'destination_currency' => 'SGD',
-                    'status' => 'ACTIVE', 'hold_expiry_at' => now()->addMinutes(10)->toISOString()]);
+            if (str_ends_with($request->url(), '/quotes')) {
+                return Http::response(['id' => 'synthetic-new-payout-quote', 'quoteType' => 'payout',
+                    'quoteIntent' => 'EXECUTABLE', 'sourceAmount' => $request['sourceAmount'],
+                    'netExchangeRate' => '1.275939120', 'expiryTime' => now()->addMinutes(5)->toISOString()]);
             }
             throw new \RuntimeException('Unexpected provider request');
         });

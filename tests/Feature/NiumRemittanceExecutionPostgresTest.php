@@ -40,6 +40,11 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
     use CreatesRenewableNiumPilotFixtures;
     use CreatesSgdLocalExecutionFixtures;
 
+    protected function postgresSafety(): string
+    {
+        return PayoutPostgresSafety::class;
+    }
+
     protected function setUp(): void
     {
         // Keep ordinary SQLite suite selection opt-out; PostgreSQL targets must pass every guard.
@@ -47,18 +52,19 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
             $this->markTestSkipped('Requires the guarded disposable Phase 4 PostgreSQL database.');
         }
         // Also protects direct invocation without the dedicated PHPUnit bootstrap.
-        PayoutPostgresSafety::assertBootstrapConnection();
+        $safety = $this->postgresSafety();
+        $safety::assertBootstrapConnection();
         parent::setUp();
         Http::preventStrayRequests();
-        $pdo = PayoutPostgresSafety::verifiedLaravelConnection($this->app);
+        $pdo = $safety::verifiedLaravelConnection($this->app);
         $this->assertSame('pgsql', DB::getDriverName());
-        $this->assertSame('/tmp/origin-wallet-p0-pg', DB::connection()->getConfig('host'));
-        $this->assertSame('nium_p0_phase4_test', DB::connection()->getDatabaseName());
+        $this->assertSame(getenv('DB_HOST'), DB::connection()->getConfig('host'));
+        $this->assertSame(getenv('DB_DATABASE'), DB::connection()->getDatabaseName());
         // Recreate only this disposable test schema, including old trigger functions.
         // Use the verified PDO directly so a reconnect cannot redirect the schema reset.
         $pdo->exec('DROP SCHEMA public CASCADE');
         $pdo->exec('CREATE SCHEMA public');
-        PayoutPostgresSafety::verifiedLaravelConnection($this->app);
+        $safety::verifiedLaravelConnection($this->app);
         $this->artisan('migrate', ['--database' => 'pgsql', '--force' => true])->assertExitCode(0);
         if (! Schema::hasColumn('transfers', 'provider_status')) {
             Schema::table('transfers', function (Blueprint $table): void {
@@ -483,7 +489,7 @@ class NiumRemittanceExecutionPostgresTest extends TestCase
         });
     }
 
-    private function race(callable $work): void
+    protected function race(callable $work): void
     {
         $dir = sys_get_temp_dir().'/nium-p0-race-'.bin2hex(random_bytes(8));
         mkdir($dir, 0700);

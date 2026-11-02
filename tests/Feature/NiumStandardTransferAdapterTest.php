@@ -62,12 +62,12 @@ class NiumStandardTransferAdapterTest extends TestCase
 
     private function locksSent(): int
     {
-        return Http::recorded(fn ($request) => str_contains($request->url(), 'lockExchangeRate'))->count();
+        return Http::recorded(fn ($request) => str_ends_with($request->url(), '/quotes'))->count();
     }
 
     private function assertNoDispatch(): void
     {
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertDatabaseCount('transfer_approvals', 0);
     }
@@ -137,7 +137,7 @@ class NiumStandardTransferAdapterTest extends TestCase
             $this->assertSame(NiumSgdLocalPayoutWorkflow::financialTermsToken($instruction), $workflow['submission_token']);
             $this->assertSame('6789', $workflow['customer_instruction']['receiving_account']['last_four']);
             $this->assertSame($transfer->fx_quote_id, $instruction['fx_quote_id']);
-            $this->assertSame((string) $transfer->fxQuote->quote_ref, $instruction['audit_id']);
+            $this->assertSame((string) $transfer->fxQuote->quote_ref, $instruction['quote_id']);
             $this->assertSame($instruction['rate'], $amounts['fx_rate']);
             $this->assertSame(strtotime($instruction['expires_at']), strtotime($amounts['fx_lock_expires_at']));
             $this->assertSame($instruction['source_currency'], $amounts['source_currency']);
@@ -150,7 +150,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertDatabaseCount('transfer_approvals', 1);
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertSame(2, $this->locksSent());
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public static function receivingAccountTypeChangeStages(): array
@@ -199,7 +199,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertDatabaseCount('transfer_approvals', $stage === 'resume' ? 1 : 0);
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertSame($calls, count(Http::recorded()));
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public static function savedCustomerReadEndpoints(): array
@@ -258,7 +258,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertSame('7.25000000', $saved['payout_amounts']['source_amount']);
         $this->assertSame('7.25', $saved['payout_amounts']['total_wallet_debit']);
         $this->assertSame(['amount' => '0', 'currency' => 'USD'], $saved['payout_amounts']['transfer_fee']);
-        $this->assertSame($transfer->fxQuote->raw_data['payout_fx_lock_contract']['rate'], $saved['payout_amounts']['fx_rate']);
+        $this->assertSame($transfer->fxQuote->raw_data['payout_quote_contract']['rate'], $saved['payout_amounts']['fx_rate']);
         $this->assertSame($transfer->fxQuote->expires_at->toISOString(), $saved['payout_amounts']['fx_lock_expires_at']);
         $this->assertNull($saved['target_amount']);
         $this->assertNull($saved['fee_amount']);
@@ -330,8 +330,7 @@ class NiumStandardTransferAdapterTest extends TestCase
     public function test_saved_customer_recovery_capabilities_remain_public_and_read_only(
         bool $detail, string $status, string $state, bool $withReference, bool $expired,
         ?string $kind, bool $canRecover, bool $canReconcile, bool $canRefresh, bool $recoveryRequired,
-    ): void
-    {
+    ): void {
         [$fixture, $transfer] = $this->standardSubmitted();
         $raw = $transfer->raw_data;
         $raw['sgd_local_workflow']['state'] = $state;
@@ -395,14 +394,14 @@ class NiumStandardTransferAdapterTest extends TestCase
         $receipt = $transfer->raw_data['sgd_local_workflow']['customer_authorization'];
         $review = $transfer->raw_data['sgd_local_workflow']['review'];
         $quoteId = $transfer->fx_quote_id;
-        $audit = (int) $transfer->fxQuote->quote_ref;
+        $audit = $transfer->fxQuote->quote_ref;
         $this->assertNoDispatch();
         $checker = $this->checker();
         if ($resume) {
             $approved = app(TransferApprovalService::class)->approve($transfer, $checker);
             $this->assertSame('approved', $approved->status);
             $this->assertNull($approved->provider_operation_key);
-            Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+            Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
         }
         $url = "/api/admin/transfers/{$transfer->id}/approve";
         $this->withToken($this->sgdToken($checker))->postJson($url, ['note' => 'Synthetic independent approval'])
@@ -423,11 +422,11 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertSame($operation, $hold->raw_data['operation_key']);
         $this->assertSame($receipt['instruction']['financial_terms'], $hold->raw_data['financial_authorization']);
         $this->assertSame('-7.25000000', $hold->amount);
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance')
             && $request->hasHeader('x-request-id', substr($operation, 5))
             && $request->data() === [
                 'beneficiary' => ['id' => 'synthetic-external-beneficiary'],
-                'payout' => ['sourceAmount' => 7.25, 'sourceCurrency' => 'USD', 'auditId' => $audit],
+                'payout' => ['sourceAmount' => 7.25, 'sourceCurrency' => 'USD', 'quoteId' => $audit],
                 'purposeCode' => 'SYNTHETIC_PURPOSE', 'sourceOfFunds' => 'Corporate Account',
             ]);
 
@@ -442,7 +441,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertSame($operation, $current->fresh()->provider_operation_key);
         $this->assertSame($receipt, $current->fresh()->raw_data['sgd_local_workflow']['customer_authorization']);
         $this->assertSame(1, ApiRequestLog::query()->where('operation', 'transfer_money')->count());
-        $this->assertCount(1, Http::recorded(fn ($request) => $request->method() === 'POST'));
+        $this->assertCount(1, Http::recorded(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance')));
         $this->assertSame(2, $this->locksSent());
         $this->assertDatabaseCount('transfer_approvals', 1);
         $this->assertDatabaseCount('ledger_entries', 1);
@@ -460,7 +459,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertSame('77.75000000', Balance::query()->sole()->ledger_balance);
         $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
         $this->travelBack();
     }
 
@@ -575,7 +574,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertDatabaseCount('fx_quotes', 2);
         $this->assertSame(2, $this->locksSent());
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public static function revokedCheckerStates(): array
@@ -608,7 +607,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertDatabaseCount('transfer_approvals', 1);
         $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertSame(2, $this->locksSent());
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 
     public function test_standard_unknown_dispatch_retains_its_hold_and_duplicate_approval_cannot_retry(): void
@@ -888,7 +887,7 @@ class NiumStandardTransferAdapterTest extends TestCase
                     'payoutMethod' => 'LOCAL', 'beneficiaryAccountType' => 'INDIVIDUAL',
                     'customerType' => 'CORPORATE', 'routingCodeType' => 'SWIFT']]]);
             }
-            if (str_contains($request->url(), 'lockExchangeRate')) {
+            if (str_ends_with($request->url(), '/quotes')) {
                 $attempts++;
                 throw new ConnectionException('Synthetic uncertain FX; no network');
             }
@@ -1033,7 +1032,7 @@ class NiumStandardTransferAdapterTest extends TestCase
         $checker = User::query()->whereHas('roles', fn ($query) => $query->where('role_code', 'admin'))->firstOrFail();
         $this->withToken($this->sgdToken($checker))->postJson('/api/admin/transfers/'.$created->json('id').'/approve')->assertOk();
         $this->postJson('/api/admin/transfers/'.$created->json('id').'/approve')->assertOk();
-        $posts = Http::recorded(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
+        $posts = Http::recorded(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance') && str_ends_with($request->url(), '/remittance'));
         $this->assertCount(1, $posts);
         $expectedBody = '{"beneficiary":{"id":"synthetic-hk-beneficiary"},"payout":{"sourceAmount":'.$amount.',"sourceCurrency":"USD","destinationCurrency":"USD","payoutMethod":"SWIFT","tradeOrderID":"STANDARD-REFERENCE","swiftFeeType":"SHA"},"purposeCode":"SYNTHETIC_PURPOSE","sourceOfFunds":"Corporate Account","customerComments":"STANDARD-REFERENCE"}';
         $this->assertSame($expectedBody, $posts->sole()[0]->body());
@@ -1061,6 +1060,6 @@ class NiumStandardTransferAdapterTest extends TestCase
         $this->assertSame('-'.number_format((float) $amount, 8, '.', ''), LedgerEntry::query()->where('entry_type', 'debit')->sole()->amount);
         $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && str_ends_with($request->url(), '/remittance'));
     }
 }

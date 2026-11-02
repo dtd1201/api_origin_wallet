@@ -84,7 +84,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
                 && $r->url() === 'https://nium.test/api/v1/client/synthetic-client/customer/synthetic-customer/wallet/synthetic-wallet/remittance'
                 && $r->hasHeader('x-api-key', 'synthetic-only')
                 && $r->data() === ['beneficiary' => ['id' => 'synthetic-external-beneficiary'],
-                    'payout' => ['sourceAmount' => 5, 'sourceCurrency' => 'USD', 'auditId' => (int) $transfer->fxQuote->quote_ref],
+                    'payout' => ['sourceAmount' => 5, 'sourceCurrency' => 'USD', 'quoteId' => $transfer->fxQuote->quote_ref],
                     'purposeCode' => 'SYNTHETIC_PURPOSE', 'sourceOfFunds' => 'Corporate Account']);
         }
         $this->withToken($token)->postJson($url)->assertOk();
@@ -234,7 +234,7 @@ class NiumPayoutPilotPolicyTest extends TestCase
         $this->assertSame('80.00000000', Balance::query()->sole()->available_balance);
         Http::assertSent(fn ($r) => $r->method() === 'POST' && $r->data() === [
             'beneficiary' => ['id' => 'synthetic-external-beneficiary'],
-            'payout' => ['sourceAmount' => 5, 'sourceCurrency' => 'USD', 'auditId' => (int) $transfer->fxQuote->quote_ref],
+            'payout' => ['sourceAmount' => 5, 'sourceCurrency' => 'USD', 'quoteId' => $transfer->fxQuote->quote_ref],
             'purposeCode' => 'SYNTHETIC_PURPOSE', 'sourceOfFunds' => 'Corporate Account',
         ]);
         $this->withToken($token)->postJson($url)->assertOk();
