@@ -2,13 +2,19 @@
 
 namespace Tests\Feature;
 
+use App\Models\ApiRequestLog;
 use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
+use App\Models\NiumApiExchangeEvidence;
 use App\Models\User;
+use App\Services\Integrations\ProviderBeneficiaryManager;
+use App\Services\Nium\NiumBeneficiaryWriteException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
+use RuntimeException;
 use Tests\TestCase;
 
 class NiumSgdBeneficiaryWorkflowTest extends TestCase
@@ -120,6 +126,172 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
             && $request['destinationCurrency'] === 'SGD' && $request['beneficiaryAccountType'] === 'Individual'
             && $request['beneficiaryIdentificationValue'] === 'FIXTURE123');
         Http::assertNotSent(fn ($request) => $request->method() !== 'GET' && $request->url() !== 'https://gateway.nium.test/beneficiaries');
+    }
+
+    #[DataProvider('rejectedWriteResponses')]
+    public function test_customer_create_rolls_back_http_error_audits_even_though_post_was_dispatched(int $status, array $body): void
+    {
+        Log::spy();
+        // Synthetic responses reproduce transaction behavior, not the unknown Production response.
+        $observed = [];
+        NiumApiExchangeEvidence::created(function (NiumApiExchangeEvidence $evidence) use (&$observed): void {
+            $log = ApiRequestLog::findOrFail($evidence->api_request_log_id);
+            if ($log->operation === 'beneficiary_create') {
+                $observed[] = [$log->request_method, $log->response_status, $evidence->response_received];
+            }
+        });
+        Http::fake([
+            '*validationSchemas*' => Http::response([$this->syntheticSchema()]),
+            'https://gateway.nium.test/beneficiaries' => Http::response($body, $status),
+        ]);
+
+        $this->postJson($this->baseUrl(), $this->payload())->assertUnprocessable()
+            ->assertJsonPath('message', 'Unable to create beneficiary with the selected provider. Review the details and try again.');
+
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request->url() === 'https://gateway.nium.test/beneficiaries');
+        $this->assertSame([['POST', $status, true]], $observed);
+        $this->assertDatabaseCount('beneficiaries', 0);
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context) use ($status): bool {
+            $this->assertDatabaseCount('api_request_logs', 0);
+            $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+            $this->assertArrayNotHasKey('message', $context);
+            $this->assertSame(NiumBeneficiaryWriteException::class, $context['exception']);
+            $diagnostic = $context['provider_diagnostic'];
+            $this->assertSame('beneficiary_create', $diagnostic['stage']);
+            $this->assertSame($status, $diagnostic['http_status']);
+            $this->assertTrue($diagnostic['response_received']);
+            $this->assertSame($status === 200 ? 'missing_beneficiary_id' : 'http_error', $diagnostic['failure_kind']);
+            Http::assertSent(fn ($request) => $request->method() === 'POST' && $request->header('x-request-id') === [$diagnostic['request_id']]);
+
+            return $message === 'Customer beneficiary provider operation failed.';
+        });
+    }
+
+    public static function rejectedWriteResponses(): array
+    {
+        return [
+            'HTTP 400' => [400, ['message' => 'Validation failed for input provided']],
+            'HTTP 422' => [422, ['message' => 'Validation failed for input provided']],
+            'HTTP 500' => [500, ['message' => 'Synthetic provider error']],
+            'HTTP 200 without beneficiary ID' => [200, ['message' => 'Synthetic incomplete success']],
+        ];
+    }
+
+    public function test_provider_http_error_is_audited_when_caller_does_not_roll_back(): void
+    {
+        Http::fake([
+            '*validationSchemas*' => Http::response([$this->syntheticSchema()]),
+            'https://gateway.nium.test/beneficiaries' => Http::response(['message' => 'Validation failed for input provided'], 400),
+        ]);
+        $beneficiary = $this->customer->beneficiaries()->create($this->payload());
+        try {
+            app(ProviderBeneficiaryManager::class)->createBeneficiary($this->provider, $beneficiary);
+            $this->fail('The rejected write must still throw.');
+        } catch (RuntimeException) {
+            $this->assertSame('create_failed', $beneficiary->fresh()->status);
+        }
+        $log = ApiRequestLog::where('operation', 'beneficiary_create')->sole();
+        $this->assertSame('POST', $log->request_method);
+        $this->assertSame(400, $log->response_status);
+        $this->assertFalse($log->is_success);
+        $this->assertTrue(NiumApiExchangeEvidence::where('api_request_log_id', $log->id)->sole()->response_received);
+    }
+
+    public function test_optional_account_verification_rejection_can_precede_beneficiary_create_and_roll_back_its_audit(): void
+    {
+        Log::spy();
+        config()->set('services.nium.account_verification_enabled', true);
+        config()->set('services.nium.account_verification_endpoint', '/accountVerification');
+        $observed = [];
+        NiumApiExchangeEvidence::created(function (NiumApiExchangeEvidence $evidence) use (&$observed): void {
+            $log = ApiRequestLog::findOrFail($evidence->api_request_log_id);
+            if ($log->request_method === 'POST') {
+                $observed[] = $log->response_status;
+            }
+        });
+        Http::fake([
+            '*validationSchemas*' => Http::response([$this->syntheticSchema()]),
+            '*accountVerification' => Http::response(['message' => 'Validation failed for input provided'], 400),
+        ]);
+        $payload = $this->payload();
+        $payload['raw_data']['nium']['verify_before_create'] = true;
+        $this->postJson($this->baseUrl(), $payload)->assertUnprocessable();
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request->url() === 'https://gateway.nium.test/accountVerification');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && $request->url() === 'https://gateway.nium.test/beneficiaries');
+        $this->assertSame([400], $observed);
+        $this->assertDatabaseCount('beneficiaries', 0);
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context): bool {
+            $this->assertSame('beneficiary_account_verification', $context['provider_diagnostic']['stage']);
+            $this->assertSame(400, $context['provider_diagnostic']['http_status']);
+            Http::assertSent(fn ($request) => $request->url() === 'https://gateway.nium.test/accountVerification'
+                && $request->header('x-request-id') === [$context['provider_diagnostic']['request_id']]);
+
+            return $message === 'Customer beneficiary provider operation failed.';
+        });
+    }
+
+    public function test_post_rollback_diagnostic_excludes_provider_supplied_personal_data_and_credentials(): void
+    {
+        Log::spy();
+        $private = 'Fixture Person 123456789 fixture.person@example.test fixture-key fixture-partner-key';
+        $responseId = (string) Str::uuid();
+        Http::fake([
+            '*validationSchemas*' => Http::response([$this->syntheticSchema()]),
+            'https://gateway.nium.test/beneficiaries' => Http::response([
+                'message' => 'Validation failed for '.$private,
+                'referenceId' => $private,
+                'beneficiaryHashId' => $private,
+                'errorCode' => $private,
+                'errors' => [
+                    ['code' => 'validation_error', 'field' => 'beneficiaryAccountNumber', 'description' => $private],
+                    ['code' => $private, 'field' => $private, 'description' => $private, 'allowedValues' => [$private]],
+                    $private,
+                ],
+            ], 400, ['x-request-id' => $responseId, 'Authorization' => $private]),
+        ]);
+        $response = $this->postJson($this->baseUrl(), $this->payload())->assertUnprocessable();
+        $this->assertStringNotContainsString($private, $response->getContent());
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context) use ($private, $responseId): bool {
+            $diagnostic = $context['provider_diagnostic'];
+            $this->assertSame($responseId, $diagnostic['response_request_id']);
+            $this->assertSame(3, $diagnostic['provider_error_count']);
+            $this->assertSame('validation_error', $diagnostic['errors']['error_code']);
+            $this->assertSame('validation_error', $diagnostic['errors']['error_items'][0]['error_code']);
+            $this->assertSame(substr(hash('sha256', $private), 0, 16), $diagnostic['errors']['error_items'][0]['error_description_fingerprint']);
+            foreach (['Fixture Person', '123456789', 'fixture.person@example.test', 'fixture-key', 'fixture-partner-key'] as $secret) {
+                $this->assertStringNotContainsString($secret, json_encode($context, JSON_THROW_ON_ERROR));
+            }
+
+            return $message === 'Customer beneficiary provider operation failed.';
+        });
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+    }
+
+    public function test_non_json_provider_rejection_has_safe_diagnostics_and_still_rolls_back(): void
+    {
+        Log::spy();
+        Http::fake([
+            '*validationSchemas*' => Http::response([$this->syntheticSchema()]),
+            'https://gateway.nium.test/beneficiaries' => Http::response('Invalid Fixture Person account 123456789 fixture-key', 502,
+                ['Content-Type' => 'text/plain', 'x-request-id' => '123456789']),
+        ]);
+        $this->postJson($this->baseUrl(), $this->payload())->assertUnprocessable()->assertDontSee('123456789');
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context): bool {
+            $this->assertSame(502, $context['provider_diagnostic']['http_status']);
+            $this->assertSame('http_error', $context['provider_diagnostic']['failure_kind']);
+            $this->assertArrayNotHasKey('response_request_id', $context['provider_diagnostic']);
+            $this->assertStringNotContainsString('123456789', json_encode($context, JSON_THROW_ON_ERROR));
+            $this->assertStringNotContainsString('fixture-key', json_encode($context, JSON_THROW_ON_ERROR));
+
+            return $message === 'Customer beneficiary provider operation failed.';
+        });
+        $this->assertDatabaseCount('api_request_logs', 0);
+        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
     }
 
     #[DataProvider('invalidFields')]
