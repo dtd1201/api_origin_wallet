@@ -88,12 +88,16 @@ class TransferEligibilityService
 
         $this->approvalService->ensureApprovedForSubmission($transfer);
 
-        $balance = Balance::query()
+        $balanceQuery = Balance::query()
             ->where('user_id', $user->id)
             ->where('provider_id', $provider->id)
             ->where('currency', $transfer->source_currency)
-            ->orderByDesc('as_of')
-            ->first();
+            ->orderByDesc('as_of');
+        if (\App\Services\Nium\NiumTransferReviewService::applies($transfer)) {
+            $account = $user->providerAccounts()->where('provider_id', $provider->id)->firstOrFail();
+            $balanceQuery->where('external_account_id', $account->external_account_id);
+        }
+        $balance = $balanceQuery->first();
 
         $wallet = (array) (($transfer->raw_data ?? [])['wallet'] ?? []);
         $hasExistingHold = filled($wallet['hold_reference'] ?? null);

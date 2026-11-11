@@ -10,6 +10,8 @@ use App\Models\User;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumPurposeCodeService;
 use App\Services\Nium\NiumTransferPolicy;
+use App\Services\Nium\NiumTransferReviewService;
+use App\Services\Nium\NiumStandardTransferAdapter;
 use App\Services\Transfers\TransferClientReferenceIdempotency;
 use App\Services\Transfers\TransferEligibilityService;
 use App\Services\Wallet\TransferApprovalService;
@@ -25,6 +27,17 @@ use Throwable;
 
 class TransferController extends Controller
 {
+    public function review(Request $request, User $user, NiumStandardTransferAdapter $adapter): JsonResponse
+    {
+        abort_unless($request->user()?->id === $user->id, 403);
+        $input = $request->validate($this->standardSgdRules());
+        try {
+            return response()->json($adapter->review($user, $input));
+        } catch (Throwable $exception) {
+            return $this->standardSgdFailure($exception, $user, $input, $adapter);
+        }
+    }
+
     public function index(User $user): JsonResponse
     {
         return response()->json(
@@ -66,6 +79,9 @@ class TransferController extends Controller
             'purpose_code' => ['nullable', 'string', 'max:100'],
             'reference_text' => ['nullable', 'string', 'max:255'],
             'client_reference' => ['nullable', 'string', 'max:255'],
+            'review_token' => ['sometimes', 'string'],
+            'accept_payment_terms' => ['sometimes', 'accepted'],
+            'purpose_confirmed' => ['sometimes', 'accepted'],
             'raw_data' => ['nullable', 'array'],
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
             'raw_data.source' => ['sometimes', 'nullable', 'string', 'max:50'],
@@ -74,6 +90,27 @@ class TransferController extends Controller
 
         $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
         $validated['provider_id'] = $provider->id;
+
+        if (strtolower((string) $provider->code) === 'nium' && $validated['target_currency'] === 'SGD') {
+            abort_unless($request->user()?->id === $user->id, 403);
+            $input = $request->validate([
+                ...$this->standardSgdRules(),
+                'transfer_type' => ['required', 'in:payout'],
+                'source_currency' => ['required', 'in:USD'],
+                'target_currency' => ['required', 'in:SGD'],
+                'review_token' => ['required', 'string', 'max:20000'],
+                'accept_payment_terms' => ['required', 'accepted'],
+                'purpose_confirmed' => ['required', 'accepted'],
+            ]);
+            $adapter = app(NiumStandardTransferAdapter::class);
+            try {
+                [$transfer, $replayed] = $adapter->submit($user, $input);
+
+                return response()->json($adapter->customerTransfer($transfer), $replayed ? 200 : 201);
+            } catch (Throwable $exception) {
+                return $this->standardSgdFailure($exception, $user, $input, $adapter);
+            }
+        }
 
         if (isset($validated['beneficiary_id'])) {
             $beneficiary = $user->beneficiaries()->findOrFail($validated['beneficiary_id']);
@@ -144,6 +181,8 @@ class TransferController extends Controller
             $validated['fee_currency'] = $validated['source_currency'];
         }
 
+        unset($validated['review_token'], $validated['accept_payment_terms'], $validated['purpose_confirmed']);
+
         $clientReference = $validated['client_reference'] ?? 'OW-'.Str::uuid()->toString();
         $existing = $user->transfers()->where('provider_id', $provider->id)->where('client_reference', $clientReference)->first();
         if ($existing !== null) {
@@ -192,6 +231,53 @@ class TransferController extends Controller
         return response()->json((new TransferResource($transfer))->resolve(), 201);
     }
 
+    private function standardSgdRules(): array
+    {
+        return [
+            'provider_id' => ['required', 'integer', 'exists:integration_providers,id'],
+            'beneficiary_id' => ['required', 'integer'],
+            'source_amount' => ['required', 'numeric', 'gt:0', 'decimal:0,8'],
+            'purpose_code' => ['required', 'string', 'max:100'],
+            'reference_text' => ['required', 'string', 'max:255'],
+            'client_reference' => ['required', 'string', 'max:100'],
+            'transfer_id' => ['sometimes', 'integer'],
+            'preparation_id' => ['sometimes', 'uuid'],
+            'transfer_type' => ['sometimes', 'in:payout'],
+            'source_currency' => ['sometimes', 'in:USD'],
+            'target_currency' => ['sometimes', 'in:SGD'],
+            'fx_quote_id' => ['prohibited'], 'fx_rate' => ['prohibited'],
+            'fee_amount' => ['prohibited'], 'fee_currency' => ['prohibited'],
+            'total_wallet_debit' => ['prohibited'], 'provider_verified' => ['prohibited'],
+            'target_amount' => ['prohibited'], 'source_bank_account_id' => ['prohibited'],
+            'raw_data' => ['prohibited'], 'accept_uncapped_charges' => ['prohibited'],
+            'quote_id' => ['prohibited'], 'pricing' => ['prohibited'],
+            'customer_authorization' => ['prohibited'], 'submission_token' => ['prohibited'],
+        ];
+    }
+
+    private function standardSgdFailure(
+        Throwable $exception,
+        User $user,
+        array $input,
+        NiumStandardTransferAdapter $adapter,
+    ): JsonResponse {
+        if ($exception instanceof \Illuminate\Database\Eloquent\ModelNotFoundException
+            || $exception instanceof \Symfony\Component\HttpKernel\Exception\HttpExceptionInterface) {
+            throw $exception;
+        }
+        $transfer = $user->transfers()->where('provider_id', $input['provider_id'])
+            ->where('client_reference', $input['client_reference'])->first();
+
+        return response()->json([
+            'message' => $exception->getMessage() === \App\Services\Nium\NiumSgdAdmissionFence::CLOSED
+                ? \App\Services\Nium\NiumSgdAdmissionFence::CLOSED
+                : ($exception->getMessage() === \App\Services\Nium\NiumPayoutFinancialControls::BLOCK_REASON
+                    ? \App\Services\Nium\NiumPayoutFinancialControls::BLOCK_REASON
+                    : 'SGD LOCAL review or acceptance could not be completed. Check the saved instruction before continuing.'),
+            'transfer' => $transfer === null ? null : $adapter->customerTransfer($transfer),
+        ], 422);
+    }
+
     private function decimal(mixed $value): string
     {
         return number_format((float) $value, 8, '.', '');
@@ -217,6 +303,10 @@ class TransferController extends Controller
         abort_unless($transfer->user_id === $user->id, 404);
 
         $provider = IntegrationProvider::query()->findOrFail($transfer->provider_id);
+
+        if (NiumTransferReviewService::applies($transfer)) {
+            return response()->json(['message' => 'Use standard Review and Customer Submit for consent. SGD remittance remains on HOLD.'], 422);
+        }
 
         try {
             $provider->assertSupportsCapability('transfer');
@@ -261,7 +351,7 @@ class TransferController extends Controller
         ]);
     }
 
-    public function cancel(User $user, Transfer $transfer): JsonResponse
+    public function cancel(User $user, Transfer $transfer, \App\Services\Wallet\LedgerService $ledger): JsonResponse
     {
         abort_unless($transfer->user_id === $user->id, 404);
 
@@ -271,10 +361,15 @@ class TransferController extends Controller
             ], 422);
         }
 
-        $transfer = DB::transaction(function () use ($transfer): Transfer {
+        $transfer = DB::transaction(function () use ($transfer, $ledger): Transfer {
+            $transfer = Transfer::query()->whereKey($transfer->id)->lockForUpdate()->firstOrFail();
+            abort_unless(in_array($transfer->status, ['draft', 'approval_required', 'approved'], true), 422);
             $transfer->update([
                 'status' => 'cancelled',
             ]);
+            if (NiumTransferReviewService::applies($transfer)) {
+                $ledger->releaseTransferHold($transfer, 'Customer cancelled before provider submission.');
+            }
 
             return $transfer->fresh();
         });

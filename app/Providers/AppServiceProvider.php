@@ -33,6 +33,10 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->bind(AmlScreeningProvider::class, UnavailableAmlScreeningProvider::class);
+        $this->app->bind(\App\Services\Nium\DynamicConfirmation\DynamicPayoutTransport::class,
+            \App\Services\Nium\DynamicConfirmation\NiumDynamicPayoutTransport::class);
+        $this->app->bind(\App\Services\Nium\DynamicConfirmation\DynamicPayoutEvidenceSource::class,
+            \App\Services\Nium\DynamicConfirmation\OriginDynamicPayoutEvidenceSource::class);
     }
 
     /**

@@ -8,6 +8,7 @@ use App\Services\Integrations\Contracts\PreparedTransferStatusProvider;
 use App\Services\Transfers\TransferEligibilityService;
 use App\Services\Wallet\LedgerService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 class ProviderTransferManager
@@ -20,6 +21,11 @@ class ProviderTransferManager
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
+        if (\App\Services\Nium\NiumTransferReviewService::applies($transfer)) {
+            $reviews = app(\App\Services\Nium\NiumTransferReviewService::class);
+            $reviews->assertAccepted($transfer->loadMissing(['user', 'beneficiary', 'fxQuote']));
+            $reviews->ensureFreshBalance($transfer);
+        }
         $this->eligibilityService->ensureTransferCanBeSubmitted(
             $transfer->loadMissing(['provider', 'user', 'beneficiary', 'sourceBankAccount'])
         );
@@ -30,10 +36,29 @@ class ProviderTransferManager
                 ->resolveTransferProvider($provider)
                 ->submitTransfer($provider, $transfer->fresh(['user', 'beneficiary', 'sourceBankAccount']));
         } catch (Throwable $exception) {
+            $cleanupFailureCode = null;
             try {
-                $this->ledgerService->releaseTransferHold($transfer->fresh(), 'Transfer hold released after provider submission failure.');
-            } catch (Throwable) {
-                // Preserve the provider failure as the primary error returned to the caller.
+                $current = $transfer->fresh();
+                // Only this known internal code is safe to include; provider codes are not logged.
+                if ($current?->failure_code === 'remittance_dispatch_held') {
+                    $cleanupFailureCode = 'remittance_dispatch_held';
+                }
+                if (! \App\Services\Nium\NiumTransferReviewService::applies($current)
+                    || in_array($current->status, ['failed', 'cancelled', 'rejected'], true)) {
+                    $this->ledgerService->releaseTransferHold($current, 'Transfer hold released after provider submission failure.');
+                }
+            } catch (Throwable $cleanupException) {
+                try {
+                    Log::error('Transfer reservation cleanup failed.', [
+                        'transfer_id' => $transfer->id,
+                        'phase' => 'reservation_cleanup',
+                        'cleanup_exception_class' => $cleanupException::class,
+                        'primary_exception_class' => $exception::class,
+                        'failure_code' => $cleanupFailureCode,
+                    ]);
+                } catch (Throwable) {
+                    // Logging failure must not replace the original submission exception.
+                }
             }
 
             throw $exception;

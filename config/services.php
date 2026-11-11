@@ -150,6 +150,23 @@ return [
         'wallet_data_sync_enabled' => env('NIUM_WALLET_DATA_SYNC_ENABLED', false),
         'wallet_data_sync_limit' => (int) env('NIUM_WALLET_DATA_SYNC_LIMIT', 50),
         'payout_fx_enabled' => env('NIUM_PAYOUT_FX_ENABLED', false),
+        // Scoped business confirmation only. Disabled until separately authorized by the operator.
+        'sgd_local_zero_fee' => [
+            'enabled' => env('NIUM_SGD_LOCAL_ZERO_FEE_ENABLED', false),
+            'version' => env('NIUM_SGD_LOCAL_ZERO_FEE_VERSION'),
+            'confirmation_reference' => env('NIUM_SGD_LOCAL_ZERO_FEE_CONFIRMATION_REFERENCE'),
+            'confirmed_by' => env('NIUM_SGD_LOCAL_ZERO_FEE_CONFIRMED_BY'),
+            'confirmed_at' => env('NIUM_SGD_LOCAL_ZERO_FEE_CONFIRMED_AT'),
+            'effective_from' => env('NIUM_SGD_LOCAL_ZERO_FEE_EFFECTIVE_FROM'),
+            'expires_at' => env('NIUM_SGD_LOCAL_ZERO_FEE_EXPIRES_AT'),
+            'provider_context' => [
+                'base_url' => env('NIUM_SGD_LOCAL_ZERO_FEE_BASE_URL'),
+                'client' => env('NIUM_SGD_LOCAL_ZERO_FEE_CLIENT_ID'),
+                'customer' => env('NIUM_SGD_LOCAL_ZERO_FEE_CUSTOMER_ID'),
+                'wallet' => env('NIUM_SGD_LOCAL_ZERO_FEE_WALLET_ID'),
+            ],
+            'terms' => \App\Services\Nium\NiumSgdLocalZeroFeePolicy::TERMS,
+        ],
         'wallet_fx_enabled' => env('NIUM_WALLET_FX_ENABLED', false),
         'payout_fx_lock_endpoint' => env('NIUM_PAYOUT_FX_LOCK_ENDPOINT', '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/lockExchangeRate'),
         'quote_endpoint' => env('NIUM_QUOTE_ENDPOINT', '/api/v1/client/{clientHashId}/quotes'),

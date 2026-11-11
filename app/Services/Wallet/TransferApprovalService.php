@@ -13,6 +13,9 @@ class TransferApprovalService
 {
     public function requiresApproval(Transfer $transfer): bool
     {
+        if (\App\Services\Nium\NiumTransferReviewService::applies($transfer)) {
+            return true;
+        }
         if (! (bool) config('wallet.transfer_controls.require_admin_approval', true)) {
             return false;
         }
@@ -29,6 +32,9 @@ class TransferApprovalService
 
     public function ensureApprovedForSubmission(Transfer $transfer): void
     {
+        if (\App\Services\Nium\NiumTransferReviewService::applies($transfer)) {
+            throw new RuntimeException(\App\Services\Nium\NiumSgdAdmissionFence::DISPATCH_HOLD);
+        }
         if (! $this->requiresApproval($transfer)) {
             return;
         }
@@ -45,6 +51,8 @@ class TransferApprovalService
 
         $hasApproval = $transfer->approvals->contains(
             fn (TransferApproval $approval): bool => $approval->action === 'approved'
+                && (! \App\Services\Nium\NiumTransferReviewService::applies($transfer)
+                    || $approval->approver_user_id !== $transfer->user_id)
         );
 
         if (! $hasApproval) {
@@ -54,14 +62,26 @@ class TransferApprovalService
 
     public function approve(Transfer $transfer, User $approver, ?string $note = null, ?ProviderTransferManager $manager = null): Transfer
     {
+        $sgdLocal = \App\Services\Nium\NiumTransferReviewService::applies($transfer);
+        $admissionLease = $sgdLocal ? app(\App\Services\Nium\NiumSgdAdmissionFence::class)->acquire() : null;
+        if ($sgdLocal) {
+            if ($approver->id === $transfer->user_id || $approver->status !== 'active' || ! $approver->isAdmin()
+                || ! $approver->hasPermission('transfers.approve')) {
+                throw new RuntimeException('An active independent Admin with transfer approval permission is required.');
+            }
+        }
         $shouldAutoSubmit = false;
-        $approved = DB::transaction(function () use ($transfer, $approver, $note, &$shouldAutoSubmit): Transfer {
+        $approved = DB::transaction(function () use ($transfer, $approver, $note, $sgdLocal, &$shouldAutoSubmit): Transfer {
             $transfer = Transfer::query()
                 ->whereKey($transfer->id)
                 ->lockForUpdate()
                 ->firstOrFail();
 
             if ($transfer->status === 'approved') {
+                if ($sgdLocal) {
+                    app(\App\Services\Nium\NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
+                }
+
                 return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
             }
 
@@ -73,14 +93,33 @@ class TransferApprovalService
                 throw new RuntimeException('This transfer cannot be approved in its current status.');
             }
 
-            $transfer->approvals()->create([
+            $snapshot = null;
+            if ($sgdLocal) {
+                if ($approver->id === $transfer->user_id || $approver->status !== 'active'
+                    || ! $approver->isAdmin() || ! $approver->hasPermission('transfers.approve')
+                    || $transfer->provider_operation_key !== null
+                    || filled($transfer->external_transfer_id) || filled($transfer->external_payment_id)) {
+                    throw new RuntimeException('An undispatched instruction and an active independent Admin are required.');
+                }
+                $snapshot = app(\App\Services\Nium\NiumSgdLocalPayoutWorkflow::class)->assertRequestedReview($transfer);
+            }
+
+            $approval = $transfer->approvals()->create([
                 'approver_user_id' => $approver->id,
                 'action' => 'approved',
                 'note' => $note,
             ]);
 
-            $shouldAutoSubmit = $transfer->status === 'approval_required';
-            $transfer->update(['status' => 'approved']);
+            $shouldAutoSubmit = ! $sgdLocal && $transfer->status === 'approval_required';
+            $fields = ['status' => 'approved'];
+            if ($sgdLocal) {
+                $raw = $transfer->raw_data;
+                $raw['sgd_local_approval'] = $snapshot;
+                $raw['sgd_local_workflow']['approval_id'] = $approval->id;
+                $raw['sgd_local_workflow']['state'] = 'approved';
+                $fields['raw_data'] = $raw;
+            }
+            $transfer->update($fields);
 
             return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
         });

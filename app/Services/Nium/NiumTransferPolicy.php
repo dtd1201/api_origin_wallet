@@ -148,6 +148,10 @@ final class NiumTransferPolicy
             return;
         }
 
+        if ($requireFxLock && $targetCurrency === 'SGD') {
+            app(NiumTransferReviewService::class)->assertAccepted($transfer);
+        }
+
         if (! (bool) config('services.nium.payout_fx_enabled', false)) {
             throw new RuntimeException('Nium payout FX is not enabled.');
         }
@@ -169,16 +173,20 @@ final class NiumTransferPolicy
         $targetCurrency = strtoupper((string) $transfer->target_currency);
         $crossCurrency = $sourceCurrency !== $targetCurrency;
 
+        $local = $targetCurrency === 'SGD';
         $payout = [
             'sourceAmount' => (float) $transfer->source_amount,
             'sourceCurrency' => self::SOURCE_CURRENCY,
             'destinationCurrency' => $targetCurrency,
-            'payoutMethod' => self::PAYOUT_METHOD,
+            'payoutMethod' => $local ? 'LOCAL' : self::PAYOUT_METHOD,
             'tradeOrderID' => $transfer->reference_text,
-            'swiftFeeType' => self::SWIFT_FEE_TYPE,
+            ...($local ? [] : ['swiftFeeType' => self::SWIFT_FEE_TYPE]),
         ];
 
-        if ($crossCurrency) {
+        if ($crossCurrency && $local) {
+            // assertTransfer above validates the exact accepted, unexpired payout quote.
+            $payout['quoteId'] = $transfer->fxQuote->quote_ref;
+        } elseif ($crossCurrency) {
             $quote = $transfer->fxQuote;
 
             if ($quote === null
@@ -244,7 +252,8 @@ final class NiumTransferPolicy
 
         if (strtoupper((string) $beneficiary->country_code) === 'SG') {
             $this->sgdLocalGate->assertCandidate($user, $provider, $beneficiary, $targetCurrency);
-            NiumSgdLocalPayoutGate::assertSubmissionAllowed();
+
+            return;
         }
 
         if (strtoupper((string) $beneficiary->country_code) !== 'HK'

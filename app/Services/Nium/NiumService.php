@@ -11,6 +11,19 @@ use RuntimeException;
 
 class NiumService
 {
+    public function getDynamicPayoutTransactions(string $path, array $query, User $user, string $reference): Response
+    {
+        return $this->client('dynamic_payout_reconciliation', $reference, readOnly: true)->get($path, $query, $user);
+    }
+
+    public function postDynamicPayout(string $path, string $json, User $user, string $operationKey,
+        \App\Services\Nium\DynamicConfirmation\DynamicPayoutWireClaim $claim): Response
+    {
+        return $this->client('dynamic_payout_submit', $operationKey,
+            ['x-idempotency-id' => $operationKey, 'x-request-id' => $operationKey], dynamicPayoutClaim: $claim)
+            ->postExactJson($path, $json, $user);
+    }
+
     public function __construct(
         private readonly NiumProviderAccountStateService $stateService,
     ) {}
@@ -33,8 +46,9 @@ class NiumService
         ?int $relatedTransferId = null,
         ?string $operation = null,
         ?string $externalReference = null,
+        ?\Closure $beforeDispatch = null,
     ): Response {
-        return $this->client($operation, $externalReference)->post($path, $payload, $user, $relatedTransferId);
+        return $this->client($operation, $externalReference, beforeDispatch: $beforeDispatch)->post($path, $payload, $user, $relatedTransferId);
     }
 
     public function postWithRequestId(
@@ -44,13 +58,14 @@ class NiumService
         string $requestId,
         ?string $operation = null,
         ?string $externalReference = null,
+        ?int $relatedTransferId = null,
     ): Response {
         if (! Str::isUuid($requestId)) {
             throw new RuntimeException('Nium x-request-id must be a UUID.');
         }
 
         return $this->client($operation, $externalReference, ['x-request-id' => $requestId])
-            ->post($path, $payload, $user);
+            ->post($path, $payload, $user, $relatedTransferId);
     }
 
     public function postSensitiveWithRequestId(
@@ -215,6 +230,9 @@ class NiumService
         ?string $externalReference = null,
         array $additionalHeaders = [],
         bool $persistRawExchange = true,
+        ?\Closure $beforeDispatch = null,
+        ?\App\Services\Nium\DynamicConfirmation\DynamicPayoutWireClaim $dynamicPayoutClaim = null,
+        bool $readOnly = false,
     ): ProviderHttpClient
     {
         $provider = $this->provider();
@@ -236,6 +254,9 @@ class NiumService
                 'external_reference' => $externalReference,
             ], static fn ($value): bool => $value !== null && $value !== ''),
             persistRawExchange: $persistRawExchange,
+            beforeDispatch: $beforeDispatch,
+            dynamicPayoutClaim: $dynamicPayoutClaim,
+            readOnlyVirtualAccountReconciliation: $readOnly,
         );
     }
 

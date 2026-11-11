@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Services\Integrations\Contracts\ProviderClient;
 use App\Services\Nium\NiumApiExchangeEvidenceStore;
 use App\Services\Nium\NiumEvidencePersistenceException;
+use App\Services\Nium\NiumRemittanceDispatchHeldException;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Support\SensitiveDataSanitizer;
 use Carbon\Carbon;
@@ -36,6 +37,8 @@ class ProviderHttpClient implements ProviderClient
         private readonly bool $persistRawExchange = true,
         private readonly bool $singleDispatchAssignment = false,
         private readonly bool $readOnlyVirtualAccountReconciliation = false,
+        private readonly ?\Closure $beforeDispatch = null,
+        private readonly ?\App\Services\Nium\DynamicConfirmation\DynamicPayoutWireClaim $dynamicPayoutClaim = null,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -51,6 +54,16 @@ class ProviderHttpClient implements ProviderClient
     public function put(string $path, array $payload, ?User $user = null, ?int $relatedTransferId = null): Response
     {
         return $this->send('PUT', $path, $payload, $user, $relatedTransferId);
+    }
+
+    public function postExactJson(string $path, string $json, User $user): Response
+    {
+        if ($this->dynamicPayoutClaim === null || $this->serviceConfigKey !== 'nium') {
+            throw new RuntimeException('Exact payout transport requires a durable dynamic claim.');
+        }
+        $payload = json_decode($json, true, 64, JSON_THROW_ON_ERROR); // Shape/fence only; wire uses original bytes.
+
+        return $this->send('POST', $path, $payload, $user, null, $json);
     }
 
     public function patch(string $path, array $payload, ?User $user = null, ?int $relatedTransferId = null): Response
@@ -87,10 +100,32 @@ class ProviderHttpClient implements ProviderClient
         array $payload,
         ?User $user,
         ?int $relatedTransferId,
+        ?string $exactJson = null,
     ): Response {
         $capturedRequestBody = null;
         $capturedRequestHeaders = [];
         $assignmentTarget = null;
+        $sgdLease = null;
+        $sgdQuote = false;
+        if ($this->serviceConfigKey === 'nium') {
+            $fence = app(\App\Services\Nium\NiumSgdAdmissionFence::class);
+            $kind = $fence->wireKind($method, $path, $payload, $relatedTransferId);
+            if ($kind === 'remittance' && $this->dynamicPayoutClaim === null) {
+                throw new NiumRemittanceDispatchHeldException(\App\Services\Nium\NiumSgdAdmissionFence::DISPATCH_HOLD);
+            }
+            if ($kind === 'quote') {
+                $sgdLease = $fence->acquire();
+                $fence->assertQuoteRequest($method, $path, $payload, $relatedTransferId, $this->headers['x-request-id'] ?? null, $this->provider->id);
+                $sgdQuote = true;
+            }
+        }
+        if ($this->dynamicPayoutClaim !== null) {
+            if ($this->serviceConfigKey !== 'nium' || $exactJson === null || DB::transactionLevel() !== 0
+                || DB::connection()->getPdo()->inTransaction()) {
+                throw new RuntimeException('Dynamic payout requires exact JSON outside a transaction.');
+            }
+            $this->dynamicPayoutClaim->authorize($method, $path, $exactJson, $this->headers, false);
+        }
         if ($this->readOnlyVirtualAccountReconciliation
             && ($this->serviceConfigKey !== 'nium' || $method !== 'GET'
                 || DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()
@@ -98,6 +133,13 @@ class ProviderHttpClient implements ProviderClient
             throw new RuntimeException('VA reconciliation requires read-only transport and authentication outside transactions.');
         }
         $request = $this->baseRequest();
+        if ($this->dynamicPayoutClaim !== null) {
+            $request = $request->withoutRedirecting()->retry(1, 0)
+                ->beforeSending(function (Request $outgoing): void {
+                    $this->dynamicPayoutClaim->authorize($outgoing->method(), $outgoing->url(),
+                        $outgoing->body(), $outgoing->headers(), true);
+                });
+        }
         if ($this->singleDispatchAssignment) {
             if ($this->serviceConfigKey !== 'nium' || $method !== 'POST'
                 || ($this->operationalContext['operation'] ?? null) !== 'assign_payment_id'
@@ -109,6 +151,20 @@ class ProviderHttpClient implements ProviderClient
         if ($this->readOnlyVirtualAccountReconciliation) {
             // Authentication must not perform a token-acquisition POST; redirects cannot change target.
             $request = $request->withoutRedirecting()->retry(1, 0);
+        }
+        if ($this->beforeDispatch !== null) {
+            // Payout authorization is checked after authentication preparation,
+            // immediately before transport. Never redirect or automatically retry it.
+            $request = $request->withoutRedirecting()->retry(1, 0)
+                ->beforeSending($this->beforeDispatch);
+        }
+        if ($sgdQuote) {
+            $request = $request->withoutRedirecting()->retry(1, 0)
+                ->beforeSending(function (Request $outgoing) use ($fence, $relatedTransferId): void {
+                    $fence->assertOpen();
+                    $fence->assertQuoteRequest($outgoing->method(), $outgoing->url(), $outgoing->data(),
+                        $relatedTransferId, $this->headers['x-request-id'] ?? null, $this->provider->id);
+                });
         }
         if ($this->serviceConfigKey === 'nium') {
             $request = $request->beforeSending(function (Request $outgoing) use (&$capturedRequestBody, &$capturedRequestHeaders, &$assignmentTarget): void {
@@ -126,7 +182,8 @@ class ProviderHttpClient implements ProviderClient
         try {
             $response = match ($method) {
                 'GET' => $request->get($url, $payload),
-                'POST' => $request->asJson()->post($url, $payload),
+                'POST' => $exactJson === null ? $request->asJson()->post($url, $payload)
+                    : $request->withBody($exactJson, 'application/json')->send('POST', $url),
                 'PUT' => $request->asJson()->put($url, $payload),
                 'PATCH' => $request->asJson()->patch($url, $payload),
                 'DELETE' => empty($payload) ? $request->delete($url) : $request->asJson()->delete($url, $payload),

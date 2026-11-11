@@ -68,6 +68,10 @@ class TransferController extends Controller
 
         $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null)->id;
 
+        abort_if(strtolower((string) IntegrationProvider::query()->findOrFail($validated['provider_id'])->code) === 'nium'
+            && strtoupper((string) $validated['target_currency']) === 'SGD', 422,
+            'SGD LOCAL requires the standard authenticated customer Review and Submit workflow.');
+
         $transfer = DB::transaction(fn () => Transfer::create($validated));
 
         return response()->json((new TransferDetailResource($transfer))->resolve($request), 201);
@@ -170,6 +174,8 @@ class TransferController extends Controller
 
     public function update(Request $request, Transfer $transfer): JsonResponse
     {
+        abort_if(\App\Services\Nium\NiumTransferReviewService::applies($transfer), 422,
+            'SGD LOCAL instructions are immutable. Use the approval, cancellation or status reconciliation workflow.');
         $validated = $request->validate([
             'transfer_no' => ['sometimes', 'string', 'max:50', 'unique:transfers,transfer_no,'.$transfer->id],
             'user_id' => ['sometimes', 'exists:users,id'],
@@ -198,9 +204,18 @@ class TransferController extends Controller
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
+        abort_if(strtolower((string) $transfer->provider?->code) === 'nium'
+            && ($validated['target_currency'] ?? null) === 'SGD', 422,
+            'SGD LOCAL requires a fresh customer review and authorization.');
+
         if (array_key_exists('provider_id', $validated)) {
             $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
         }
+
+        $effectiveProvider = IntegrationProvider::query()->findOrFail($validated['provider_id'] ?? $transfer->provider_id);
+        abort_if(strtolower((string) $effectiveProvider->code) === 'nium'
+            && strtoupper((string) ($validated['target_currency'] ?? $transfer->target_currency)) === 'SGD', 422,
+            'SGD LOCAL requires the standard authenticated customer Review and Submit workflow.');
 
         $transfer = DB::transaction(function () use ($transfer, $validated): Transfer {
             $transfer->update($validated);
@@ -213,6 +228,8 @@ class TransferController extends Controller
 
     public function destroy(Transfer $transfer): JsonResponse
     {
+        abort_if(\App\Services\Nium\NiumTransferReviewService::applies($transfer), 422,
+            'SGD LOCAL payment history cannot be deleted. Cancel an unsubmitted instruction through its workflow.');
         DB::transaction(fn () => $transfer->delete());
 
         return response()->json(status: 204);

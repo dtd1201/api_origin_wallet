@@ -251,6 +251,12 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             return;
         }
 
+        if ((config('nium_dynamic_payouts.reconciliation_enabled', false) === true
+                || config('nium_dynamic_confirmation.automatic_dispatch_enabled', false) === true)
+            && app(\App\Services\Nium\DynamicConfirmation\DynamicPayoutWebhook::class)->observe($provider, $payload, $resource)) {
+            return;
+        }
+
         $transfer = $this->findTransfer($provider, $payload, $resource);
 
         if ($transfer !== null) {

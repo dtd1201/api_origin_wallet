@@ -22,8 +22,12 @@ Artisan::command('inspire', function () {
 Artisan::command(
     'nium:smoke-test
     {userId? : User ID used for customer, wallet, sync, or quote checks}
-    {--live : Perform the authenticated Get Client request}
+    {--live : Perform authenticated requests for the selected mode; evidence uses its GET allowlist}
     {--client-capabilities : Print only the safe Get Client capability projection}
+    {--entitlement-evidence : Plan or collect sanitized evidence using the isolated GET-only collector}
+    {--evidence-environment= : Explicit approved provider environment: sandbox or production}
+    {--evidence-scope= : Operator-approved opaque scope alias}
+    {--evidence-corridor=* : Explicit approved corridor aliases; repeat to select multiple corridors}
     {--compliance-callback : Also validate the separate transaction compliance callback configuration}
     {--full : Validate the complete Nium production-readiness endpoint configuration}
     {--sync : Run account, balance, and transaction sync for the user}
@@ -32,6 +36,11 @@ Artisan::command(
     {--target-currency=EUR : Quote buy currency}
     {--amount=100 : Quote amount in source currency}',
     function (): int {
+        if ($this->option('entitlement-evidence') || $this->option('evidence-environment') !== null
+            || $this->option('evidence-scope') !== null || $this->option('evidence-corridor') !== []) {
+            return app(\App\Services\Nium\NiumEntitlementEvidenceCollector::class)->run($this, $this->input);
+        }
+
         $baseUrl = (string) config('services.nium.base_url', '');
         $apiKey = (string) config('services.nium.auth.header_value', '');
         $clientId = (string) config('services.nium.client_id', '');
@@ -464,6 +473,13 @@ Schedule::command('nium:reconcile-customers')
     ->onOneServer()
     ->withoutOverlapping(10)
     ->when(fn (): bool => (bool) config('services.nium.customer_reconciliation_enabled', false));
+
+Schedule::command('nium:process-dynamic-payouts')
+    ->everyMinute()
+    ->onOneServer()
+    ->withoutOverlapping(5)
+    ->when(fn (): bool => config('nium_dynamic_confirmation.automatic_dispatch_enabled', false) === true
+        || config('nium_dynamic_payouts.reconciliation_enabled', false) === true);
 
 Schedule::command('kyc:dispatch-notifications')
     ->everyMinute()

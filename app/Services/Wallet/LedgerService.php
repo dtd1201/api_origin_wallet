@@ -31,6 +31,14 @@ class LedgerService
             $balance = $this->lockTransferBalance($transfer);
             $amount = $this->decimal($transfer->source_amount);
 
+            if (\App\Services\Nium\NiumTransferReviewService::applies($transfer)
+                && isset($balance->raw_data['provider_available_balance'])) {
+                $spendable = $this->subtract($balance->raw_data['provider_available_balance'], $balance->reserved_balance);
+                if ($this->compare($spendable, $balance->available_balance) < 0) {
+                    $balance->available_balance = $spendable;
+                }
+            }
+
             if ($this->compare($balance->available_balance, $amount) < 0) {
                 throw new RuntimeException('Insufficient available balance for this transfer.');
             }
@@ -221,6 +229,14 @@ class LedgerService
             ->where('provider_id', $transfer->provider_id)
             ->where('currency', strtoupper((string) $transfer->source_currency))
             ->lockForUpdate();
+
+        if (\App\Services\Nium\NiumTransferReviewService::applies($transfer)) {
+            $account = $transfer->user->providerAccounts()->where('provider_id', $transfer->provider_id)->firstOrFail();
+            $walletId = $balanceId !== null
+                ? ($transfer->fxQuote?->raw_data['provider_context']['wallet'] ?? $account->external_account_id)
+                : $account->external_account_id;
+            $query->where('external_account_id', $walletId);
+        }
 
         if ($balanceId !== null) {
             $query->whereKey($balanceId);

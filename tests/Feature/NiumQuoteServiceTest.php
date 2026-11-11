@@ -19,6 +19,8 @@ class NiumQuoteServiceTest extends TestCase
     {
         parent::setUp();
 
+        Http::preventStrayRequests();
+
         config()->set('services.nium.base_url', 'https://gateway.sandbox.nium.test');
         config()->set('services.nium.client_id', 'client_hash_123');
         config()->set('services.nium.auth', [
@@ -84,6 +86,7 @@ class NiumQuoteServiceTest extends TestCase
                 && ($data['sourceCurrencyCode'] ?? null) === 'USD'
                 && ($data['destinationCurrencyCode'] ?? null) === 'EUR'
                 && (float) ($data['sourceAmount'] ?? 0) === 100.0
+                && ! array_key_exists('destinationAmount', $data)
                 && ($data['customerHashId'] ?? null) === 'cust_hash_123'
                 && ($data['quoteType'] ?? null) === 'payout'
                 && ($data['quoteIntent'] ?? null) === 'EXECUTABLE'
@@ -113,6 +116,87 @@ class NiumQuoteServiceTest extends TestCase
         }
 
         Http::assertNothingSent();
+    }
+
+    public function test_usd_to_usd_pricing_is_not_supported_even_when_payout_fx_is_enabled(): void
+    {
+        [$provider, $user] = $this->providerAndUser();
+        config()->set('services.nium.payout_fx_enabled', true);
+        Http::fake();
+
+        try {
+            app(NiumQuoteService::class)->createQuote($provider, $user, [
+                'source_currency' => 'USD',
+                'target_currency' => 'USD',
+                'source_amount' => 5,
+            ]);
+            $this->fail('Expected same-currency pricing to be unsupported.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame(
+                'Nium FX quote requires a valid cross-currency pair and positive source amount.',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('fx_quotes', 0);
+    }
+
+    public function test_destination_only_amount_does_not_trigger_an_invented_reverse_quote(): void
+    {
+        [$provider, $user] = $this->providerAndUser();
+        config()->set('services.nium.payout_fx_enabled', true);
+        Http::fake();
+
+        try {
+            app(NiumQuoteService::class)->createQuote($provider, $user, [
+                'source_currency' => 'USD',
+                'target_currency' => 'EUR',
+                'target_amount' => 91.5,
+            ]);
+            $this->fail('Expected destination-only quoting to be unsupported.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame(
+                'Nium FX quote requires a valid cross-currency pair and positive source amount.',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('fx_quotes', 0);
+    }
+
+    public function test_provider_destination_amount_is_used_without_reverse_calculation(): void
+    {
+        [$provider, $user] = $this->providerAndUser();
+        config()->set('services.nium.payout_fx_enabled', true);
+        Http::fake([
+            'https://gateway.sandbox.nium.test/api/v1/client/client_hash_123/quotes' => Http::response([
+                'id' => 'quote_provider_destination',
+                'sourceAmount' => 100,
+                'destinationAmount' => 90.25,
+                'exchangeRate' => 0.92,
+                'netExchangeRate' => 0.915,
+                'expiryTime' => now()->addMinutes(5)->toISOString(),
+            ]),
+        ]);
+
+        $quote = app(NiumQuoteService::class)->createQuote($provider, $user, [
+            'source_currency' => 'USD',
+            'target_currency' => 'EUR',
+            'source_amount' => 100,
+            // The generic endpoint accepts this field, but Nium does not use it.
+            'target_amount' => 999,
+        ]);
+
+        $this->assertSame('100.00000000', $quote->source_amount);
+        $this->assertSame('90.25000000', $quote->target_amount);
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && (float) $request['sourceAmount'] === 100.0
+            && ! array_key_exists('destinationAmount', $request->data())
+            && ! array_key_exists('target_amount', $request->data())
+        );
     }
 
     private function providerAndUser(): array

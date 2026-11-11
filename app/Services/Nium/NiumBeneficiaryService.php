@@ -23,6 +23,14 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         private readonly NiumBeneficiaryRequirementsService $requirementsService,
     ) {}
 
+    public function payoutMethods(Beneficiary $beneficiary): array
+    {
+        $beneficiary->loadMissing('user.profile');
+        $this->accountStateService->assertEligible($beneficiary->user);
+
+        return $this->corridorService->beneficiaryPayoutMethods($beneficiary);
+    }
+
     public function requirements(Beneficiary $beneficiary): array
     {
         $beneficiary->loadMissing('user.profile');
@@ -72,7 +80,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
     }
 
-    private function validatedPayload(Beneficiary $beneficiary, NiumBeneficiaryRequirementsResult $schema): array
+    public function validatedPayload(Beneficiary $beneficiary, NiumBeneficiaryRequirementsResult $schema): array
     {
         $corridor = $this->validateCorridor($beneficiary, $schema);
         $payload = $this->buildBeneficiaryPayload($beneficiary);
@@ -225,6 +233,40 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
             throw new RuntimeException("{$provider->name} beneficiary deletion failed.");
         }
+    }
+
+    /**
+     * Local authorization evidence from the same effective recipient inputs as registration.
+     * Includes names/account type, bank account, typed routing, proxy/card destination,
+     * recipient identification/address and schema-supplied beneficiary inputs. Never
+     * include provider responses, verification evidence, diagnostics or timestamps.
+     */
+    public function receivingAccountBinding(Beneficiary $beneficiary): array
+    {
+        $payload = $this->buildBeneficiaryPayload($beneficiary);
+        foreach ((array) data_get($beneficiary->raw_data, 'nium.additionalFields', []) as $name => $value) {
+            if ($value !== null && $value !== '' && ! array_key_exists($name, $payload)) {
+                $payload[$name] = $value;
+            }
+        }
+
+        return $this->canonicalReceivingAccount($payload);
+    }
+
+    private function canonicalReceivingAccount(array $values): array
+    {
+        // The registration builder already resolves aliases and omits absent/null/empty
+        // optional inputs. Preserve significant values (including account leading zeros).
+        foreach ($values as $key => $value) {
+            if (is_array($value)) {
+                $values[$key] = $this->canonicalReceivingAccount($value);
+            }
+        }
+        if (! array_is_list($values)) {
+            ksort($values, SORT_STRING);
+        }
+
+        return $values;
     }
 
     private function buildBeneficiaryPayload(Beneficiary $beneficiary): array

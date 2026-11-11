@@ -48,16 +48,23 @@ class NiumTransferService implements PreparedTransferStatusProvider
             if ($locked->provider_id !== $provider->id) {
                 throw new RuntimeException('Transfer provider does not match the Nium submission provider.');
             }
+            if (NiumTransferReviewService::applies($locked)
+                && (filled($locked->provider_operation_key) || filled($locked->external_transfer_id) || filled($locked->external_payment_id))) {
+                throw new RuntimeException('This SGD payout has already entered dispatch. Reconcile its saved outcome; do not submit again.');
+            }
             $this->eligibilityService->ensureTransferCanBeSubmitted($locked);
 
             if ($preparedFxQuote !== null) {
                 $this->attachPreparedPayoutFxLock($locked, $preparedFxQuote);
             }
 
+            $providerIdentifiers = $this->providerAccountIdentifiers($locked);
             $this->ensureAuthoritativeQuote($locked);
             $this->policy->assertTransfer($locked, $authoritativePurposeCodes);
+            if (NiumTransferReviewService::applies($locked)) {
+                app(NiumTransferReviewService::class)->assertReserved($locked);
+            }
             $payload = $this->buildTransferPayload($locked, $authoritativePurposeCodes);
-            $providerIdentifiers = $this->providerAccountIdentifiers($locked);
 
             $locked->update([
                 'provider_operation_key' => $locked->provider_operation_key ?: 'nium-'.Str::uuid()->toString(),
@@ -86,7 +93,35 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 relatedTransferId: $transfer->id,
                 operation: 'transfer_money',
                 externalReference: $transfer->provider_operation_key,
+                beforeDispatch: NiumTransferReviewService::applies($transfer) ? function () use ($transfer): void {
+                    try {
+                        app(NiumTransferReviewService::class)->assertAccepted(
+                            $transfer->fresh(['provider', 'user', 'beneficiary', 'fxQuote']),
+                        );
+                    } catch (RuntimeException $exception) {
+                        throw new NiumPayoutPreDispatchException($exception->getMessage(), previous: $exception);
+                    }
+                } : null,
             );
+        } catch (NiumRemittanceDispatchHeldException $exception) {
+            // This transport rejection guarantees no remittance POST was sent.
+            // Preserve the operation key, approval, FX and provider event evidence.
+            $transfer->update([
+                'status' => 'failed',
+                'failure_code' => 'remittance_dispatch_held',
+                'failure_reason' => $exception->getMessage(),
+                'completed_at' => now(),
+            ]);
+
+            throw $exception;
+        } catch (NiumPayoutPreDispatchException $exception) {
+            $transfer->update([
+                'status' => 'failed', 'failure_code' => 'payout_terms_expired_or_changed',
+                'failure_reason' => 'No payout was sent. Obtain a new quote and customer authorization.',
+                'completed_at' => now(),
+            ]);
+
+            throw $exception;
         } catch (ConnectionException|NiumEvidencePersistenceException) {
             $transfer->update([
                 'status' => 'submission_unknown',
@@ -324,6 +359,14 @@ class NiumTransferService implements PreparedTransferStatusProvider
             return null;
         }
 
+        if ($targetCurrency === 'SGD') {
+            // Customer accepted this payout quote. Admin dispatch may validate it,
+            // but must never silently acquire replacement terms.
+            app(NiumTransferReviewService::class)->assertAccepted($candidate);
+
+            return null;
+        }
+
         // Existing server-side payout FX lock will be validated later.
         if ($candidate->fx_quote_id !== null) {
             return null;
@@ -352,7 +395,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
             $candidate->user,
             $sourceCurrency,
             $targetCurrency,
-            (float) $candidate->source_amount,
+            (string) $candidate->source_amount,
         );
     }
 
@@ -380,7 +423,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
             || $quote->provider_id !== $transfer->provider_id
             || strtoupper((string) $quote->source_currency) !== strtoupper((string) $transfer->source_currency)
             || strtoupper((string) $quote->target_currency) !== strtoupper((string) $transfer->target_currency)
-            || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')) {
+            || NiumPayoutFxLockContract::decimal($quote->source_amount) !== NiumPayoutFxLockContract::decimal($transfer->source_amount)) {
             throw new RuntimeException(
                 'Prepared Nium payout FX lock does not match the authoritative transfer.'
             );
@@ -511,6 +554,12 @@ class NiumTransferService implements PreparedTransferStatusProvider
     {
         $quote = $transfer->fxQuote;
 
+        if (NiumTransferReviewService::applies($transfer)) {
+            app(NiumTransferReviewService::class)->assertAccepted($transfer);
+
+            return;
+        }
+
         if ($quote === null) {
             return;
         }
@@ -531,11 +580,16 @@ class NiumTransferService implements PreparedTransferStatusProvider
             || $quote->provider_id !== $transfer->provider_id
             || strtoupper($quote->source_currency) !== strtoupper($transfer->source_currency)
             || strtoupper($quote->target_currency) !== strtoupper($transfer->target_currency)
-            || number_format((float) $quote->source_amount, 8, '.', '') !== number_format((float) $transfer->source_amount, 8, '.', '')
-            || number_format((float) $quote->net_rate, 10, '.', '') !== number_format((float) $transfer->fx_rate, 10, '.', '')) {
+            || NiumPayoutFxLockContract::decimal($quote->source_amount) !== NiumPayoutFxLockContract::decimal($transfer->source_amount)
+            || NiumPayoutFxLockContract::decimal($quote->net_rate) !== NiumPayoutFxLockContract::decimal($transfer->fx_rate)) {
             throw new RuntimeException('Nium payout FX lock ownership, corridor, amount, or rate does not match the transfer.');
         }
 
         NiumPayoutAuditId::fromQuote($quote);
+        NiumPayoutFxLockContract::assertMatchesTransfer(
+            $quote,
+            $transfer,
+            $this->payoutFxLockService->context($transfer->provider, $transfer->user),
+        );
     }
 }

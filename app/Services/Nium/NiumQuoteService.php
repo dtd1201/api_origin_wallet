@@ -23,6 +23,9 @@ class NiumQuoteService implements QuoteProvider
 
         $sourceCurrency = strtoupper(trim((string) ($payload['source_currency'] ?? '')));
         $targetCurrency = strtoupper(trim((string) ($payload['target_currency'] ?? '')));
+        if ($targetCurrency === 'SGD') {
+            throw new RuntimeException('SGD quotes require the saved standard Review workflow; generic FX quotes are disabled.');
+        }
         $sourceAmount = (float) ($payload['source_amount'] ?? 0);
 
         if (strlen($sourceCurrency) !== 3
@@ -65,6 +68,13 @@ class NiumQuoteService implements QuoteProvider
             throw new RuntimeException($responseData['message'] ?? 'Nium executable FX quote failed.');
         }
 
+        if (($responseData['quoteType'] ?? 'payout') !== 'payout') {
+            throw new RuntimeException('Nium returned a quote that cannot authorize a payout.');
+        }
+        $contract = $sourceCurrency === 'USD' && $targetCurrency === 'SGD'
+            ? NiumPayoutQuoteContract::parse($responseData, $sourceCurrency, $targetCurrency, (string) $payload['source_amount'])
+            : null;
+
         $midRate = $responseData['exchangeRate'] ?? null;
         $netRate = $responseData['netExchangeRate'] ?? $midRate;
 
@@ -82,15 +92,16 @@ class NiumQuoteService implements QuoteProvider
             'quote_ref' => (string) $quoteId,
             'source_currency' => $sourceCurrency,
             'target_currency' => $targetCurrency,
-            'source_amount' => $resolvedSourceAmount,
+            'source_amount' => $contract['source_amount'] ?? $resolvedSourceAmount,
             'target_amount' => $targetAmount,
             'mid_rate' => is_numeric($midRate) ? $midRate : null,
-            'net_rate' => is_numeric($netRate) ? $netRate : null,
+            'net_rate' => $contract['rate'] ?? (is_numeric($netRate) ? $netRate : null),
             'fee_amount' => 0,
-            'expires_at' => $expiresAt,
+            'expires_at' => $contract['expires_at'] ?? $expiresAt,
             'raw_data' => array_filter([
                 'provider_fx_type' => 'modern_quote',
                 'provider_quote_id' => (string) $quoteId,
+                'payout_quote_contract' => $contract,
                 'quote_type' => $responseData['quoteType'] ?? 'payout',
                 'quote_intent' => $responseData['quoteIntent'] ?? 'EXECUTABLE',
                 'conversion_schedule' => $responseData['conversionSchedule'] ?? 'immediate',

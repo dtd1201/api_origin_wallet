@@ -124,6 +124,7 @@ class NiumDataSyncService implements DataSyncProvider
                         'provider_available_balance' => $available,
                         'provider_ledger_balance' => $providerLedger,
                         'provider_reserved_balance' => $providerReserved,
+                        'provider_balance_as_of' => $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']) ?? now()->toISOString(),
                     ], static fn ($value) => $value !== null && $value !== '')
                 );
 

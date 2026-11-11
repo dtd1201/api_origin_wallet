@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\User\IdentityVerificationController;
 use App\Http\Controllers\Api\User\KycApplicantCorrectionController;
 use App\Http\Controllers\Api\User\KycSubmissionController;
 use App\Http\Controllers\Api\User\NiumCorporateConstantsController;
+use App\Http\Controllers\Api\User\NiumDynamicPayoutController;
 use App\Http\Controllers\Api\User\NiumPurposeCodeController;
 use App\Http\Controllers\Api\User\NiumRfiCaseController;
 use App\Http\Controllers\Api\User\OverviewController;
@@ -21,6 +22,13 @@ use App\Http\Controllers\Api\User\TransferController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('users/{user}/overview', [OverviewController::class, 'show']);
+Route::prefix('users/{user}/nium/dynamic-payouts')->whereNumber('user')->group(function (): void {
+    Route::get('options', [NiumDynamicPayoutController::class, 'options']);
+    Route::post('quotes', [NiumDynamicPayoutController::class, 'quote']);
+    Route::post('reviews', [NiumDynamicPayoutController::class, 'review']);
+    Route::post('/', [NiumDynamicPayoutController::class, 'submit']);
+    Route::get('{intent}', [NiumDynamicPayoutController::class, 'show'])->whereUuid('intent');
+});
 Route::get('users/{user}/profile', [ProfileController::class, 'show']);
 Route::put('users/{user}/profile', [ProfileController::class, 'update']);
 Route::get('users/{user}/kyc-profile', [KycSubmissionController::class, 'show']);
@@ -66,12 +74,14 @@ Route::middleware('profile.complete')->group(function (): void {
     Route::get('users/{user}/bank-accounts/{bankAccount}', [BankAccountController::class, 'show']);
 
     Route::get('users/{user}/beneficiaries/requirements', [BeneficiaryController::class, 'requirements']);
+    Route::get('users/{user}/beneficiaries/payout-methods', [BeneficiaryController::class, 'payoutMethods']);
     Route::post('users/{user}/beneficiaries', [BeneficiaryController::class, 'store']);
     Route::get('users/{user}/beneficiaries', [BeneficiaryController::class, 'index']);
     Route::put('users/{user}/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'update']);
     Route::delete('users/{user}/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'destroy']);
     Route::get('users/{user}/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'show']);
 
+    Route::post('users/{user}/transfers/review', [TransferController::class, 'review']);
     Route::post('users/{user}/transfers', [TransferController::class, 'store']);
     Route::get('users/{user}/transfers', [TransferController::class, 'index']);
     Route::get('users/{user}/transfers/nium-purpose-codes', NiumPurposeCodeController::class);

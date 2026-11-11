@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources\User;
 
+use App\Services\Nium\NiumSgdLocalPayoutAmounts;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -9,21 +10,30 @@ class TransferResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
+        $sgdLocal = $this->source_currency === 'USD' && $this->target_currency === 'SGD'
+            && strtolower((string) $this->provider?->code) === 'nium';
+        $payoutAmounts = $sgdLocal ? app(NiumSgdLocalPayoutAmounts::class)->forTransfer($this->resource) : null;
+
         return [
             'id' => $this->id,
             'transfer_no' => $this->transfer_no,
             'provider_id' => $this->provider_id,
-            'source_bank_account_id' => $this->source_bank_account_id,
+            'source_bank_account_id' => $sgdLocal ? null : $this->source_bank_account_id,
             'beneficiary_id' => $this->beneficiary_id,
-            'fx_quote_id' => $this->fx_quote_id,
+            'fx_quote_id' => $sgdLocal ? null : $this->fx_quote_id,
             'transfer_type' => $this->transfer_type,
             'source_currency' => $this->source_currency,
             'target_currency' => $this->target_currency,
             'source_amount' => $this->source_amount,
-            'target_amount' => $this->target_amount,
-            'fx_rate' => $this->fx_rate,
-            'fee_amount' => $this->fee_amount,
-            'fee_currency' => $this->fee_currency,
+            'target_amount' => $sgdLocal ? null : $this->target_amount,
+            'fx_rate' => $sgdLocal ? $payoutAmounts['fx_rate'] : $this->fx_rate,
+            'fee_amount' => $sgdLocal ? null : $this->fee_amount,
+            'fee_currency' => $sgdLocal ? null : $this->fee_currency,
+            'payout_amounts' => $this->when(
+                $sgdLocal,
+                fn () => $payoutAmounts,
+            ),
+            'payout_workflow' => $this->when($sgdLocal, fn () => app(\App\Services\Nium\NiumSgdLocalPayoutWorkflow::class)->customerPresentation($this->resource)),
             'purpose_code' => $this->purpose_code,
             'reference_text' => $this->reference_text,
             'client_reference' => $this->client_reference,

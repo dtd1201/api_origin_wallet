@@ -48,6 +48,13 @@ class NiumPayoutFxSafetyTest extends TestCase
             'inactive' => [['status' => 'EXPIRED']],
             'wrong source currency' => [['source_currency' => 'SGD']],
             'wrong destination currency' => [['destination_currency' => 'SGD']],
+            'conflicting audit aliases' => [['auditId' => '113']],
+            'conflicting rate aliases' => [['fxRate' => '0.916']],
+            'conflicting example rate' => [['exchangeRate' => '0.916']],
+            'wrong camel source currency' => [['sourceCurrency' => 'SGD']],
+            'wrong camel destination currency' => [['destinationCurrency' => 'SGD']],
+            'wrong response amount' => [['sourceAmount' => '10.00000001']],
+            'relative expiry' => [['hold_expiry_at' => '+10 minutes']],
             'HTTP failure' => [[], 503],
         ];
     }
