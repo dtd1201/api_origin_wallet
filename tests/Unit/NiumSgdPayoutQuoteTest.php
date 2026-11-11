@@ -55,6 +55,7 @@ class NiumSgdPayoutQuoteTest extends TestCase
     {
         return array_replace([
             'id' => 'synthetic-payout-quote', 'quoteType' => 'payout', 'quoteIntent' => 'EXECUTABLE',
+            'conversionSchedule' => 'immediate', 'executionType' => 'at_conversion_time', 'lockPeriod' => '15_mins',
             'sourceCurrencyCode' => 'USD', 'destinationCurrencyCode' => 'SGD', 'sourceAmount' => '5.00',
             'netExchangeRate' => '1.276738080', 'expiryTime' => '2026-11-02T01:43:46Z',
         ], $changes);
@@ -287,8 +288,10 @@ class NiumSgdPayoutQuoteTest extends TestCase
             'indicative quote' => [['quoteIntent' => 'INDICATIVE']],
             'automatic execution' => [['executionType' => 'automatic']],
             'manual execution' => [['executionType' => 'manual']],
+            'wrong lock period' => [['lockPeriod' => '1_hour']],
             'deferred conversion' => [['conversionSchedule' => 'scheduled']],
             'nonzero markup' => [['markupRate' => '0.1']],
+            'destination markup' => [['destinationMarkupAmount' => '0.01']],
             'unsupported fees' => [['feeAmount' => '0']],
             'different amount' => [['sourceAmount' => '5.00000001']],
             'missing amount' => [['sourceAmount' => null]],
@@ -384,5 +387,27 @@ class NiumSgdPayoutQuoteTest extends TestCase
         ], 'USD', 'EUR', '5');
         $this->assertSame('112', $contract['audit_id']);
         $this->assertArrayNotHasKey('quote_id', $contract);
+    }
+
+    public function test_quote_correction_uses_the_requested_currency_pair_without_a_new_corridor_allowlist(): void
+    {
+        // Request serialization alone never grants corridor admission or dispatch authority.
+        $request = NiumPayoutQuoteContract::request('test-customer', 'EUR', 'GBP', '123.45');
+        $this->assertSame('EUR', $request['sourceCurrencyCode']);
+        $this->assertSame('GBP', $request['destinationCurrencyCode']);
+        $this->assertSame('immediate', $request['conversionSchedule']);
+        $this->assertSame('at_conversion_time', $request['executionType']);
+        $this->assertSame('15_mins', $request['lockPeriod']);
+    }
+
+    public function test_numeric_destination_markup_is_preserved_exactly_and_rejected_when_nonzero(): void
+    {
+        $body = json_encode($this->response(), JSON_THROW_ON_ERROR);
+        $body = substr($body, 0, -1).',"destinationMarkupAmount":1e-8}';
+        $response = NiumPayoutQuoteContract::decodeResponse($body);
+        $this->assertSame('0.00000001', $response['destinationMarkupAmount']);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('unapproved FX markup');
+        NiumPayoutQuoteContract::parse($response, 'USD', 'SGD', '5');
     }
 }
