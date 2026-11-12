@@ -6,7 +6,9 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Tazapay\TazapayBeneficiaryService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -16,6 +18,7 @@ class TazapayBeneficiaryServiceTest extends TestCase
 
     public function test_create_beneficiary_maps_model_to_tazapay_payload(): void
     {
+        Http::preventStrayRequests();
         $provider = IntegrationProvider::query()->create([
             'code' => 'tazapay',
             'name' => 'Tazapay',
@@ -66,6 +69,8 @@ class TazapayBeneficiaryServiceTest extends TestCase
         ]);
 
         config()->set('services.tazapay.base_url', 'https://service-sandbox.tazapay.com');
+        // This standalone adapter fixture must supply the path it expects on the wire.
+        config()->set('services.tazapay.beneficiary_endpoint', '/v3/beneficiary');
         config()->set('services.tazapay.auth', [
             'mode' => 'basic_auth',
             'username' => 'tzp_key',
@@ -73,33 +78,39 @@ class TazapayBeneficiaryServiceTest extends TestCase
         ]);
 
         Http::fake([
-            'https://service-sandbox.tazapay.com/v3/beneficiary' => Http::response([
-                'status' => 'success',
-                'message' => '',
-                'data' => [
-                    'id' => 'bnf_test_123',
-                    'status' => 'active',
-                    'destination_details' => [
-                        'type' => 'bank',
-                        'bank' => [
-                            'account_number' => '1234567890',
-                            'bank_name' => 'HDFC',
-                            'country' => 'IN',
-                            'currency' => 'INR',
-                            'bank_codes' => [
-                                'ifsc_code' => 'HDFC0001234',
-                                'swift_code' => 'HDFCINBB',
+            'https://service-sandbox.tazapay.com/v3/beneficiary' => function (Request $request) {
+                $this->assertSame(0, DB::transactionLevel());
+                $this->assertFalse(DB::connection()->getPdo()->inTransaction());
+                $this->assertSame('POST', $request->method());
+                return Http::response([
+                    'status' => 'success',
+                    'message' => '',
+                    'data' => [
+                        'id' => 'bnf_test_123',
+                        'status' => 'active',
+                        'destination_details' => [
+                            'type' => 'bank',
+                            'bank' => [
+                                'account_number' => '1234567890',
+                                'bank_name' => 'HDFC',
+                                'country' => 'IN',
+                                'currency' => 'INR',
+                                'bank_codes' => [
+                                    'ifsc_code' => 'HDFC0001234',
+                                    'swift_code' => 'HDFCINBB',
+                                ],
                             ],
                         ],
                     ],
-                ],
-            ], 200),
+                ], 200);
+            },
         ]);
 
         $updated = app(TazapayBeneficiaryService::class)->createBeneficiary($provider, $beneficiary->fresh('user'));
 
         $this->assertSame('bnf_test_123', $updated->external_beneficiary_id);
         $this->assertSame('active', $updated->status);
+        Http::assertSentCount(1);
 
         Http::assertSent(function ($request): bool {
             $data = $request->data();

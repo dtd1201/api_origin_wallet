@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
@@ -13,12 +14,14 @@ class NiumService
 {
     public function getDynamicPayoutTransactions(string $path, array $query, User $user, string $reference): Response
     {
+        OwnerFirst::outside();
         return $this->client('dynamic_payout_reconciliation', $reference, readOnly: true)->get($path, $query, $user);
     }
 
     public function postDynamicPayout(string $path, string $json, User $user, string $operationKey,
         \App\Services\Nium\DynamicConfirmation\DynamicPayoutWireClaim $claim): Response
     {
+        OwnerFirst::outside();
         return $this->client('dynamic_payout_submit', $operationKey,
             ['x-idempotency-id' => $operationKey, 'x-request-id' => $operationKey], dynamicPayoutClaim: $claim)
             ->postExactJson($path, $json, $user);
@@ -36,6 +39,7 @@ class NiumService
         ?string $externalReference = null,
     ): Response
     {
+        OwnerFirst::outside();
         return $this->client($operation, $externalReference)->get($path, $query, $user);
     }
 
@@ -48,6 +52,7 @@ class NiumService
         ?string $externalReference = null,
         ?\Closure $beforeDispatch = null,
     ): Response {
+        OwnerFirst::outside();
         return $this->client($operation, $externalReference, beforeDispatch: $beforeDispatch)->post($path, $payload, $user, $relatedTransferId);
     }
 
@@ -60,6 +65,7 @@ class NiumService
         ?string $externalReference = null,
         ?int $relatedTransferId = null,
     ): Response {
+        OwnerFirst::outside();
         if (! Str::isUuid($requestId)) {
             throw new RuntimeException('Nium x-request-id must be a UUID.');
         }
@@ -76,6 +82,7 @@ class NiumService
         ?string $operation = null,
         ?string $externalReference = null,
     ): Response {
+        OwnerFirst::outside();
         if (! Str::isUuid($requestId)) {
             throw new RuntimeException('Nium x-request-id must be a UUID.');
         }
@@ -91,6 +98,7 @@ class NiumService
         string $externalReference,
         string $clientName,
     ): Response {
+        OwnerFirst::outside();
         return $this->client(
             'onboarding_simulation_submit_kyc',
             $externalReference,
@@ -104,6 +112,7 @@ class NiumService
         User $user,
         string $externalReference
     ): Response {
+        OwnerFirst::outside();
         return $this->client(
            'transaction_simulation_transition',
            $externalReference,
@@ -112,6 +121,7 @@ class NiumService
 
     public function put(string $path, array $payload = [], ?User $user = null): Response
     {
+        OwnerFirst::outside();
         return $this->client()->put($path, $payload, $user);
     }
 
@@ -123,6 +133,7 @@ class NiumService
         ?string $operation = null,
         ?string $externalReference = null,
     ): Response {
+        OwnerFirst::outside();
         if (! Str::isUuid($requestId)) {
             throw new RuntimeException('Nium x-request-id must be a UUID.');
         }
@@ -133,6 +144,7 @@ class NiumService
 
     public function delete(string $path, array $payload = [], ?User $user = null): Response
     {
+        OwnerFirst::outside();
         return $this->client()->delete($path, $payload, $user);
     }
 

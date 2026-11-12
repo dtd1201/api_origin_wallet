@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycRelatedPerson;
@@ -46,6 +47,7 @@ final class NiumHkSubmitKycOneShotRunner
 
     public function run(string $target): array
     {
+        OwnerFirst::outside();
         $context = $this->preflight($target);
         $protectedFingerprint = $this->fingerprint($context['protected_account']);
         $logMaxId = (int) (ApiRequestLog::query()->max('id') ?? 0);
@@ -223,7 +225,7 @@ final class NiumHkSubmitKycOneShotRunner
 
     private function claim(string $referenceId): void
     {
-        DB::transaction(function () use ($referenceId): void {
+        OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function () use ($referenceId): void {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $key = 'ref_'.substr(hash('sha256', $referenceId), 0, 16);
@@ -242,7 +244,7 @@ final class NiumHkSubmitKycOneShotRunner
 
     private function mark(string $referenceId, string $state, ?int $httpStatus = null, mixed $redirectUrl = null): void
     {
-        DB::transaction(function () use ($referenceId, $state, $httpStatus, $redirectUrl): void {
+        OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function () use ($referenceId, $state, $httpStatus, $redirectUrl): void {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $key = 'ref_'.substr(hash('sha256', $referenceId), 0, 16);

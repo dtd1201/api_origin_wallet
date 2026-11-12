@@ -8,7 +8,7 @@ use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Unlimit\UnlimitTransferService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;

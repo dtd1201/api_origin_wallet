@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
 use App\Models\UserProviderAccount;
@@ -41,7 +42,7 @@ final class NiumApprovedDiagnosticCustomerBindingService
             throw new RuntimeException('Approved diagnostic customer binding arguments do not match the locked allowlist.');
         }
 
-        return DB::transaction(function () use ($customerHashId, $walletHashId, $approval, $operatorContext): UserProviderAccount {
+        return OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function () use ($customerHashId, $walletHashId, $approval, $operatorContext): UserProviderAccount {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->first();
 
             if (! $account instanceof UserProviderAccount

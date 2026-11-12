@@ -6,7 +6,7 @@ use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use Tests\TestCase;

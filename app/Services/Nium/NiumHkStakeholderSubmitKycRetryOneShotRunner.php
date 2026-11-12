@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycRelatedPerson;
@@ -53,6 +54,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
 
     public function run(bool $separateHumanApproval = false): array
     {
+        OwnerFirst::outside();
         if (! $separateHumanApproval) {
             throw new RuntimeException('Separate human approval is required outside the generation #2 runner.');
         }
@@ -238,7 +240,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
 
     private function claim(array $context): void
     {
-        DB::transaction(function () use ($context): void {
+        OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function () use ($context): void {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             if (array_key_exists(self::CLAIM_KEY, $metadata)) {
@@ -261,7 +263,7 @@ final class NiumHkStakeholderSubmitKycRetryOneShotRunner
 
     private function mark(string $state): void
     {
-        DB::transaction(function () use ($state): void {
+        OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function () use ($state): void {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $metadata[self::CLAIM_KEY]['state'] = $state;

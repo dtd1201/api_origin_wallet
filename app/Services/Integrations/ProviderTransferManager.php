@@ -2,9 +2,13 @@
 
 namespace App\Services\Integrations;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Services\Integrations\Contracts\PreparedTransferStatusProvider;
+use App\Services\Nium\NiumPayoutPreDispatchException;
+use App\Services\Nium\NiumRemittanceDispatchHeldException;
+use App\Services\Nium\NiumSubmissionPreflightException;
 use App\Services\Transfers\TransferEligibilityService;
 use App\Services\Wallet\LedgerService;
 use Illuminate\Support\Facades\DB;
@@ -21,6 +25,7 @@ class ProviderTransferManager
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
+        OwnerFirst::outside();
         if (\App\Services\Nium\NiumTransferReviewService::applies($transfer)) {
             $reviews = app(\App\Services\Nium\NiumTransferReviewService::class);
             $reviews->assertAccepted($transfer->loadMissing(['user', 'beneficiary', 'fxQuote']));
@@ -29,7 +34,9 @@ class ProviderTransferManager
         $this->eligibilityService->ensureTransferCanBeSubmitted(
             $transfer->loadMissing(['provider', 'user', 'beneficiary', 'sourceBankAccount'])
         );
-        $this->ledgerService->reserveTransfer($transfer);
+        $hold = $this->ledgerService->reserveTransfer($transfer);
+        // Only the INSERTing call owns cleanup; idempotent readers do not.
+        $ownedHold = $hold?->wasRecentlyCreated === true ? $hold : null;
 
         try {
             return $this->registry
@@ -43,10 +50,19 @@ class ProviderTransferManager
                 if ($current?->failure_code === 'remittance_dispatch_held') {
                     $cleanupFailureCode = 'remittance_dispatch_held';
                 }
-                if (! \App\Services\Nium\NiumTransferReviewService::applies($current)
-                    || in_array($current->status, ['failed', 'cancelled', 'rejected'], true)) {
-                    $this->ledgerService->releaseTransferHold($current, 'Transfer hold released after provider submission failure.');
+                $preflight = $exception instanceof NiumSubmissionPreflightException;
+                $transportNoWire = ($exception instanceof NiumRemittanceDispatchHeldException
+                    || $exception instanceof NiumPayoutPreDispatchException)
+                    && filled($exception->noWireOperationKey);
+                if ($ownedHold !== null && ($preflight || $transportNoWire)) {
+                    $this->ledgerService->releaseOwnedTransferHoldBeforeWire(
+                        $current,
+                        $ownedHold,
+                        $transportNoWire ? $exception->noWireOperationKey : null,
+                    );
                 }
+                // Unknown exceptions and provider responses after a POST do not
+                // prove no-wire. Keep funds held for authoritative reconciliation.
             } catch (Throwable $cleanupException) {
                 try {
                     Log::error('Transfer reservation cleanup failed.', [
@@ -67,13 +83,14 @@ class ProviderTransferManager
 
     public function syncTransferStatus(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
+        OwnerFirst::outside();
         $transferProvider = $this->registry->resolveTransferProvider($provider);
 
         if ($transferProvider instanceof PreparedTransferStatusProvider) {
             // Provider I/O must remain outside the database transaction.
             $prepared = $transferProvider->prepareTransferStatusSync($provider, $transfer);
 
-            return DB::transaction(function () use ($provider, $transfer, $transferProvider, $prepared): Transfer {
+            return OwnerFirst::transfer($transfer, function () use ($provider, $transfer, $transferProvider, $prepared): Transfer {
                 $locked = Transfer::query()
                     ->whereKey($transfer->id)
                     ->lockForUpdate()

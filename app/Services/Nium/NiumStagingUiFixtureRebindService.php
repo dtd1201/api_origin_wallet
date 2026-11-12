@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
 use App\Models\UserProviderAccount;
@@ -38,6 +39,7 @@ final class NiumStagingUiFixtureRebindService
 
     public function rebind(string $approval, string $operatorContext): UserProviderAccount
     {
+        OwnerFirst::outside();
         if (! app()->environment('staging')) {
             throw new RuntimeException('Nium UI fixture rebind is staging-only.');
         }
@@ -80,7 +82,7 @@ final class NiumStagingUiFixtureRebindService
 
         $this->assertAuthenticatedResponse($response->status(), $payload, $evidence);
 
-        return DB::transaction(function () use ($approval, $evidence, $operatorContext, $payload): UserProviderAccount {
+        return OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function () use ($approval, $evidence, $operatorContext, $payload): UserProviderAccount {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->first();
             $this->assertFixtureAccount($account);
             $this->assertLockedFixtureState($account);

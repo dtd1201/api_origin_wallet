@@ -11,7 +11,7 @@ use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumFileService;
 use App\Services\Nium\NiumHkSandboxFileStageRunner;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
 use Mockery\MockInterface;
 use RuntimeException;

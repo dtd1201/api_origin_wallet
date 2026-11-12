@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
 use App\Models\KycDocument;
@@ -28,7 +29,7 @@ final class NiumHkManualKycResubmissionService
             throw new RuntimeException('The administrator is not authorized to approve manual KYC resubmissions.');
         }
 
-        return DB::transaction(function () use ($customer, $admin, $priorLogId, $reason): NiumManualKycResubmissionAuthorization {
+        return OwnerFirst::users([$customer->id, $admin->id], function () use ($customer, $admin, $priorLogId, $reason): NiumManualKycResubmissionAuthorization {
             $account = UserProviderAccount::query()->where('user_id', $customer->id)
                 ->whereHas('provider', fn ($query) => $query->whereRaw('LOWER(code) = ?', ['nium']))
                 ->whereNotNull('external_customer_id')->lockForUpdate()->sole();

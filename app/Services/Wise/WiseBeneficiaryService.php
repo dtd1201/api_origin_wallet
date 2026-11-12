@@ -5,12 +5,16 @@ namespace App\Services\Wise;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\Contracts\BeneficiaryProvider;
+use App\Services\Integrations\BeneficiaryOperationService;
+use App\Services\Integrations\CoordinatesBeneficiaryOperations;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use RuntimeException;
 
 class WiseBeneficiaryService implements BeneficiaryProvider
 {
+    use CoordinatesBeneficiaryOperations;
+
     use WiseDataFormatter;
 
     public function __construct(
@@ -18,10 +22,11 @@ class WiseBeneficiaryService implements BeneficiaryProvider
     ) {
     }
 
-    public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performCreateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         $beneficiary->loadMissing('user');
         $payload = $this->buildBeneficiaryPayload($beneficiary);
+        BeneficiaryOperationService::beginMutation($beneficiary, 'create');
         $response = $this->wiseService->post(
             path: (string) config('services.wise.recipient_endpoint'),
             payload: $payload,
@@ -31,7 +36,7 @@ class WiseBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
     }
 
-    public function updateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performUpdateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return $this->createBeneficiary($provider, $beneficiary);
@@ -45,9 +50,10 @@ class WiseBeneficiaryService implements BeneficiaryProvider
         }
 
         $previousExternalId = (string) $beneficiary->external_beneficiary_id;
-        $beneficiary->forceFill(['external_beneficiary_id' => null])->save();
-        $beneficiary = $this->createBeneficiary($provider, $beneficiary->fresh()->load('user'));
+        BeneficiaryOperationService::write($beneficiary, ['external_beneficiary_id' => null]);
+        $beneficiary = $this->createBeneficiary($provider, BeneficiaryOperationService::current($beneficiary)->load('user'));
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'wise_cleanup');
         $deleteResponse = $this->wiseService->delete(
             path: str_replace(
                 '{accountId}',
@@ -58,7 +64,7 @@ class WiseBeneficiaryService implements BeneficiaryProvider
         );
 
         if (! $deleteResponse->successful() && $deleteResponse->status() !== 403) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     'previous_external_beneficiary_id' => $previousExternalId,
                     'cleanup_error' => $deleteResponse->json() ?? ['raw' => $deleteResponse->body()],
@@ -69,7 +75,7 @@ class WiseBeneficiaryService implements BeneficiaryProvider
         return $beneficiary;
     }
 
-    public function deleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
+    protected function performDeleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
     {
         $beneficiary->loadMissing('user');
 
@@ -77,6 +83,7 @@ class WiseBeneficiaryService implements BeneficiaryProvider
             return;
         }
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'delete');
         $response = $this->wiseService->delete(
             path: str_replace(
                 '{accountId}',
@@ -89,7 +96,7 @@ class WiseBeneficiaryService implements BeneficiaryProvider
         if (! $response->successful()) {
             $responseData = $response->json() ?? ['raw' => $response->body()];
 
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => 'delete_failed',
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     'delete_error' => $responseData,
@@ -129,7 +136,7 @@ class WiseBeneficiaryService implements BeneficiaryProvider
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
         if (! $response->successful() || ! filled($responseData['id'] ?? null)) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => "{$action}_failed",
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     "{$action}_request" => $requestPayload,
@@ -140,7 +147,7 @@ class WiseBeneficiaryService implements BeneficiaryProvider
             throw new RuntimeException($this->transferFailureMessage($responseData, "{$provider->name} beneficiary {$action} failed."));
         }
 
-        $beneficiary->update([
+        BeneficiaryOperationService::write($beneficiary, [
             'external_beneficiary_id' => (string) $responseData['id'],
             'status' => $this->normalizeBeneficiaryStatus(
                 Arr::get($responseData, 'status'),
@@ -153,6 +160,6 @@ class WiseBeneficiaryService implements BeneficiaryProvider
             ]),
         ]);
 
-        return $beneficiary->fresh();
+        return BeneficiaryOperationService::current($beneficiary);
     }
 }

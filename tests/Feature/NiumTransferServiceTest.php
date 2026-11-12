@@ -22,7 +22,7 @@ use App\Services\Nium\NiumTransferService;
 use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -39,6 +39,7 @@ class NiumTransferServiceTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        config()->set('wallet.ledger.enabled', true);
 
         if (! Schema::hasColumn('transfers', 'provider_status')) {
             Schema::table('transfers', function (Blueprint $table): void {
@@ -99,6 +100,7 @@ class NiumTransferServiceTest extends TestCase
         Balance::query()->create([
             'user_id' => $user->id,
             'provider_id' => $provider->id,
+            'external_account_id' => 'wallet_hash_123',
             'currency' => 'USD',
             'available_balance' => 1000,
             'ledger_balance' => 1000,
@@ -149,6 +151,8 @@ class NiumTransferServiceTest extends TestCase
                 'system_reference_number' => 'RT6431795378',
             ], 200),
         ]);
+
+        app(LedgerService::class)->reserveTransfer($transfer);
 
         $updated = app(NiumTransferService::class)->submitTransfer(
             $provider,
@@ -436,14 +440,13 @@ class NiumTransferServiceTest extends TestCase
 
     public function test_manager_sync_rejects_conflicting_terminal_status_without_changing_ledger(): void
     {
-        [$provider, $transfer] = $this->makeSubmittableTransfer([
-            'external_transfer_id' => 'RT-TERMINAL-CONFLICT',
-        ]);
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
 
         $ledger = app(LedgerService::class);
         $ledger->reserveTransfer($transfer);
 
         $transfer->update([
+            'external_transfer_id' => 'RT-TERMINAL-CONFLICT',
             'status' => 'completed',
             'completed_at' => now(),
         ]);
@@ -501,6 +504,8 @@ class NiumTransferServiceTest extends TestCase
         [$provider, $transfer] = $this->makeSubmittableTransfer();
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-ONCE', 'paymentId' => 'PAY-ONCE'])]);
 
+        app(LedgerService::class)->reserveTransfer($transfer);
+
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
         try {
@@ -523,7 +528,10 @@ class NiumTransferServiceTest extends TestCase
                 'external_customer_id' => 'provider-account-customer',
                 'external_account_id' => 'provider-account-wallet',
             ]);
+        Balance::query()->where('user_id', $transfer->user_id)->update(['external_account_id' => 'provider-account-wallet']);
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-PROVIDER-ACCOUNT'])]);
+
+        app(LedgerService::class)->reserveTransfer($transfer);
 
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
@@ -543,6 +551,8 @@ class NiumTransferServiceTest extends TestCase
             'fx_rate' => null,
         ]);
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-SAME-CURRENCY'])]);
+
+        app(LedgerService::class)->reserveTransfer($transfer);
 
         $updated = app(NiumTransferService::class)->submitTransfer(
             $provider,
@@ -565,6 +575,8 @@ class NiumTransferServiceTest extends TestCase
             'fx_rate' => null,
         ]);
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-LIVE-FX'])]);
+
+        app(LedgerService::class)->reserveTransfer($transfer);
 
         $updated = app(NiumTransferService::class)->submitTransfer(
             $provider,
@@ -666,6 +678,7 @@ class NiumTransferServiceTest extends TestCase
         ]);
 
         // Legacy HK/EUR lock acquisition is supported; its remittance wire is held.
+        app(LedgerService::class)->reserveTransfer($transfer);
         try {
             app(NiumTransferService::class)->submitTransfer($provider, $transfer->fresh());
             $this->fail('A legacy cross-currency payload must not bypass the dispatch HOLD.');
@@ -754,6 +767,7 @@ class NiumTransferServiceTest extends TestCase
         $this->assertSame('EUR', $payload['payout']['destinationCurrency']);
         $this->assertSame(112, $payload['payout']['auditId']);
 
+        app(LedgerService::class)->reserveTransfer($transfer);
         try {
             app(NiumTransferService::class)->submitTransfer($provider, $transfer->fresh());
             $this->fail('An authoritative audit ID does not authorize cross-currency dispatch.');
@@ -1170,6 +1184,8 @@ class NiumTransferServiceTest extends TestCase
         ]);
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-SWIFT'])]);
 
+        app(LedgerService::class)->reserveTransfer($transfer);
+
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
         Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
@@ -1196,6 +1212,8 @@ class NiumTransferServiceTest extends TestCase
             ],
         ]);
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-AUTHORITATIVE'])]);
+
+        app(LedgerService::class)->reserveTransfer($transfer);
 
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
@@ -1346,6 +1364,7 @@ class NiumTransferServiceTest extends TestCase
             ]],
         ], 400)]);
 
+        app(LedgerService::class)->reserveTransfer($transfer);
         try {
             app(NiumTransferService::class)->submitTransfer($provider, $transfer);
             $this->fail('Expected the provider error to reject the transfer.');
@@ -1386,6 +1405,8 @@ class NiumTransferServiceTest extends TestCase
             'paymentId' => 'PAY-UNKNOWN-WITHOUT-SYSTEM-REF',
         ], 200)]);
 
+        app(LedgerService::class)->reserveTransfer($transfer);
+
         $updated = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
         $this->assertSame('submission_unknown', $updated->status);
@@ -1410,6 +1431,8 @@ class NiumTransferServiceTest extends TestCase
             ], 503),
         ]);
 
+        app(LedgerService::class)->reserveTransfer($transfer);
+
         $updated = app(NiumTransferService::class)->submitTransfer(
             $provider,
             $transfer
@@ -1432,12 +1455,14 @@ class NiumTransferServiceTest extends TestCase
 
     public function test_successful_transfer_reference_remains_compatible_with_lifecycle_webhook(): void
     {
-        config()->set('wallet.ledger.enabled', false);
+        config()->set('wallet.ledger.enabled', true);
         [$provider, $transfer] = $this->makeSubmittableTransfer();
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response([
             'systemReferenceNumber' => 'RT-WEBHOOK-LIFECYCLE',
             'paymentId' => 'PAY-WEBHOOK-LIFECYCLE',
         ], 200)]);
+
+        app(LedgerService::class)->reserveTransfer($transfer);
 
         $submitted = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
         $this->assertSame('pending', $submitted->status);
@@ -1472,6 +1497,8 @@ class NiumTransferServiceTest extends TestCase
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response([])]);
 
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['systemReferenceNumber' => 'RT-AUTHORITATIVE-FEE'])]);
+        app(LedgerService::class)->reserveTransfer($transfer);
+
         app(NiumTransferService::class)->submitTransfer($provider, $transfer);
         Http::assertSent(fn ($request): bool => $this->isRemittancePost($request)
             && ($request->data()['payout']['swiftFeeType'] ?? null) === 'SHA');
@@ -1495,6 +1522,8 @@ class NiumTransferServiceTest extends TestCase
             return Http::response([], 500);
         });
 
+        app(LedgerService::class)->reserveTransfer($transfer);
+
         $unknown = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
         $this->assertSame('submission_unknown', $unknown->status);
 
@@ -1517,6 +1546,8 @@ class NiumTransferServiceTest extends TestCase
                 throw new RuntimeException('Synthetic evidence persistence failure.');
             }
         });
+
+        app(LedgerService::class)->reserveTransfer($transfer);
 
         $unknown = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
@@ -1592,7 +1623,7 @@ class NiumTransferServiceTest extends TestCase
         $this->assertNoRemittancePost();
     }
 
-    public function test_manager_releases_hold_for_provider_failure(): void
+    public function test_manager_preserves_hold_for_provider_response_without_no_wire_proof(): void
     {
         [$provider, $rejectedTransfer] = $this->makeSubmittableTransfer();
         Http::fake([...$this->purposeCodesRoute(), '*' => Http::response(['message' => 'Rejected'], 422)]);
@@ -1600,11 +1631,12 @@ class NiumTransferServiceTest extends TestCase
             app(ProviderTransferManager::class)->submitTransfer($provider, $rejectedTransfer);
             $this->fail('Provider rejection must be surfaced.');
         } catch (RuntimeException) {
-            // A definite provider rejection releases the transfer hold.
+            // A response after a POST does not authorize no-wire request cleanup.
         }
         $rejectedBalance = Balance::query()->where('user_id', $rejectedTransfer->user_id)->sole();
-        $this->assertSame('1000.00000000', $rejectedBalance->available_balance);
-        $this->assertSame('0.00000000', $rejectedBalance->reserved_balance);
+        $this->assertSame('990.00000000', $rejectedBalance->available_balance);
+        $this->assertSame('10.00000000', $rejectedBalance->reserved_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
     }
 
     public function test_submission_unknown_preserves_manager_hold(): void
@@ -2053,6 +2085,181 @@ class NiumTransferServiceTest extends TestCase
         $this->assertCount(1, collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]->url(), '/lockExchangeRate')));
     }
 
+    public function test_preflight_failure_releases_created_hold_and_retry_is_rejected_without_provider_io(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::preventStrayRequests();
+        Http::fake(['*purposeCodes' => Http::response(['message' => 'Unavailable'], 503)]);
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer);
+            $this->fail('Preflight must fail before any remittance submission.');
+        } catch (\App\Services\Nium\NiumSubmissionPreflightException $exception) {
+            $this->assertSame('Nium purpose codes are temporarily unavailable.', $exception->getMessage());
+        }
+        $this->assertSame('draft', $transfer->fresh()->status);
+        $this->assertNull($transfer->fresh()->provider_operation_key);
+        $this->assertSame('1000.00000000', Balance::query()->sole()->available_balance);
+        $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+        $entries = LedgerEntry::query()->orderBy('id')->get()->toArray();
+        $calls = count(Http::recorded());
+
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer->fresh());
+            $this->fail('Released hold retry must not be revived.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Released or debited transfer holds cannot be reused as active reservations.', $exception->getMessage());
+        }
+        $this->assertSame($entries, LedgerEntry::query()->orderBy('id')->get()->toArray());
+        $this->assertSame($calls, count(Http::recorded()));
+        $this->assertDatabaseCount('ledger_entries', 2);
+        $this->assertNoRemittancePost();
+    }
+
+    public function test_preflight_failure_reusing_an_active_hold_has_no_cleanup_authority(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer(['target_amount' => '10']);
+        app(LedgerService::class)->reserveTransfer($transfer);
+        Http::fake($this->purposeCodesRoute());
+
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer->fresh());
+            $this->fail('Policy must reject the invalid instruction.');
+        } catch (\App\Services\Nium\NiumSubmissionPreflightException) {
+            // This request received a duplicate hold, not cleanup authority.
+        }
+        $this->assertSame('990.00000000', Balance::query()->sole()->available_balance);
+        $this->assertSame('10.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertDatabaseCount('ledger_entries', 1);
+        $this->assertNoRemittancePost();
+    }
+
+    public function test_losing_submit_during_winner_post_cannot_release_winners_hold(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        $stale = $transfer->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount']);
+        $posts = 0;
+        Http::fake(function ($request) use ($provider, $stale, &$posts) {
+            if (str_contains($request->url(), '/purposeCodes')) {
+                return Http::response([['description' => 'General Goods', 'purposeCode' => 'IR01811']]);
+            }
+            $this->assertTrue($this->isRemittancePost($request));
+            $posts++;
+            try {
+                app(ProviderTransferManager::class)->submitTransfer($provider, $stale);
+                $this->fail('Stale concurrent request must not acquire another submission.');
+            } catch (RuntimeException) {
+                $this->assertSame('10.00000000', Balance::query()->sole()->reserved_balance);
+                $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
+            }
+
+            return Http::response(['systemReferenceNumber' => 'RT-PATCH258-WINNER']);
+        });
+        $submitted = app(ProviderTransferManager::class)->submitTransfer($provider, $transfer);
+
+        $this->assertSame('pending', $submitted->status);
+        $this->assertSame(1, $posts);
+        $this->assertDatabaseCount('ledger_entries', 1);
+        $this->assertSame('10.00000000', Balance::query()->sole()->reserved_balance);
+    }
+
+    public function test_hold_creator_cleanup_is_fenced_when_reuser_has_committed_submission(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        $entered = false;
+        $posts = 0;
+        Http::fake(function ($request) use ($provider, $transfer, &$entered, &$posts) {
+            if (str_contains($request->url(), '/purposeCodes')) {
+                if (! $entered) {
+                    $entered = true;
+                    // Deterministic interleaving, not a PostgreSQL concurrency proof.
+                    $winner = app(ProviderTransferManager::class)->submitTransfer($provider, $transfer->fresh());
+                    $this->assertSame('pending', $winner->status);
+
+                    return Http::response(['message' => 'Creator preflight failed'], 503);
+                }
+
+                return Http::response([['description' => 'General Goods', 'purposeCode' => 'IR01811']]);
+            }
+            $this->assertTrue($this->isRemittancePost($request));
+            $posts++;
+
+            return Http::response(['systemReferenceNumber' => 'RT-PATCH258-REUSER']);
+        });
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer);
+            $this->fail('Creator preflight should fail after the competing submit.');
+        } catch (\App\Services\Nium\NiumSubmissionPreflightException) {
+            // The creator owns the original hold, but a committed wire fences release.
+        }
+        $this->assertSame('pending', $transfer->fresh()->status);
+        $this->assertSame(1, $posts);
+        $this->assertSame('10.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertDatabaseCount('ledger_entries', 1);
+    }
+
+    public function test_nium_submission_without_own_active_hold_never_posts(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::fake($this->purposeCodesRoute());
+        try {
+            app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+            $this->fail('Direct provider primitive must require an own active hold.');
+        } catch (\App\Services\Nium\NiumSubmissionPreflightException $exception) {
+            $this->assertSame('An own hold journal is required for this transfer.', $exception->getMessage());
+        }
+        $this->assertSame('draft', $transfer->fresh()->status);
+        $this->assertNull($transfer->fresh()->provider_operation_key);
+        $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertNoRemittancePost();
+    }
+
+    public function test_unpersisted_submission_claim_never_posts_and_releases_only_created_hold(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::preventStrayRequests();
+        Http::fake($this->purposeCodesRoute());
+        Transfer::updating(static function (Transfer $candidate): ?bool {
+            return $candidate->isDirty('status') && $candidate->status === 'submitting' ? false : null;
+        });
+
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer);
+            $this->fail('A vetoed submission claim must never reach provider POST.');
+        } catch (\App\Services\Nium\NiumSubmissionPreflightException $exception) {
+            $this->assertSame('Nium submission claim was not persisted; no payout was sent.', $exception->getMessage());
+        }
+
+        $this->assertSame('draft', $transfer->fresh()->status);
+        $this->assertNull($transfer->fresh()->provider_operation_key);
+        $this->assertSame('1000.00000000', Balance::query()->sole()->available_balance);
+        $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertSame('1000.00000000', Balance::query()->sole()->ledger_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'release')->count());
+        $this->assertNoRemittancePost();
+    }
+
+    public function test_unclassified_failure_after_submission_claim_preserves_hold(): void
+    {
+        [$provider, $transfer] = $this->makeSubmittableTransfer();
+        Http::fake(function ($request) {
+            if (str_contains($request->url(), '/purposeCodes')) {
+                return Http::response([['description' => 'General Goods', 'purposeCode' => 'IR01811']]);
+            }
+            throw new RuntimeException('Unclassified failure at remittance boundary.');
+        });
+        try {
+            app(ProviderTransferManager::class)->submitTransfer($provider, $transfer);
+            $this->fail('Unknown failure must be surfaced.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Unclassified failure at remittance boundary.', $exception->getMessage());
+        }
+        $this->assertSame('submitting', $transfer->fresh()->status);
+        $this->assertNotEmpty($transfer->fresh()->provider_operation_key);
+        $this->assertSame('10.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertDatabaseCount('ledger_entries', 1);
+    }
+
     private function assertRemittanceDispatchHeldState(Transfer $transfer): void
     {
         $this->assertSame('failed', $transfer->status);
@@ -2089,7 +2296,8 @@ class NiumTransferServiceTest extends TestCase
             'provider_ids_verified_at' => now(),
         ]);
         Balance::query()->create([
-            'user_id' => $user->id, 'provider_id' => $provider->id, 'currency' => 'USD',
+            'user_id' => $user->id, 'provider_id' => $provider->id,
+            'external_account_id' => 'wallet-test', 'currency' => 'USD',
             'available_balance' => 1000, 'ledger_balance' => 1000, 'as_of' => now(),
         ]);
         $beneficiary = Beneficiary::query()->create([

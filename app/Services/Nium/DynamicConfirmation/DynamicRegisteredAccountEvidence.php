@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\Beneficiary;
 use App\Models\UserProviderAccount;
@@ -18,6 +19,7 @@ final class DynamicRegisteredAccountEvidence
 
     public function inspect(Beneficiary $beneficiary, UserProviderAccount $account, array $quoteBinding): array
     {
+        if (DB::transactionLevel() > 0) OwnerFirst::current([$account->user_id, $beneficiary->user_id]);
         $log = ApiRequestLog::query()->when(DB::transactionLevel() > 0, fn ($q) => $q->lockForUpdate())->findOrFail($quoteBinding['registration_log_id']);
         $exchange = $log->niumExchangeEvidence()->when(DB::transactionLevel() > 0, fn ($q) => $q->lockForUpdate())->first();
         if ($log->user_id !== $beneficiary->user_id || $log->provider_id !== $beneficiary->provider_id

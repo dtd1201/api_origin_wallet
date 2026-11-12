@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Balance;
 use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
@@ -19,6 +20,7 @@ final class DynamicPayoutReconciler
 
     public function reconcile(string $id): void
     {
+        OwnerFirst::outside();
         if (config('nium_dynamic_payouts.reconciliation_enabled', false) !== true) {
             return;
         }
@@ -69,7 +71,7 @@ final class DynamicPayoutReconciler
             $result = ['state' => 'unavailable', 'reason' => 'dynamic_authenticated_accounting_unavailable'];
         }
         try {
-            $this->dispatcher->locked($id, function ($intent, $current, $reservation) use ($token, $result, $claimed): void {
+            $this->dispatcher->locked($id, function ($intent, $current, $reservation, $context) use ($token, $result, $claimed): void {
                 if ($current->reconciliation_token !== $token) {
                     return;
                 }
@@ -116,7 +118,7 @@ final class DynamicPayoutReconciler
                     $current->financial_evidence = $result['receipt'];
                 }
                 if ($result['state'] === 'matched') {
-                    $this->ledger->consume($intent, $reservation, Balance::query()->lockForUpdate()->findOrFail($intent->balance_id));
+                    $this->ledger->consume($intent, $reservation, Balance::query()->lockForUpdate()->findOrFail($intent->balance_id), $context);
                     $receipt = $current->financial_evidence;
                     $receipt['post_match_recovery'] = ['attempts' => 0,
                         'expires_at' => now()->addSeconds(max(60, min(604800, (int) config('nium_dynamic_payouts.post_match_reconciliation_window_seconds', 604800))))->toISOString()];
@@ -128,7 +130,7 @@ final class DynamicPayoutReconciler
                     if ($result['state'] === 'mismatched' && isset($result['receipt'])) {
                         // Settled authenticated provider observations establish the
                         // operation, not a new customer price. Consume only consent.
-                        $this->ledger->consume($intent, $reservation, Balance::query()->lockForUpdate()->findOrFail($intent->balance_id));
+                        $this->ledger->consume($intent, $reservation, Balance::query()->lockForUpdate()->findOrFail($intent->balance_id), $context);
                         $current->financial_risk_state = 'PROVIDER_ACCOUNTING_DISCREPANCY_REQUIRES_REVIEW';
                     }
                     if ($result['state'] === 'exception') {
@@ -147,7 +149,15 @@ final class DynamicPayoutReconciler
                     }
                 }
             });
-        } catch (Throwable) {
+        } catch (Throwable $exception) {
+            try {
+                \Illuminate\Support\Facades\Log::warning('Dynamic financial settlement rolled back for review.', [
+                    'outbox_id' => $id, 'exception_class' => $exception::class,
+                    'sqlstate' => \App\Services\Wallet\Concurrency\PostgresOwnerFirstTransactions::sqlState($exception),
+                ]);
+            } catch (Throwable) {
+                // Logging failure cannot prevent the separate review receipt transaction.
+            }
             $this->dispatcher->locked($id, function ($intent, $current) use ($token): void {
                 if ($current->reconciliation_token === $token) {
                     DynamicPayoutDispatcher::exception($current, 'dynamic_financial_settlement_requires_review');

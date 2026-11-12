@@ -5,7 +5,7 @@ namespace Tests\Feature;
 use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
 use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;

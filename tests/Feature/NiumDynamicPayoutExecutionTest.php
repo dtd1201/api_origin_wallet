@@ -26,6 +26,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\Concerns\CreatesDynamicConfirmationFixtures;
 use Tests\Concerns\CreatesFinalizedUsdConfirmationFixtures;
+use Tests\Concerns\CreatesNiumBalanceSyncObservation;
 use Tests\Support\DynamicConfirmationDatabaseTestCase;
 use Tests\Support\DynamicPayoutTransportStub;
 use Throwable;
@@ -35,6 +36,7 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
 {
     use CreatesDynamicConfirmationFixtures;
     use CreatesFinalizedUsdConfirmationFixtures;
+    use CreatesNiumBalanceSyncObservation;
 
     private DynamicPayoutTransportStub $wire;
     private DynamicPayoutDispatcher $dispatcher;
@@ -80,6 +82,25 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
             [...$scope, 'authCode' => 'FT-fixture-fee', 'transactionType' => 'Fee_Debit', 'settlementAuthAmount' => $fee,
                 'labels' => ['originalAuthorizationCode' => 'RT-fixture-dynamic', 'feeName' => 'REMIT_BANK_FEE']],
         ], 'response_sha256' => [str_repeat('a', 64)], 'observed_at' => now()->toISOString()];
+    }
+
+    public function test_sync_during_authenticated_reconciliation_cannot_apply_the_provider_debit_twice(): void
+    {
+        $outbox = $this->prepare();
+        $this->dispatcher->dispatch($outbox->id);
+        $this->observeNiumBalance('1000');
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->wire->batch = $this->records($outbox->fresh());
+        $this->reconciler->reconcile($outbox->id);
+        $this->observeNiumBalance('1000');
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('matched', $outbox->fresh()->state);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->ledger_balance);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame(1, $this->wire->submissions);
     }
 
     public static function modes(): array
@@ -256,9 +277,9 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
     {
         $outbox = $this->prepare();
         $intent = NiumDynamicIntent::query()->findOrFail($outbox->intent_id);
-        // The evidence stub also rejects transactions with a different message,
-        // so this verifies the service refuses before invoking its refresh hook.
-        $this->expectExceptionMessage('dynamic_execution_refresh_requires_no_transaction');
+        // The service contract rejects before the evidence stub refresh hook.
+        // The stub uses an ordinary RuntimeException rather than this typed failure.
+        $this->expectException(\App\Services\Wallet\Concurrency\OwnerLockContractViolation::class);
         DB::transaction(fn () => $this->confirmation->refreshForExecution($intent));
     }
 
@@ -269,6 +290,10 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->dispatcher->dispatch($outbox->id);
         $this->assertSame('ambiguous', $outbox->fresh()->state);
         $this->assertNull($outbox->fresh()->provider_reference);
+        $this->observeNiumBalance('1000');
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
         $this->dispatcher->dispatch($outbox->id);
         $this->assertSame(1, $this->wire->submissions);
         $this->wire->batch = $this->records($outbox->fresh());

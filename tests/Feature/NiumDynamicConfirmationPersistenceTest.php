@@ -128,7 +128,7 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
 
     public function test_insufficient_funds_roll_back_intent_and_every_reservation_mutation(): void
     {
-        $this->wallet->update(['available_balance' => '101.99']);
+        $this->wallet->update(['available_balance' => '101.99', 'ledger_balance' => '101.99']);
 
         $this->rejected(fn () => $this->confirmDynamic(), 'dynamic_insufficient_available_funds');
 
@@ -387,18 +387,20 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
         $this->assertSame('held', NiumDynamicPayoutOutbox::query()->sole()->state);
     }
 
-    public function test_wallet_sync_cannot_make_reserved_money_spendable_again(): void
+    public function test_historically_overwritten_wallet_requires_audited_repair_before_reserve_or_release(): void
     {
-        $this->wallet->update(['available_balance' => '150', 'raw_data' => ['provider_available_balance' => '150']]);
+        $this->wallet->update(['available_balance' => '150', 'ledger_balance' => '150',
+            'raw_data' => ['provider_available_balance' => '150']]);
         $intent = $this->confirmDynamic();
         $this->wallet->refresh()->update(['available_balance' => '150']);
         $this->source->review = $this->dynamicReview(quoteId: 'fixture-quote-2');
 
-        $this->rejected(fn () => $this->confirmDynamic('second-reference'), 'dynamic_insufficient_available_funds');
+        $this->rejected(fn () => $this->confirmDynamic('second-reference'), 'dynamic_reservation_balance_inconsistent');
 
-        $this->confirmation->cancel($this->owner, $intent->id);
+        $this->rejected(fn () => $this->confirmation->cancel($this->owner, $intent->id),
+            'dynamic_reservation_balance_inconsistent');
         $this->assertSame('150.00000000', $this->wallet->fresh()->available_balance);
-        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('102.00000000', $this->wallet->fresh()->reserved_balance);
     }
 
     public function test_high_precision_total_debit_never_rounds_through_float(): void

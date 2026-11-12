@@ -12,7 +12,7 @@ use App\Services\Integrations\ProviderHttpClient;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumFileService;
 use Illuminate\Filesystem\FilesystemAdapter;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;

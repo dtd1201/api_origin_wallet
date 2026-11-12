@@ -17,7 +17,7 @@ use App\Services\Nium\NiumSgdAdmissionFence;
 use App\Services\Nium\NiumPayoutFxLockService;
 use App\Services\Nium\NiumService;
 use App\Services\Wallet\TransferApprovalService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;

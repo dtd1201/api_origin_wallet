@@ -12,7 +12,7 @@ use App\Models\WebhookEvent;
 use App\Services\Nium\NiumHkStakeholderSubmitKycRetryOneShotRunner;
 use App\Services\Nium\NiumProviderAccountMetadataOwnership;
 use App\Services\Nium\NiumService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Mockery\MockInterface;
 use RuntimeException;
 use Tests\TestCase;

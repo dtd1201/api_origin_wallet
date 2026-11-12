@@ -11,7 +11,7 @@ use App\Services\Nium\NiumHkApplicantSubmitKycEvidenceReconciler;
 use App\Services\Nium\NiumHkSandboxKycSimulationRunner;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;

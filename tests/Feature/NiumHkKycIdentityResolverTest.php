@@ -6,7 +6,7 @@ use App\Models\KycProfile;
 use App\Models\KycRelatedPerson;
 use App\Models\User;
 use App\Services\Nium\NiumHkKycIdentityResolver;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\TestCase;

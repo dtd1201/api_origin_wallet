@@ -6,7 +6,7 @@ use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\Transaction;
 use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;

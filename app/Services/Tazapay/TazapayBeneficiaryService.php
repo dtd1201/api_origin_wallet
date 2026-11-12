@@ -5,20 +5,25 @@ namespace App\Services\Tazapay;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\Contracts\BeneficiaryProvider;
+use App\Services\Integrations\BeneficiaryOperationService;
+use App\Services\Integrations\CoordinatesBeneficiaryOperations;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use RuntimeException;
 
 class TazapayBeneficiaryService implements BeneficiaryProvider
 {
+    use CoordinatesBeneficiaryOperations;
+
     public function __construct(
         private readonly TazapayService $tazapayService,
     ) {
     }
 
-    public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performCreateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         $payload = $this->buildBeneficiaryPayload($beneficiary);
+        BeneficiaryOperationService::beginMutation($beneficiary, 'create');
         $response = $this->tazapayService->post(
             path: (string) config('services.tazapay.beneficiary_endpoint'),
             payload: $payload,
@@ -28,13 +33,14 @@ class TazapayBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
     }
 
-    public function updateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performUpdateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return $this->createBeneficiary($provider, $beneficiary);
         }
 
         $payload = $this->buildBeneficiaryPayload($beneficiary);
+        BeneficiaryOperationService::beginMutation($beneficiary, 'update');
         $response = $this->tazapayService->put(
             path: str_replace(
                 '{beneficiary}',
@@ -48,7 +54,7 @@ class TazapayBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'update', $payload);
     }
 
-    public function deleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
+    protected function performDeleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
     {
         // Tazapay beneficiary docs currently expose create/fetch/update flows; no delete API is wired here.
     }
@@ -132,7 +138,7 @@ class TazapayBeneficiaryService implements BeneficiaryProvider
         $beneficiaryPayload = (array) ($responseData['data'] ?? $responseData);
 
         if (! $response->successful() || ! filled($beneficiaryPayload['id'] ?? $beneficiary->external_beneficiary_id)) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => "{$action}_failed",
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     "{$action}_request" => $requestPayload,
@@ -146,7 +152,7 @@ class TazapayBeneficiaryService implements BeneficiaryProvider
         $bankDetails = (array) Arr::get($beneficiaryPayload, 'destination_details.bank', []);
         $bankCodes = (array) ($bankDetails['bank_codes'] ?? []);
 
-        $beneficiary->update([
+        BeneficiaryOperationService::write($beneficiary, [
             'external_beneficiary_id' => $beneficiaryPayload['id'] ?? $beneficiary->external_beneficiary_id,
             'bank_name' => $bankDetails['bank_name'] ?? $beneficiary->bank_name,
             'bank_code' => $bankCodes['aba_code'] ?? $bankCodes['swift_code'] ?? $beneficiary->bank_code,
@@ -161,7 +167,7 @@ class TazapayBeneficiaryService implements BeneficiaryProvider
             ]),
         ]);
 
-        return $beneficiary->fresh();
+        return BeneficiaryOperationService::current($beneficiary);
     }
 
     private function normalizeBeneficiaryType(?string $type): string

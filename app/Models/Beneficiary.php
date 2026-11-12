@@ -11,6 +11,9 @@ class Beneficiary extends Model
 {
     use HasFactory;
 
+    /** Internal dispatch snapshot, never an Eloquent attribute or API field. */
+    public ?BeneficiaryOperation $operationContext = null;
+
     protected $hidden = ['raw_data'];
 
     protected $fillable = [

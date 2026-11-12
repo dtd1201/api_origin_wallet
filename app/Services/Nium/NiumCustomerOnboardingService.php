@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserProviderAccount;
@@ -28,6 +29,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
 
     public function syncUser(IntegrationProvider $provider, User $user): UserProviderAccount
     {
+        OwnerFirst::outside();
         return $this->synchronizeUser($provider, $user)['account'];
     }
 
@@ -131,6 +133,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
         User $user,
         ?UserProviderAccount $existingProviderAccount = null,
     ): ProviderOnboardingResult {
+        OwnerFirst::outside();
         $synchronization = $this->synchronizeUser($provider, $user);
 
         return $this->result(
@@ -146,6 +149,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
         UserProviderAccount $providerAccount,
         array $payload,
     ): ProviderOnboardingResult {
+        OwnerFirst::outside();
         $reservedFields = [
             'status',
             'subStatus',
@@ -231,6 +235,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
         ?string $requestId = null,
         ?array &$retrievedPayload = null,
     ): UserProviderAccount {
+        OwnerFirst::outside();
         $customerHashId = $verifiedCustomerHashId ?: $providerAccount->external_customer_id;
         $response = $this->niumService->get(
             path: $this->niumService->path(
@@ -288,7 +293,7 @@ class NiumCustomerOnboardingService implements OnboardingProvider
 
     private function provisionProviderAccount(IntegrationProvider $provider, User $user): UserProviderAccount
     {
-        return DB::transaction(function () use ($provider, $user): UserProviderAccount {
+        return OwnerFirst::users([$user->id], function () use ($provider, $user): UserProviderAccount {
             UserProviderAccount::query()->insertOrIgnore([
                 'user_id' => $user->id,
                 'provider_id' => $provider->id,

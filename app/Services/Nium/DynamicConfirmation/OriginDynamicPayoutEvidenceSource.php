@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use DateTimeImmutable;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -24,6 +25,7 @@ final class OriginDynamicPayoutEvidenceSource implements DynamicPayoutEvidenceSo
 
     public function refreshForExecution(NiumDynamicIntent $intent): void
     {
+        OwnerFirst::outside();
         if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
             throw new RuntimeException('dynamic_execution_refresh_requires_no_transaction');
         }
@@ -54,6 +56,7 @@ final class OriginDynamicPayoutEvidenceSource implements DynamicPayoutEvidenceSo
 
     public function revalidate(LockedPayoutRecords $records, DateTimeImmutable $at): DynamicPayoutEvidence
     {
+        OwnerFirst::current([$records->user->id]);
         if (DB::transactionLevel() < 1) {
             throw new RuntimeException('dynamic_evidence_requires_transaction');
         }

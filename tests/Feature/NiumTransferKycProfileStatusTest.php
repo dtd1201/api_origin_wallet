@@ -8,7 +8,8 @@ use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Nium\NiumTransferService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use App\Services\Wallet\LedgerService;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
@@ -22,6 +23,7 @@ class NiumTransferKycProfileStatusTest extends TestCase
     {
         parent::setUp();
 
+        config()->set('wallet.ledger.enabled', true);
         config()->set('wallet.transfer_controls.require_admin_approval', false);
         config()->set('services.nium.payout_fx_enabled', false);
         config()->set('services.nium.base_url', 'https://gateway.nium.test');
@@ -64,6 +66,7 @@ class NiumTransferKycProfileStatusTest extends TestCase
         $this->assertDatabaseCount('transfers', 1);
 
         $transfer = Transfer::query()->sole();
+        app(LedgerService::class)->reserveTransfer($transfer);
         $updated = app(NiumTransferService::class)->submitTransfer($provider, $transfer);
 
         $this->assertSame('pending', $updated->status);
@@ -191,6 +194,7 @@ class NiumTransferKycProfileStatusTest extends TestCase
         Balance::query()->create([
             'user_id' => $user->id,
             'provider_id' => $provider->id,
+            'external_account_id' => 'kyc-status-wallet',
             'currency' => 'USD',
             'available_balance' => 1000,
             'ledger_balance' => 1000,

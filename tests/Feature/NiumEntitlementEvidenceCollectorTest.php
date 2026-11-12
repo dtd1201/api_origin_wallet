@@ -10,7 +10,7 @@ use App\Services\Nium\NiumDynamicQuoteFoundation;
 use App\Services\Nium\NiumEntitlementEvidenceProjector;
 use App\Services\Nium\NiumEntitlementEvidenceScope;
 use App\Services\Nium\NiumEntitlementEvidenceTransport;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Events\RequestSending;
 use Illuminate\Http\Client\Factory;

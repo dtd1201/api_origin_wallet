@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\AuditLog;
 use App\Models\LedgerEntry;
 use App\Models\NiumDynamicIntent;
@@ -23,6 +24,7 @@ final class DynamicPayoutDispatcher
 
     public function dispatch(string $id): void
     {
+        OwnerFirst::outside();
         DynamicPayoutGate::assertDispatchEnabled();
         try {
             $pending = NiumDynamicPayoutOutbox::query()->findOrFail($id);
@@ -33,8 +35,8 @@ final class DynamicPayoutDispatcher
                     || $outbox->submission_started_at !== null || $outbox->provider_reference !== null) {
                     return false;
                 }
-                $this->assertReservation($intent, $outbox, $reservation);
                 $this->confirmation->revalidateForExecution($intent);
+                $this->assertReservation($intent, $outbox, $reservation);
                 $key = $intent->confirmed_terms['execution_operation_key'] ?? (string) Str::uuid();
                 $json = DynamicPayoutRequest::json($intent, $key);
                 DynamicPayoutDispatcher::persist($outbox->forceFill(['state' => 'claimed', 'claimed_at' => now(),
@@ -101,6 +103,7 @@ final class DynamicPayoutDispatcher
     /** Called immediately before the sole wire attempt, after authentication preparation. */
     public function beginWire(string $id, string $token): void
     {
+        OwnerFirst::outside();
         DynamicPayoutGate::assertDispatchEnabled();
         $pending = NiumDynamicPayoutOutbox::query()->findOrFail($id);
         $this->confirmation->refreshForExecution(NiumDynamicIntent::query()->findOrFail($pending->intent_id));
@@ -109,8 +112,8 @@ final class DynamicPayoutDispatcher
                 || $outbox->attempts !== 0 || $outbox->submission_started_at !== null) {
                 throw new RuntimeException('dynamic_submission_already_claimed');
             }
-            $this->assertReservation($intent, $outbox, $reservation);
             $this->confirmation->revalidateForExecution($intent);
+            $this->assertReservation($intent, $outbox, $reservation);
             if ($outbox->request_json !== DynamicPayoutRequest::json($intent, $outbox->operation_key)) {
                 throw new RuntimeException('dynamic_payout_request_changed');
             }
@@ -165,13 +168,18 @@ final class DynamicPayoutDispatcher
         $found = NiumDynamicPayoutOutbox::query()->findOrFail($id);
         $owner = NiumDynamicIntent::query()->findOrFail($found->intent_id)->user_id;
 
-        return DB::transaction(function () use ($owner, $found, $id, $work) {
+        return OwnerFirst::users([$owner], function ($context) use ($owner, $found, $id, $work) {
             User::query()->lockForUpdate()->findOrFail($owner);
             $intent = NiumDynamicIntent::query()->lockForUpdate()->findOrFail($found->intent_id);
             $reservation = NiumDynamicReservation::query()->where('intent_id', $intent->id)->lockForUpdate()->sole();
             $outbox = NiumDynamicPayoutOutbox::query()->lockForUpdate()->findOrFail($id);
 
-            return $work($intent, $outbox, $reservation);
+            if ((string) $intent->user_id !== (string) $owner || $outbox->intent_id !== $intent->id
+                || $outbox->reservation_id !== $reservation->id || $reservation->intent_id !== $intent->id) {
+                throw new \App\Services\Wallet\Concurrency\OwnerBindingChanged('Dynamic execution binding changed.');
+            }
+
+            return $work($intent, $outbox, $reservation, $context);
         }, 3);
     }
 

@@ -2,18 +2,21 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\UserProviderAccount;
 use App\Services\Integrations\Contracts\PreparedTransferStatusProvider;
 use App\Services\Transfers\TransferEligibilityService;
+use App\Services\Wallet\LedgerService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
+use Throwable;
 
 class NiumTransferService implements PreparedTransferStatusProvider
 {
@@ -27,56 +30,14 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
     public function submitTransfer(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
-        $authoritativePurposeCodes = $this->purposeCodes->supported($transfer->user()->firstOrFail());
-
-        // Provider I/O must remain outside the transfer row-lock transaction.
-        $preparedFxQuote = $this->preparePayoutFxLockIfRequired($provider, $transfer, $authoritativePurposeCodes);
-
-        [$transfer, $payload, $providerIdentifiers] = DB::transaction(function () use (
-            $provider,
-            $transfer,
-            $authoritativePurposeCodes,
-            $preparedFxQuote,
-        ): array {
-            $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
-
-            if (! in_array($locked->status, ['draft', 'approval_required', 'approved'], true)) {
-                throw new RuntimeException('Transfer has already entered provider submission and cannot be submitted again.');
-            }
-
-            $locked->load(['provider', 'user.kycProfile', 'beneficiary', 'sourceBankAccount', 'fxQuote']);
-            if ($locked->provider_id !== $provider->id) {
-                throw new RuntimeException('Transfer provider does not match the Nium submission provider.');
-            }
-            if (NiumTransferReviewService::applies($locked)
-                && (filled($locked->provider_operation_key) || filled($locked->external_transfer_id) || filled($locked->external_payment_id))) {
-                throw new RuntimeException('This SGD payout has already entered dispatch. Reconcile its saved outcome; do not submit again.');
-            }
-            $this->eligibilityService->ensureTransferCanBeSubmitted($locked);
-
-            if ($preparedFxQuote !== null) {
-                $this->attachPreparedPayoutFxLock($locked, $preparedFxQuote);
-            }
-
-            $providerIdentifiers = $this->providerAccountIdentifiers($locked);
-            $this->ensureAuthoritativeQuote($locked);
-            $this->policy->assertTransfer($locked, $authoritativePurposeCodes);
-            if (NiumTransferReviewService::applies($locked)) {
-                app(NiumTransferReviewService::class)->assertReserved($locked);
-            }
-            $payload = $this->buildTransferPayload($locked, $authoritativePurposeCodes);
-
-            $locked->update([
-                'provider_operation_key' => $locked->provider_operation_key ?: 'nium-'.Str::uuid()->toString(),
-                'status' => 'submitting',
-            ]);
-
-            return [
-                $locked->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount', 'fxQuote']),
-                $payload,
-                $providerIdentifiers,
-            ];
-        });
+        OwnerFirst::outside();
+        try {
+            [$transfer, $payload, $providerIdentifiers] = $this->prepareSubmission($provider, $transfer);
+        } catch (Throwable $exception) {
+            // No remittance claim from this invocation was committed and no POST
+            // was reached. Cleanup still must fence a different request's claim.
+            throw new NiumSubmissionPreflightException($exception);
+        }
 
         try {
             $response = $this->niumService->post(
@@ -104,9 +65,10 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 } : null,
             );
         } catch (NiumRemittanceDispatchHeldException $exception) {
+            $exception->noWireOperationKey = $transfer->provider_operation_key;
             // This transport rejection guarantees no remittance POST was sent.
             // Preserve the operation key, approval, FX and provider event evidence.
-            $transfer->update([
+            $this->persistSubmissionOutcome($transfer, fn (Transfer $transfer): array => [
                 'status' => 'failed',
                 'failure_code' => 'remittance_dispatch_held',
                 'failure_reason' => $exception->getMessage(),
@@ -115,7 +77,8 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
             throw $exception;
         } catch (NiumPayoutPreDispatchException $exception) {
-            $transfer->update([
+            $exception->noWireOperationKey = $transfer->provider_operation_key;
+            $this->persistSubmissionOutcome($transfer, fn (Transfer $transfer): array => [
                 'status' => 'failed', 'failure_code' => 'payout_terms_expired_or_changed',
                 'failure_reason' => 'No payout was sent. Obtain a new quote and customer authorization.',
                 'completed_at' => now(),
@@ -123,7 +86,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
             throw $exception;
         } catch (ConnectionException|NiumEvidencePersistenceException) {
-            $transfer->update([
+            $this->persistSubmissionOutcome($transfer, fn (Transfer $transfer): array => [
                 'status' => 'submission_unknown',
                 'failure_code' => 'provider_submission_unknown',
                 'failure_reason' => 'Provider submission outcome is unknown; do not retry the POST.',
@@ -142,7 +105,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
             ?? null;
 
         if (in_array($response->status(), [408, 429], true) || $response->serverError()) {
-            $transfer->update([
+            $this->persistSubmissionOutcome($transfer, fn (Transfer $transfer): array => [
                 'external_transfer_id' => filled($systemReferenceNumber)
                     ? $systemReferenceNumber
                     : $transfer->external_transfer_id,
@@ -159,7 +122,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         }
 
         if (! $response->successful()) {
-            $transfer->update([
+            $this->persistSubmissionOutcome($transfer, fn (Transfer $transfer): array => [
                 'status' => 'failed',
                 'failure_code' => (string) ($responseData['code'] ?? 'provider_error'),
                 'failure_reason' => $responseData['message'] ?? 'Nium transfer submission failed.',
@@ -170,7 +133,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         }
 
         if (! filled($systemReferenceNumber)) {
-            $transfer->update([
+            $this->persistSubmissionOutcome($transfer, fn (Transfer $transfer): array => [
                 'external_payment_id' => filled($paymentId)
                     ? $paymentId
                     : $transfer->external_payment_id,
@@ -183,8 +146,13 @@ class NiumTransferService implements PreparedTransferStatusProvider
             return $transfer->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         }
 
-        return DB::transaction(function () use ($transfer, $responseData, $systemReferenceNumber, $paymentId): Transfer {
+        return OwnerFirst::transfer($transfer, function () use ($transfer, $responseData, $systemReferenceNumber, $paymentId): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+
+            $this->assertSubmissionKey($locked, $transfer);
+            if (! in_array($locked->status, ['submitting', 'submission_unknown'], true)) {
+                return $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
+            }
 
             if (
                 filled($locked->external_transfer_id)
@@ -193,7 +161,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 return $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
             }
 
-            $locked->update([
+            if (! $locked->update([
                 'external_transfer_id' => $systemReferenceNumber,
                 'external_payment_id' => filled($paymentId)
                     ? $paymentId
@@ -202,17 +170,103 @@ class NiumTransferService implements PreparedTransferStatusProvider
                 'submitted_at' => now(),
                 'provider_status_at' => now(),
                 'raw_data' => $this->safeOperationalData($locked, $responseData),
-            ]);
+            ])) throw new RuntimeException('Submission result was not persisted.');
 
             return $locked->fresh(['beneficiary', 'sourceBankAccount', 'transactions']);
         });
     }
 
+    private function assertSubmissionKey(Transfer $locked, Transfer $claim): void
+    {
+        if (! is_string($claim->provider_operation_key) || $claim->provider_operation_key === ''
+            || $locked->provider_operation_key !== $claim->provider_operation_key) {
+            throw new \App\Services\Wallet\Concurrency\OwnerBindingChanged('Submission result does not own the committed claim.');
+        }
+    }
+
+    private function persistSubmissionOutcome(Transfer $claim, \Closure $fields): Transfer
+    {
+        return OwnerFirst::transfer($claim, function () use ($claim, $fields): Transfer {
+            $locked = Transfer::query()->lockForUpdate()->findOrFail($claim->id);
+            $this->assertSubmissionKey($locked, $claim);
+            if (in_array($locked->status, ['submitting', 'submission_unknown'], true)
+                && ! $locked->update($fields($locked))) {
+                throw new RuntimeException('Submission outcome was not persisted.');
+            }
+
+            return $locked;
+        });
+    }
+
+    /** Provider reads remain outside the locked claim transaction. */
+    private function prepareSubmission(IntegrationProvider $provider, Transfer $transfer): array
+    {
+        OwnerFirst::outside();
+        $authoritativePurposeCodes = $this->purposeCodes->supported($transfer->user()->firstOrFail());
+
+        // Provider I/O must remain outside the transfer row-lock transaction.
+        $preparedFxQuote = $this->preparePayoutFxLockIfRequired($provider, $transfer, $authoritativePurposeCodes);
+
+        return OwnerFirst::transfer($transfer, function () use (
+            $provider,
+            $transfer,
+            $authoritativePurposeCodes,
+            $preparedFxQuote,
+        ): array {
+            $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+
+            if (! in_array($locked->status, ['draft', 'approval_required', 'approved'], true)) {
+                throw new RuntimeException('Transfer has already entered provider submission and cannot be submitted again.');
+            }
+
+            $locked->load(['provider', 'user.kycProfile', 'beneficiary', 'sourceBankAccount', 'fxQuote']);
+            if ($locked->provider_id !== $provider->id) {
+                throw new RuntimeException('Transfer provider does not match the Nium submission provider.');
+            }
+            if (NiumTransferReviewService::applies($locked)
+                && (filled($locked->provider_operation_key) || filled($locked->external_transfer_id) || filled($locked->external_payment_id))) {
+                throw new RuntimeException('This SGD payout has already entered dispatch. Reconcile its saved outcome; do not submit again.');
+            }
+            $this->eligibilityService->ensureTransferCanBeSubmitted($locked);
+
+            $providerIdentifiers = $this->providerAccountIdentifiers($locked);
+            IntegrationProvider::query()->whereKey($locked->provider_id)->lock('for key share')->firstOrFail();
+            \App\Models\Balance::query()->where('user_id', $locked->user_id)->where('provider_id', $locked->provider_id)
+                ->where('external_account_id', $providerIdentifiers['wallet'])->where('currency', strtoupper($locked->source_currency))
+                ->lockForUpdate()->firstOrFail();
+            if ($preparedFxQuote !== null) {
+                $this->attachPreparedPayoutFxLock($locked, $preparedFxQuote);
+            }
+
+            $this->ensureAuthoritativeQuote($locked);
+            $this->policy->assertTransfer($locked, $authoritativePurposeCodes);
+            if (NiumTransferReviewService::applies($locked)) {
+                app(NiumTransferReviewService::class)->assertReserved($locked);
+            }
+            app(LedgerService::class)->assertTransferReserved($locked, $providerIdentifiers['wallet']);
+            $payload = $this->buildTransferPayload($locked, $authoritativePurposeCodes);
+
+            if (! $locked->update([
+                'provider_operation_key' => $locked->provider_operation_key ?: 'nium-'.Str::uuid()->toString(),
+                'status' => 'submitting',
+            ])) {
+                throw new RuntimeException('Nium submission claim was not persisted; no payout was sent.');
+            }
+
+            return [
+                $locked->fresh(['provider', 'user', 'beneficiary', 'sourceBankAccount', 'fxQuote']),
+                $payload,
+                $providerIdentifiers,
+            ];
+        });
+    }
+
     public function syncTransferStatus(IntegrationProvider $provider, Transfer $transfer): Transfer
     {
+        OwnerFirst::outside();
         $prepared = $this->prepareTransferStatusSync($provider, $transfer);
 
-        return DB::transaction(function () use ($provider, $transfer, $prepared): Transfer {
+        return OwnerFirst::transfer($transfer, function () use ($provider, $transfer, $prepared): Transfer {
             $locked = Transfer::query()
                 ->whereKey($transfer->id)
                 ->lockForUpdate()
@@ -224,6 +278,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
 
     public function prepareTransferStatusSync(IntegrationProvider $provider, Transfer $transfer): array
     {
+        OwnerFirst::outside();
         $transfer->loadMissing(['provider', 'user', 'beneficiary', 'sourceBankAccount']);
 
         if (! filled($transfer->external_transfer_id)) {
@@ -266,6 +321,7 @@ class NiumTransferService implements PreparedTransferStatusProvider
         Transfer $transfer,
         array $prepared,
     ): Transfer {
+        OwnerFirst::current([$transfer->user_id]);
         $responseData = (array) ($prepared['response_data'] ?? []);
         $statusPayload = (array) ($prepared['status_payload'] ?? []);
         $status = (string) ($prepared['status'] ?? 'pending');

@@ -8,8 +8,8 @@ use App\Models\FxQuote;
 use App\Models\LedgerEntry;
 use App\Models\Transfer;
 use App\Models\User;
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 /** Incident #5 only. Local evidence review/reset; never provider I/O or payment authority. */
@@ -45,7 +45,8 @@ final class NiumRejectedPayoutQuoteRecovery
                 throw new RuntimeException('SGD must be closed and all cooperating operations drained.');
             }
 
-            return DB::transaction(function () use ($operator, $clearance, $providerArtifact, $apply): Transfer {
+            // The incident owner is fixed; authenticate its lock before dependent rows.
+            return OwnerFirst::users([12], function () use ($operator, $clearance, $providerArtifact, $apply): Transfer {
                 $operator = User::query()->findOrFail($operator->id);
                 if ($operator->id === 12 || $operator->status !== 'active' || ! $operator->isAdmin()
                     || ! $operator->hasPermission('transfers.approve')) {
@@ -54,7 +55,7 @@ final class NiumRejectedPayoutQuoteRecovery
                 $locked = Transfer::query()->lockForUpdate()->findOrFail(5);
                 app(NiumSgdLocalCugScope::class)->assertTransfer($locked);
                 app(NiumSgdLocalPayoutWorkflow::class)->assertIntent($locked);
-                if ($locked->user_id !== 12 || $locked->provider_id !== 10 || $locked->beneficiary_id !== 9
+                if ($locked->id !== 5 || $locked->user_id !== 12 || $locked->provider_id !== 10 || $locked->beneficiary_id !== 9
                     || NiumSgdLocalCugScope::principal($locked->source_amount) !== '5'
                     || $locked->purpose_code !== 'IR008' || $locked->client_reference !== self::REFERENCE) {
                     throw new RuntimeException('Transfer does not match the reviewed incident.');

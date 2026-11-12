@@ -9,7 +9,7 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Support\BeneficiaryEditFields;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;

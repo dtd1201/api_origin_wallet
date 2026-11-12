@@ -32,6 +32,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
+        $this->app->singleton(\App\Services\Wallet\Concurrency\OwnerFirstTransactions::class,
+            \App\Services\Wallet\Concurrency\PostgresOwnerFirstTransactions::class);
         $this->app->bind(AmlScreeningProvider::class, UnavailableAmlScreeningProvider::class);
         $this->app->bind(\App\Services\Nium\DynamicConfirmation\DynamicPayoutTransport::class,
             \App\Services\Nium\DynamicConfirmation\NiumDynamicPayoutTransport::class);

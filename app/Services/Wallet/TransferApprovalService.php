@@ -2,6 +2,7 @@
 
 namespace App\Services\Wallet;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Transfer;
 use App\Models\TransferApproval;
 use App\Models\User;
@@ -62,6 +63,7 @@ class TransferApprovalService
 
     public function approve(Transfer $transfer, User $approver, ?string $note = null, ?ProviderTransferManager $manager = null): Transfer
     {
+        OwnerFirst::outside();
         $sgdLocal = \App\Services\Nium\NiumTransferReviewService::applies($transfer);
         $admissionLease = $sgdLocal ? app(\App\Services\Nium\NiumSgdAdmissionFence::class)->acquire() : null;
         if ($sgdLocal) {
@@ -70,8 +72,8 @@ class TransferApprovalService
                 throw new RuntimeException('An active independent Admin with transfer approval permission is required.');
             }
         }
-        $shouldAutoSubmit = false;
-        $approved = DB::transaction(function () use ($transfer, $approver, $note, $sgdLocal, &$shouldAutoSubmit): Transfer {
+        [$approved, $shouldAutoSubmit] = OwnerFirst::transfer($transfer, function () use ($transfer, $approver, $note, $sgdLocal): array {
+            $approver = User::query()->findOrFail($approver->id);
             $transfer = Transfer::query()
                 ->whereKey($transfer->id)
                 ->lockForUpdate()
@@ -82,11 +84,11 @@ class TransferApprovalService
                     app(\App\Services\Nium\NiumSgdLocalPayoutAuthorization::class)->assertApproved($transfer);
                 }
 
-                return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
+                return [$transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']), false];
             }
 
             if (in_array($transfer->status, ['pending', 'submitting', 'submission_unknown', 'failed'], true)) {
-                return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
+                return [$transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']), false];
             }
 
             if (! in_array($transfer->status, ['draft', 'approval_required'], true)) {
@@ -121,8 +123,8 @@ class TransferApprovalService
             }
             $transfer->update($fields);
 
-            return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
-        });
+            return [$transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']), $shouldAutoSubmit];
+        }, [$approver->id]);
 
         $approved->loadMissing('provider');
         if ($shouldAutoSubmit && $manager !== null && strtolower((string) $approved->provider?->code) === 'nium') {
@@ -134,7 +136,7 @@ class TransferApprovalService
 
     public function reject(Transfer $transfer, User $approver, ?string $note = null): Transfer
     {
-        return DB::transaction(function () use ($transfer, $approver, $note): Transfer {
+        return OwnerFirst::transfer($transfer, function () use ($transfer, $approver, $note): Transfer {
             $transfer = Transfer::query()
                 ->whereKey($transfer->id)
                 ->lockForUpdate()
@@ -144,21 +146,37 @@ class TransferApprovalService
                 throw new RuntimeException('This transfer cannot be rejected in its current status.');
             }
 
-            $transfer->approvals()->create([
+            if (filled($transfer->provider_operation_key) || filled($transfer->external_transfer_id)
+                || filled($transfer->external_payment_id) || $transfer->submitted_at !== null
+                || $transfer->provider_status_at !== null) {
+                throw new RuntimeException('A submitted transfer cannot be rejected or have its hold released.');
+            }
+            if (! config('wallet.ledger.enabled', true)
+                && (\App\Models\LedgerEntry::query()->where('source_type', 'transfer')
+                    ->where('source_id', (string) $transfer->id)->exists()
+                    || isset($transfer->raw_data['wallet']['hold_reference']))) {
+                throw new RuntimeException('A financial hold cannot be rejected while the ledger is disabled.');
+            }
+
+            app(LedgerService::class)->assertTransferHoldReleasable($transfer);
+            $receipt = $transfer->approvals()->create([
                 'approver_user_id' => $approver->id,
                 'action' => 'rejected',
                 'note' => $note,
             ]);
 
-            $transfer->update([
+            if (! $receipt->exists) throw new RuntimeException('Rejection receipt was not persisted.');
+            if (! $transfer->update([
                 'status' => 'rejected',
                 'failure_code' => 'admin_rejected',
                 'failure_reason' => $note ?: 'Transfer rejected by admin.',
                 'completed_at' => now(),
-            ]);
+            ])) throw new RuntimeException('Rejection status was not persisted.');
+
+            app(LedgerService::class)->releaseTransferHold($transfer, 'Transfer rejected by admin.');
 
             return $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
-        });
+        }, [$approver->id]);
     }
 
     private function compare(mixed $left, mixed $right): int

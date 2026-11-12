@@ -17,7 +17,7 @@ use App\Services\Nium\NiumEvidencePersistenceException;
 use App\Services\Nium\NiumRegionResolver;
 use App\Services\Nium\NiumRfiWorkflowService;
 use App\Services\Nium\NiumService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Artisan;

@@ -75,6 +75,10 @@ final class DynamicPayoutAccounting
         }
         $fees = [];
         foreach ($records as $row) {
+            if (isset($row['labels']['originalAuthorizationCode'], $row['originalAuthorizationCode'])
+                && $row['labels']['originalAuthorizationCode'] !== $row['originalAuthorizationCode']) {
+                return ['state' => 'unavailable', 'reason' => 'dynamic_fee_linkage_conflict', 'provider_reference' => $reference];
+            }
             $linked = ($row['labels']['originalAuthorizationCode'] ?? null) === $reference
                 || ($row['originalAuthorizationCode'] ?? null) === $reference;
             if ($linked && in_array($row['transactionType'] ?? null, ['Fee_Reversal', 'Remittance_Reversal'], true)) {
@@ -110,6 +114,9 @@ final class DynamicPayoutAccounting
             return ['state' => 'unavailable', 'reason' => 'dynamic_remittance_debit_currency_unsupported', 'provider_reference' => $reference];
         }
         $principal = new Decimal($remit['settlementAuthAmount']);
+        if ($principal->isZero()) {
+            return ['state' => 'unavailable', 'reason' => 'dynamic_wallet_debit_evidence_missing', 'provider_reference' => $reference];
+        }
         $fee = new Decimal('0');
         $debits = ['USD' => $principal];
         $allUsd = true;
@@ -133,8 +140,7 @@ final class DynamicPayoutAccounting
         $destination = new Decimal($remit['settlementTransactionAmount']);
         $matched = $allUsd && $total->equals(new Decimal($intent->total_debit))
             && $principal->equals(new Decimal($t['principal']['amount']))
-            && $fee->equals(new Decimal($t['transaction_fee']['amount']))
-            && $destination->equals(new Decimal($t['estimated_recipient']['amount']));
+            && $fee->equals(new Decimal($t['transaction_fee']['amount']));
         $matched = $matched && array_filter($fees, static fn (array $row): bool => $row['labels']['feeName'] !== 'REMIT_BANK_FEE') === [];
         if (isset($remit['labels']['netExchangeRate'])) {
             if (! is_string($remit['labels']['netExchangeRate']) || ! is_string($t['fx_rate'] ?? null)) {
@@ -150,6 +156,10 @@ final class DynamicPayoutAccounting
                 'wallet_debit_usd' => $allUsd ? $total->value : null,
                 'provider_wallet_debits' => array_map(static fn (Decimal $amount): string => $amount->value, $debits),
                 'destination_amount' => $destination->value, 'destination_currency' => $intent->destination_currency,
+                // Quote amounts are reference estimates, not settlement guarantees.
+                'estimated_destination_amount' => $t['estimated_recipient']['amount'],
+                'destination_minus_estimate' => (string) \Brick\Math\BigDecimal::of($destination->value)
+                    ->minus($t['estimated_recipient']['amount'])->stripTrailingZeros(),
                 'customer_authorized_debit_usd' => (new Decimal($intent->total_debit))->value,
                 'customer_principal_usd' => $t['principal']['amount'], 'customer_fee_allocation_usd' => $t['transaction_fee']['amount'],
                 'provider_fee_records' => array_map(static fn (array $row): array => [

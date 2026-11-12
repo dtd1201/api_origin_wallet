@@ -5,11 +5,13 @@ namespace App\Console\Commands;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
 use App\Models\Beneficiary;
+use App\Models\BeneficiaryOperation;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Nium\NiumService;
+use App\Services\Wallet\Concurrency\OwnerFirst;
+use App\Services\Integrations\BeneficiaryOperationConflict;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Throwable;
 
@@ -87,14 +89,19 @@ final class ReconcileNiumBeneficiaryPayoutMethods extends Command
 
             if ($apply) {
                 $accepted = array_values(array_filter($results, fn (array $result): bool => $result['accepted']));
-                DB::transaction(function () use ($accepted, $snapshots, $providerId, $userId, $operator, $requestLogId): void {
+                OwnerFirst::users([$userId], function () use ($accepted, $snapshots, $providerId, $userId, $operator, $requestLogId): void {
+                    IntegrationProvider::query()->whereKey($providerId)->lock('for key share')->firstOrFail();
                     foreach ($accepted as $result) {
                         $beneficiary = Beneficiary::query()->lockForUpdate()->findOrFail($result['id']);
                         if ($this->snapshot($beneficiary) !== $snapshots[$beneficiary->id]) {
                             throw new RuntimeException("Beneficiary {$beneficiary->id} changed after reconciliation and was not modified.");
                         }
-
-                        $beneficiary->update(['payout_method' => 'SWIFT']);
+                        if (BeneficiaryOperation::query()->where('active_beneficiary_id', $beneficiary->id)->exists()) {
+                            throw new BeneficiaryOperationConflict;
+                        }
+                        if (! $beneficiary->update(['payout_method' => 'SWIFT'])) {
+                            throw new RuntimeException('Beneficiary payout method was not persisted.');
+                        }
                         AuditLog::query()->create([
                             'user_id' => $userId,
                             'action' => self::AUDIT_ACTION,

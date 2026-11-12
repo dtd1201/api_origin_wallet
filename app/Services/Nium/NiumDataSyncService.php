@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
 use App\Models\Transaction;
@@ -22,6 +23,7 @@ class NiumDataSyncService implements DataSyncProvider
 
     public function syncAccounts(IntegrationProvider $provider, User $user): array
     {
+        OwnerFirst::outside();
         $providerAccount = $this->customerOnboardingService->syncUser($provider, $user);
 
         return [
@@ -34,17 +36,20 @@ class NiumDataSyncService implements DataSyncProvider
 
     public function syncBalances(IntegrationProvider $provider, User $user): array
     {
+        OwnerFirst::outside();
         $endpoint = (string) config('services.nium.wallet_balance_endpoint', '');
 
         if ($endpoint === '') {
             throw new RuntimeException('NIUM_WALLET_BALANCE_ENDPOINT is not configured.');
         }
 
+        $requestedCustomer = $this->niumService->customerId($user);
+        $requestedWallet = $this->niumService->walletId($user);
         $response = $this->niumService->get(
             path: $this->niumService->path($endpoint, [
                 'client' => $this->niumService->clientId(),
-                'customer' => $this->niumService->customerId($user),
-                'wallet' => $this->niumService->walletId($user),
+                'customer' => $requestedCustomer,
+                'wallet' => $requestedWallet,
             ]),
             user: $user,
         );
@@ -52,9 +57,21 @@ class NiumDataSyncService implements DataSyncProvider
 
         $data = $this->successfulJson($response, 'Nium balance sync failed.');
         $items = $this->balanceItems($data);
-        $count = 0;
-
-        DB::transaction(function () use ($items, $provider, $user, &$count): void {
+        usort($items, fn ($left, $right) => strcmp(
+            strtoupper((string) $this->value($left, ['currency', 'currencyCode', 'currency_code', 'curSymbol'])),
+            strtoupper((string) $this->value($right, ['currency', 'currencyCode', 'currency_code', 'curSymbol'])),
+        ));
+        $count = OwnerFirst::users([$user->id], function () use ($items, $provider, $user, $requestedCustomer, $requestedWallet): int {
+            $count = 0;
+            // Same owner-first order as Dynamic confirmation/cancellation/settlement.
+            // Also serializes first-wallet insertion, where no Balance row exists.
+            User::query()->lockForUpdate()->findOrFail($user->id);
+            $account = $user->providerAccounts()->where('provider_id', $provider->id)->lockForUpdate()->firstOrFail();
+            if ($account->external_customer_id !== $requestedCustomer || $account->external_account_id !== $requestedWallet) {
+                throw new RuntimeException('Nium balance sync account binding changed.');
+            }
+            // Pre-acquire the provider FK lock before any Balance rows, including first inserts.
+            IntegrationProvider::query()->whereKey($provider->id)->lock('for key share')->firstOrFail();
             foreach ($items as $item) {
                 $currency = strtoupper((string) $this->value($item, [
                     'currency',
@@ -69,8 +86,11 @@ class NiumDataSyncService implements DataSyncProvider
 
                 $externalAccountId = (string) (
                     $this->value($item, ['walletHashId', 'wallet_hash_id', 'walletId', 'wallet_id'])
-                    ?: $this->niumService->walletId($user)
+                    ?: $requestedWallet
                 );
+                if ($externalAccountId !== $requestedWallet) {
+                    throw new RuntimeException('Nium balance sync wallet scope mismatch.');
+                }
                 $available = $this->numericValue($item, [
                     'availableBalance',
                     'available_balance',
@@ -105,15 +125,17 @@ class NiumDataSyncService implements DataSyncProvider
                     ->lockForUpdate()
                     ->first();
 
+                if ($existing !== null && (string) $existing->user_id !== (string) $user->id) {
+                    throw new RuntimeException('Nium balance sync wallet ownership conflict.');
+                }
+
                 // reserved_balance is owned by Origin's transfer ledger.
                 // Provider-side reserved/blocked amounts are informational only.
                 $localReserved = $existing?->reserved_balance ?? 0;
-                $localAvailable = $available ?? ($existing?->available_balance ?? 0);
-                $localLedger = bcadd(
-                    (string) $localAvailable,
-                    (string) $localReserved,
-                    8
-                );
+                $preserveBooks = $existing !== null && NiumBalanceOwnership::preservesBooks($existing);
+                $localAvailable = $preserveBooks ? $existing->available_balance
+                    : ($available ?? ($existing?->available_balance ?? 0));
+                $localLedger = $preserveBooks ? $existing->ledger_balance : bcadd((string) $localAvailable, '0', 8);
 
                 $rawData = array_merge(
                     (array) ($existing?->raw_data ?? []),
@@ -124,9 +146,13 @@ class NiumDataSyncService implements DataSyncProvider
                         'provider_available_balance' => $available,
                         'provider_ledger_balance' => $providerLedger,
                         'provider_reserved_balance' => $providerReserved,
-                        'provider_balance_as_of' => $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']) ?? now()->toISOString(),
+                        'provider_balance_observed_at' => now()->toISOString(),
                     ], static fn ($value) => $value !== null && $value !== '')
                 );
+                // Observation time is not a provider-supplied accounting timestamp.
+                $rawData['provider_balance_as_of'] = $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']);
+                // This generic parser is not the scoped exact Dynamic observation.
+                unset($rawData['dynamic_authenticated_availability']);
 
                 Balance::query()->updateOrCreate(
                     [
@@ -139,6 +165,8 @@ class NiumDataSyncService implements DataSyncProvider
                         'available_balance' => $localAvailable,
                         'ledger_balance' => $localLedger,
                         'reserved_balance' => $localReserved,
+                        // Existing legacy callers use as_of for refresh freshness.
+                        // The raw fields distinguish observation from provider time.
                         'as_of' => $this->value($item, ['asOf', 'as_of', 'updatedAt', 'updated_at']) ?? now(),
                         'raw_data' => $rawData,
                     ],
@@ -146,6 +174,7 @@ class NiumDataSyncService implements DataSyncProvider
 
                 $count++;
             }
+            return $count;
         });
 
         return ['synced_balances' => $count];
@@ -153,6 +182,7 @@ class NiumDataSyncService implements DataSyncProvider
 
     public function syncTransactions(IntegrationProvider $provider, User $user): array
     {
+        OwnerFirst::outside();
         $endpoint = (string) config('services.nium.wallet_transactions_endpoint', '');
 
         if ($endpoint === '') {

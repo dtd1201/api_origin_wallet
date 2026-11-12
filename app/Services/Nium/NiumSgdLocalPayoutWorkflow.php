@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Balance;
 use App\Models\LedgerEntry;
 use App\Models\Transfer;
@@ -26,6 +27,7 @@ final class NiumSgdLocalPayoutWorkflow
 
     public function prepare(User $user, array $input, bool $refreshFunding = false, ?NiumReviewDiagnostics $diagnostics = null): Transfer
     {
+        OwnerFirst::outside();
         $diagnostics?->stage('prepare_admission');
         $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $diagnostics?->stage('prepare_beneficiary');
@@ -56,7 +58,7 @@ final class NiumSgdLocalPayoutWorkflow
         $intent = $this->intent($candidate);
 
         $diagnostics?->stage('prepare_persistence');
-        return DB::transaction(function () use ($user, $candidate, $input, $intent): Transfer {
+        return OwnerFirst::users([$user->id], function () use ($user, $candidate, $input, $intent): Transfer {
             // Serialize idempotency claims per customer; distinct client references are distinct payments.
             User::query()->whereKey($user->id)->lockForUpdate()->firstOrFail();
             $existing = $user->transfers()->where('provider_id', $candidate->provider_id)
@@ -140,6 +142,7 @@ final class NiumSgdLocalPayoutWorkflow
 
     public function requestLock(Transfer $transfer, string $requestId, ?NiumReviewDiagnostics $diagnostics = null): Transfer
     {
+        OwnerFirst::outside();
         $diagnostics?->stage('fx_lock_preflight');
         $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $this->scope->assertTransfer($transfer);
@@ -153,7 +156,7 @@ final class NiumSgdLocalPayoutWorkflow
             $this->invalid('FX locking has not been enabled for the reviewed release.');
         }
         $diagnostics?->stage('fx_lock_claim');
-        $claimed = DB::transaction(function () use ($transfer, $requestId): ?Transfer {
+        $claimed = OwnerFirst::transfer($transfer, function () use ($transfer, $requestId): ?Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
             $this->scope->assertTransfer($locked);
             $this->assertIntent($locked);
@@ -199,7 +202,7 @@ final class NiumSgdLocalPayoutWorkflow
             $quote = $this->locks->createSgdPreparationLock($claimed, $requestId);
 
             $diagnostics?->stage('fx_lock_attachment');
-            $result = DB::transaction(function () use ($claimed, $requestId, $quote): Transfer {
+            $result = OwnerFirst::transfer($claimed, function () use ($claimed, $requestId, $quote): Transfer {
                 $locked = Transfer::query()->lockForUpdate()->findOrFail($claimed->id);
                 $this->scope->assertTransfer($locked);
                 $this->assertIntent($locked);
@@ -230,7 +233,7 @@ final class NiumSgdLocalPayoutWorkflow
         } catch (Throwable $exception) {
             $diagnostics?->fxOutcome('uncertain');
             try {
-                $unknownRecorded = DB::transaction(function () use ($transfer, $requestId): bool {
+                $unknownRecorded = OwnerFirst::transfer($transfer, function () use ($transfer, $requestId): bool {
                     $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
                     $workflow = $locked->raw_data['sgd_local_workflow'] ?? [];
                     if (($workflow['lock_request_id'] ?? null) === $requestId && ($workflow['state'] ?? null) === 'locking') {
@@ -256,12 +259,13 @@ final class NiumSgdLocalPayoutWorkflow
     /** Authenticated Submit records acceptance and enters the existing maker workflow atomically. */
     public function submit(Transfer $transfer, User $customer, string $submissionToken, bool $acceptUncappedCharges): Transfer
     {
+        OwnerFirst::outside();
         $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $transfer->loadMissing(['user', 'provider', 'beneficiary']);
         $purposes = $this->purposes->supported($transfer->user);
         $this->gate->assertCandidate($transfer->user, $transfer->provider, $transfer->beneficiary, 'SGD');
 
-        return DB::transaction(function () use ($transfer, $customer, $submissionToken, $acceptUncappedCharges, $purposes): Transfer {
+        return OwnerFirst::transfer($transfer, function () use ($transfer, $customer, $submissionToken, $acceptUncappedCharges, $purposes): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
             if ($customer->id !== $locked->user_id || $customer->status !== 'active') {
                 $this->invalid('Only the active authenticated customer can submit this instruction.');
@@ -315,11 +319,12 @@ final class NiumSgdLocalPayoutWorkflow
         $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $transfer->loadMissing(['user', 'provider', 'beneficiary']);
         if ($purposes === null) {
+            OwnerFirst::outside();
             $purposes = $this->purposes->supported($transfer->user);
             $this->gate->assertCandidate($transfer->user, $transfer->provider, $transfer->beneficiary, 'SGD');
         }
 
-        return DB::transaction(function () use ($transfer, $purposes, $financialTermsToken): Transfer {
+        return OwnerFirst::transfer($transfer, function () use ($transfer, $purposes, $financialTermsToken): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
             $this->scope->assertTransfer($locked);
             $this->assertIntent($locked);
@@ -384,7 +389,7 @@ final class NiumSgdLocalPayoutWorkflow
 
     private function resetReview(Transfer $transfer, bool $replaceFx): Transfer
     {
-        return DB::transaction(function () use ($transfer, $replaceFx): Transfer {
+        return OwnerFirst::transfer($transfer, function () use ($transfer, $replaceFx): Transfer {
             $locked = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
             $this->scope->assertTransfer($locked);
             $this->assertIntent($locked);

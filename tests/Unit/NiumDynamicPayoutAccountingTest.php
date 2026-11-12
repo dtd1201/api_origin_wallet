@@ -63,6 +63,24 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
         }
     }
 
+    public function test_actual_recipient_amount_is_recorded_separately_from_quote_estimate(): void
+    {
+        $result = $this->evaluate([0 => ['settlementTransactionAmount' => '783']]);
+        $this->assertSame('matched', $result['state']);
+        $this->assertSame('783', $result['receipt']['destination_amount']);
+        $this->assertSame('784', $result['receipt']['estimated_destination_amount']);
+        $this->assertSame('-1', $result['receipt']['destination_minus_estimate']);
+    }
+
+    public function test_explicit_zero_fee_observation_is_retained_as_a_provider_cost_difference(): void
+    {
+        $result = $this->evaluate([1 => ['settlementAuthAmount' => '0']]);
+        $this->assertSame('mismatched', $result['state']);
+        $this->assertSame('0', $result['receipt']['fee_usd']);
+        $this->assertSame('980', $result['receipt']['wallet_debit_usd']);
+        $this->assertSame('-20', $result['receipt']['provider_minus_customer_usd']);
+    }
+
     public function test_other_provider_fee_currency_is_recorded_without_conversion_or_customer_repricing(): void
     {
         $result = $this->evaluate([1 => ['authCurrencyCode' => 'EUR', 'settlementAuthAmount' => '7.25']]);
@@ -124,7 +142,9 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
             'different provider fee is an operational discrepancy' => [[1 => ['labels' => ['originalAuthorizationCode' => 'RT-1', 'feeName' => 'OTHER_PROVIDER_FEE']]], 'mismatched'],
             'confirmed extra dollar' => [[1 => ['settlementAuthAmount' => '21']], 'mismatched'],
             'confirmed principal mismatch' => [[0 => ['settlementAuthAmount' => '1000']], 'mismatched'],
-            'confirmed receive mismatch' => [[0 => ['settlementTransactionAmount' => '783']], 'mismatched'],
+            'actual receive amount differs from reference estimate' => [[0 => ['settlementTransactionAmount' => '783']], 'matched'],
+            'zero principal cannot prove a wallet debit' => [[0 => ['settlementAuthAmount' => '0']], 'unavailable'],
+            'contradictory fee linkage' => [[1 => ['originalAuthorizationCode' => 'other']], 'unavailable'],
             'returned payout' => [[0 => ['status' => 'Returned']], 'exception'],
             'failed fee' => [[1 => ['status' => 'Failed']], 'exception'],
             'released fee' => [[1 => ['settlementStatus' => 'Released']], 'exception'],

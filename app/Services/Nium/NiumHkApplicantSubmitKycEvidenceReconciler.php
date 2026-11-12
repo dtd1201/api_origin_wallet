@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\UserProviderAccount;
@@ -35,7 +36,7 @@ final class NiumHkApplicantSubmitKycEvidenceReconciler
 
     public function reconcile(): array
     {
-        return DB::transaction(function (): array {
+        return OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function (): array {
             $provider = IntegrationProvider::query()->whereRaw('LOWER(code) = ?', ['nium'])->sole();
             $account = UserProviderAccount::query()
                 ->whereKey(self::ACCOUNT_ID)

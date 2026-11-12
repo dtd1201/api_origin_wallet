@@ -20,7 +20,7 @@ use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumProviderRequestException;
 use App\Services\Nium\NiumRegionResolver;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Arr;

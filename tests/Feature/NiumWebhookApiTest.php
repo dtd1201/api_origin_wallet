@@ -8,7 +8,7 @@ use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Models\WebhookEvent;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Tests\TestCase;
 
 class NiumWebhookApiTest extends TestCase
@@ -212,7 +212,7 @@ class NiumWebhookApiTest extends TestCase
         ]);
     }
 
-    public function test_card_wallet_funding_webhook_uses_template_event_type_and_updates_balance(): void
+    public function test_card_wallet_funding_webhook_uses_template_event_type_and_preserves_legacy_hold(): void
     {
         config()->set('services.nium.webhook.static_header_name', 'x-partner-key');
         config()->set('services.nium.webhook.static_header_value', 'nium-webhook-test-key');
@@ -257,10 +257,12 @@ class NiumWebhookApiTest extends TestCase
             'provider_id' => $provider->id,
             'external_account_id' => 'wallet-funding-001',
             'currency' => 'USD',
-            'available_balance' => '260474.00000000',
-            'ledger_balance' => '275474.00000000',
+            'available_balance' => '263474.00000000',
+            'ledger_balance' => '278474.00000000',
             'reserved_balance' => '15000.00000000',
         ]);
+        $this->assertSame('260474.0', Balance::query()->sole()->raw_data['nium_funding_balance_observation']['wallet_balance']);
+        $this->assertDatabaseCount('ledger_entries', 0);
     }
 
 

@@ -8,6 +8,7 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
+use App\Services\Integrations\BeneficiaryOperationConflict;
 use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
 use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\NiumBeneficiaryWriteException;
@@ -16,11 +17,9 @@ use App\Support\BeneficiaryEditFields;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
-use InvalidArgumentException;
-use RuntimeException;
+use Throwable;
 
 class BeneficiaryController extends Controller
 {
@@ -153,16 +152,8 @@ class BeneficiaryController extends Controller
             $provider = PrimaryProvider::resolveForRequest(isset($validated['provider_id']) ? (int) $validated['provider_id'] : null);
             $validated['provider_id'] = $provider->id;
 
-            $beneficiary = DB::transaction(function () use ($user, $provider, $validated, $manager): Beneficiary {
-                $provider->assertSupportsCapability('beneficiary');
-                $beneficiary = $user->beneficiaries()->create([
-                    ...$validated,
-                    'status' => 'pending',
-                ]);
-
-                return $manager->createBeneficiary($provider, $beneficiary->load('user'));
-            });
-        } catch (RuntimeException|InvalidArgumentException|ValidationException $exception) {
+            $beneficiary = $manager->createForUser($provider, $user, $validated);
+        } catch (Throwable $exception) {
             if ($exception instanceof ValidationException) {
                 throw $exception;
             }
@@ -229,9 +220,8 @@ class BeneficiaryController extends Controller
         ]);
 
         try {
-            $beneficiary = DB::transaction(function () use ($beneficiary, $validated, $manager, $payoutMethods): Beneficiary {
-                $beneficiary = Beneficiary::query()->lockForUpdate()->findOrFail($beneficiary->id);
-                $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+            $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+            $beneficiary = $manager->updateForUser($provider, $beneficiary, function (Beneficiary $beneficiary) use ($validated, $provider, $payoutMethods): void {
                 $replacesRouting = is_array(data_get($validated, 'raw_data.nium.routingInfo'));
                 if ($provider->code === 'nium') {
                     $validated['raw_data'] = BeneficiaryEditFields::mergeUpdate(
@@ -245,12 +235,10 @@ class BeneficiaryController extends Controller
                     // A full typed routing replacement also clears obsolete legacy columns.
                     $validated += ['bank_code' => null, 'branch_code' => null, 'swift_bic' => null];
                 }
-                $beneficiary->update($validated);
-                $provider->assertSupportsCapability('beneficiary');
-
-                return $manager->updateBeneficiary($provider, $beneficiary->fresh()->load('user'));
-            });
-        } catch (RuntimeException|InvalidArgumentException $exception) {
+                $beneficiary->fill($validated);
+            }, $validated);
+        } catch (Throwable $exception) {
+            if ($exception instanceof ValidationException) throw $exception;
             return $this->providerFailureResponse($exception, 'update', $user->id, $beneficiary->id);
         }
 
@@ -262,13 +250,10 @@ class BeneficiaryController extends Controller
         abort_unless($beneficiary->user_id === $user->id, 404);
 
         try {
-            DB::transaction(function () use ($beneficiary, $manager): void {
-                $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
-                $provider->assertSupportsCapability('beneficiary');
-                $manager->deleteBeneficiary($provider, $beneficiary->load('user'));
-                $beneficiary->delete();
-            });
-        } catch (RuntimeException|InvalidArgumentException $exception) {
+            $provider = IntegrationProvider::query()->findOrFail($beneficiary->provider_id);
+            $provider->assertSupportsCapability('beneficiary');
+            $manager->deleteBeneficiary($provider, $beneficiary);
+        } catch (Throwable $exception) {
             return $this->providerFailureResponse($exception, 'delete', $user->id, $beneficiary->id);
         }
 
@@ -304,7 +289,7 @@ class BeneficiaryController extends Controller
     }
 
     private function providerFailureResponse(
-        RuntimeException|InvalidArgumentException $exception,
+        Throwable $exception,
         string $operation,
         int $userId,
         ?int $beneficiaryId = null,
@@ -314,14 +299,15 @@ class BeneficiaryController extends Controller
             'user_id' => $userId,
             'beneficiary_id' => $beneficiaryId,
             'exception' => $exception::class,
-            // This runs after the transaction rollback, which also removes provider audit rows.
             ...($exception instanceof NiumBeneficiaryWriteException
                 ? ['provider_diagnostic' => $exception->safeDiagnostic]
                 : []),
         ]);
 
         return response()->json([
-            'message' => "Unable to {$operation} beneficiary with the selected provider. Review the details and try again.",
-        ], 422);
+            'message' => "Unable to {$operation} beneficiary with the selected provider. The operation requires review before another provider attempt.",
+            'retryable' => false,
+            'code' => $exception instanceof BeneficiaryOperationConflict ? 'beneficiary_operation_unresolved' : 'beneficiary_operation_failed',
+        ], $exception instanceof BeneficiaryOperationConflict ? 409 : 422);
     }
 }

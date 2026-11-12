@@ -11,7 +11,7 @@ use App\Models\User;
 use App\Services\Integrations\ProviderQuoteManager;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumTransferPolicy;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Mockery\MockInterface;

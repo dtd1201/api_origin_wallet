@@ -6,7 +6,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumQuoteService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Tests\TestCase;

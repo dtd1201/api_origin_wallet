@@ -5,18 +5,23 @@ namespace App\Services\PingPong;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\Contracts\BeneficiaryProvider;
+use App\Services\Integrations\BeneficiaryOperationService;
+use App\Services\Integrations\CoordinatesBeneficiaryOperations;
 use Illuminate\Http\Client\Response;
 use RuntimeException;
 
 class PingPongBeneficiaryService implements BeneficiaryProvider
 {
+    use CoordinatesBeneficiaryOperations;
+
     public function __construct(
         private readonly PingPongService $pingPongService,
     ) {
     }
 
-    public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performCreateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
+        BeneficiaryOperationService::beginMutation($beneficiary, 'create');
         $response = $this->pingPongService->createRecipient(
             payload: $this->buildBeneficiaryPayload($beneficiary),
             user: $beneficiary->user,
@@ -25,12 +30,13 @@ class PingPongBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create');
     }
 
-    public function updateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performUpdateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return $this->createBeneficiary($provider, $beneficiary);
         }
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'update');
         $response = $this->pingPongService->updateRecipient(
             payload: array_merge(
                 ['biz_id' => (string) $beneficiary->external_beneficiary_id],
@@ -42,12 +48,13 @@ class PingPongBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'update');
     }
 
-    public function deleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
+    protected function performDeleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return;
         }
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'delete');
         $response = $this->pingPongService->deleteRecipient(
             bizId: (string) $beneficiary->external_beneficiary_id,
             user: $beneficiary->user,
@@ -56,7 +63,7 @@ class PingPongBeneficiaryService implements BeneficiaryProvider
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
         if (! $this->isSuccessfulResponse($response, $responseData)) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => 'delete_failed',
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     'delete_error' => $responseData,
@@ -127,7 +134,7 @@ class PingPongBeneficiaryService implements BeneficiaryProvider
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
         if (! $this->isSuccessfulResponse($response, $responseData)) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => "{$action}_failed",
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     "{$action}_error" => $responseData,
@@ -138,7 +145,7 @@ class PingPongBeneficiaryService implements BeneficiaryProvider
         }
 
         $providerData = (array) ($responseData['data'] ?? []);
-        $beneficiary->update([
+        BeneficiaryOperationService::write($beneficiary, [
             'external_beneficiary_id' => $providerData['biz_id'] ?? $beneficiary->external_beneficiary_id,
             'status' => $this->normalizeBeneficiaryStatus($providerData['status'] ?? ($action === 'create' ? 'PENDING' : $beneficiary->status)),
             'raw_data' => array_merge($beneficiary->raw_data ?? [], [
@@ -147,7 +154,7 @@ class PingPongBeneficiaryService implements BeneficiaryProvider
             ]),
         ]);
 
-        return $beneficiary->fresh();
+        return BeneficiaryOperationService::current($beneficiary);
     }
 
     private function isSuccessfulResponse(Response $response, array $responseData): bool

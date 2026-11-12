@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\Decimal;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\FinalizedUsdPayoutPreparation;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutAmountMode;
@@ -81,7 +82,7 @@ final class NiumDynamicPayoutQuoteService
 
         // No provider I/O inside locks. Refuse changed local identity/registration;
         // check current conservative funds again after HTTP.
-        return DB::transaction(function () use ($user, $beneficiary, $wallet, $binding, $request, $response, $quote): NiumDynamicPayoutQuote {
+        return OwnerFirst::users([$user->id], function () use ($user, $beneficiary, $wallet, $binding, $request, $response, $quote): NiumDynamicPayoutQuote {
             $owner = User::query()->lockForUpdate()->findOrFail($user->id);
             UserProviderAccount::query()->lockForUpdate()->findOrFail($binding['provider_account_id']);
             $recipient = Beneficiary::query()->lockForUpdate()->findOrFail($beneficiary->id);
@@ -295,6 +296,7 @@ final class NiumDynamicPayoutQuoteService
 
     private function outsideTransaction(): void
     {
+        OwnerFirst::outside();
         if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
             throw new RuntimeException('dynamic_quote_requires_network_outside_transaction');
         }

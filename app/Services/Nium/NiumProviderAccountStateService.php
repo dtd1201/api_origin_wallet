@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\AuditLog;
 use App\Models\KycProviderSubmission;
 use App\Models\User;
@@ -36,22 +37,19 @@ class NiumProviderAccountStateService
         ?string $userAgent = null,
         ?string $requestId = null,
     ): UserProviderAccount {
-        try {
-            return DB::transaction(function () use ($providerAccount, $payload, $source): UserProviderAccount {
-                $providerAccount = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
-                $this->assertNotReservedIncompleteCustomerRetryFixture($providerAccount);
-
-                return $this->applyAuthenticatedStateToLockedAccount(
-                    $providerAccount,
-                    $payload,
-                    $source,
+        return OwnerFirst::account($providerAccount, function ($context) use ($providerAccount, $payload, $source, $ipAddress, $userAgent, $requestId): UserProviderAccount {
+            $providerAccount = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
+            $this->assertNotReservedIncompleteCustomerRetryFixture($providerAccount);
+            try {
+                return $this->applyAuthenticatedStateToLockedAccount($providerAccount, $payload, $source);
+            } catch (NiumProviderIdConflictException $exception) {
+                app(\App\Services\Wallet\Concurrency\OwnerFirstTransactions::class)->afterRollback(
+                    $context,
+                    fn () => $this->quarantineConflict($providerAccount, $exception, $source, $ipAddress, $userAgent, $requestId),
                 );
-            });
-        } catch (NiumProviderIdConflictException $exception) {
-            $this->quarantineConflict($providerAccount, $exception, $source, $ipAddress, $userAgent, $requestId);
-
-            throw $exception;
-        }
+                throw $exception;
+            }
+        });
     }
 
     public function applyRestrictiveNotification(
@@ -59,7 +57,7 @@ class NiumProviderAccountStateService
         array $payload,
         string $source,
     ): UserProviderAccount {
-        return DB::transaction(function () use ($providerAccount, $payload, $source): UserProviderAccount {
+        return OwnerFirst::account($providerAccount, function () use ($providerAccount, $payload, $source): UserProviderAccount {
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
             $status = $this->safeValues->providerStatus($this->stringValue($payload, ['status']));
             $subStatus = $this->safeValues->providerSubStatus($this->stringValue($payload, ['subStatus']));
@@ -111,7 +109,7 @@ class NiumProviderAccountStateService
         string $source,
         ?string $requestId = null,
     ): UserProviderAccount {
-        return DB::transaction(function () use ($providerAccount, $reason, $source, $requestId): UserProviderAccount {
+        return OwnerFirst::account($providerAccount, function () use ($providerAccount, $reason, $source, $requestId): UserProviderAccount {
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
             $before = $this->auditState($account);
             $account->update([
@@ -143,7 +141,7 @@ class NiumProviderAccountStateService
 
     public function markWriteOutcomeUnknown(UserProviderAccount $providerAccount): UserProviderAccount
     {
-        return DB::transaction(function () use ($providerAccount): UserProviderAccount {
+        return OwnerFirst::account($providerAccount, function () use ($providerAccount): UserProviderAccount {
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
             $metadata = (array) ($account->metadata ?? []);
             $metadata['is_resubmission_allowed'] = false;
@@ -161,7 +159,7 @@ class NiumProviderAccountStateService
 
     public function claimCustomerCreate(UserProviderAccount $providerAccount): ?UserProviderAccount
     {
-        return DB::transaction(function () use ($providerAccount): ?UserProviderAccount {
+        return OwnerFirst::account($providerAccount, function () use ($providerAccount): ?UserProviderAccount {
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
 
             if (
@@ -183,12 +181,12 @@ class NiumProviderAccountStateService
             ]);
 
             return $account->fresh();
-        }, 3);
+        }, attempts: 3);
     }
 
     public function markCustomerCreateRejected(UserProviderAccount $providerAccount): UserProviderAccount
     {
-        return DB::transaction(function () use ($providerAccount): UserProviderAccount {
+        return OwnerFirst::account($providerAccount, function () use ($providerAccount): UserProviderAccount {
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
             $metadata = (array) ($account->metadata ?? []);
             $metadata['is_resubmission_allowed'] = true;
@@ -233,7 +231,7 @@ class NiumProviderAccountStateService
         array $payload,
         string $source,
     ): UserProviderAccount {
-        return DB::transaction(function () use ($providerAccount, $payload, $source): UserProviderAccount {
+        return OwnerFirst::account($providerAccount, function () use ($providerAccount, $payload, $source): UserProviderAccount {
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
             $before = $this->auditState($account);
             $entityStates = (array) Arr::get((array) $account->metadata, 'nium_entity_kyc_states', []);
@@ -531,7 +529,7 @@ class NiumProviderAccountStateService
             throw new RuntimeException('Invalid Nium identifier conflict field.');
         }
 
-        DB::transaction(function () use ($providerAccount, $exception, $source, $requestId, $safeField): void {
+        OwnerFirst::account($providerAccount, function () use ($providerAccount, $exception, $source, $requestId, $safeField): void {
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($providerAccount->id);
             $before = $this->auditState($account);
             $account->update([

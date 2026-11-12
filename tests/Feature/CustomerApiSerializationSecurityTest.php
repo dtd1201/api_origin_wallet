@@ -8,6 +8,7 @@ use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
+use Closure;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Mockery\MockInterface;
@@ -94,8 +95,9 @@ class CustomerApiSerializationSecurityTest extends TestCase
         $beneficiary = $user->beneficiaries()->create($this->beneficiaryAttributes($provider));
 
         $this->mock(ProviderBeneficiaryManager::class, function (MockInterface $mock): void {
-            $mock->shouldReceive('createBeneficiary')->once()->andReturnUsing(function ($provider, Beneficiary $beneficiary): Beneficiary {
-                $beneficiary->update([
+            $mock->shouldReceive('createForUser')->once()->andReturnUsing(function ($provider, User $user, array $attributes): Beneficiary {
+                $beneficiary = $user->beneficiaries()->create([
+                    ...$attributes,
                     'external_beneficiary_id' => 'PROVIDER_BENEFICIARY_CREATED',
                     'status' => 'active',
                     'raw_data' => ['diagnostic' => 'INTERNAL_NIUM_METADATA_CREATE'],
@@ -103,8 +105,10 @@ class CustomerApiSerializationSecurityTest extends TestCase
 
                 return $beneficiary->fresh();
             });
-            $mock->shouldReceive('updateBeneficiary')->once()->andReturnUsing(function ($provider, Beneficiary $beneficiary): Beneficiary {
-                $beneficiary->update(['raw_data' => ['diagnostic' => 'INTERNAL_NIUM_METADATA_UPDATE']]);
+            $mock->shouldReceive('updateForUser')->once()->andReturnUsing(function ($provider, Beneficiary $beneficiary, Closure $prepare, ?array $request = null): Beneficiary {
+                $prepare($beneficiary);
+                $beneficiary->raw_data = ['diagnostic' => 'INTERNAL_NIUM_METADATA_UPDATE'];
+                $beneficiary->save();
 
                 return $beneficiary->fresh();
             });
@@ -144,7 +148,7 @@ class CustomerApiSerializationSecurityTest extends TestCase
     {
         [$user, $token, $provider] = $this->customer();
         $this->mock(ProviderBeneficiaryManager::class, function (MockInterface $mock): void {
-            $mock->shouldReceive('createBeneficiary')
+            $mock->shouldReceive('createForUser')
                 ->once()
                 ->andThrow(new RuntimeException('PROVIDER_INTERNAL_ERROR_SECRET_URL_REQUEST_ID'));
         });
@@ -152,7 +156,8 @@ class CustomerApiSerializationSecurityTest extends TestCase
         $providerFailure = $this->withToken($token)
             ->postJson("/api/user/users/{$user->id}/beneficiaries", $this->beneficiaryPayload($provider))
             ->assertUnprocessable()
-            ->assertJsonPath('message', 'Unable to create beneficiary with the selected provider. Review the details and try again.');
+            ->assertJsonPath('message', 'Unable to create beneficiary with the selected provider. The operation requires review before another provider attempt.')
+            ->assertJsonPath('retryable', false);
         $this->assertStringNotContainsString('PROVIDER_INTERNAL_ERROR_SECRET_URL_REQUEST_ID', $providerFailure->getContent());
 
         $this->withToken($token)
@@ -193,6 +198,7 @@ class CustomerApiSerializationSecurityTest extends TestCase
             'full_name' => 'Safe Beneficiary',
             'country_code' => 'US',
             'currency' => 'USD',
+            'payout_method' => 'LOCAL',
             'bank_name' => 'Customer Bank',
             'account_number' => '123456789',
             'status' => 'active',

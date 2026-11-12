@@ -5,14 +5,19 @@ namespace App\Services\Currenxie;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\Contracts\BeneficiaryProvider;
+use App\Services\Integrations\BeneficiaryOperationService;
+use App\Services\Integrations\CoordinatesBeneficiaryOperations;
 use App\Services\Integrations\ProviderHttpClient;
 use Illuminate\Http\Client\Response;
 use RuntimeException;
 
 class CurrenxieBeneficiaryService implements BeneficiaryProvider
 {
-    public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    use CoordinatesBeneficiaryOperations;
+
+    protected function performCreateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
+        BeneficiaryOperationService::beginMutation($beneficiary, 'create');
         $response = $this->client($provider)->post(
             path: (string) config('services.currenxie.beneficiary_endpoint'),
             payload: $this->buildBeneficiaryPayload($beneficiary),
@@ -22,12 +27,13 @@ class CurrenxieBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create');
     }
 
-    public function updateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performUpdateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return $this->createBeneficiary($provider, $beneficiary);
         }
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'update');
         $response = $this->client($provider)->put(
             path: $this->beneficiaryResourcePath(
                 (string) config('services.currenxie.beneficiary_update_endpoint'),
@@ -40,12 +46,13 @@ class CurrenxieBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'update');
     }
 
-    public function deleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
+    protected function performDeleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return;
         }
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'delete');
         $response = $this->client($provider)->delete(
             path: $this->beneficiaryResourcePath(
                 (string) config('services.currenxie.beneficiary_delete_endpoint'),
@@ -57,7 +64,7 @@ class CurrenxieBeneficiaryService implements BeneficiaryProvider
         if (! $response->successful()) {
             $responseData = $response->json() ?? ['raw' => $response->body()];
 
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => 'delete_failed',
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     'delete_error' => $responseData,
@@ -123,7 +130,7 @@ class CurrenxieBeneficiaryService implements BeneficiaryProvider
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
         if (! $response->successful()) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => "{$action}_failed",
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     "{$action}_error" => $responseData,
@@ -133,7 +140,7 @@ class CurrenxieBeneficiaryService implements BeneficiaryProvider
             throw new RuntimeException("{$provider->name} beneficiary {$action} failed.");
         }
 
-        $beneficiary->update([
+        BeneficiaryOperationService::write($beneficiary, [
             'external_beneficiary_id' => $responseData['id'] ?? $responseData['beneficiary_id'] ?? $beneficiary->external_beneficiary_id,
             'status' => $responseData['status'] ?? 'active',
             'raw_data' => array_merge($beneficiary->raw_data ?? [], [
@@ -141,7 +148,7 @@ class CurrenxieBeneficiaryService implements BeneficiaryProvider
             ]),
         ]);
 
-        return $beneficiary->fresh();
+        return BeneficiaryOperationService::current($beneficiary);
     }
 
     private function beneficiaryResourcePath(string $template, string $externalBeneficiaryId): string

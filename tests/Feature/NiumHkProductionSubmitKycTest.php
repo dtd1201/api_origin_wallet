@@ -16,7 +16,7 @@ use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumHkSubmitKycService;
 use App\Services\Nium\NiumService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Mockery\MockInterface;

@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\KycProfile;
 use App\Models\KycRelatedPerson;
@@ -24,6 +25,7 @@ final class NiumHkSubmitKycService
 
     public function submit(WebhookEvent $event): string
     {
+        OwnerFirst::outside();
         $context = $this->context($event);
         if (! $this->claim($context)) {
             return 'already_processed';
@@ -86,6 +88,7 @@ final class NiumHkSubmitKycService
     /** Submit every person entity created by the current HK Corporate Full payload. */
     public function submitAwaitingKyc(WebhookEvent $event): array
     {
+        OwnerFirst::outside();
         $account = UserProviderAccount::query()->where('provider_id', $event->provider_id)
             ->where('external_customer_id', (string) data_get($event->payload, 'customerHashId'))->firstOrFail();
         $results = [];
@@ -242,7 +245,7 @@ final class NiumHkSubmitKycService
 
     private function claim(array $context): bool
     {
-        return DB::transaction(function () use ($context): bool {
+        return OwnerFirst::account($context['account'], function () use ($context): bool {
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
             $key = $this->attemptKey($account->external_customer_id, $context['entity_type'], $context['external_id']);
             $metadata = (array) $account->metadata;
@@ -268,12 +271,12 @@ final class NiumHkSubmitKycService
             ]);
             $account->forceFill(['metadata' => $metadata])->save();
             return true;
-        }, 3);
+        }, attempts: 3);
     }
 
     private function mark(array $context, string $state, ?int $httpStatus = null, mixed $redirectUrl = null, ?string $providerReference = null): void
     {
-        DB::transaction(function () use ($context, $state, $httpStatus, $redirectUrl, $providerReference): void {
+        OwnerFirst::account($context['account'], function () use ($context, $state, $httpStatus, $redirectUrl, $providerReference): void {
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $key = $this->attemptKey($account->external_customer_id, $context['entity_type'], $context['external_id']);
@@ -301,7 +304,7 @@ final class NiumHkSubmitKycService
                 'updated_at' => now()->toISOString(),
             ], static fn (mixed $value): bool => $value !== null));
             $account->forceFill(['metadata' => $metadata])->save();
-        }, 3);
+        }, attempts: 3);
     }
 
     private function attemptLog(array $context): ?ApiRequestLog

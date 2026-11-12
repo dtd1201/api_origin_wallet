@@ -7,7 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Nium\NiumPayoutAuditId;
 use App\Services\Nium\NiumPayoutFxLockService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;

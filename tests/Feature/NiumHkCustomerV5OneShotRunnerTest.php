@@ -15,7 +15,7 @@ use App\Services\Nium\NiumHkCorporateV5Validator;
 use App\Services\Nium\NiumHkCustomerV5OneShotRunner;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Mockery\MockInterface;

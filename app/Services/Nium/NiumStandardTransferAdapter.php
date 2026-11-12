@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Transfers\TransferEligibilityService;
@@ -27,6 +28,7 @@ final class NiumStandardTransferAdapter
 
     public function review(User $customer, array $input): array
     {
+        OwnerFirst::outside();
         $diagnostics = new NiumReviewDiagnostics;
         try {
             return $this->prepareReview($customer, $input, $diagnostics);
@@ -105,6 +107,7 @@ final class NiumStandardTransferAdapter
     /** Replay only a matching recorded receipt; never refresh pricing, FX or dispatch. */
     public function submit(User $customer, array $input): array
     {
+        OwnerFirst::outside();
         $admissionLease = app(NiumSgdAdmissionFence::class)->acquire();
         $token = $this->decodeToken($input['review_token']);
         abort_unless(($token['user_id'] ?? null) === $customer->id && $customer->status === 'active', 403);
@@ -132,7 +135,7 @@ final class NiumStandardTransferAdapter
 
     private function recordedAcceptance(User $customer, array $input, array $token): array
     {
-        return DB::transaction(function () use ($customer, $input, $token): array {
+        return OwnerFirst::users([$customer->id], function () use ($customer, $input, $token): array {
             $transfer = $customer->transfers()->whereKey($token['transfer_id'])->lockForUpdate()->firstOrFail();
             $this->assertInput($transfer, $input);
             abort_unless(NiumPayoutFxLockContract::sameBinding($token['request'], $this->requestBinding($transfer)),

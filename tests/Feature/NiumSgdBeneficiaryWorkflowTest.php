@@ -4,12 +4,14 @@ namespace Tests\Feature;
 
 use App\Models\ApiRequestLog;
 use App\Models\ApiToken;
+use App\Models\Beneficiary;
+use App\Models\BeneficiaryOperation;
 use App\Models\IntegrationProvider;
 use App\Models\NiumApiExchangeEvidence;
 use App\Models\User;
 use App\Services\Integrations\ProviderBeneficiaryManager;
 use App\Services\Nium\NiumBeneficiaryWriteException;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -129,7 +131,7 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
     }
 
     #[DataProvider('rejectedWriteResponses')]
-    public function test_customer_create_rolls_back_http_error_audits_even_though_post_was_dispatched(int $status, array $body): void
+    public function test_customer_create_retains_http_error_evidence_and_fences_redispatch(int $status, array $body): void
     {
         Log::spy();
         // Synthetic responses reproduce transaction behavior, not the unknown Production response.
@@ -146,16 +148,18 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
         ]);
 
         $this->postJson($this->baseUrl(), $this->payload())->assertUnprocessable()
-            ->assertJsonPath('message', 'Unable to create beneficiary with the selected provider. Review the details and try again.');
+            ->assertJsonPath('message', 'Unable to create beneficiary with the selected provider. The operation requires review before another provider attempt.');
 
         Http::assertSent(fn ($request) => $request->method() === 'POST' && $request->url() === 'https://gateway.nium.test/beneficiaries');
         $this->assertSame([['POST', $status, true]], $observed);
-        $this->assertDatabaseCount('beneficiaries', 0);
-        $this->assertDatabaseCount('api_request_logs', 0);
-        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+        $this->assertDatabaseCount('beneficiaries', 1);
+        $this->assertNull(Beneficiary::query()->sole()->external_beneficiary_id);
+        $this->assertSame('ambiguous', BeneficiaryOperation::query()->sole()->state);
+        $this->assertSame(1, ApiRequestLog::query()->where('request_method', 'POST')->count());
+        $this->assertSame(1, NiumApiExchangeEvidence::query()->where('request_method', 'POST')->count());
         Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context) use ($status): bool {
-            $this->assertDatabaseCount('api_request_logs', 0);
-            $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+            $this->assertSame(1, ApiRequestLog::query()->where('request_method', 'POST')->count());
+            $this->assertSame(1, NiumApiExchangeEvidence::query()->where('request_method', 'POST')->count());
             $this->assertArrayNotHasKey('message', $context);
             $this->assertSame(NiumBeneficiaryWriteException::class, $context['exception']);
             $diagnostic = $context['provider_diagnostic'];
@@ -199,7 +203,7 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
         $this->assertTrue(NiumApiExchangeEvidence::where('api_request_log_id', $log->id)->sole()->response_received);
     }
 
-    public function test_optional_account_verification_rejection_can_precede_beneficiary_create_and_roll_back_its_audit(): void
+    public function test_optional_account_verification_rejection_precedes_create_and_retains_its_audit(): void
     {
         Log::spy();
         config()->set('services.nium.account_verification_enabled', true);
@@ -221,9 +225,11 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
         Http::assertSent(fn ($request) => $request->method() === 'POST' && $request->url() === 'https://gateway.nium.test/accountVerification');
         Http::assertNotSent(fn ($request) => $request->method() === 'POST' && $request->url() === 'https://gateway.nium.test/beneficiaries');
         $this->assertSame([400], $observed);
-        $this->assertDatabaseCount('beneficiaries', 0);
-        $this->assertDatabaseCount('api_request_logs', 0);
-        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+        $this->assertDatabaseCount('beneficiaries', 1);
+        $this->assertSame('ambiguous', BeneficiaryOperation::query()->sole()->state);
+        $this->assertSame(['account_verification' => true], BeneficiaryOperation::query()->sole()->dispatch_steps);
+        $this->assertSame(1, ApiRequestLog::query()->where('request_method', 'POST')->count());
+        $this->assertSame(1, NiumApiExchangeEvidence::query()->where('request_method', 'POST')->count());
         Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context): bool {
             $this->assertSame('beneficiary_account_verification', $context['provider_diagnostic']['stage']);
             $this->assertSame(400, $context['provider_diagnostic']['http_status']);
@@ -234,7 +240,7 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
         });
     }
 
-    public function test_post_rollback_diagnostic_excludes_provider_supplied_personal_data_and_credentials(): void
+    public function test_retained_failure_diagnostic_excludes_provider_supplied_personal_data_and_credentials(): void
     {
         Log::spy();
         $private = 'Fixture Person 123456789 fixture.person@example.test fixture-key fixture-partner-key';
@@ -268,11 +274,11 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
 
             return $message === 'Customer beneficiary provider operation failed.';
         });
-        $this->assertDatabaseCount('api_request_logs', 0);
-        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+        $this->assertSame(1, ApiRequestLog::query()->where('request_method', 'POST')->count());
+        $this->assertSame(1, NiumApiExchangeEvidence::query()->where('request_method', 'POST')->count());
     }
 
-    public function test_non_json_provider_rejection_has_safe_diagnostics_and_still_rolls_back(): void
+    public function test_non_json_provider_rejection_has_safe_diagnostics_and_retains_evidence(): void
     {
         Log::spy();
         Http::fake([
@@ -290,8 +296,8 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
 
             return $message === 'Customer beneficiary provider operation failed.';
         });
-        $this->assertDatabaseCount('api_request_logs', 0);
-        $this->assertDatabaseCount('nium_api_exchange_evidence', 0);
+        $this->assertSame(1, ApiRequestLog::query()->where('request_method', 'POST')->count());
+        $this->assertSame(1, NiumApiExchangeEvidence::query()->where('request_method', 'POST')->count());
     }
 
     #[DataProvider('invalidFields')]
@@ -329,8 +335,9 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
     }
 
     #[DataProvider('corridorChanges')]
-    public function test_registered_edit_cannot_mutate_corridor_or_create_a_replacement(array $changes): void
+    public function test_registered_edit_cannot_mutate_corridor_or_create_a_replacement(array $changes, array $errors): void
     {
+        config(['services.nium.beneficiary_update_endpoint' => '', 'services.nium.beneficiary_update_enabled' => false]);
         $beneficiary = $this->customer->beneficiaries()->create([
             ...$this->payload(), 'beneficiary_type' => 'business', 'country_code' => 'HK', 'currency' => 'USD',
             'payout_method' => 'SWIFT', 'external_beneficiary_id' => 'registered-fixture', 'status' => 'active',
@@ -338,18 +345,23 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
         ]);
         $original = $beneficiary->fresh()->getAttributes();
         $this->putJson($this->baseUrl().'/'.$beneficiary->id, $changes)->assertUnprocessable()
+            ->assertJsonValidationErrors($errors)
             ->assertSee('registered NIUM beneficiary');
         $this->assertSame($original, $beneficiary->fresh()->getAttributes());
         $this->assertDatabaseCount('beneficiaries', 1);
+        $this->assertDatabaseCount('beneficiary_operations', 0);
+        $this->assertDatabaseCount('api_request_logs', 0);
         Http::assertNothingSent();
     }
 
     public static function corridorChanges(): array
     {
         return [
-            [['country_code' => 'SG', 'currency' => 'SGD', 'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']]]],
-            [['currency' => 'SGD']], [['country_code' => 'SG']], [['beneficiary_type' => 'individual']],
-            [['raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']]]],
+            [['country_code' => 'SG', 'currency' => 'SGD', 'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']]],
+                ['country_code', 'currency', 'raw_data.nium.payoutMethod']],
+            [['currency' => 'SGD'], ['currency']], [['country_code' => 'SG'], ['country_code']],
+            [['beneficiary_type' => 'individual'], ['beneficiary_type']],
+            [['raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']]], ['raw_data.nium.payoutMethod']],
         ];
     }
 
@@ -384,14 +396,37 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
 
     public function test_unknown_registered_method_cannot_be_established_from_client_raw_metadata_during_edit(): void
     {
+        config(['services.nium.beneficiary_update_endpoint' => '', 'services.nium.beneficiary_update_enabled' => false]);
         $beneficiary = $this->customer->beneficiaries()->create([
             ...$this->payload(), 'external_beneficiary_id' => 'legacy-registered-fixture', 'status' => 'active',
         ]);
         $original = $beneficiary->fresh()->getAttributes();
-        $this->putJson($this->baseUrl().'/'.$beneficiary->id, ['full_name' => 'Changed Name'])
-            ->assertUnprocessable()->assertJsonValidationErrors('raw_data.nium.payoutMethod')
-            ->assertSee('payout method could not be verified');
+        foreach ([['full_name' => 'Changed Name'],
+            ['full_name' => 'Changed Name', 'raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']]]] as $changes) {
+            $this->putJson($this->baseUrl().'/'.$beneficiary->id, $changes)
+                ->assertUnprocessable()->assertJsonValidationErrors('raw_data.nium.payoutMethod')
+                ->assertSee('payout method could not be verified');
+        }
         $this->assertSame($original, $beneficiary->fresh()->getAttributes());
+        $this->assertDatabaseCount('beneficiary_operations', 0);
+        $this->assertDatabaseCount('api_request_logs', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_valid_registered_edit_still_requires_update_entitlement_before_claim_or_http(): void
+    {
+        config(['services.nium.beneficiary_update_endpoint' => '/beneficiaries/{beneficiaryHashId}',
+            'services.nium.beneficiary_update_enabled' => false]);
+        $beneficiary = $this->customer->beneficiaries()->create([
+            ...$this->payload(), 'payout_method' => 'LOCAL',
+            'external_beneficiary_id' => 'registered-fixture', 'status' => 'active',
+        ]);
+        $original = $beneficiary->fresh()->getAttributes();
+        $this->putJson($this->baseUrl().'/'.$beneficiary->id, ['full_name' => 'Changed Name'])
+            ->assertUnprocessable()->assertJsonPath('code', 'beneficiary_operation_failed');
+        $this->assertSame($original, $beneficiary->fresh()->getAttributes());
+        $this->assertDatabaseCount('beneficiary_operations', 0);
+        $this->assertDatabaseCount('api_request_logs', 0);
         Http::assertNothingSent();
     }
 

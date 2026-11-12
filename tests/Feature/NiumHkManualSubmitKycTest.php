@@ -21,7 +21,7 @@ use App\Services\Nium\NiumHkManualKycResubmissionService;
 use App\Services\Nium\NiumHkSubmitKycService;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Services\Nium\NiumService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;

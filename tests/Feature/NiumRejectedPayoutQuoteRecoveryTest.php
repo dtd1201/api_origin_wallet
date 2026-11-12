@@ -9,16 +9,23 @@ use App\Models\LedgerEntry;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Nium\NiumRejectedPayoutQuoteRecovery;
 use App\Services\Nium\NiumSgdLocalPayoutWorkflow;
+use App\Services\Wallet\Concurrency\OwnerFirst;
+use App\Services\Wallet\Concurrency\OwnerLockContractViolation;
+use App\Services\Wallet\LedgerService;
 use App\Services\Wallet\TransferApprovalService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Database\Connection;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\Concerns\CreatesRejectedSgdQuoteIncident;
+use Tests\Support\LockRecordingPostgresConnection;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
+use Tests\Support\PostgresLockRace;
 use Tests\TestCase;
 
 class NiumRejectedPayoutQuoteRecoveryTest extends TestCase
@@ -29,6 +36,9 @@ class NiumRejectedPayoutQuoteRecoveryTest extends TestCase
     {
         [$transfer, $operator, $clearance, $log, $evidence] = $this->rejectedIncident();
         $before = $transfer->raw_data;
+        $transferBefore = $transfer->fresh()->getRawOriginal();
+        $balanceBefore = Balance::query()->sole()->getRawOriginal();
+        $auditBefore = $log->fresh()->getRawOriginal();
         $captured = $evidence->fresh()->getRawOriginal();
         $flags = config()->get('nium_dynamic_confirmation');
         $payoutFlags = config()->get('nium_dynamic_payouts');
@@ -36,6 +46,7 @@ class NiumRejectedPayoutQuoteRecoveryTest extends TestCase
         $approvalRequired = config('wallet.transfer_controls.require_admin_approval');
         $recovery = app(NiumRejectedPayoutQuoteRecovery::class);
         $recovery->recover($operator, $clearance, $this->rejectedProviderArtifact);
+        $this->assertSame($transferBefore, $transfer->fresh()->getRawOriginal());
         $this->assertSameRecoveryJson($before, $transfer->fresh()->raw_data);
         $result = $recovery->recover($operator, $clearance, $this->rejectedProviderArtifact, true);
         $this->assertSame('draft', $result->status);
@@ -44,8 +55,24 @@ class NiumRejectedPayoutQuoteRecoveryTest extends TestCase
         $this->assertSameRecoveryJson($before['sgd_local_workflow'], $receipt['original_attempt']);
         $this->assertSame(4763, $receipt['api_request_log_id']);
         $this->assertSame($operator->id, $receipt['operator_id']);
+        $this->assertSameRecoveryJson([
+            'api_request_log_id' => 4763, 'request_uuid' => NiumRejectedPayoutQuoteRecovery::REQUEST,
+            'request_body_sha256' => $evidence->request_body_sha256,
+            'response_body_sha256' => $evidence->response_body_sha256,
+            'clearance_sha256' => hash('sha256', json_encode($clearance, JSON_THROW_ON_ERROR)),
+            'provider_review' => $clearance['provider_review'], 'operator_id' => $operator->id,
+            'recovered_at' => now()->toISOString(), 'original_attempt' => $before['sgd_local_workflow'],
+        ], $receipt);
+        $expected = $before;
+        $expected['sgd_local_workflow']['state'] = 'draft';
+        $expected['sgd_local_workflow']['rejected_quote_recoveries'][NiumRejectedPayoutQuoteRecovery::REQUEST] = $receipt;
+        $this->assertSameRecoveryJson($expected, $result->raw_data);
+        $mutable = array_flip(['raw_data', 'updated_at']);
+        $this->assertSame(array_diff_key($transferBefore, $mutable), array_diff_key($result->getRawOriginal(), $mutable));
         $this->assertSameRecoveryJson($result->raw_data, $recovery->recover($operator, $clearance, $this->rejectedProviderArtifact, true)->raw_data);
         $this->assertSame($captured, $evidence->fresh()->getRawOriginal());
+        $this->assertSame($auditBefore, $log->fresh()->getRawOriginal());
+        $this->assertSame($balanceBefore, Balance::query()->sole()->getRawOriginal());
         $this->assertSame(400, $log->fresh()->response_status);
         $this->assertNull($result->fx_quote_id);
         $this->assertNull($result->provider_operation_key);
@@ -53,17 +80,20 @@ class NiumRejectedPayoutQuoteRecoveryTest extends TestCase
         $this->assertDatabaseCount('transfer_approvals', 0);
         $this->assertSame('85.00000000', Balance::query()->sole()->available_balance);
         $this->assertSame('0.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertSame('85.00000000', Balance::query()->sole()->ledger_balance);
         $this->assertSame($flags, config()->get('nium_dynamic_confirmation'));
         $this->assertSame($payoutFlags, config()->get('nium_dynamic_payouts'));
         $this->assertSame($quoteFlags, config()->get('nium_dynamic_quotes'));
         $this->assertSame($approvalRequired, config('wallet.transfer_controls.require_admin_approval'));
         $this->assertSame("CLOSED v1\n", file_get_contents($this->sgdFenceDirectory.'/state'));
+        $this->assertRecoveryLeaseReleased();
         Http::assertNothingSent();
     }
 
     public static function refusals(): array
     {
-        return array_map(fn ($v) => [$v], ['uuid', 'owner', 'intent', 'audit_uuid', 'duplicate_audit', 'missing_capture',
+        return array_map(fn ($v) => [$v], ['uuid', 'owner', 'provider', 'beneficiary', 'reference', 'purpose', 'intent',
+            'audit_uuid', 'duplicate_audit', 'missing_capture',
             'hash', 'timeout', 'success', 'wrong_error', 'contradictory_response', 'clearance', 'clearance_hash',
             'no_clearance_reference', 'operator', 'open', 'active_lease', 'quote', 'reservation', 'ledger',
             'operation', 'consent', 'timing', 'capture_uuid', 'capture_method', 'wrong_request', 'wrong_url', 'artifact',
@@ -103,6 +133,19 @@ class NiumRejectedPayoutQuoteRecoveryTest extends TestCase
             case 'uuid': $raw['sgd_local_workflow']['lock_request_id'] = Str::uuid()->toString();
                 break;
             case 'owner': $transfer->user_id = $operator->id;
+                break;
+            case 'provider': $provider = $transfer->provider->replicate();
+                $provider->code = 'synthetic-other';
+                $provider->save();
+                $transfer->provider_id = $provider->id;
+                break;
+            case 'beneficiary': $beneficiary = $transfer->beneficiary->replicate();
+                $beneficiary->save();
+                $transfer->beneficiary_id = $beneficiary->id;
+                break;
+            case 'reference': $transfer->client_reference = 'OW-OTHER-INCIDENT';
+                break;
+            case 'purpose': $transfer->purpose_code = 'IR009';
                 break;
             case 'intent': $transfer->source_amount = '5.01';
                 break;
@@ -173,18 +216,150 @@ class NiumRejectedPayoutQuoteRecoveryTest extends TestCase
         }
         $transfer->raw_data = $raw;
         $transfer->save();
-        $before = $transfer->fresh()->raw_data;
+        $before = $transfer->fresh()->getRawOriginal();
         try {
             app(NiumRejectedPayoutQuoteRecovery::class)->recover($operator, $clearance, $this->rejectedProviderArtifact, true);
             $this->fail('Unsafe recovery must refuse: '.$case);
         } catch (RuntimeException|ValidationException) {
-            $this->assertSame($before, $transfer->fresh()->raw_data);
+            $this->assertSame($before, $transfer->fresh()->getRawOriginal());
         } finally {
             if ($lease !== null) {
                 fclose($lease);
             }
         }
+        $this->assertRecoveryLeaseReleased();
         Http::assertNothingSent();
+    }
+
+    public function test_unauthenticated_transfer_first_transaction_is_rejected_and_releases_lease(): void
+    {
+        [$transfer, $operator, $clearance] = $this->rejectedIncident();
+        $before = $transfer->fresh()->getRawOriginal();
+        try {
+            DB::transaction(function () use ($transfer, $operator, $clearance): void {
+                $transfer->newQuery()->whereKey(5)->lockForUpdate()->firstOrFail();
+                app(NiumRejectedPayoutQuoteRecovery::class)->recover($operator, $clearance, $this->rejectedProviderArtifact, true);
+            });
+            $this->fail('Recovery must refuse an unauthenticated outer transaction.');
+        } catch (OwnerLockContractViolation) {
+            $this->assertSame($before, $transfer->fresh()->getRawOriginal());
+        }
+        $this->assertSame(0, DB::transactionLevel());
+        $this->assertFalse(DB::connection()->getPdo()->inTransaction());
+        $this->assertRecoveryLeaseReleased();
+        Http::assertNothingSent();
+    }
+
+    public static function recoveryLockSchedules(): array
+    {
+        return ['recovery first' => [true], 'financial writer first' => [false]];
+    }
+
+    #[DataProvider('recoveryLockSchedules')]
+    public function test_recovery_and_owner_first_financial_writer_serialize_on_owner_before_transfer(bool $recoveryFirst): void
+    {
+        [$transfer, $operator, $clearance, $log, $evidence] = $this->rejectedIncident();
+        $before = $transfer->fresh()->getRawOriginal();
+        $balanceBefore = Balance::query()->sole()->getRawOriginal();
+        $auditBefore = $log->fresh()->getRawOriginal();
+        $captureBefore = $evidence->fresh()->getRawOriginal();
+        $recover = function (PostgresLockRace $race, bool $pause) use ($operator, $clearance): int {
+            $authenticated = false;
+            LockRecordingPostgresConnection::$afterQuery = function (string $sql) use ($race, $pause, &$authenticated): void {
+                if (! $authenticated && str_contains($sql, '"transfers"') && str_contains(strtolower($sql), 'for update')) {
+                    $authenticated = true; // Set before the context's own identity query.
+                    OwnerFirst::current([12]);
+                    if ($pause) {
+                        $race->signal('locked');
+                        $race->await('continue');
+                    }
+                }
+            };
+            try {
+                $result = app(NiumRejectedPayoutQuoteRecovery::class)->recover($operator, $clearance, $this->rejectedProviderArtifact, true);
+                $this->assertTrue($authenticated);
+                Http::assertNothingSent();
+
+                return $result->id;
+            } finally {
+                LockRecordingPostgresConnection::$afterQuery = null;
+            }
+        };
+        $financialWriter = function (PostgresLockRace $race, bool $pause) use ($transfer): void {
+            if ($pause) $race->pauseAfterLock('users');
+            // Exercise the real financial entry point. The incident must remain
+            // unreserved: this locks its owner/transfer and proves no hold exists.
+            $this->assertNull(app(LedgerService::class)->releaseTransferHold($transfer));
+            Http::assertNothingSent();
+        };
+        $race = (new PostgresLockRace)->run(
+            function (PostgresLockRace $race) use ($recoveryFirst, $recover, $financialWriter): void {
+                if ($recoveryFirst) $recover($race, true);
+                else $financialWriter($race, true);
+            },
+            function (PostgresLockRace $race) use ($recoveryFirst, $recover, $financialWriter): void {
+                $race->await('locked', 0);
+                if ($recoveryFirst) $financialWriter($race, false);
+                else $recover($race, false);
+            },
+            function (PostgresLockRace $race, Connection $observer, array $pids) use ($recoveryFirst): void {
+                $race->await('locked', 0);
+                $wait = $race->waitForBlock($observer, $pids[1], $pids[0]);
+                $this->assertStringContainsString('"users"', $wait['query']);
+                $this->assertStringContainsString('for update', strtolower($wait['query']));
+                if (! $recoveryFirst) {
+                    // While recovery waits for the owner it must hold no Transfer lock.
+                    $observer->transaction(fn () => $observer->table('transfers')->where('id', 5)->lock('for update nowait')->first());
+                }
+                $race->signal('continue');
+            },
+        );
+        $diagnostics = json_encode($race, JSON_THROW_ON_ERROR);
+        $this->assertSame(['ok', 'ok'], array_column($race['workers'], 'status'), $diagnostics);
+        $this->assertCount(3, array_unique($race['pids']));
+        foreach ($race['workers'] as $worker) {
+            $this->assertSame(0, $worker['depth'], $diagnostics);
+            $this->assertFalse($worker['pdo_transaction'], $diagnostics);
+        }
+        foreach ($race['sql'] as $queries) {
+            $this->assertSame([], array_values(array_filter(array_column($queries, 'sqlstate'))), $diagnostics);
+            // Connection setup/discovery is recorded with attempt zero, before BEGIN.
+            $this->assertSame([1], array_values(array_unique(array_filter(array_column($queries, 'attempt')))), $diagnostics);
+            $locks = array_values(array_filter($queries, fn ($q) => str_contains(strtolower($q['sql']), 'for update')));
+            $this->assertGreaterThanOrEqual(2, count($locks), $diagnostics);
+            $this->assertStringContainsString('"users"', $locks[0]['sql']);
+            $this->assertStringContainsString('"transfers"', $locks[1]['sql']);
+        }
+        $recoveryQueries = $race['sql'][$recoveryFirst ? 0 : 1];
+        $recoveryLocks = array_values(array_filter($recoveryQueries, fn ($q) => str_contains(strtolower($q['sql']), 'for update')));
+        $this->assertCount(5, $recoveryLocks);
+        foreach (['users', 'transfers', 'api_request_logs', 'nium_api_exchange_evidence', 'balances'] as $index => $table) {
+            $this->assertStringContainsString('"'.$table.'"', $recoveryLocks[$index]['sql']);
+        }
+        $mutable = array_flip(['raw_data', 'updated_at']);
+        $this->assertSame(array_diff_key($before, $mutable), array_diff_key($transfer->fresh()->getRawOriginal(), $mutable));
+        $this->assertSame('draft', $transfer->fresh()->raw_data['sgd_local_workflow']['state']);
+        $this->assertSame($balanceBefore, Balance::query()->sole()->getRawOriginal());
+        $this->assertSame($auditBefore, $log->fresh()->getRawOriginal());
+        $this->assertSame($captureBefore, $evidence->fresh()->getRawOriginal());
+        $this->assertDatabaseCount('ledger_entries', 0);
+        $this->assertDatabaseCount('transfer_approvals', 0);
+        $this->assertDatabaseCount('fx_quotes', 0);
+        $this->assertSame("CLOSED v1\n", file_get_contents($this->sgdFenceDirectory.'/state'));
+        $this->assertRecoveryLeaseReleased();
+        Http::assertNothingSent();
+    }
+
+    private function assertRecoveryLeaseReleased(): void
+    {
+        $lease = fopen($this->sgdFenceDirectory.'/drain.lock', 'rb');
+        $this->assertIsResource($lease);
+        try {
+            $this->assertTrue(flock($lease, LOCK_EX | LOCK_NB), 'Recovery leaked its exclusive admission lease.');
+        } finally {
+            flock($lease, LOCK_UN);
+            fclose($lease);
+        }
     }
 
     public function test_new_quote_requires_fresh_consent_and_independent_approval_without_enabling_dispatch(): void

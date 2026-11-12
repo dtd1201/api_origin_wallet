@@ -11,7 +11,7 @@ use App\Services\Nium\NiumSupportEvidenceFormatter;
 use App\Support\SensitiveDataSanitizer;
 use GuzzleHttp\Psr7\Request as Psr7Request;
 use GuzzleHttp\Psr7\Utils as Psr7Utils;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -20,6 +20,49 @@ use Tests\TestCase;
 class ProviderHttpClientTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_active_transaction_blocks_api_and_token_http_before_authentication(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'PATCH268C_OAUTH', 'name' => 'Fixture OAuth Provider', 'status' => 'active',
+        ]);
+        config(['services.patch268c_oauth.base_url' => 'https://provider.example.test',
+            'services.patch268c_oauth.auth' => ['mode' => 'client_credentials',
+                'token_endpoint' => '/oauth/token', 'client_id' => 'fixture', 'client_secret' => 'fixture',
+                'cache_key' => 'patch268c:blocked-auth']]);
+        Cache::forget('patch268c:blocked-auth');
+        Http::fake([]);
+        try {
+            \Illuminate\Support\Facades\DB::transaction(function () use ($provider): void {
+                (new ProviderHttpClient($provider, 'patch268c_oauth'))->get('/accounts');
+            });
+            $this->fail('Provider transport accepted an active transaction.');
+        } catch (\App\Services\Wallet\Concurrency\OwnerLockContractViolation) {
+            Http::assertNothingSent();
+            $this->assertSame(0, \Illuminate\Support\Facades\DB::transactionLevel());
+        }
+    }
+
+    public function test_last_transport_guard_rejects_a_transaction_left_open_by_authorization(): void
+    {
+        $provider = IntegrationProvider::query()->create([
+            'code' => 'PATCH268C_PROVIDER', 'name' => 'Fixture Provider', 'status' => 'active',
+        ]);
+        config(['services.patch268c_provider.base_url' => 'https://provider.example.test',
+            'services.patch268c_provider.auth' => ['mode' => 'none']]);
+        Http::fake([]);
+        $client = new ProviderHttpClient($provider, 'patch268c_provider', beforeDispatch: static function (): void {
+            \Illuminate\Support\Facades\DB::beginTransaction();
+        });
+        try {
+            $client->get('/accounts');
+            $this->fail('Provider transport ran after an authorization callback left a transaction open.');
+        } catch (\App\Services\Wallet\Concurrency\OwnerLockContractViolation) {
+            Http::assertNothingSent();
+        } finally {
+            if (\Illuminate\Support\Facades\DB::transactionLevel() > 0) \Illuminate\Support\Facades\DB::rollBack();
+        }
+    }
 
     public function test_get_request_supports_query_params_and_static_headers(): void
     {
@@ -487,7 +530,7 @@ class ProviderHttpClientTest extends TestCase
         $this->assertDatabaseCount('api_request_logs', 1);
         $this->assertSame(['x-request-id' => $requestId], $log->request_headers);
         $this->assertSame(['x-request-id' => $responseRequestId], $log->response_headers);
-        $this->assertSame([
+        $this->assertEqualsCanonicalizing([
             'external_id_fingerprint' => substr(hash('sha256', 'external-reference-secret'), 0, 16),
             'customer_type' => 'corporate',
             'region' => 'SG',
@@ -652,7 +695,7 @@ class ProviderHttpClientTest extends TestCase
         (new ProviderHttpClient($provider, 'nium'))->get('/api/v5/client/client-id/customers');
 
         $log = ApiRequestLog::query()->sole();
-        $this->assertSame([
+        $this->assertEqualsCanonicalizing([
             'http_status' => 200,
             'customer_id_present' => false,
             'wallet_id_present' => false,

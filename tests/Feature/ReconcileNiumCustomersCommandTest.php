@@ -13,7 +13,7 @@ use App\Services\Nium\NiumCustomerReconciliationService;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumRfiWorkflowService;
 use Illuminate\Console\Scheduling\Schedule;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;

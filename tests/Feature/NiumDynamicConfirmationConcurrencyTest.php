@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\LedgerEntry;
 use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
 use App\Models\NiumDynamicReservation;
+use App\Models\User;
 use App\Services\Nium\DynamicConfirmation\DynamicReservationLedger;
 use App\Services\Nium\DynamicConfirmation\DynamicTransferConfirmationService;
 use Illuminate\Support\Facades\DB;
@@ -16,12 +18,16 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use RuntimeException;
 use Tests\Concerns\CreatesDynamicConfirmationFixtures;
+use Tests\Concerns\CreatesFinalizedUsdConfirmationFixtures;
+use Tests\Concerns\CreatesNiumBalanceSyncObservation;
 use Tests\Support\DynamicConfirmationDatabaseTestCase;
 use Throwable;
 
 final class NiumDynamicConfirmationConcurrencyTest extends DynamicConfirmationDatabaseTestCase
 {
     use CreatesDynamicConfirmationFixtures;
+    use CreatesFinalizedUsdConfirmationFixtures;
+    use CreatesNiumBalanceSyncObservation;
 
     protected function setUp(): void
     {
@@ -80,6 +86,63 @@ final class NiumDynamicConfirmationConcurrencyTest extends DynamicConfirmationDa
         $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'release')->count());
         $this->assertSame('150.00000000', $this->wallet->fresh()->available_balance);
         $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+    }
+
+    public function test_concurrent_sync_and_confirmation_preserve_the_new_hold(): void
+    {
+        $results = $this->race(function (int $worker): string {
+            if ($worker === 0) {
+                return $this->confirmDynamic()->id;
+            }
+            $this->observeNiumBalance('150');
+            return 'synced';
+        });
+        $this->assertSame(['ok', 'ok'], array_column($results, 'status'), json_encode($results));
+        $this->assertOneReservation();
+        $this->assertSame('150.00000000', $this->wallet->fresh()->ledger_balance);
+    }
+
+    public function test_concurrent_sync_and_cancellation_preserve_one_release(): void
+    {
+        $intent = $this->confirmDynamic();
+        $results = $this->race(function (int $worker) use ($intent): string {
+            if ($worker === 0) {
+                return $this->confirmation->cancel($this->owner, $intent->id)->id;
+            }
+            $this->observeNiumBalance('150');
+            return 'synced';
+        });
+        $this->assertSame(['ok', 'ok'], array_column($results, 'status'), json_encode($results));
+        $this->assertSame('150.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('150.00000000', $this->wallet->fresh()->ledger_balance);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'release')->count());
+    }
+
+    public function test_concurrent_sync_and_ledger_consumption_preserve_one_customer_debit(): void
+    {
+        $this->wallet->update(['currency' => 'USD', 'available_balance' => '3000',
+            'ledger_balance' => '3000', 'raw_data' => ['provider_available_balance' => '3000']]);
+        $this->source->review = $this->usdReview();
+        $intent = $this->confirmDynamic();
+        $results = $this->race(function (int $worker) use ($intent): string {
+            if ($worker === 0) {
+                OwnerFirst::users([$this->owner->id], function ($context) use ($intent): void {
+                    $intent = \App\Models\NiumDynamicIntent::query()->lockForUpdate()->findOrFail($intent->id);
+                    User::query()->lockForUpdate()->findOrFail($this->owner->id);
+                    $reservation = NiumDynamicReservation::query()->lockForUpdate()->sole();
+                    (new DynamicReservationLedger)->consume($intent, $reservation, $this->wallet, $context);
+                });
+                return 'consumed';
+            }
+            $this->observeNiumBalance('2000');
+            return 'synced';
+        });
+        $this->assertSame(['ok', 'ok'], array_column($results, 'status'), json_encode($results));
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
     private function assertOneReservation(): void

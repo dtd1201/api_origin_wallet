@@ -15,7 +15,7 @@ use App\Services\Nium\NiumTransactionRfiManualReconciliationException;
 use App\Services\Nium\NiumTransactionRfiOutcomePersister;
 use App\Services\Nium\NiumTransactionRfiService;
 use App\Services\Nium\NiumTransactionRfiSubmissionService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Mockery\MockInterface;

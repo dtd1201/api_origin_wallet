@@ -20,7 +20,7 @@ use App\Services\Integrations\ProviderRegistry;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumKycDataValidator;
 use App\Services\Nium\NiumProviderRequestException;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;

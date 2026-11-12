@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\UserProviderAccount;
@@ -25,6 +26,7 @@ final class NiumCustomerReconciliationService
 
     public function reconcile(?int $limit = null): array
     {
+        OwnerFirst::outside();
         $provider = IntegrationProvider::query()
             ->whereRaw('LOWER(code) = ?', ['nium'])
             ->where('status', 'active')
@@ -158,7 +160,9 @@ final class NiumCustomerReconciliationService
 
     private function recordFailure(int $accountId): void
     {
-        DB::transaction(function () use ($accountId): void {
+        $discovered = UserProviderAccount::query()->find($accountId);
+        if ($discovered === null) return;
+        OwnerFirst::account($discovered, function () use ($accountId): void {
             $account = UserProviderAccount::query()->lockForUpdate()->find($accountId);
             if (! $account instanceof UserProviderAccount) {
                 return;
@@ -192,12 +196,12 @@ final class NiumCustomerReconciliationService
                     'backoff_seconds' => $delay,
                 ],
             ]);
-        }, 3);
+        }, attempts: 3);
     }
 
     private function clearFailureMetadata(UserProviderAccount $account): void
     {
-        DB::transaction(function () use ($account): void {
+        OwnerFirst::account($account, function () use ($account): void {
             $locked = UserProviderAccount::query()->lockForUpdate()->find($account->id);
             if (! $locked instanceof UserProviderAccount) {
                 return;
@@ -208,7 +212,7 @@ final class NiumCustomerReconciliationService
             }
             Arr::forget($metadata, 'nium_customer_reconciliation');
             $locked->forceFill(['metadata' => $metadata])->save();
-        }, 3);
+        }, attempts: 3);
     }
 
     private function diagnosticCategory(Throwable $exception): string

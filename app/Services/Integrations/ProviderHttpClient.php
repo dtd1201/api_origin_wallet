@@ -2,6 +2,7 @@
 
 namespace App\Services\Integrations;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
@@ -102,6 +103,7 @@ class ProviderHttpClient implements ProviderClient
         ?int $relatedTransferId,
         ?string $exactJson = null,
     ): Response {
+        OwnerFirst::outside();
         $capturedRequestBody = null;
         $capturedRequestHeaders = [];
         $assignmentTarget = null;
@@ -175,6 +177,11 @@ class ProviderHttpClient implements ProviderClient
                 }
             });
         }
+        // Registered last: callbacks may take short local claims, but must return after commit.
+        $request = $request->beforeSending(static function (Request $outgoing): void {
+            OwnerFirst::outside();
+        });
+        OwnerFirst::outside();
         $url = $this->buildUrl($path);
         $startedAt = microtime(true);
         $startedAtUtc = CarbonImmutable::now('UTC');
@@ -260,6 +267,7 @@ class ProviderHttpClient implements ProviderClient
 
     private function resolveAuthHeaders(): array
     {
+        OwnerFirst::outside();
         $authConfig = (array) config("services.{$this->serviceConfigKey}.auth", []);
         $mode = strtolower((string) ($authConfig['mode'] ?? 'none'));
 
@@ -314,6 +322,9 @@ class ProviderHttpClient implements ProviderClient
         $tokenUrl = (string) ($authConfig['token_url'] ?? '');
         $request = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
             ->acceptJson()
+            ->beforeSending(static function (Request $outgoing): void {
+                OwnerFirst::outside();
+            })
             ->asJson()
             ->withHeaders([
                 'x-api-key' => $apiKey,
@@ -382,6 +393,9 @@ class ProviderHttpClient implements ProviderClient
 
         $request = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
             ->acceptJson()
+            ->beforeSending(static function (Request $outgoing): void {
+                OwnerFirst::outside();
+            })
             ->asForm();
 
         foreach ((array) ($authConfig['headers'] ?? []) as $headerName => $headerValue) {
@@ -441,6 +455,9 @@ class ProviderHttpClient implements ProviderClient
 
         $response = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
             ->acceptJson()
+            ->beforeSending(static function (Request $outgoing): void {
+                OwnerFirst::outside();
+            })
             ->asForm()
             ->post(
                 $tokenUrl !== '' ? $this->buildUrl($tokenUrl) : $this->buildUrl($tokenEndpoint),
@@ -485,6 +502,9 @@ class ProviderHttpClient implements ProviderClient
 
         $response = Http::timeout((int) config("services.{$this->serviceConfigKey}.timeout", 30))
             ->acceptJson()
+            ->beforeSending(static function (Request $outgoing): void {
+                OwnerFirst::outside();
+            })
             ->get($this->buildUrl($tokenEndpoint), [
                 'app_id' => $appId,
                 'app_secret' => $appSecret,
@@ -633,7 +653,7 @@ class ProviderHttpClient implements ProviderClient
         ];
 
         try {
-            DB::transaction(function () use (
+            $persist = function () use (
                 $attributes,
                 $method,
                 $url,
@@ -658,7 +678,28 @@ class ProviderHttpClient implements ProviderClient
                     responseReceived: $response !== null,
                     assignmentTarget: $assignmentTarget,
                 );
-            }, 3);
+            };
+            $owners = array_values(array_filter([$attributes['user_id']]));
+            $related = $attributes['related_transfer_id'] === null ? null
+                : \App\Models\Transfer::query()->useWritePdo()->findOrFail($attributes['related_transfer_id']);
+            if ($related !== null) $owners[] = $related->user_id;
+            $persistBound = function () use ($persist, $related, $attributes): void {
+                if ($related !== null) {
+                    $locked = \App\Models\Transfer::query()->lockForUpdate()->findOrFail($related->id);
+                    if ((string) $locked->user_id !== (string) $related->user_id
+                        || (string) $locked->provider_id !== (string) $related->provider_id
+                        || (string) $locked->provider_id !== (string) $attributes['provider_id']) {
+                        throw new \App\Services\Wallet\Concurrency\OwnerBindingChanged('API evidence transfer binding changed.');
+                    }
+                }
+                IntegrationProvider::query()->whereKey($attributes['provider_id'])->lock('for key share')->firstOrFail();
+                $persist();
+            };
+            if ($owners === []) {
+                DB::transaction($persistBound, 1);
+            } else {
+                OwnerFirst::users($owners, $persistBound, 3);
+            }
         } catch (Throwable $exception) {
             throw new NiumEvidencePersistenceException([
                 'client_hash_id' => $attributes['client_hash_id'],

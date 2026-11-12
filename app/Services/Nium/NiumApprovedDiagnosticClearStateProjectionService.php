@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
 use App\Models\UserProviderAccount;
@@ -47,7 +48,7 @@ final class NiumApprovedDiagnosticClearStateProjectionService
             throw new RuntimeException('Approved diagnostic clear-state projection requires operator context.');
         }
 
-        return DB::transaction(function () use ($approval, $operatorContext): UserProviderAccount {
+        return OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function () use ($approval, $operatorContext): UserProviderAccount {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->first();
 
             if (! $account instanceof UserProviderAccount

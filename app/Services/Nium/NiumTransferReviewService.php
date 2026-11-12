@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Balance;
 use App\Models\FxQuote;
 use App\Models\Transfer;
@@ -111,6 +112,7 @@ class NiumTransferReviewService
 
     public function assertReserved(Transfer $transfer): void
     {
+        OwnerFirst::current([$transfer->user_id]);
         $hold = \App\Models\LedgerEntry::query()->where('reference', "transfer:{$transfer->id}:hold")->first();
         $released = \App\Models\LedgerEntry::query()->where('reference', "transfer:{$transfer->id}:release")->exists();
         $balance = $hold === null ? null : Balance::query()->whereKey($hold->balance_id)->lockForUpdate()->first();
@@ -126,6 +128,7 @@ class NiumTransferReviewService
 
     public function ensureFreshBalance(Transfer $transfer): void
     {
+        OwnerFirst::outside();
         $context = $this->locks->context($transfer->provider, $transfer->user);
         $query = fn () => Balance::query()->where('user_id', $transfer->user_id)
             ->where('provider_id', $transfer->provider_id)->where('currency', 'USD')

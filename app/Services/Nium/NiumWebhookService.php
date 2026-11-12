@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Jobs\Nium\SubmitNiumHkEntityKycJob;
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
@@ -11,6 +12,7 @@ use App\Models\NiumVirtualAccountOperation;
 use App\Models\NiumVirtualAccountRequest;
 use App\Models\Transaction;
 use App\Models\Transfer;
+use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Models\WebhookEvent;
 use App\Services\Integrations\Contracts\ReprocessesWebhookEvent;
@@ -44,6 +46,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     public function handleWebhook(IntegrationProvider $provider, Request $request): array
     {
+        OwnerFirst::outside();
         $this->verifyWebhookIfConfigured($request);
 
         $payload = $request->json()->all();
@@ -139,6 +142,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
 
     public function reprocessWebhookEvent(IntegrationProvider $provider, WebhookEvent $event): WebhookEvent
     {
+        OwnerFirst::outside();
         if ($event->nium_va_evidence !== null) {
             return $this->recoverVaReceipt($provider, $event);
         }
@@ -283,7 +287,7 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             $status = $this->normalizeTransferStatus($providerStatus);
             $statusAt = $this->transferStatusTimestamp($resource, $payload);
 
-            DB::transaction(function () use ($provider, $payload, $providerStatus, $resource, $status, $statusAt, $transfer): void {
+            OwnerFirst::transfer($transfer, function () use ($provider, $payload, $providerStatus, $resource, $status, $statusAt, $transfer): void {
                 $locked = Transfer::query()
                     ->whereKey($transfer->id)
                     ->lockForUpdate()
@@ -387,7 +391,13 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
             throw new RuntimeException('Nium funding webhook could not map the wallet to a provider account.');
         }
 
-        DB::transaction(function () use ($account, $currency, $provider, $walletBalance, $walletHashId): void {
+        OwnerFirst::account($account, function () use ($account, $currency, $provider, $walletBalance, $walletHashId, $payload): void {
+            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($account->id);
+            if ((string) $account->provider_id !== (string) $provider->id || $account->external_account_id !== $walletHashId
+                || (isset($payload['customerHashId']) && $account->external_customer_id !== $payload['customerHashId'])) {
+                throw new \App\Services\Wallet\Concurrency\OwnerBindingChanged('Funding webhook account binding changed.');
+            }
+            IntegrationProvider::query()->whereKey($provider->id)->lock('for key share')->firstOrFail();
             $attributes = [
                 'provider_id' => $provider->id,
                 'external_account_id' => $walletHashId,
@@ -399,6 +409,23 @@ class NiumWebhookService implements ReprocessesWebhookEvent, WebhookProvider
                 ->first();
 
             if ($balance !== null) {
+                if ((string) $balance->user_id !== (string) $account->user_id) {
+                    throw new RuntimeException('Nium funding webhook wallet ownership conflict.');
+                }
+                if (NiumBalanceOwnership::preservesBooks($balance)) {
+                    // A wallet total cannot identify new funding separately from
+                    // an in-flight payout, fee or return. Local holds and historical
+                    // Dynamic books use the same ownership policy as balance sync.
+                    $raw = $balance->raw_data ?? [];
+                    $raw['nium_funding_balance_observation'] = [
+                        'wallet_balance' => $walletBalance, 'observed_at' => now()->toISOString(),
+                    ];
+                    unset($raw['dynamic_authenticated_availability']);
+                    if (! $balance->update(['raw_data' => $raw])) {
+                        throw new RuntimeException('Nium funding observation was not persisted.');
+                    }
+                    return;
+                }
                 $balance->update([
                     'user_id' => $account->user_id,
                     'available_balance' => $walletBalance,

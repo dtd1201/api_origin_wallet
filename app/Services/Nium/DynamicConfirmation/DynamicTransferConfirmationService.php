@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\AmlScreening;
 use App\Models\Balance;
 use App\Models\BankAccount;
@@ -44,7 +45,7 @@ final class DynamicTransferConfirmationService
             'accepted_terms_fingerprint' => $acceptedFingerprint,
         ], JSON_THROW_ON_ERROR));
 
-        return DB::transaction(function () use ($authenticatedActor, $providerAccountId, $beneficiaryId,
+        return OwnerFirst::users([$authenticatedActor->id], function ($context) use ($authenticatedActor, $providerAccountId, $beneficiaryId,
             $balanceId, $clientReference, $acceptedFingerprint, $requestFingerprint): NiumDynamicIntent {
             // A real row serializes even FIRST requests; no reliance on locking a missing intent.
             $user = User::query()->lockForUpdate()->findOrFail($authenticatedActor->id);
@@ -122,7 +123,7 @@ final class DynamicTransferConfirmationService
                 throw new RuntimeException('dynamic_intent_not_persisted');
             }
             $reservationId = (string) Str::uuid();
-            $hold = $this->ledger->reserve($intent, $wallet, $reservationId);
+            $hold = $this->ledger->reserve($intent, $wallet, $reservationId, $context);
             $reservation = NiumDynamicReservation::query()->forceCreate([
                 'id' => $reservationId, 'intent_id' => $intent->id, 'balance_id' => $wallet->id,
                 'currency' => $debit->currency, 'amount' => $amount, 'state' => 'held',
@@ -150,7 +151,7 @@ final class DynamicTransferConfirmationService
     public function validateReview(User $actor, int $accountId, int $beneficiaryId, int $balanceId, string $fingerprint): void
     {
         $this->assertConfirmationEnabled();
-        DB::transaction(function () use ($actor, $accountId, $beneficiaryId, $balanceId, $fingerprint): void {
+        OwnerFirst::users([$actor->id], function ($context) use ($actor, $accountId, $beneficiaryId, $balanceId, $fingerprint): void {
             $user = User::query()->lockForUpdate()->findOrFail($actor->id);
             $account = UserProviderAccount::query()->where('user_id', $user->id)->lockForUpdate()->findOrFail($accountId);
             $provider = IntegrationProvider::query()->lockForUpdate()->findOrFail($account->provider_id);
@@ -173,6 +174,7 @@ final class DynamicTransferConfirmationService
 
     public function refreshForExecution(NiumDynamicIntent $intent): void
     {
+        OwnerFirst::outside();
         if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
             throw new RuntimeException('dynamic_execution_refresh_requires_no_transaction');
         }
@@ -190,7 +192,7 @@ final class DynamicTransferConfirmationService
             throw new RuntimeException('dynamic_cancellation_request_invalid');
         }
 
-        return DB::transaction(function () use ($authenticatedActor, $intentId): NiumDynamicIntent {
+        return OwnerFirst::users([$authenticatedActor->id], function ($context) use ($authenticatedActor, $intentId): NiumDynamicIntent {
             $user = User::query()->lockForUpdate()->findOrFail($authenticatedActor->id);
             $intent = NiumDynamicIntent::query()->where('user_id', $user->id)->lockForUpdate()->findOrFail($intentId);
             $reservation = NiumDynamicReservation::query()->where('intent_id', $intent->id)->lockForUpdate()->sole();
@@ -209,7 +211,7 @@ final class DynamicTransferConfirmationService
                 throw new RuntimeException('dynamic_cancellation_requires_proof_of_no_submission');
             }
             $wallet = Balance::query()->lockForUpdate()->findOrFail($intent->balance_id);
-            $release = $this->ledger->release($intent, $reservation, $wallet);
+            $release = $this->ledger->release($intent, $reservation, $wallet, $context);
             if (! $reservation->forceFill(['state' => 'released', 'release_entry_id' => $release->id,
                 'released_by' => $user->id, 'released_at' => now()])->save()
                 || ! $outbox->forceFill(['state' => 'cancelled', 'cancelled_at' => now()])->save()) {
@@ -312,6 +314,7 @@ final class DynamicTransferConfirmationService
     /** Caller holds the owner/intent/outbox locks. No network is permitted in evidence revalidation. */
     public function revalidateForExecution(NiumDynamicIntent $intent): void
     {
+        OwnerFirst::current([$intent->user_id]);
         if (DB::transactionLevel() < 1 || $this->evidence === null) {
             throw new RuntimeException('dynamic_authoritative_evidence_source_unavailable');
         }

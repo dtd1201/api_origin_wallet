@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycDocument;
@@ -61,6 +62,7 @@ final class NiumHkCustomerV5OneShotRunner
      */
     public function run(string $executionRoot): array
     {
+        OwnerFirst::outside();
         $this->claimExecutionRoot($executionRoot);
         $context = $this->preflight();
         $protectedFingerprint = $this->fingerprint($context['protected_account']);
@@ -449,7 +451,7 @@ final class NiumHkCustomerV5OneShotRunner
 
     private function claimCreate(array $payload): UserProviderAccount
     {
-        return DB::transaction(function () use ($payload): UserProviderAccount {
+        return OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::PROVIDER_ACCOUNT_ID), function () use ($payload): UserProviderAccount {
             $account = UserProviderAccount::query()->whereKey(self::PROVIDER_ACCOUNT_ID)->lockForUpdate()->firstOrFail();
             $providerId = (int) $account->provider_id;
             $metadata = (array) $account->metadata;
@@ -494,12 +496,12 @@ final class NiumHkCustomerV5OneShotRunner
             ])->save();
 
             return $account->fresh();
-        }, 3);
+        }, attempts: 3);
     }
 
     private function markCreateTerminal(string $state, bool $resubmissionAllowed): void
     {
-        DB::transaction(function () use ($state, $resubmissionAllowed): void {
+        OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::PROVIDER_ACCOUNT_ID), function () use ($state, $resubmissionAllowed): void {
             $account = UserProviderAccount::query()->whereKey(self::PROVIDER_ACCOUNT_ID)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $metadata['customer_v5_submission_state'] = $state;

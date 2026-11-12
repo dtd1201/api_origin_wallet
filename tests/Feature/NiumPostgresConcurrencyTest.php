@@ -313,7 +313,7 @@ class NiumPostgresConcurrencyTest extends TestCase
             'customer_id_verified_at' => now(), 'wallet_id_verified_at' => now(), 'provider_ids_verified_at' => now(),
         ]);
         Balance::query()->create([
-            'user_id' => $user->id, 'provider_id' => $provider->id, 'currency' => 'USD',
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'external_account_id' => 'transfer-wallet', 'currency' => 'USD',
             'available_balance' => 100, 'ledger_balance' => 100, 'as_of' => now(),
         ]);
         $beneficiary = Beneficiary::query()->create([
@@ -325,11 +325,14 @@ class NiumPostgresConcurrencyTest extends TestCase
             'transfer_no' => 'TRF-CONCURRENT', 'user_id' => $user->id, 'provider_id' => $provider->id,
             'beneficiary_id' => $beneficiary->id, 'transfer_type' => 'payout',
             'source_currency' => 'USD', 'target_currency' => 'USD', 'source_amount' => 10,
-            'fee_amount' => 0, 'fee_currency' => 'USD', 'purpose_code' => 'IR01811', 'status' => 'draft',
+            'fee_amount' => 0, 'fee_currency' => 'USD', 'purpose_code' => 'IR01811', 'reference_text' => 'PATCH258-CONCURRENCY', 'status' => 'draft',
         ]);
 
         $this->runConcurrent(2, function () use ($provider, $transfer): void {
-            Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-CONCURRENT'])]);
+            Http::fake([
+                '*purposeCodes' => Http::response([['purposeCode' => 'IR01811', 'description' => 'General Goods']]),
+                '*' => Http::response(['systemReferenceNumber' => 'RT-CONCURRENT']),
+            ]);
 
             try {
                 app(ProviderTransferManager::class)->submitTransfer(
@@ -347,6 +350,10 @@ class NiumPostgresConcurrencyTest extends TestCase
         $this->assertSame('RT-CONCURRENT', $updated->external_transfer_id);
         $this->assertSame(1, ApiRequestLog::query()->where('related_transfer_id', $transfer->id)->where('request_method', 'POST')->count());
         $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'release')->count());
+        $this->assertSame('90.00000000', Balance::query()->sole()->available_balance);
+        $this->assertSame('10.00000000', Balance::query()->sole()->reserved_balance);
+        $this->assertSame('100.00000000', Balance::query()->sole()->ledger_balance);
 
         $operationKey = $updated->provider_operation_key;
 
@@ -380,7 +387,7 @@ class NiumPostgresConcurrencyTest extends TestCase
             'wallet_id_verified_at' => now(), 'provider_ids_verified_at' => now(),
         ]);
         Balance::query()->create([
-            'user_id' => $user->id, 'provider_id' => $provider->id, 'currency' => 'USD',
+            'user_id' => $user->id, 'provider_id' => $provider->id, 'external_account_id' => 'balance-wallet', 'currency' => 'USD',
             'available_balance' => 100, 'ledger_balance' => 100, 'as_of' => now(),
         ]);
         $beneficiary = Beneficiary::query()->create([
@@ -392,11 +399,14 @@ class NiumPostgresConcurrencyTest extends TestCase
             'transfer_no' => "TRF-BALANCE-{$number}", 'user_id' => $user->id, 'provider_id' => $provider->id,
             'beneficiary_id' => $beneficiary->id, 'transfer_type' => 'payout', 'source_currency' => 'USD',
             'target_currency' => 'USD', 'source_amount' => 80, 'fee_amount' => 0, 'fee_currency' => 'USD',
-            'purpose_code' => 'IR01811', 'status' => 'draft',
+            'purpose_code' => 'IR01811', 'reference_text' => 'PATCH258-CONCURRENCY', 'status' => 'draft',
         ]));
 
         $this->runConcurrent(2, function (int $worker) use ($provider, $transfers): void {
-            Http::fake(['*' => Http::response(['systemReferenceNumber' => 'RT-BALANCE-'.$worker])]);
+            Http::fake([
+                '*purposeCodes' => Http::response([['purposeCode' => 'IR01811', 'description' => 'General Goods']]),
+                '*' => Http::response(['systemReferenceNumber' => 'RT-BALANCE-'.$worker]),
+            ]);
             try {
                 app(ProviderTransferManager::class)->submitTransfer(
                     IntegrationProvider::query()->findOrFail($provider->id),
@@ -616,6 +626,7 @@ class NiumPostgresConcurrencyTest extends TestCase
 
     private function configureNium(): void
     {
+        config()->set('wallet.ledger.enabled', true);
         config()->set('services.nium.base_url', 'https://gateway.nium.test');
         config()->set('services.nium.client_id', 'concurrency-client-id');
         config()->set('services.nium.auth.mode', 'header');

@@ -5,8 +5,8 @@ namespace App\Console\Commands;
 use App\Models\AuditLog;
 use App\Models\Beneficiary;
 use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
+use App\Services\Integrations\BeneficiaryOperationService;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Throwable;
 
@@ -31,8 +31,8 @@ final class RepairNiumBeneficiaryPayoutMethod extends Command
     public function handle(NiumBeneficiaryPayoutMethodResolver $resolver): int
     {
         try {
-            $result = DB::transaction(function () use ($resolver): array {
-                $beneficiary = Beneficiary::query()->lockForUpdate()->findOrFail((int) $this->argument('beneficiary'));
+            $discovered = Beneficiary::query()->useWritePdo()->findOrFail((int) $this->argument('beneficiary'));
+            $result = app(BeneficiaryOperationService::class)->mutateLocally($discovered, function (Beneficiary $beneficiary) use ($resolver): array {
                 $this->assertExpectedIdentity($beneficiary);
                 if (strtolower((string) $beneficiary->provider()->value('code')) !== 'nium') {
                     throw new RuntimeException('The expected provider is not Nium.');
@@ -50,7 +50,9 @@ final class RepairNiumBeneficiaryPayoutMethod extends Command
 
                 if ((bool) $this->option('apply')) {
                     $this->assertApproved();
-                    $beneficiary->update(['payout_method' => $evidence->payoutMethod]);
+                    if (! $beneficiary->update(['payout_method' => $evidence->payoutMethod])) {
+                        throw new RuntimeException('Beneficiary payout method was not persisted.');
+                    }
                     AuditLog::query()->create([
                         'user_id' => $beneficiary->user_id,
                         'action' => self::AUDIT_ACTION,

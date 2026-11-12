@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\IntegrationProvider;
 use App\Models\NiumDynamicPayoutOutbox;
 use RuntimeException;
@@ -42,6 +43,7 @@ final class DynamicPayoutWebhook
             throw new RuntimeException('dynamic_webhook_reference_conflict');
         }
         $this->dispatcher->locked($ids->sole()->id, function ($intent, $outbox) use ($data, $reference, $external): void {
+            OwnerFirst::current([$intent->user_id]);
             $c = $intent->confirmed_terms['context']['corridor'];
             if (($data['clientHashId'] ?? null) !== $c['client'] || ($data['customerHashId'] ?? null) !== $intent->customer
                 || ($data['walletHashId'] ?? null) !== $intent->source_wallet

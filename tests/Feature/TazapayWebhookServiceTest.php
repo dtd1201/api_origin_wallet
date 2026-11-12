@@ -7,7 +7,7 @@ use App\Models\Transaction;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Tazapay\TazapayWebhookService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Request;
 use Tests\TestCase;
 

@@ -4,7 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;

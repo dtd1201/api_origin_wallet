@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\ApiRequestLog;
 use App\Models\IntegrationProvider;
 use App\Models\User;
@@ -36,6 +37,7 @@ final class NiumHkSandboxKycSimulationRunner
 
     public function run(): array
     {
+        OwnerFirst::outside();
         $context = $this->preflight();
         $protectedFingerprint = $this->fingerprint($context['protected_account']);
         $logMaxId = (int) (ApiRequestLog::query()->max('id') ?? 0);
@@ -133,7 +135,7 @@ final class NiumHkSandboxKycSimulationRunner
 
     private function claim(): void
     {
-        DB::transaction(function (): void {
+        OwnerFirst::account(UserProviderAccount::query()->findOrFail(self::ACCOUNT_ID), function (): void {
             $account = UserProviderAccount::query()->whereKey(self::ACCOUNT_ID)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
 

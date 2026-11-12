@@ -673,7 +673,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         $this->nium->shouldNotReceive('get');
         $this->nium->shouldNotReceive('post');
-        $this->expectExceptionMessage('dynamic_quote_requires_network_outside_transaction');
+        $this->expectException(\App\Services\Wallet\Concurrency\OwnerLockContractViolation::class);
         DB::transaction(fn () => app(NiumDynamicPayoutQuoteService::class)
             ->availability($this->owner, $this->beneficiary, $this->wallet));
     }

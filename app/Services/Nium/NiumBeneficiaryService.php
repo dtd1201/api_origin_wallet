@@ -5,15 +5,18 @@ namespace App\Services\Nium;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\Contracts\BeneficiaryProvider;
+use App\Services\Integrations\BeneficiaryOperationService;
+use App\Services\Integrations\CoordinatesBeneficiaryOperations;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use RuntimeException;
 
 class NiumBeneficiaryService implements BeneficiaryProvider
 {
+    use CoordinatesBeneficiaryOperations;
+
     public const CLIENT_LEGAL_ENTITY = 'HK';
 
     public function __construct(
@@ -30,6 +33,17 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         $this->accountStateService->assertEligible($beneficiary->user);
 
         return $this->corridorService->beneficiaryPayoutMethods($beneficiary);
+    }
+
+    public function assertLocalBeneficiaryOperation(Beneficiary $beneficiary, string $action): void
+    {
+        if (! filled($beneficiary->external_beneficiary_id)) return;
+        if ((string) config('services.nium.beneficiary_'.$action.'_endpoint', '') === '') {
+            throw new RuntimeException('Nium beneficiary '.$action.' endpoint is not configured.');
+        }
+        if (! (bool) config('services.nium.beneficiary_'.$action.'_enabled', false)) {
+            throw new RuntimeException('Nium beneficiary '.$action.' is not enabled for this client entitlement.');
+        }
     }
 
     public function requirements(Beneficiary $beneficiary): array
@@ -49,7 +63,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         return [$corridor, $schema];
     }
 
-    public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performCreateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         [$corridor, $schema] = $this->requirements($beneficiary);
 
@@ -58,13 +72,18 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
     public function createValidatedBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary, array $selectedCorridor, NiumBeneficiaryRequirementsResult $schema): Beneficiary
     {
+        if ($beneficiary->operationContext === null) {
+            return app(BeneficiaryOperationService::class)->execute($provider, $beneficiary, 'create',
+                fn (Beneficiary $snapshot) => $this->createValidatedBeneficiary($provider, $snapshot, $selectedCorridor, $schema));
+        }
         $beneficiary->loadMissing('user.profile');
         $this->accountStateService->assertEligible($beneficiary->user);
         $this->requirementsService->assertMatchesCorridor($schema, $selectedCorridor);
         $payload = $this->validatedPayload($beneficiary, $schema);
         $this->verifyAccountIfRequested($beneficiary);
 
-        $requestId = (string) Str::uuid();
+        $requestId = BeneficiaryOperationService::requestId($beneficiary);
+        BeneficiaryOperationService::beginMutation($beneficiary, 'create');
         $response = $this->niumService->postWithRequestId(
             path: $this->niumService->path(
                 (string) config('services.nium.beneficiary_endpoint'),
@@ -131,7 +150,8 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         }
 
         $payload = $this->buildAccountVerificationPayload($beneficiary, $nium);
-        $requestId = (string) Str::uuid();
+        $requestId = BeneficiaryOperationService::requestId($beneficiary, verification: true);
+        BeneficiaryOperationService::beginMutation($beneficiary, 'account_verification');
         $response = $this->niumService->postWithRequestId(
             path: $this->niumService->path(
                 (string) config('services.nium.account_verification_endpoint'),
@@ -150,7 +170,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         if (! $response->successful()) {
             $responseData = $response->json() ?? ['raw' => $response->body()];
 
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => 'verification_failed',
                 'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
             ]);
@@ -160,12 +180,12 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
-        $beneficiary->update([
+        BeneficiaryOperationService::write($beneficiary, [
             'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
         ]);
     }
 
-    public function updateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performUpdateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         $beneficiary->loadMissing('user.profile');
         $this->accountStateService->assertEligible($beneficiary->user);
@@ -185,7 +205,9 @@ class NiumBeneficiaryService implements BeneficiaryProvider
 
         [, $schema] = $this->requirements($beneficiary);
         $payload = $this->validatedPayload($beneficiary, $schema);
-        $response = $this->niumService->put(
+        BeneficiaryOperationService::beginMutation($beneficiary, 'update');
+        $requestId = BeneficiaryOperationService::requestId($beneficiary);
+        $response = $this->niumService->putWithRequestId(
             path: $this->niumService->path(
                 $endpoint,
                 [
@@ -196,12 +218,15 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             ),
             payload: $payload,
             user: $beneficiary->user,
+            requestId: $requestId,
+            operation: 'beneficiary_update',
+            externalReference: (string) $beneficiary->id,
         );
 
-        return $this->handleWriteResponse($provider, $beneficiary, $response, 'update', $payload);
+        return $this->handleWriteResponse($provider, $beneficiary, $response, 'update', $payload, $requestId);
     }
 
-    public function deleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
+    protected function performDeleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
     {
         $beneficiary->loadMissing('user');
 
@@ -218,6 +243,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             throw new RuntimeException('Nium beneficiary delete is not enabled for this client entitlement.');
         }
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'delete');
         $response = $this->niumService->delete(
             path: $this->niumService->path(
                 $endpoint,
@@ -233,7 +259,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
         if (! $response->successful()) {
             $responseData = $response->json() ?? ['raw' => $response->body()];
 
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => 'delete_failed',
                 'raw_data' => $this->safeOperationalData($responseData),
             ]);
@@ -344,7 +370,7 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             : ($providerBeneficiaryId ?? $beneficiary->external_beneficiary_id);
 
         if (! $response->successful() || ! filled($resolvedBeneficiaryId)) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => "{$action}_failed",
                 'raw_data' => $this->mergeSafeOperationalData($beneficiary, $responseData),
             ]);
@@ -352,14 +378,14 @@ class NiumBeneficiaryService implements BeneficiaryProvider
             throw new NiumBeneficiaryWriteException($response, "beneficiary_{$action}", $requestId);
         }
 
-        $beneficiary->update([
+        BeneficiaryOperationService::write($beneficiary, [
             'external_beneficiary_id' => $resolvedBeneficiaryId,
             'status' => $this->normalizeBeneficiaryStatus($payload['status'] ?? 'ACTIVE'),
             'payout_method' => strtoupper((string) $requestPayload['payoutMethod']),
             'raw_data' => $this->mergeSuccessfulWriteData($beneficiary, $responseData, $requestPayload),
         ]);
 
-        return $beneficiary->fresh();
+        return BeneficiaryOperationService::current($beneficiary);
     }
 
     private function routingInfo(Beneficiary $beneficiary, array $nium): array

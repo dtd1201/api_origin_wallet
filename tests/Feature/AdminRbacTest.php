@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Http;
 use App\Models\Role;
 use App\Models\Transfer;
 use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 

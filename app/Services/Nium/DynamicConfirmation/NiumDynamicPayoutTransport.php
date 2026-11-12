@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\IntegrationProvider;
 use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
@@ -85,6 +86,7 @@ final class NiumDynamicPayoutTransport implements DynamicPayoutTransport
 
     private function assertScope(NiumDynamicIntent $intent): void
     {
+        OwnerFirst::outside();
         $c = $intent->confirmed_terms['context']['corridor'];
         $base = (string) config('services.nium.base_url');
         $provider = IntegrationProvider::query()->findOrFail($intent->provider_id);

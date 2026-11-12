@@ -45,16 +45,30 @@ final class NiumDynamicWalletSnapshotTest extends DynamicConfirmationDatabaseTes
         });
     }
 
-    public function test_authenticated_refresh_caps_spendable_funds_without_replacing_holds_or_ledger(): void
+    public function test_authenticated_refresh_records_admission_ceiling_without_rewriting_books(): void
     {
         $this->wallet->update(['available_balance' => '1500', 'reserved_balance' => '500']);
         $this->response('{"walletHashId":"fixture-wallet","currencies":[{"currencyCode":"USD","availableBalance":1000.01}]}');
         $snapshot = $this->snapshots->refresh($this->owner, $this->wallet);
         $this->assertSame('1000.01000000', $snapshot['available']);
-        $this->assertSame('500.01000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('1500.00000000', $this->wallet->fresh()->available_balance);
         $this->assertSame('500.00000000', $this->wallet->fresh()->reserved_balance);
         $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
         $this->assertArrayNotHasKey('provider_as_of', $snapshot);
+        $this->assertSame(0, LedgerEntry::query()->count());
+    }
+
+    public function test_lower_then_higher_provider_observations_do_not_permanently_reduce_local_funds(): void
+    {
+        $this->nium->shouldReceive('get')->twice()->andReturn(
+            new Response(new PsrResponse(200, [], '{"walletHashId":"fixture-wallet","currencies":[{"currencyCode":"USD","availableBalance":500}]}')),
+            new Response(new PsrResponse(200, [], '{"walletHashId":"fixture-wallet","currencies":[{"currencyCode":"USD","availableBalance":2000}]}')));
+        $this->snapshots->refresh($this->owner, $this->wallet);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('500.00000000', $this->wallet->fresh()->raw_data['provider_available_balance']);
+        $this->snapshots->refresh($this->owner, $this->wallet);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->raw_data['provider_available_balance']);
         $this->assertSame(0, LedgerEntry::query()->count());
     }
 
@@ -93,7 +107,7 @@ final class NiumDynamicWalletSnapshotTest extends DynamicConfirmationDatabaseTes
     public function test_wallet_provider_io_is_forbidden_inside_reservation_transactions(): void
     {
         $this->nium->shouldNotReceive('get');
-        $this->expectExceptionMessage('dynamic_wallet_refresh_requires_network_outside_transaction');
+        $this->expectException(\App\Services\Wallet\Concurrency\OwnerLockContractViolation::class);
         DB::transaction(fn () => $this->snapshots->refresh($this->owner, $this->wallet));
     }
 

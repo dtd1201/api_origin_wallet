@@ -6,13 +6,14 @@ use App\Models\ApiRequestLog;
 use App\Models\ApiToken;
 use App\Models\AuditLog;
 use App\Models\Beneficiary;
+use App\Models\BeneficiaryOperation;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Nium\NiumBeneficiaryPayoutMethodResolver;
 use App\Services\Nium\NiumBeneficiaryRequirementsService;
 use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\NiumTransferPolicy;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -203,7 +204,7 @@ class NiumBeneficiaryLifecycleTest extends TestCase
 
         $audit = AuditLog::query()->where('action', 'beneficiary.nium_payout_method_repaired')->sole();
         $this->assertSame((string) $beneficiary->id, $audit->entity_id);
-        $this->assertSame([
+        $expected = [
             'beneficiary_id' => $beneficiary->id,
             'provider_id' => $provider->id,
             'user_id' => $user->id,
@@ -211,7 +212,12 @@ class NiumBeneficiaryLifecycleTest extends TestCase
             'external_beneficiary_id' => 'legacy-beneficiary-id',
             'payout_method' => 'SWIFT',
             'operator_context' => 'OPS-123 lifecycle repair test',
-        ], $audit->new_data);
+        ];
+        $actual = $audit->new_data;
+        // PostgreSQL JSONB may reorder object keys; keep exact keys, values and types.
+        ksort($expected);
+        ksort($actual);
+        $this->assertSame($expected, $actual);
         $this->assertStringNotContainsString('lifecycle-key', json_encode($audit->toArray(), JSON_THROW_ON_ERROR));
     }
 
@@ -335,6 +341,12 @@ class NiumBeneficiaryLifecycleTest extends TestCase
         ])->assertUnprocessable()->assertJsonValidationErrors('bank_code');
         $this->assertSame('IFSC', data_get($beneficiary->fresh()->raw_data, 'nium.bankCodeType'));
         Http::assertSentCount(2);
+        $operations = BeneficiaryOperation::query()->where('beneficiary_id', $beneficiary->id)->orderBy('generation')->get();
+        $this->assertSame(['succeeded', 'rejected'], $operations->pluck('state')->all());
+        $this->assertNull($operations[1]->dispatch_steps);
+        $this->assertNull($operations[1]->active_beneficiary_id);
+        $this->assertSame(ValidationException::class, $operations[1]->failure_class);
+        $this->assertSame('active', $beneficiary->fresh()->status);
     }
 
     public function test_missing_branch_routing_type_returns_a_branch_field_error_without_post(): void

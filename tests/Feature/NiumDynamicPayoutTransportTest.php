@@ -75,6 +75,23 @@ final class NiumDynamicPayoutTransportTest extends DynamicConfirmationDatabaseTe
         (new NiumDynamicPayoutTransport($this->nium))->transactions($this->intent);
     }
 
+    public function test_missing_pagination_metadata_cannot_be_treated_as_an_exhaustive_fee_inventory(): void
+    {
+        $this->nium->shouldReceive('getDynamicPayoutTransactions')->once()->andReturn($this->response(
+            '{"content":[{"authCode":"row"}]}'));
+        $this->expectExceptionMessage('dynamic_transaction_pagination_unverified');
+        (new NiumDynamicPayoutTransport($this->nium))->transactions($this->intent);
+    }
+
+    public function test_changing_transaction_count_between_pages_rejects_the_snapshot(): void
+    {
+        $this->nium->shouldReceive('getDynamicPayoutTransactions')->twice()->andReturn(
+            $this->response('{"content":[{"authCode":"row-1"}],"totalPages":2,"totalElements":2}'),
+            $this->response('{"content":[{"authCode":"row-2"}],"totalPages":2,"totalElements":3}'));
+        $this->expectExceptionMessage('dynamic_transaction_snapshot_incomplete');
+        (new NiumDynamicPayoutTransport($this->nium))->transactions($this->intent);
+    }
+
     public function test_sandbox_intent_cannot_be_reconciled_against_production(): void
     {
         config(['services.nium.base_url' => 'https://gateway.nium.com']);

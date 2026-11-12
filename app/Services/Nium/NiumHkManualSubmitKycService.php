@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Jobs\Nium\ContinueNiumHkManualKycJob;
 use App\Models\ApiRequestLog;
 use App\Models\AuditLog;
@@ -37,6 +38,7 @@ final class NiumHkManualSubmitKycService
 
     public function submit(User $user, ?string $idempotencyKey = null): array
     {
+        OwnerFirst::outside();
         $context = $this->context($user, $idempotencyKey);
 
         if (isset($context['continuation'])) {
@@ -513,6 +515,7 @@ final class NiumHkManualSubmitKycService
 
     public function continueManualKyc(int $continuationId): ?int
     {
+        OwnerFirst::outside();
         $claimToken = (string) Str::uuid();
         $continuation = DB::transaction(function () use ($continuationId, $claimToken): ?NiumManualKycContinuation {
             $row = NiumManualKycContinuation::query()->whereKey($continuationId)->lockForUpdate()->first();
@@ -1184,7 +1187,7 @@ final class NiumHkManualSubmitKycService
 
     private function claim(array $context): ?array
     {
-        return DB::transaction(function () use ($context): ?array {
+        return OwnerFirst::account($context['account'], function () use ($context): ?array {
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $key = $this->attemptKey($context['reference_id']);
@@ -1214,7 +1217,7 @@ final class NiumHkManualSubmitKycService
             $account->forceFill(['metadata' => $metadata])->save();
 
             return null;
-        }, 3);
+        }, attempts: 3);
     }
 
     private function finish(
@@ -1228,7 +1231,7 @@ final class NiumHkManualSubmitKycService
         mixed $externalId = null,
         ?string $biometricUrl = null,
     ): array {
-        $attempt = DB::transaction(function () use ($context, $state, $httpStatus, $providerReference, $kycStatus, $kycMode, $entityType, $externalId, $biometricUrl): array {
+        $attempt = OwnerFirst::account($context['account'], function () use ($context, $state, $httpStatus, $providerReference, $kycStatus, $kycMode, $entityType, $externalId, $biometricUrl): array {
             $account = UserProviderAccount::query()->whereKey($context['account']->id)->lockForUpdate()->firstOrFail();
             $metadata = (array) $account->metadata;
             $log = $this->attemptLog($context);
@@ -1275,7 +1278,7 @@ final class NiumHkManualSubmitKycService
             }
 
             return $attempt;
-        }, 3);
+        }, attempts: 3);
 
         return $attempt;
     }

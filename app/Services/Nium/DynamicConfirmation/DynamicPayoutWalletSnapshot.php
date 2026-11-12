@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace App\Services\Nium\DynamicConfirmation;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Balance;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumService;
-use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -21,6 +21,7 @@ final class DynamicPayoutWalletSnapshot
 
     public function refresh(User $user, Balance $wallet, ?string $exceptIntent = null): array
     {
+        OwnerFirst::outside();
         if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
             throw new RuntimeException('dynamic_wallet_refresh_requires_network_outside_transaction');
         }
@@ -37,7 +38,7 @@ final class DynamicPayoutWalletSnapshot
         $snapshot += ['observed_at' => now()->toISOString(), 'expires_at' => $started->copy()->addSeconds(30)->toISOString(),
             'response_sha256' => hash('sha256', $response->body())];
 
-        return DB::transaction(function () use ($user, $wallet, $account, $scope, $snapshot, $exceptIntent): array {
+        return OwnerFirst::users([$user->id], function () use ($user, $wallet, $account, $scope, $snapshot, $exceptIntent): array {
             $owner = User::query()->lockForUpdate()->findOrFail($user->id);
             $currentAccount = UserProviderAccount::query()->lockForUpdate()->findOrFail($account->id);
             $current = Balance::query()->lockForUpdate()->findOrFail($wallet->id);
@@ -47,21 +48,12 @@ final class DynamicPayoutWalletSnapshot
                 throw new RuntimeException('dynamic_wallet_snapshot_binding_changed');
             }
             DynamicPayoutGate::assertWalletClear((int) $wallet->provider_id, $scope['wallet'], $exceptIntent);
-            $reserved = BigDecimal::of(DynamicReservationLedger::storage($current->reserved_balance));
-            $ceiling = BigDecimal::of($snapshot['available'])->minus($reserved);
-            $local = BigDecimal::of(DynamicReservationLedger::storage($current->available_balance));
-            $ledgerCeiling = BigDecimal::of(DynamicReservationLedger::storage($current->ledger_balance))->minus($reserved);
-            // A provider refresh cannot increase local funds, overwrite holds, or
-            // apply the provider's debit to the local ledger for a second time.
-            $available = BigDecimal::min($local, $ceiling, $ledgerCeiling);
-            if ($available->isNegative()) {
-                $available = BigDecimal::zero();
-            }
+            // Observations constrain admission, not journal balances. Persisting
+            // a minimum here loses legitimate funds when a later observation rises.
             $raw = $current->raw_data ?? [];
             $raw['provider_available_balance'] = $snapshot['available'];
             $raw['dynamic_authenticated_availability'] = $snapshot;
-            DynamicPayoutDispatcher::persist($current->forceFill(['raw_data' => $raw,
-                'available_balance' => DynamicReservationLedger::storage((string) $available)]));
+            DynamicPayoutDispatcher::persist($current->forceFill(['raw_data' => $raw]));
             return $snapshot;
         }, 3);
     }

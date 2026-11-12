@@ -2,11 +2,14 @@
 
 namespace App\Http\Controllers\Api\Admin;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Http\Controllers\Api\Admin\Concerns\RecordsAdminAudit;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Admin\TransferDetailResource;
 use App\Http\Resources\Admin\TransferListResource;
 use App\Models\IntegrationProvider;
+use App\Models\LedgerEntry;
+use App\Models\NiumComplianceEvent;
 use App\Models\Transfer;
 use App\Services\Integrations\ProviderTransferManager;
 use App\Services\Wallet\LedgerService;
@@ -14,6 +17,7 @@ use App\Services\Wallet\TransferApprovalService;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use RuntimeException;
@@ -72,7 +76,7 @@ class TransferController extends Controller
             && strtoupper((string) $validated['target_currency']) === 'SGD', 422,
             'SGD LOCAL requires the standard authenticated customer Review and Submit workflow.');
 
-        $transfer = DB::transaction(fn () => Transfer::create($validated));
+        $transfer = OwnerFirst::users([$validated['user_id']], fn () => Transfer::create($validated));
 
         return response()->json((new TransferDetailResource($transfer))->resolve($request), 201);
     }
@@ -156,7 +160,6 @@ class TransferController extends Controller
 
         try {
             $transfer = $approvalService->reject($transfer, $request->user(), $validated['note'] ?? null);
-            $ledgerService->releaseTransferHold($transfer, 'Transfer hold released after admin rejection.');
             $transfer = $transfer->fresh(['approvals.approver', 'beneficiary', 'sourceBankAccount']);
         } catch (RuntimeException $exception) {
             return response()->json([
@@ -174,8 +177,6 @@ class TransferController extends Controller
 
     public function update(Request $request, Transfer $transfer): JsonResponse
     {
-        abort_if(\App\Services\Nium\NiumTransferReviewService::applies($transfer), 422,
-            'SGD LOCAL instructions are immutable. Use the approval, cancellation or status reconciliation workflow.');
         $validated = $request->validate([
             'transfer_no' => ['sometimes', 'string', 'max:50', 'unique:transfers,transfer_no,'.$transfer->id],
             'user_id' => ['sometimes', 'exists:users,id'],
@@ -204,34 +205,94 @@ class TransferController extends Controller
             'raw_data.rate_id' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
-        abort_if(strtolower((string) $transfer->provider?->code) === 'nium'
-            && ($validated['target_currency'] ?? null) === 'SGD', 422,
-            'SGD LOCAL requires a fresh customer review and authorization.');
+        $transfer = OwnerFirst::transfer($transfer, function () use ($transfer, $validated): Transfer {
+            // Serialize against reservation, submission claim and reconciliation.
+            // Route-bound models and payload status are never the authority here.
+            $transfer = Transfer::query()->whereKey($transfer->id)->lockForUpdate()->firstOrFail();
+            abort_if(\App\Services\Nium\NiumTransferReviewService::applies($transfer), 422,
+                'SGD LOCAL instructions are immutable. Use the approval, cancellation or status reconciliation workflow.');
+            $this->assertGenericMutationAllowed($transfer);
 
-        if (array_key_exists('provider_id', $validated)) {
-            $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
-        }
+            if (array_key_exists('provider_id', $validated)) {
+                $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
+            }
+            $effectiveProvider = IntegrationProvider::query()->findOrFail($validated['provider_id'] ?? $transfer->provider_id);
+            abort_if(strtolower((string) $effectiveProvider->code) === 'nium'
+                && strtoupper((string) ($validated['target_currency'] ?? $transfer->target_currency)) === 'SGD', 422,
+                'SGD LOCAL requires the standard authenticated customer Review and Submit workflow.');
 
-        $effectiveProvider = IntegrationProvider::query()->findOrFail($validated['provider_id'] ?? $transfer->provider_id);
-        abort_if(strtolower((string) $effectiveProvider->code) === 'nium'
-            && strtoupper((string) ($validated['target_currency'] ?? $transfer->target_currency)) === 'SGD', 422,
-            'SGD LOCAL requires the standard authenticated customer Review and Submit workflow.');
-
-        $transfer = DB::transaction(function () use ($transfer, $validated): Transfer {
             $transfer->update($validated);
 
             return $transfer->fresh();
-        });
+        }, isset($validated['user_id']) ? [$validated['user_id']] : []);
 
         return response()->json((new TransferDetailResource($transfer))->resolve($request));
     }
 
     public function destroy(Transfer $transfer): JsonResponse
     {
-        abort_if(\App\Services\Nium\NiumTransferReviewService::applies($transfer), 422,
-            'SGD LOCAL payment history cannot be deleted. Cancel an unsubmitted instruction through its workflow.');
-        DB::transaction(fn () => $transfer->delete());
+        OwnerFirst::transfer($transfer, function () use ($transfer): void {
+            $transfer = Transfer::query()->whereKey($transfer->id)->lockForUpdate()->firstOrFail();
+            abort_if(\App\Services\Nium\NiumTransferReviewService::applies($transfer), 422,
+                'SGD LOCAL payment history cannot be deleted. Cancel an unsubmitted instruction through its workflow.');
+            $this->assertGenericMutationAllowed($transfer);
+            $transfer->delete();
+        });
 
         return response()->json(status: 204);
+    }
+
+    /** Only generic Admin CRUD calls this, while holding the persisted Transfer row lock. */
+    private function assertGenericMutationAllowed(Transfer $transfer): void
+    {
+        // Include canonical references even when historical source metadata is
+        // contradictory. Neither journal status nor mutable wallet receipts can
+        // make an existing financial record disappear from this boundary.
+        $journals = LedgerEntry::query()->where(function ($query) use ($transfer): void {
+            $query->where(fn ($source) => $source->where('source_type', 'transfer')->where('source_id', (string) $transfer->id))
+                ->orWhereIn('reference', [
+                    "transfer:{$transfer->id}:hold", "transfer:{$transfer->id}:debit", "transfer:{$transfer->id}:release",
+                ]);
+        });
+        $niumProviders = IntegrationProvider::query()->select('id')->whereRaw('LOWER(code) = ?', ['nium']);
+        $compliance = NiumComplianceEvent::query()->where('transfer_id', $transfer->id);
+
+        // Related persisted Nium evidence also protects an instruction whose
+        // provider identity was already corrupted before this patch.
+        $isNium = strtolower((string) $transfer->provider?->code) === 'nium'
+            || (clone $journals)->whereIn('provider_id', $niumProviders)->exists()
+            || $transfer->transactions()->whereIn('provider_id', $niumProviders)->exists()
+            || $transfer->apiRequestLogs()->whereIn('provider_id', $niumProviders)->exists()
+            || $transfer->fxQuote()->whereIn('provider_id', $niumProviders)->exists()
+            || (clone $compliance)->whereIn('provider_id', $niumProviders)->exists();
+        if (! $isNium) {
+            return;
+        }
+
+        $protected = $journals->exists() || $transfer->fx_quote_id !== null
+            || $transfer->approvals()->exists() || $transfer->transactions()->exists()
+            || $transfer->apiRequestLogs()->exists() || $compliance->exists()
+            || ! in_array($transfer->status, ['draft', 'approval_required', 'approved'], true);
+        foreach ([
+            'provider_operation_key', 'external_transfer_id', 'external_payment_id',
+            'submitted_at', 'provider_status_at', 'provider_status', 'provider_status_detail',
+            'completed_at', 'failure_code', 'failure_reason',
+        ] as $field) {
+            $protected = $protected || $transfer->getRawOriginal($field) !== null;
+        }
+        // Supplement authoritative columns/relations with existing receipt and
+        // provider-result markers; raw_data is never the only evidence queried.
+        foreach ([
+            'wallet.hold_reference', 'wallet.held_amount', 'wallet.debit_reference', 'wallet.release_reference',
+            'provider_operation_key', 'provider_request_id', 'provider_status', 'provider_error_code',
+            'fx_quote_id', 'quote_ref', 'payment_consent',
+        ] as $path) {
+            $protected = $protected || Arr::has((array) $transfer->raw_data, $path);
+        }
+
+        // Existing editable fields all affect instruction, financial or audit
+        // identity. There is no demonstrated safe metadata exception to allow.
+        abort_if($protected, 422,
+            'Nium transfers with financial history or bound authorization cannot be edited or deleted through generic Admin CRUD.');
     }
 }

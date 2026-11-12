@@ -13,7 +13,7 @@ use App\Services\Nium\NiumPayoutFxLockService;
 use App\Services\Nium\NiumSgdLocalPayoutGate;
 use App\Services\Nium\NiumTransferPolicy;
 use App\Services\Nium\NiumTransferService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;

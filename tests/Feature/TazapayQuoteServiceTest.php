@@ -5,7 +5,7 @@ namespace Tests\Feature;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Tazapay\TazapayQuoteService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 

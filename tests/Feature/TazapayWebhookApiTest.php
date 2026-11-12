@@ -5,7 +5,7 @@ namespace Tests\Feature;
 use App\Models\IntegrationProvider;
 use App\Models\Transfer;
 use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Tests\TestCase;
 
 class TazapayWebhookApiTest extends TestCase

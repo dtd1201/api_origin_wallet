@@ -4,7 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\ManagedExchangeRate;
 use App\Services\BankRates\BankRateSyncService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 

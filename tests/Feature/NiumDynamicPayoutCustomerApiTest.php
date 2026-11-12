@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutAmountMode;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutInstruction;
 use App\Models\ApiToken;
@@ -239,11 +240,11 @@ final class NiumDynamicPayoutCustomerApiTest extends DynamicConfirmationDatabase
             app(DynamicPayoutEvidenceSource::class)->revalidate($records, $this->at());
             $this->fail('Evidence was accepted outside a transaction.');
         } catch (RuntimeException $exception) {
-            $this->assertSame('dynamic_evidence_requires_transaction', $exception->getMessage());
+            $this->assertInstanceOf(\App\Services\Wallet\Concurrency\OwnerLockContractViolation::class, $exception);
         }
         $this->wallet->user_id = User::factory()->create()->id;
         $this->expectExceptionMessage('dynamic_local_identity_unverified');
-        DB::transaction(fn () => app(DynamicPayoutEvidenceSource::class)->revalidate($records, $this->at()));
+        OwnerFirst::users([$this->owner->id], fn () => app(DynamicPayoutEvidenceSource::class)->revalidate($records, $this->at()));
     }
 
     public function test_disabled_flags_do_not_reserve_and_owned_status_remains_readable(): void

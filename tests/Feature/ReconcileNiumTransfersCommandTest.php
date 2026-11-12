@@ -8,7 +8,7 @@ use App\Models\LedgerEntry;
 use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Wallet\LedgerService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -268,16 +268,16 @@ class ReconcileNiumTransfersCommandTest extends TestCase
             'transfer_no' => 'TRF-'.$reference,
             'user_id' => $user->id,
             'provider_id' => $provider->id,
-            'external_transfer_id' => $reference,
             'transfer_type' => 'payout',
             'source_currency' => 'USD',
             'target_currency' => 'USD',
             'source_amount' => '10.00000000',
-            'status' => 'pending',
+            'status' => 'draft',
         ]);
 
         app(LedgerService::class)
             ->reserveTransfer($transfer);
+        $transfer->update(['status' => 'pending', 'external_transfer_id' => $reference]);
 
         return $transfer->fresh();
     }

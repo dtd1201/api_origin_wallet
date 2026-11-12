@@ -10,7 +10,7 @@ use App\Services\Compliance\ComplianceEvidenceService;
 use App\Services\Nium\NiumCustomerDocumentPreparationService;
 use App\Services\Nium\NiumCustomerOnboardingService;
 use App\Services\Nium\NiumProviderRequestException;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Event;
 use Mockery;
 use Tests\TestCase;

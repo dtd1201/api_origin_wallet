@@ -7,7 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Models\NiumComplianceEvent;
 use App\Models\Transfer;
 use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;

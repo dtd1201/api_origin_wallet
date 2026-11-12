@@ -10,7 +10,7 @@ use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumService;
 use App\Services\Nium\NiumStagingUiFixtureRebindService;
 use App\Services\Nium\NiumWebhookService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Http\Request;

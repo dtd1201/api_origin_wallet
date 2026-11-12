@@ -6,10 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\Admin\BeneficiaryDetailResource;
 use App\Http\Resources\Admin\BeneficiaryListResource;
 use App\Models\Beneficiary;
+use App\Models\IntegrationProvider;
+use App\Services\Integrations\BeneficiaryOperationConflict;
+use App\Services\Integrations\BeneficiaryOperationService;
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class BeneficiaryController extends Controller
 {
@@ -48,7 +51,10 @@ class BeneficiaryController extends Controller
 
         $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'] ?? null)->id;
 
-        $beneficiary = DB::transaction(fn () => Beneficiary::create($validated));
+        $beneficiary = OwnerFirst::users([(int) $validated['user_id']], function () use ($validated): Beneficiary {
+            IntegrationProvider::query()->whereKey($validated['provider_id'])->lock('for key share')->firstOrFail();
+            return Beneficiary::create($validated);
+        });
 
         return response()->json((new BeneficiaryDetailResource($beneficiary))->resolve($request), 201);
     }
@@ -90,18 +96,29 @@ class BeneficiaryController extends Controller
             $validated['provider_id'] = PrimaryProvider::resolveForRequest($validated['provider_id'])->id;
         }
 
-        $beneficiary = DB::transaction(function () use ($beneficiary, $validated): Beneficiary {
-            $beneficiary->update($validated);
-
-            return $beneficiary->fresh();
-        });
+        try {
+            $beneficiary = app(BeneficiaryOperationService::class)->mutateLocally($beneficiary,
+                function (Beneficiary $locked) use ($validated): Beneficiary {
+                    if (! $locked->update($validated)) throw new \RuntimeException('Beneficiary edit was not persisted.');
+                    return $locked->fresh();
+                }, isset($validated['user_id']) ? [(int) $validated['user_id']] : [],
+                isset($validated['provider_id']) ? [(int) $validated['provider_id']] : []);
+        } catch (BeneficiaryOperationConflict) {
+            return response()->json(['message' => 'The beneficiary has an unresolved provider operation.'], 409);
+        }
 
         return response()->json((new BeneficiaryDetailResource($beneficiary))->resolve($request));
     }
 
     public function destroy(Beneficiary $beneficiary): JsonResponse
     {
-        DB::transaction(fn () => $beneficiary->delete());
+        try {
+            app(BeneficiaryOperationService::class)->mutateLocally($beneficiary, function (Beneficiary $locked): void {
+                if (! $locked->delete()) throw new \RuntimeException('Beneficiary deletion was not persisted.');
+            });
+        } catch (BeneficiaryOperationConflict) {
+            return response()->json(['message' => 'The beneficiary has an unresolved provider operation.'], 409);
+        }
 
         return response()->json(status: 204);
     }

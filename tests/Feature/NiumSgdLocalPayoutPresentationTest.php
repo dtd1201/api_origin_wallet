@@ -11,7 +11,7 @@ use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Nium\NiumPayoutFxLockContract;
 use App\Services\Nium\NiumPayoutFxLockService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 

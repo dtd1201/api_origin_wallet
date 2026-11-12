@@ -2,6 +2,7 @@
 
 namespace App\Services\Nium;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\AuditLog;
 use App\Models\IntegrationProvider;
 use App\Models\KycProviderSubmission;
@@ -227,6 +228,7 @@ final class NiumCustomerRetryService
         UserProviderAccount $providerAccount,
         IntegrationProvider $provider,
     ): NiumCustomerLookupResult {
+        OwnerFirst::outside();
         $fixtureCapability = $this->consumeFixtureCapability($user, $providerAccount);
         $providerCapability = $this->consumeProviderCapability($provider);
 
@@ -372,6 +374,7 @@ final class NiumCustomerRetryService
         NiumCustomerLookupResult $lookupResult,
         array $payload,
     ): NiumCustomerCreateResult {
+        OwnerFirst::outside();
         $externalReference = $this->fixtureExternalReference($user, $providerAccount);
         $capability = $this->lookupProvenance[$lookupResult] ?? null;
 
@@ -510,6 +513,7 @@ final class NiumCustomerRetryService
         UserProviderAccount $providerAccount,
         NiumCustomerLookupResult|NiumCustomerCreateResult $result,
     ): UserProviderAccount {
+        OwnerFirst::outside();
         $capability = $this->successCapabilities[$result] ?? null;
 
         if (! $this->validSuccessCapability($providerAccount, $result, $capability)) {
@@ -519,7 +523,7 @@ final class NiumCustomerRetryService
         unset($this->successCapabilities[$result]);
 
         try {
-            return DB::transaction(function () use ($capability): UserProviderAccount {
+            return OwnerFirst::account($providerAccount, function () use ($capability): UserProviderAccount {
                 $lockedAccount = UserProviderAccount::query()
                     ->whereKey(self::PROVIDER_ACCOUNT_ID)
                     ->lockForUpdate()

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\User;
 
+use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\User\TransferResource;
 use App\Models\IntegrationProvider;
@@ -190,7 +191,7 @@ class TransferController extends Controller
         }
 
         try {
-            $transfer = DB::transaction(function () use ($approvalService, $user, $validated, $clientReference): Transfer {
+            $transfer = OwnerFirst::users([$user->id], function () use ($approvalService, $user, $validated, $clientReference): Transfer {
                 $transfer = $user->transfers()->create([
                     ...$validated,
                     'transfer_no' => 'TRF-'.Str::upper(Str::random(12)),
@@ -216,15 +217,18 @@ class TransferController extends Controller
         }
 
         if ($fxQuote !== null) {
-            $transfer->update([
-                'target_amount' => null,
-                'fx_rate' => $fxQuote->net_rate,
-                'fee_amount' => 0,
-                'raw_data' => [
-                    'fx_quote_id' => $fxQuote->id,
-                    'quote_ref' => $fxQuote->quote_ref,
-                ],
-            ]);
+            OwnerFirst::transfer($transfer, function () use ($transfer, $fxQuote): void {
+                $transfer = Transfer::query()->lockForUpdate()->findOrFail($transfer->id);
+                $transfer->update([
+                    'target_amount' => null,
+                    'fx_rate' => $fxQuote->net_rate,
+                    'fee_amount' => 0,
+                    'raw_data' => [
+                        'fx_quote_id' => $fxQuote->id,
+                        'quote_ref' => $fxQuote->quote_ref,
+                    ],
+                ]);
+            });
             $transfer = $transfer->fresh();
         }
 
@@ -361,7 +365,7 @@ class TransferController extends Controller
             ], 422);
         }
 
-        $transfer = DB::transaction(function () use ($transfer, $ledger): Transfer {
+        $transfer = OwnerFirst::transfer($transfer, function () use ($transfer, $ledger): Transfer {
             $transfer = Transfer::query()->whereKey($transfer->id)->lockForUpdate()->firstOrFail();
             abort_unless(in_array($transfer->status, ['draft', 'approval_required', 'approved'], true), 422);
             $transfer->update([

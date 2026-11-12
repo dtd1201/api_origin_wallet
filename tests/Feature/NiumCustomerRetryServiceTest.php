@@ -21,7 +21,7 @@ use App\Services\Nium\NiumProviderHttpClientFactory;
 use App\Services\Nium\NiumSafeValueProjector;
 use App\Services\Nium\NiumService;
 use Illuminate\Database\Events\QueryExecuted;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;

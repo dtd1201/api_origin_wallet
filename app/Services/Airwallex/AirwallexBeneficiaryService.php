@@ -5,19 +5,24 @@ namespace App\Services\Airwallex;
 use App\Models\Beneficiary;
 use App\Models\IntegrationProvider;
 use App\Services\Integrations\Contracts\BeneficiaryProvider;
+use App\Services\Integrations\BeneficiaryOperationService;
+use App\Services\Integrations\CoordinatesBeneficiaryOperations;
 use Illuminate\Http\Client\Response;
 use RuntimeException;
 
 class AirwallexBeneficiaryService implements BeneficiaryProvider
 {
+    use CoordinatesBeneficiaryOperations;
+
     public function __construct(
         private readonly AirwallexService $airwallexService,
     ) {
     }
 
-    public function createBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performCreateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         $payload = $this->buildBeneficiaryPayload($beneficiary);
+        BeneficiaryOperationService::beginMutation($beneficiary, 'create');
         $response = $this->airwallexService->post(
             path: (string) config('services.airwallex.beneficiary_endpoint'),
             payload: $payload,
@@ -27,13 +32,14 @@ class AirwallexBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'create', $payload);
     }
 
-    public function updateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
+    protected function performUpdateBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): Beneficiary
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return $this->createBeneficiary($provider, $beneficiary);
         }
 
         $payload = $this->buildBeneficiaryPayload($beneficiary);
+        BeneficiaryOperationService::beginMutation($beneficiary, 'update');
         $response = $this->airwallexService->put(
             path: $this->beneficiaryResourcePath(
                 (string) config('services.airwallex.beneficiary_update_endpoint'),
@@ -46,12 +52,13 @@ class AirwallexBeneficiaryService implements BeneficiaryProvider
         return $this->handleWriteResponse($provider, $beneficiary, $response, 'update', $payload);
     }
 
-    public function deleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
+    protected function performDeleteBeneficiary(IntegrationProvider $provider, Beneficiary $beneficiary): void
     {
         if (! filled($beneficiary->external_beneficiary_id)) {
             return;
         }
 
+        BeneficiaryOperationService::beginMutation($beneficiary, 'delete');
         $response = $this->airwallexService->delete(
             path: $this->beneficiaryResourcePath(
                 (string) config('services.airwallex.beneficiary_delete_endpoint'),
@@ -63,7 +70,7 @@ class AirwallexBeneficiaryService implements BeneficiaryProvider
         if (! $response->successful()) {
             $responseData = $response->json() ?? ['raw' => $response->body()];
 
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => 'delete_failed',
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     'delete_error' => $responseData,
@@ -135,7 +142,7 @@ class AirwallexBeneficiaryService implements BeneficiaryProvider
         $responseData = $response->json() ?? ['raw' => $response->body()];
 
         if (! $response->successful()) {
-            $beneficiary->update([
+            BeneficiaryOperationService::write($beneficiary, [
                 'status' => "{$action}_failed",
                 'raw_data' => array_merge($beneficiary->raw_data ?? [], [
                     "{$action}_request" => $requestPayload,
@@ -149,7 +156,7 @@ class AirwallexBeneficiaryService implements BeneficiaryProvider
         $beneficiaryPayload = (array) ($responseData['beneficiary'] ?? []);
         $bankDetails = (array) ($beneficiaryPayload['bank_details'] ?? []);
 
-        $beneficiary->update([
+        BeneficiaryOperationService::write($beneficiary, [
             'external_beneficiary_id' => $responseData['id'] ?? $responseData['beneficiary_id'] ?? $beneficiary->external_beneficiary_id,
             'full_name' => $beneficiary->full_name,
             'company_name' => $beneficiaryPayload['company_name'] ?? $beneficiary->company_name,
@@ -168,7 +175,7 @@ class AirwallexBeneficiaryService implements BeneficiaryProvider
             ]),
         ]);
 
-        return $beneficiary->fresh();
+        return BeneficiaryOperationService::current($beneficiary);
     }
 
     private function beneficiaryResourcePath(string $template, string $externalBeneficiaryId): string

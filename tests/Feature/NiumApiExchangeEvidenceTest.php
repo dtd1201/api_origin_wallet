@@ -7,7 +7,7 @@ use App\Models\IntegrationProvider;
 use App\Models\NiumApiExchangeEvidence;
 use App\Models\User;
 use App\Services\Integrations\ProviderHttpClient;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;

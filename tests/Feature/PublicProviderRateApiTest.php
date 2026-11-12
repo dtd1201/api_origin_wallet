@@ -7,7 +7,7 @@ use App\Models\FxQuote;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserProviderAccount;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
