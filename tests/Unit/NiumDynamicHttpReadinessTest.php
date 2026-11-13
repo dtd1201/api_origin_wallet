@@ -274,12 +274,12 @@ final class NiumDynamicHttpReadinessTest extends TestCase
         $this->assertClosed($response);
     }
 
-    public function test_sgd_local_remains_on_hold_and_dispatch_stays_denied(): void
+    public function test_sgd_local_without_financial_evidence_stays_unavailable(): void
     {
         $corridor = $this->corridor(['sourceCurrency' => 'SGD', 'destinationCountry' => 'SG', 'destinationCurrency' => 'SGD']);
         $scope = $this->scope(['fundingWallets' => ['SGD' => 'private-wallet']]);
         $response = $this->evaluate(['scope' => $scope], $this->candidate($scope, $corridor));
-        $this->assertContains('sgd_local_hold', $response->body()['options'][0]['reason_codes']);
+        $this->assertContains('financial_readiness_unverified', $response->body()['options'][0]['reason_codes']);
         $this->assertClosed($response);
     }
 

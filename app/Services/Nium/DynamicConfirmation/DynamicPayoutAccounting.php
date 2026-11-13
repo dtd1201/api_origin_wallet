@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Nium\DynamicConfirmation;
 
 use App\Domain\Nium\DynamicMultiCurrency\Financial\Decimal;
+use App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutAmountMode;
 use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
 use Throwable;
@@ -24,11 +25,15 @@ final class DynamicPayoutAccounting
     private function inspect(NiumDynamicIntent $intent, NiumDynamicPayoutOutbox $outbox, array $batch): array
     {
         $records = $batch['records'];
+        if (! is_array($records) || ! array_is_list($records)) {
+            return ['state' => 'unavailable', 'reason' => 'dynamic_accounting_fields_unsupported'];
+        }
         $c = $intent->confirmed_terms['context']['corridor'];
         $remittances = [];
+        $reversedReference = false;
         $identities = [];
         foreach ($records as $row) {
-            if (($row['walletHashId'] ?? null) !== $intent->source_wallet
+            if (! is_array($row) || ($row['walletHashId'] ?? null) !== $intent->source_wallet
                 || ($row['customerHashId'] ?? null) !== $intent->customer
                 || ($row['clientHashId'] ?? null) !== $c['client']
                 || ! is_string($row['authCode'] ?? null) || preg_match('/^[A-Za-z0-9_-]{1,100}$/D', $row['authCode']) !== 1
@@ -36,11 +41,23 @@ final class DynamicPayoutAccounting
                 return ['state' => 'unavailable', 'reason' => 'dynamic_accounting_scope_unverified'];
             }
             $identities[$row['authCode']] = true;
+            if ($row['authCode'] === $outbox->provider_reference
+                && in_array($row['transactionType'] ?? null, ['Fee_Reversal', 'Remittance_Reversal'], true)) {
+                $reversedReference = true;
+            }
+            // externalId is null in the observed contract. A local operation key
+            // alone must never discover a provider reference or settle a payment.
             if (in_array($row['transactionType'] ?? null, ['Remittance_Debit', 'Remittance_Debit_External'], true)
-                && (($outbox->provider_reference !== null && $row['authCode'] === $outbox->provider_reference)
-                    || ($outbox->operation_key !== null && ($row['externalId'] ?? null) === $outbox->operation_key))) {
+                && $outbox->provider_reference !== null && $row['authCode'] === $outbox->provider_reference) {
                 $remittances[] = $row;
             }
+        }
+        if ($outbox->provider_reference === null) {
+            return ['state' => 'pending', 'reason' => 'dynamic_remittance_reference_missing'];
+        }
+        if ($reversedReference) {
+            return ['state' => 'exception', 'reason' => 'dynamic_provider_reversal_requires_review',
+                'provider_reference' => $outbox->provider_reference];
         }
         if (count($remittances) === 0) {
             return ['state' => 'pending', 'reason' => 'dynamic_remittance_record_missing'];
@@ -84,6 +101,10 @@ final class DynamicPayoutAccounting
             if ($linked && in_array($row['transactionType'] ?? null, ['Fee_Reversal', 'Remittance_Reversal'], true)) {
                 return ['state' => 'exception', 'reason' => 'dynamic_provider_reversal_requires_review', 'provider_reference' => $reference];
             }
+            if (in_array($row['transactionType'] ?? null, ['Fee_Reversal', 'Remittance_Reversal'], true)
+                && ! isset($row['labels']['originalAuthorizationCode']) && ! isset($row['originalAuthorizationCode'])) {
+                return ['state' => 'unavailable', 'reason' => 'dynamic_reversal_linkage_unavailable', 'provider_reference' => $reference];
+            }
             if (($row['transactionType'] ?? null) === 'Fee_Debit') {
                 if (! isset($row['labels']['originalAuthorizationCode']) && ! isset($row['originalAuthorizationCode'])) {
                     return ['state' => 'unavailable', 'reason' => 'dynamic_fee_linkage_unavailable', 'provider_reference' => $reference];
@@ -93,16 +114,33 @@ final class DynamicPayoutAccounting
                 }
             }
         }
+        if (($remit['settlementStatus'] ?? null) !== 'Settled') {
+            $unsettled = ($remit['settlementStatus'] ?? null) === 'Unsettled';
+            return ['state' => $unsettled ? 'pending' : 'unavailable',
+                'reason' => $unsettled ? 'dynamic_provider_records_pending' : 'dynamic_provider_settlement_status_unsupported',
+                'provider_reference' => $reference];
+        }
+        if (! in_array($status, ['APPROVED', 'PAID'], true)) {
+            return ['state' => 'unavailable', 'reason' => 'dynamic_provider_status_unsupported', 'provider_reference' => $reference];
+        }
         if ($fees === []) {
+            // Neither an absent Fee_Debit nor a zero CUSTOMER fee proves a zero
+            // PROVIDER fee. No scoped authoritative no-charge contract is installed.
             return ['state' => 'pending', 'reason' => 'dynamic_fee_records_missing', 'provider_reference' => $reference];
         }
         foreach ([$remit, ...$fees] as $row) {
-            if (in_array(strtoupper($row['status'] ?? ''), ['RETURNED', 'REJECTED', 'DECLINED', 'FAILED', 'ERROR', 'BLOCKED', 'CANCELLED', 'REVERSAL'], true)
+            if (in_array(strtoupper(trim((string) ($row['status'] ?? ''))), ['RETURNED', 'REJECTED', 'DECLINED', 'FAILED', 'ERROR', 'BLOCKED', 'CANCELLED', 'REVERSAL'], true)
                 || in_array($row['settlementStatus'] ?? null, ['Released', 'Disputed', 'Waived'], true)) {
                 return ['state' => 'exception', 'reason' => 'dynamic_provider_terminal_exception', 'provider_reference' => $reference];
             }
             if (($row['settlementStatus'] ?? null) !== 'Settled') {
-                return ['state' => 'pending', 'reason' => 'dynamic_provider_records_pending', 'provider_reference' => $reference];
+                $unsettled = ($row['settlementStatus'] ?? null) === 'Unsettled';
+                return ['state' => $unsettled ? 'pending' : 'unavailable',
+                    'reason' => $unsettled ? 'dynamic_provider_records_pending' : 'dynamic_provider_settlement_status_unsupported',
+                    'provider_reference' => $reference];
+            }
+            if (! in_array(strtoupper(trim((string) ($row['status'] ?? ''))), ['APPROVED', 'PAID'], true)) {
+                return ['state' => 'unavailable', 'reason' => 'dynamic_provider_status_unsupported', 'provider_reference' => $reference];
             }
             if (($row['debit'] ?? null) !== true || ! is_string($row['authCurrencyCode'] ?? null)
                 || preg_match('/^[A-Z]{3}$/D', $row['authCurrencyCode']) !== 1
@@ -133,15 +171,37 @@ final class DynamicPayoutAccounting
         // Sum per-transaction settled wallet debits. effectiveAuthAmount may already include fees.
         $total = $principal->plus($fee);
         $t = $intent->confirmed_terms['financial_terms'];
+        if ($intent->source_currency !== 'USD'
+            || ($t['principal']['currency'] ?? null) !== 'USD'
+            || ($t['transaction_fee']['currency'] ?? null) !== 'USD'
+            || ($t['wallet_debit']['currency'] ?? null) !== 'USD'
+            || ($t['estimated_recipient']['currency'] ?? null) !== $intent->destination_currency
+            || ! in_array($intent->amount_mode, [PayoutAmountMode::Source->value, PayoutAmountMode::Destination->value], true)) {
+            return ['state' => 'unavailable', 'reason' => 'dynamic_customer_accounting_terms_unverified', 'provider_reference' => $reference];
+        }
         if (($remit['transactionCurrencyCode'] ?? null) !== $intent->destination_currency
             || ! is_string($remit['settlementTransactionAmount'] ?? null)) {
             return ['state' => 'unavailable', 'reason' => 'dynamic_destination_amount_evidence_missing', 'provider_reference' => $reference];
         }
         $destination = new Decimal($remit['settlementTransactionAmount']);
+        if ($destination->isZero()) {
+            return ['state' => 'unavailable', 'reason' => 'dynamic_destination_amount_evidence_missing', 'provider_reference' => $reference];
+        }
+        if (! (new Decimal($t['wallet_debit']['amount']))->equals(new Decimal($intent->total_debit))
+            || ! (new Decimal($t['principal']['amount']))->plus(new Decimal($t['transaction_fee']['amount']))
+                ->equals(new Decimal($intent->total_debit))) {
+            return ['state' => 'unavailable', 'reason' => 'dynamic_customer_accounting_terms_unverified', 'provider_reference' => $reference];
+        }
         $matched = $allUsd && $total->equals(new Decimal($intent->total_debit))
             && $principal->equals(new Decimal($t['principal']['amount']))
             && $fee->equals(new Decimal($t['transaction_fee']['amount']));
         $matched = $matched && array_filter($fees, static fn (array $row): bool => $row['labels']['feeName'] !== 'REMIT_BANK_FEE') === [];
+        // A destination-driven instruction specifies the intended recipient amount.
+        // A different observed credit is an exception, never silently a matched payout.
+        $destinationSpecified = $intent->amount_mode === PayoutAmountMode::Destination->value;
+        if ($destinationSpecified) {
+            $matched = $matched && $destination->equals(new Decimal($t['estimated_recipient']['amount']));
+        }
         if (isset($remit['labels']['netExchangeRate'])) {
             if (! is_string($remit['labels']['netExchangeRate']) || ! is_string($t['fx_rate'] ?? null)) {
                 return ['state' => 'unavailable', 'reason' => 'dynamic_provider_fx_observation_unverified', 'provider_reference' => $reference];
@@ -158,6 +218,7 @@ final class DynamicPayoutAccounting
                 'destination_amount' => $destination->value, 'destination_currency' => $intent->destination_currency,
                 // Quote amounts are reference estimates, not settlement guarantees.
                 'estimated_destination_amount' => $t['estimated_recipient']['amount'],
+                'intended_destination_amount' => $destinationSpecified ? $t['estimated_recipient']['amount'] : null,
                 'destination_minus_estimate' => (string) \Brick\Math\BigDecimal::of($destination->value)
                     ->minus($t['estimated_recipient']['amount'])->stripTrailingZeros(),
                 'customer_authorized_debit_usd' => (new Decimal($intent->total_debit))->value,
@@ -165,6 +226,7 @@ final class DynamicPayoutAccounting
                 'provider_fee_records' => array_map(static fn (array $row): array => [
                     'id' => $row['authCode'], 'fee_name' => $row['labels']['feeName'],
                     'amount' => $row['settlementAuthAmount'], 'currency' => $row['authCurrencyCode']], $fees),
+                'fee_evidence' => 'SETTLED_FEE_RECORDS',
                 'fx_observations' => array_intersect_key((array) ($remit['labels'] ?? []),
                     array_flip(['netExchangeRate', 'markupRate'])),
                 'discrepancy' => ! $matched,
@@ -173,7 +235,7 @@ final class DynamicPayoutAccounting
                 'transaction_ids' => array_column([$remit, ...$fees], 'authCode'),
                 'response_sha256' => $batch['response_sha256'], 'observed_at' => $batch['observed_at'],
             ]];
-        if ($status === 'PAID') {
+        if ($matched && $status === 'PAID') {
             $result['provider_status'] = 'PAID';
         }
 

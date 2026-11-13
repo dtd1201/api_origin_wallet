@@ -37,10 +37,11 @@ class NiumService
         ?User $user = null,
         ?string $operation = null,
         ?string $externalReference = null,
+        ?\Closure $beforeDispatch = null,
     ): Response
     {
         OwnerFirst::outside();
-        return $this->client($operation, $externalReference)->get($path, $query, $user);
+        return $this->client($operation, $externalReference, beforeDispatch: $beforeDispatch)->get($path, $query, $user);
     }
 
     public function post(

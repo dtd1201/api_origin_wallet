@@ -26,6 +26,9 @@ final class DynamicPayoutInstructionValidation
             throw new RuntimeException('dynamic_instruction_validation_requires_network_outside_transaction');
         }
         $binding = $quote->binding;
+        $environment = DynamicPayoutEnvironment::configured();
+        $environment->assertBinding($binding['base_url']);
+        $environment->assertContract('validation');
         $path = $this->nium->path('/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance/validate',
             ['client' => $binding['client'], 'customer' => $binding['customer'], 'wallet' => $binding['wallet']]);
         $mode = PayoutAmountMode::from($binding['amount_mode']);
@@ -44,6 +47,8 @@ final class DynamicPayoutInstructionValidation
         $response = $this->nium->post(path: $path, payload: $payload, user: $user,
             operation: 'dynamic_remittance_validate', externalReference: $quote->id,
             beforeDispatch: function (Request $request) use ($binding, $path, $json): void {
+                DynamicPayoutEnvironment::configured()->assertBinding($binding['base_url']);
+                DynamicPayoutEnvironment::configured()->assertContract('validation');
                 if (DB::transactionLevel() !== 0 || $request->method() !== 'POST'
                     || $request->url() !== $binding['base_url'].$path
                     || rtrim((string) config('services.nium.base_url'), '/') !== $binding['base_url']
@@ -52,6 +57,7 @@ final class DynamicPayoutInstructionValidation
                     throw new RuntimeException('dynamic_instruction_validation_binding_changed');
                 }
             });
+        DynamicPayoutEnvironment::configured()->assertBinding($binding['base_url']);
         if (! $response->successful() || strlen($response->body()) > 65536 || $started->copy()->addSeconds(30)->isPast()) {
             throw new RuntimeException('dynamic_payout_instruction_validation_unavailable');
         }

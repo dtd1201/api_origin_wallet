@@ -395,7 +395,7 @@ final class NiumDynamicMultiCurrencyRegistryTest extends TestCase
         $this->assertSame(['phase_one_dispatch_disabled'], $evaluation->decision->dispatchReasons);
     }
 
-    public function test_synthetic_production_evidence_cannot_dispatch_and_sgd_local_remains_held(): void
+    public function test_synthetic_production_evidence_including_sgd_local_cannot_dispatch(): void
     {
         $corridor = $this->corridor(['environment' => 'production']);
         $evaluation = $this->evaluate($corridor, $this->complete($corridor));
@@ -406,8 +406,8 @@ final class NiumDynamicMultiCurrencyRegistryTest extends TestCase
         $sgd = $this->corridor(['environment' => 'production', 'destinationCountry' => 'SG', 'destinationCurrency' => 'SGD']);
         $held = $this->evaluate($sgd, $this->complete($sgd));
         $this->assertTrue($held->lookup->accepted);
-        $this->assertSame('DENIED', $held->decision->preparation);
-        $this->assertContains('sgd_local_hold', $held->decision->preparationReasons);
+        $this->assertSame('ALLOWED', $held->decision->preparation);
+        $this->assertContains('synthetic_evidence', $held->decision->dispatchReasons);
         $this->assertSame('DENIED', $held->decision->dispatch);
     }
 

@@ -133,15 +133,16 @@ final class NiumDynamicPayoutCustomerApiTest extends DynamicConfirmationDatabase
 
     public static function excludedLanes(): array
     {
-        return [['USD', 'SWIFT'], ['SGD', 'LOCAL'], ['GBP', 'SWIFT']];
+        return [['USD', 'SWIFT', 'dynamic_same_currency_quote_contract_unverified'],
+            ['SGD', 'LOCAL', 'dynamic_provider_quote_disabled'], ['GBP', 'SWIFT', 'dynamic_swift_fee_contract_unverified']];
     }
 
     #[DataProvider('excludedLanes')]
-    public function test_hk_swift_sgd_and_other_unsupported_rails_cannot_be_enrolled(string $currency, string $rail): void
+    public function test_unverified_dynamic_options_have_precise_reasons_while_legacy_remains_separate(string $currency, string $rail, string $reason): void
     {
         $this->beneficiary->update(['currency' => $currency, 'payout_method' => $rail]);
         $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
-            ->assertJsonPath('destination_currencies', [])->assertJsonPath('reason_codes', ['dynamic_corridor_unsupported']);
+            ->assertJsonPath('destination_currencies', [])->assertJsonPath('reason_codes', [$reason]);
         $this->noReservation();
     }
 
@@ -270,6 +271,24 @@ final class NiumDynamicPayoutCustomerApiTest extends DynamicConfirmationDatabase
         $this->postJson($this->path(), $this->submission())->assertStatus(503)
             ->assertJsonPath('reason_codes', ['dynamic_payout_submission_disabled']);
         $this->noReservation();
+    }
+
+    #[DataProvider('modes')]
+    public function test_spend_submit_cannot_reserve_when_get_recovery_contract_is_unverified(string $mode, string $amount): void
+    {
+        // Synthetic consent cannot turn shared POST compatibility into GET evidence.
+        $this->source->review = $this->usdReview(PayoutAmountMode::from($mode), [
+            'instruction' => new PayoutInstruction('IR005', 'Salary', 'Invoice')]);
+        $this->app->instance(DynamicTransferConfirmationService::class, $this->confirmation);
+        config(['services.nium.base_url' => 'https://api.spend.nium.com',
+            'services.nium.transfer_endpoint' => '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance',
+            'nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
+            'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-operator-reference']);
+
+        $this->postJson($this->path(), $this->submission())->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_production_transactions_contract_unverified']);
+        $this->noReservation();
+        // The database test base also asserts no HTTP, jobs or queued dispatch.
     }
 
     #[DataProvider('modes')]

@@ -75,8 +75,8 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
             'settlementStatus' => 'Settled', 'status' => 'Approved'];
 
         return ['records' => [
-            [...$scope, 'authCode' => 'RT-fixture-dynamic', 'externalId' => $outbox->operation_key,
-                'transactionType' => 'Remittance_Debit_External', 'settlementAuthAmount' => '980',
+            [...$scope, 'authCode' => 'RT-fixture-dynamic', 'externalId' => null, 'originalAuthorizationCode' => null,
+                'transactionType' => 'Remittance_Debit', 'settlementAuthAmount' => '980',
                 'effectiveAuthAmount' => '1000', 'transactionCurrencyCode' => 'GBP',
                 'settlementTransactionAmount' => '784', 'labels' => ['beneficiaryId' => 'fixture-registered-payee']],
             [...$scope, 'authCode' => 'FT-fixture-fee', 'transactionType' => 'Fee_Debit', 'settlementAuthAmount' => $fee,
@@ -283,7 +283,7 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         DB::transaction(fn () => $this->confirmation->refreshForExecution($intent));
     }
 
-    public function test_timeout_never_reposts_and_can_recover_by_exact_provider_external_id(): void
+    public function test_timeout_never_reposts_and_requires_an_authenticated_provider_reference_for_recovery(): void
     {
         $outbox = $this->prepare();
         $this->wire->afterWire = static fn () => throw new RuntimeException('synthetic timeout after sending');
@@ -297,9 +297,52 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->dispatcher->dispatch($outbox->id);
         $this->assertSame(1, $this->wire->submissions);
         $this->wire->batch = $this->records($outbox->fresh());
+        // Even a matching local externalId cannot establish the provider reference.
+        $this->wire->batch['records'][0]['externalId'] = $outbox->fresh()->operation_key;
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertNull($outbox->fresh()->provider_reference);
+        $this->assertSame('ambiguous', $outbox->fresh()->state);
+        $this->assertSame('pending', $outbox->fresh()->financial_state);
+        $this->assertSame('dynamic_remittance_reference_missing', $outbox->fresh()->exception_code);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        // Existing authenticated webhook binding supplies the missing reference.
+        $this->webhook($outbox, 'PAID');
+        $this->wire->batch['records'][0]['externalId'] = null;
         $this->reconciler->reconcile($outbox->id);
         $this->assertSame('RT-fixture-dynamic', $outbox->fresh()->provider_reference);
         $this->assertSame('matched', $outbox->fresh()->state);
+        $this->assertSame(1, $this->wire->submissions);
+    }
+
+    public function test_provider_2xx_without_a_reference_is_ambiguous_and_never_replayed(): void
+    {
+        $outbox = $this->prepare();
+        $transport = new class($this->wire) implements DynamicPayoutTransport {
+            public function __construct(private DynamicPayoutTransportStub $wire) {}
+
+            public function submit(NiumDynamicIntent $intent, NiumDynamicPayoutOutbox $outbox,
+                \App\Services\Nium\DynamicConfirmation\DynamicPayoutWireClaim $claim): array
+            {
+                $this->wire->submit($intent, $outbox, $claim);
+                return ['http_status' => 200, 'provider_reference' => null];
+            }
+
+            public function transactions(NiumDynamicIntent $intent): array
+            {
+                return $this->wire->transactions($intent);
+            }
+        };
+        $dispatcher = new DynamicPayoutDispatcher($this->confirmation, $transport);
+        $dispatcher->dispatch($outbox->id);
+        $dispatcher->dispatch($outbox->id);
+        $this->assertSame(1, $this->wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $this->assertSame('ambiguous', $outbox->fresh()->state);
+        $this->assertNull($outbox->fresh()->provider_reference);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
     private function webhook(NiumDynamicPayoutOutbox $outbox, string $status, string $reference = 'RT-fixture-dynamic'): void
@@ -441,9 +484,15 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->dispatcher->dispatch($outbox->id);
         $this->wire->batch = $this->records($outbox->fresh());
         array_pop($this->wire->batch['records']);
+        $this->wire->batch['records'][0]['status'] = 'PAID';
         $this->reconciler->reconcile($outbox->id);
         $this->assertSame('pending', $outbox->fresh()->financial_state);
         $this->assertNotNull($outbox->fresh()->next_reconciliation_at);
+        $this->assertNull($outbox->fresh()->provider_status);
+        $this->assertNotSame('paid', $this->customerStatus($outbox)['status']);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
         $this->wire->batch = $this->records($outbox->fresh());
         $this->travelTo($this->at('00:12:00'));
@@ -468,6 +517,27 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame('-1000.00000000', LedgerEntry::query()->where('entry_type', 'debit')->sole()->amount);
         $this->expectExceptionMessage('dynamic_wallet_has_unresolved_payout');
         $this->confirmDynamic('different-customer-reference');
+    }
+
+    public function test_destination_credit_difference_becomes_an_exception_without_extra_debit_or_second_post(): void
+    {
+        $outbox = $this->prepare(PayoutAmountMode::Destination);
+        $this->dispatcher->dispatch($outbox->id);
+        $this->wire->batch = $this->records($outbox->fresh());
+        $this->wire->batch['records'][0]['settlementTransactionAmount'] = '783';
+        $this->reconciler->reconcile($outbox->id);
+        $this->reconciler->reconcile($outbox->id);
+        $this->dispatcher->dispatch($outbox->id);
+        $this->assertSame('exception', $outbox->fresh()->state);
+        $this->assertSame('mismatched', $outbox->fresh()->financial_state);
+        $this->assertSame('784', $outbox->fresh()->financial_evidence['intended_destination_amount']);
+        $this->assertSame('783', $outbox->fresh()->financial_evidence['destination_amount']);
+        $this->assertSame('1000', $outbox->fresh()->financial_evidence['customer_authorized_debit_usd']);
+        $this->assertSame('consumed', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame('-1000.00000000', LedgerEntry::query()->where('entry_type', 'debit')->sole()->amount);
+        $this->assertSame(1, $this->wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
     }
 
     public function test_missing_records_exhaust_read_only_budget_without_reposting(): void

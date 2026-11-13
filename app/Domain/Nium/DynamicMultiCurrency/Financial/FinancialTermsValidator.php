@@ -27,10 +27,6 @@ final class FinancialTermsValidator
         if ($candidate->corridor->provider !== 'nium') {
             $reasons[] = FinancialReason::UnsupportedProvider;
         }
-        if ($candidate->corridor->provider === 'nium' && $candidate->corridor->destinationCurrency === 'SGD'
-            && $candidate->corridor->payoutMethod === 'LOCAL') {
-            $reasons[] = FinancialReason::SgdHold;
-        }
 
         $contractReasons = $contract === null ? [FinancialReason::ContractMissing] : $this->contractReasons($candidate, $contract, $asOf, $crossCurrency);
         $reasons = [...$reasons, ...$contractReasons];

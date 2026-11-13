@@ -17,9 +17,10 @@ use App\Models\NiumDynamicPayoutQuote;
 use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\DynamicConfirmation\DynamicReceivingAccountBinding;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutEnvironment;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization;
 use App\Services\Nium\DynamicConfirmation\DynamicReservationLedger;
 use App\Services\Nium\DynamicConfirmation\ExactProviderJson;
-use App\Services\Nium\DynamicConfirmation\OriginDynamicPayoutEvidenceSource;
 use Brick\Math\BigDecimal;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
@@ -32,7 +33,8 @@ final class NiumDynamicPayoutQuoteService
     public function __construct(private readonly NiumService $nium,
         private readonly NiumSupportedCorridorService $corridors,
         private readonly NiumBeneficiaryPayoutMethodResolver $registration,
-        private readonly NiumProviderAccountStateService $accounts) {}
+        private readonly NiumProviderAccountStateService $accounts,
+        private readonly DynamicPayoutFinancialAuthorization $financial) {}
 
     /** Successful catalogue lookup permits reference quoting only, not execution. No configured override. */
     public function availability(User $user, Beneficiary $beneficiary, Balance $wallet): array
@@ -48,6 +50,7 @@ final class NiumDynamicPayoutQuoteService
     public function create(User $user, Beneficiary $beneficiary, Balance $wallet,
         PayoutAmountMode $mode, string $enteredAmount): NiumDynamicPayoutQuote
     {
+        $this->assertQuoteDestination($beneficiary->currency);
         $binding = $this->availability($user, $beneficiary, $wallet);
         $request = FinalizedUsdPayoutPreparation::quoteRequestForAmount(
             $binding['customer'], $beneficiary->currency, $mode, $enteredAmount);
@@ -60,20 +63,28 @@ final class NiumDynamicPayoutQuoteService
         if (ExactProviderJson::decode(json_encode($payload, JSON_THROW_ON_ERROR)) !== ExactProviderJson::decode($json)) {
             throw new RuntimeException('dynamic_quote_request_precision_unavailable');
         }
-        $path = $this->quotePath();
+        $path = $this->quotePath($binding['base_url']);
         $expectedUrl = $binding['base_url'].$path;
+        $dispatched = false;
         $response = $this->nium->post(path: $path, payload: $payload, user: $user,
             operation: 'dynamic_payout_reference_quote', externalReference: (string) $beneficiary->id,
-            beforeDispatch: function (Request $outgoing) use ($expectedUrl, $json): void {
+            beforeDispatch: function (Request $outgoing) use ($expectedUrl, $path, $binding, $json, &$dispatched): void {
                 $this->outsideTransaction();
-                if (config('nium_dynamic_quotes.quote_contract_enabled', false) !== true
-                    || ! (bool) config('services.nium.payout_fx_enabled', false)
+                if ($this->quotePath($binding['base_url']) !== $path || $dispatched
+                    || $this->nium->clientId() !== $binding['client']
                     || $outgoing->method() !== 'POST'
                     || $outgoing->url() !== $expectedUrl
                     || ExactProviderJson::decode($outgoing->body()) !== ExactProviderJson::decode($json)) {
                     throw new RuntimeException('dynamic_quote_transport_binding_changed');
                 }
+                $dispatched = true;
             });
+        if (! $dispatched) {
+            throw new RuntimeException('dynamic_quote_transport_binding_changed');
+        }
+        if ($this->quotePath($binding['base_url']) !== $path || $this->nium->clientId() !== $binding['client']) {
+            throw new RuntimeException('dynamic_quote_binding_changed');
+        }
         if (! $response->successful()) {
             throw new RuntimeException('dynamic_provider_quote_unavailable');
         }
@@ -110,12 +121,15 @@ final class NiumDynamicPayoutQuoteService
     public function assertCurrent(NiumDynamicPayoutQuote $stored, User $user, Beneficiary $beneficiary, Balance $wallet,
         ?NiumDynamicIntent $consumingIntent = null): void
     {
+        $this->quotePath($stored->binding['base_url']);
         $binding = $this->binding($user, $beneficiary, $wallet);
         $original = $stored->binding;
         unset($original['amount_mode'], $original['entered_amount']);
         ksort($original, SORT_STRING);
         if ($stored->user_id !== $user->id || $stored->beneficiary_id !== $beneficiary->id
-            || $stored->balance_id !== $wallet->id || $binding !== $original) {
+            || $stored->balance_id !== $wallet->id || $binding !== $original
+            || (string) $stored->provider_id !== (string) $beneficiary->provider_id
+            || (string) $stored->provider_account_id !== (string) $binding['provider_account_id']) {
             throw new RuntimeException('dynamic_quote_binding_changed');
         }
         if ($stored->expires_at <= now()) {
@@ -129,10 +143,28 @@ final class NiumDynamicPayoutQuoteService
             $this->assertUnused((int) $stored->provider_id, $stored->binding, $stored->quote_id);
             $this->assertFunds($wallet, FinalizedUsdPayoutPreparation::plannedDebitForPrincipal($quote['sourceAmount'])->amount->value);
         } else {
-            $environment = $stored->binding['base_url'] === 'https://gateway.nium.com' ? 'production' : 'sandbox';
-            $key = NiumDynamicIntent::quoteConsumptionKey((int) $stored->provider_id, $environment,
+            $environment = $this->quoteEnvironment($stored->binding['base_url']);
+            $context = $consumingIntent->confirmed_terms['context'] ?? [];
+            $corridor = $context['corridor'] ?? [];
+            $identity = $corridor['environment'] ?? '';
+            $environment->assertBinding($context['provider_origin'] ?? match ($identity) {
+                'production' => 'https://gateway.nium.com',
+                'sandbox' => 'https://gatewaysandbox.nium.com',
+                default => throw new RuntimeException('dynamic_provider_scope_unverified'),
+            }, $identity);
+            $key = NiumDynamicIntent::quoteConsumptionKey((int) $stored->provider_id, $environment->identity,
                 $stored->binding['client'], $stored->binding['customer'], $stored->quote_id);
             if (! $consumingIntent->exists || $consumingIntent->user_id !== $user->id
+                || (string) $consumingIntent->provider_id !== (string) $stored->provider_id
+                || (string) $consumingIntent->provider_account_id !== (string) $stored->provider_account_id
+                || (string) $consumingIntent->balance_id !== (string) $wallet->id
+                || (string) $consumingIntent->beneficiary_id !== (string) $beneficiary->id
+                || $consumingIntent->customer !== $stored->binding['customer']
+                || $consumingIntent->source_wallet !== $stored->binding['wallet']
+                || ($corridor['provider'] ?? null) !== 'nium'
+                || ($corridor['client'] ?? null) !== $stored->binding['client']
+                || ($corridor['customer'] ?? null) !== $stored->binding['customer']
+                || ($corridor['fundingWallet'] ?? null) !== $stored->binding['wallet']
                 || $consumingIntent->quote_consumption_key !== $key || $consumingIntent->quote_id !== $stored->quote_id) {
                 throw new RuntimeException('dynamic_quote_already_consumed');
             }
@@ -141,11 +173,7 @@ final class NiumDynamicPayoutQuoteService
 
     private function assertUnused(int $providerId, array $binding, string $quoteId): void
     {
-        $environment = match ($binding['base_url']) {
-            'https://gatewaysandbox.nium.com' => 'sandbox',
-            'https://gateway.nium.com' => 'production',
-            default => throw new RuntimeException('dynamic_quote_environment_unverified'),
-        };
+        $environment = $this->quoteEnvironment($binding['base_url'])->identity;
         $key = NiumDynamicIntent::quoteConsumptionKey($providerId, $environment, $binding['client'],
             $binding['customer'], $quoteId);
         if (NiumDynamicIntent::query()->where('quote_consumption_key', $key)->exists()) {
@@ -157,6 +185,10 @@ final class NiumDynamicPayoutQuoteService
     public function project(NiumDynamicPayoutQuote $stored): array
     {
         $quote = $this->parsed($stored);
+        $beneficiary = Beneficiary::query()->findOrFail($stored->beneficiary_id);
+        if (($stored->binding['customer_pricing_sha256'] ?? null) !== $this->financial->fingerprint($beneficiary)) {
+            throw new RuntimeException('dynamic_quote_binding_changed');
+        }
 
         return ['status' => 'QUOTE_REFERENCE_ONLY', 'dynamic_quote_id' => $stored->id,
             'provider_quote_id' => $stored->quote_id, 'beneficiary_id' => $stored->beneficiary_id,
@@ -168,13 +200,18 @@ final class NiumDynamicPayoutQuoteService
             'planned_total_usd_debit' => FinalizedUsdPayoutPreparation::plannedDebitForPrincipal($quote['sourceAmount'])->amount->value,
             'quoted_destination_amount' => ['currency' => $stored->binding['destination_currency'], 'amount' => $quote['destinationAmount']->value],
             'nium_quoted_fx_rate' => $quote['netExchangeRate']->value,
-            'financial_verification' => 'UNVERIFIED', 'review' => 'DENIED', 'admission' => 'DENIED', 'dispatch' => 'DENIED',
-            'reason_codes' => OriginDynamicPayoutEvidenceSource::MISSING_DEPENDENCIES];
+            'customer_pricing' => $this->financial->pricing($beneficiary),
+            'origin_service_fee' => ['currency' => 'USD', 'amount' => '0'],
+            'financial_verification' => 'CUSTOMER_PRICING_AUTHORIZED_PROVIDER_SETTLEMENT_UNVERIFIED',
+            'review' => 'REQUIRED', 'admission' => 'REVIEW_REQUIRED', 'dispatch' => 'DENIED',
+            'pricing_status' => 'CONTRACTUAL_CUSTOMER_TERMS', 'reason_codes' => []];
     }
 
     private function parsed(NiumDynamicPayoutQuote $stored): array
     {
         $b = $stored->binding;
+        $this->quotePath($b['base_url']);
+        $this->assertQuoteDestination($b['destination_currency']);
         $request = FinalizedUsdPayoutPreparation::quoteRequestForAmount($b['customer'], $b['destination_currency'],
             PayoutAmountMode::from($b['amount_mode']), $b['entered_amount']);
         if ($stored->request_json !== $request->json()) {
@@ -201,7 +238,7 @@ final class NiumDynamicPayoutQuoteService
             || $beneficiary->provider?->code !== 'nium' || $beneficiary->provider?->status !== 'active'
             || ! in_array($beneficiary->status, ['active', 'approved', 'verified'], true)
             || ! in_array($beneficiary->beneficiary_type, ['individual', 'business'], true)
-            || $beneficiary->payout_method !== 'LOCAL' || in_array($beneficiary->currency, ['USD', 'SGD'], true)
+            || $beneficiary->payout_method !== 'LOCAL' || $beneficiary->currency === 'USD'
             || $wallet->currency !== 'USD' || $wallet->external_account_id !== $account->external_account_id
             || ! in_array($account->compliance_status, ['clear', 'approved'], true)
             || ! in_array($account->rfi_status, ['clear', 'closed', 'not_required'], true)
@@ -213,7 +250,7 @@ final class NiumDynamicPayoutQuoteService
         $evidence = $this->registration->successfulRequestEvidence($beneficiary);
         $log = $evidence === null ? null : ApiRequestLog::query()->find($evidence->apiRequestLogId);
         $exchange = $log?->niumExchangeEvidence;
-        $base = rtrim((string) config('services.nium.base_url'), '/');
+        $base = $this->quoteEnvironment()->origin;
         $path = $this->nium->path((string) config('services.nium.beneficiary_endpoint'),
             ['client' => $this->nium->clientId(), 'customer' => $account->external_customer_id]);
         // Both persisted URLs redact client/customer path identifiers. Do not mistake
@@ -239,7 +276,7 @@ final class NiumDynamicPayoutQuoteService
             throw new RuntimeException('dynamic_quote_registration_evidence_unavailable');
         }
 
-        $binding = ['version' => 'nium-dynamic-reference-quote-v1', 'owner' => (string) $user->id,
+        $binding = ['version' => 'nium-dynamic-reference-quote-v2', 'owner' => (string) $user->id,
             'provider_account_id' => $account->id, 'customer' => $account->external_customer_id,
             'wallet' => $wallet->external_account_id, 'balance_id' => $wallet->id,
             'beneficiary_id' => $beneficiary->id, 'destination_currency' => $beneficiary->currency,
@@ -247,6 +284,7 @@ final class NiumDynamicPayoutQuoteService
             'registration_log_id' => $evidence->apiRequestLogId, 'base_url' => $base, 'client' => $this->nium->clientId(),
             'registration_request_sha256' => $exchange->request_body_sha256,
             'registration_response_sha256' => $exchange->response_body_sha256,
+            'customer_pricing_sha256' => $this->financial->fingerprint($beneficiary),
             'customer_verified_at' => $account->customer_id_verified_at->toISOString(),
             'wallet_verified_at' => $account->wallet_id_verified_at->toISOString()];
         ksort($binding, SORT_STRING);
@@ -254,18 +292,37 @@ final class NiumDynamicPayoutQuoteService
         return $binding;
     }
 
-    private function quotePath(): string
+    private function quoteEnvironment(?string $origin = null): DynamicPayoutEnvironment
     {
-        $base = rtrim((string) config('services.nium.base_url'), '/');
-        if (! in_array($base, ['https://gatewaysandbox.nium.com', 'https://gateway.nium.com'], true)) {
-            throw new RuntimeException('dynamic_quote_environment_unverified');
-        }
-        $path = $this->nium->path((string) config('services.nium.quote_endpoint'), ['client' => $this->nium->clientId()]);
-        if ($path !== $this->nium->path('/api/v1/client/{clientHashId}/quotes', ['client' => $this->nium->clientId()])) {
-            throw new RuntimeException('dynamic_quote_endpoint_unverified');
+        $environment = DynamicPayoutEnvironment::configured();
+        if ($origin !== null) {
+            $environment->assertBinding($origin);
         }
 
+        return $environment;
+    }
+
+    private function quotePath(?string $origin = null): string
+    {
+        $environment = $this->quoteEnvironment($origin);
+        if (config('nium_dynamic_quotes.quote_contract_enabled', false) !== true
+            || ! (bool) config('services.nium.payout_fx_enabled', false)) {
+            throw new RuntimeException('dynamic_provider_quote_disabled');
+        }
+        $client = $this->nium->clientId();
+        $path = $this->nium->path((string) config('services.nium.quote_endpoint'), ['client' => $client]);
+        $environment->assertQuoteReferenceEndpoint($path, $client);
+
         return $path;
+    }
+
+    private function assertQuoteDestination(string $currency): void
+    {
+        // Preserve reference catalogue work without enrolling SGD Standard or HK
+        // same-currency payments in this Dynamic Quote acquisition path.
+        if (in_array($currency, ['SGD', 'USD'], true)) {
+            throw new RuntimeException('dynamic_quote_local_eligibility_changed');
+        }
     }
 
     private function checkAmounts(array $quote): void

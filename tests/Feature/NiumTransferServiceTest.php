@@ -30,6 +30,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
+use Tests\Support\Auto02bPostgresTestReset;
 use Tests\TestCase;
 
 class NiumTransferServiceTest extends TestCase
@@ -71,9 +72,48 @@ class NiumTransferServiceTest extends TestCase
         $this->assertCount(0, collect(Http::recorded())->filter(fn ($pair) => $this->isRemittancePost($pair[0])));
     }
 
+    private function withStagingEnvironment(callable $callback): mixed
+    {
+        $application = $this->app;
+        $environment = $application->environment();
+
+        try {
+            // Exercise staging-only HTTP diagnostics without leaking into schema teardown.
+            $application->detectEnvironment(fn (): string => 'staging');
+
+            return $callback();
+        } finally {
+            $application->detectEnvironment(fn (): string => $environment);
+        }
+    }
+
+    public function test_staging_diagnostics_scope_restores_testing_after_exception(): void
+    {
+        $connection = DB::connection();
+        $failure = new RuntimeException('Synthetic staging diagnostics failure.');
+
+        try {
+            $this->withStagingEnvironment(function () use ($failure): void {
+                $this->assertSame('staging', $this->app->environment());
+                $this->assertFalse($this->app->runningUnitTests());
+                throw $failure;
+            });
+            $this->fail('The staging scope must propagate the original exception.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame($failure, $exception);
+        }
+
+        $this->assertSame('testing', $this->app->environment());
+        $this->assertTrue($this->app->runningUnitTests());
+        $this->assertSame($connection, DB::connection());
+        $this->assertSame(0, $connection->transactionLevel());
+        $this->assertFalse($connection->getPdo()->inTransaction());
+        // Run every unchanged safety predicate, including the real write-PDO identity.
+        Auto02bPostgresTestReset::assertSafe($this->app, $connection);
+    }
+
     public function test_submit_transfer_creates_nium_remittance_and_updates_transfer(): void
     {
-        $this->app->detectEnvironment(fn (): string => 'staging');
         $provider = IntegrationProvider::query()->create([
             'code' => 'nium',
             'name' => 'Nium',
@@ -154,10 +194,13 @@ class NiumTransferServiceTest extends TestCase
 
         app(LedgerService::class)->reserveTransfer($transfer);
 
-        $updated = app(NiumTransferService::class)->submitTransfer(
+        $updated = $this->withStagingEnvironment(fn () => app(NiumTransferService::class)->submitTransfer(
             $provider,
             $transfer->fresh(['provider', 'user', 'beneficiary'])
-        );
+        ));
+
+        $this->assertSame('testing', $this->app->environment());
+        Auto02bPostgresTestReset::assertSafe($this->app, DB::connection());
 
         $this->assertSame('RT6431795378', $updated->external_transfer_id);
         $this->assertSame('pay_123', $updated->external_payment_id);
@@ -1326,7 +1369,6 @@ class NiumTransferServiceTest extends TestCase
 
     public function test_provider_error_appends_operational_data_without_replacing_nium_fixture_data(): void
     {
-        $this->app->detectEnvironment(fn (): string => 'staging');
         [$provider, $transfer] = $this->makeSubmittableTransfer([
             'purpose_code' => 'IR01811',
             'raw_data' => [
@@ -1366,11 +1408,14 @@ class NiumTransferServiceTest extends TestCase
 
         app(LedgerService::class)->reserveTransfer($transfer);
         try {
-            app(NiumTransferService::class)->submitTransfer($provider, $transfer);
+            $this->withStagingEnvironment(fn () => app(NiumTransferService::class)->submitTransfer($provider, $transfer));
             $this->fail('Expected the provider error to reject the transfer.');
         } catch (RuntimeException $exception) {
             $this->assertSame('Invalid transfer request.', $exception->getMessage());
         }
+
+        $this->assertSame('testing', $this->app->environment());
+        Auto02bPostgresTestReset::assertSafe($this->app, DB::connection());
 
         $rawData = (array) $transfer->fresh()->raw_data;
         $this->assertSame('Corporate Account', $rawData['nium']['sourceOfFunds']);
@@ -2069,9 +2114,28 @@ class NiumTransferServiceTest extends TestCase
             ]),
         ]);
         // Existing legacy transport fixture only; SGD acquisition remains held.
-        $quote = app(NiumPayoutFxLockService::class)->createLock($provider, $transfer->user, 'USD', 'EUR', '10');
+        $locks = app(NiumPayoutFxLockService::class);
+        $quote = $locks->createLock($provider, $transfer->user, 'USD', 'EUR', '10');
         $transfer->update(['fx_quote_id' => $quote->id, 'fx_rate' => $quote->net_rate]);
+        $quote = $quote->fresh();
+        $originalQuote = $quote->getAttributes();
+        $originalContext = $locks->context($provider, $transfer->user);
+        $this->assertSame('wallet-test', $originalContext['wallet']);
+        NiumPayoutFxLockContract::assertMatchesTransfer($quote, $transfer->fresh(), $originalContext);
+
+        $originalBalance = Balance::query()->where('user_id', $transfer->user_id)->sole();
+        $originalBooks = $originalBalance->getAttributes();
+        // The current submission wallet must exist to reach FX binding validation.
+        // Keep the original wallet and its quote untouched; this is a different wallet.
+        $submissionBalance = Balance::query()->create([
+            'user_id' => $transfer->user_id, 'provider_id' => $provider->id,
+            'external_account_id' => 'changed-wallet', 'currency' => 'USD',
+            'available_balance' => 1000, 'ledger_balance' => 1000, 'reserved_balance' => 0,
+            'as_of' => now(),
+        ]);
+        $submissionBooks = $submissionBalance->fresh()->getAttributes();
         $transfer->user->providerAccounts()->update(['external_account_id' => 'changed-wallet']);
+        $this->assertSame('changed-wallet', $locks->context($provider, $transfer->fresh()->user)['wallet']);
         try {
             app(NiumTransferService::class)->submitTransfer($provider, $transfer->fresh());
             $this->fail('A lock from another wallet must never be submitted.');
@@ -2081,6 +2145,10 @@ class NiumTransferServiceTest extends TestCase
         $this->assertNoRemittancePost();
         $this->assertSame('draft', $transfer->fresh()->status);
         $this->assertNull($transfer->fresh()->provider_operation_key);
+        $this->assertSame($originalBooks, $originalBalance->fresh()->getAttributes());
+        $this->assertSame($submissionBooks, $submissionBalance->fresh()->getAttributes());
+        $this->assertSame($originalQuote, $quote->fresh()->getAttributes());
+        $this->assertDatabaseCount('ledger_entries', 0);
         $this->assertSame(1, FxQuote::query()->count());
         $this->assertCount(1, collect(Http::recorded())->filter(fn ($pair) => str_contains($pair[0]->url(), '/lockExchangeRate')));
     }

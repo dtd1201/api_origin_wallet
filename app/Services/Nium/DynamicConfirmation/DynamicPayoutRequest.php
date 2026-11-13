@@ -20,7 +20,7 @@ final class DynamicPayoutRequest
         $instruction = new PayoutInstruction($instruction['purposeCode'] ?? '', $instruction['sourceOfFunds'] ?? '',
             $instruction['customerComments'] ?? '');
         if ($intent->source_currency !== 'USD' || $intent->destination_currency === 'USD'
-            || $intent->destination_currency === 'SGD' || $c['payoutMethod'] !== 'LOCAL'
+            || $c['payoutMethod'] !== 'LOCAL'
             || ! isset($s['finalized_usd_preparation']) || $s['quote_id'] !== $intent->quote_id) {
             throw new RuntimeException('dynamic_execution_corridor_unsupported');
         }

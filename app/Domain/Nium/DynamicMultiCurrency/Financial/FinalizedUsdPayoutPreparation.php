@@ -17,8 +17,10 @@ use InvalidArgumentException;
  */
 final readonly class FinalizedUsdPayoutPreparation
 {
-    public const VERSION = 'nium-usd-inclusive-fee-preparation-v2';
+    public const VERSION = 'nium-usd-inclusive-fee-preparation-v4';
 
+    // Arithmetic shared with the accepted USD-inclusive LOCAL customer contract.
+    // Preparation alone still grants no financial or provider authority.
     public const FEE_USD = '20';
 
     public const DEFAULT_MARGIN_PERCENT = '1.5';
@@ -65,7 +67,7 @@ final readonly class FinalizedUsdPayoutPreparation
             new Decimal($margin), $basis, $debit, $principal, null);
     }
 
-    /** Business arithmetic for provider reference quotes; never eligibility or fee-collection proof. */
+    /** Historical planning arithmetic; never eligibility, authorized pricing or fee-collection proof. */
     public static function quoteRequestForAmount(string $customer, string $destinationCurrency,
         PayoutAmountMode $mode, string $enteredAmount, string $lockPeriod = '5_mins'): PayoutQuoteRequest
     {
@@ -119,7 +121,8 @@ final readonly class FinalizedUsdPayoutPreparation
             $this->withQuote($this->quote, $actor, $asOf);
         }
 
-        return ['version' => self::VERSION, 'basis' => 'finalized_business_rules',
+        return ['version' => self::VERSION, 'basis' => 'historical_business_planning_assumptions',
+            'pricing_authorization' => 'UNVERIFIED',
             'status' => 'PREPARATION_ONLY', 'input_mode' => $this->quoteRequest->mode->value,
             'entered_amount' => $this->quoteRequest->mode === PayoutAmountMode::Source
                 ? $this->plannedCustomerDebit->snapshot()
@@ -152,18 +155,14 @@ final readonly class FinalizedUsdPayoutPreparation
         return $amount;
     }
 
-    /** Observed Production fee configuration, for disclosure only. Never reprice the quote. */
+    /** Contracted country/currency/rail metadata. Never reprice the provider quote. */
     private static function margin(CorridorIdentity $corridor): array
     {
-        // The operator-established Active default plan is currency based. The older
-        // documentary country tuples (e.g. CH/EUR 0.30%) must not override it.
-        $percent = match ($corridor->destinationCurrency) {
-            'HKD', 'SGD', 'GBP', 'EUR' => '0.13',
-            'JPY', 'THB' => '0.28',
-            'KRW' => '0.44',
-            default => self::DEFAULT_MARGIN_PERCENT,
-        };
+        $row = DocumentaryFeeSchedule::contractedLocal($corridor->sourceCurrency,
+            $corridor->destinationCountry, $corridor->destinationCurrency, $corridor->payoutMethod);
 
-        return [$percent, 'production_v2_active_default_fee_plan_observation'];
+        return $row === null
+            ? [self::DEFAULT_MARGIN_PERCENT, 'uncontracted_planning_reference_only']
+            : [$row['margin_percent'], 'accepted_signed_local_schedule'];
     }
 }

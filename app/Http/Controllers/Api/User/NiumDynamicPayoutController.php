@@ -19,6 +19,7 @@ use App\Models\NiumDynamicReservation;
 use App\Models\User;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutCustomerStatus;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutGate;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization;
 use App\Services\Nium\DynamicConfirmation\DynamicTransferConfirmationService;
 use App\Services\Nium\DynamicConfirmation\OriginDynamicPayoutEvidenceSource;
 use App\Services\Nium\NiumProviderAccountStateService;
@@ -49,26 +50,36 @@ final class NiumDynamicPayoutController extends Controller
         $beneficiary = $user->beneficiaries()->findOrFail($input['beneficiary_id']);
         [$reasons, $wallet] = $this->candidate($user, $beneficiary);
         $quoteAvailability = ['status' => 'UNAVAILABLE', 'destination_currencies' => [],
+            'supported_amount_modes' => [], 'payout_rail' => null,
             'reason_codes' => $reasons ?: ['dynamic_provider_quote_disabled']];
         if ($reasons === [] && (bool) config('services.nium.payout_fx_enabled', false)) {
             try {
-                $this->quotes->availability($user, $beneficiary, $wallet);
+                $this->reviews->availability($user, $beneficiary, $wallet);
                 $quoteAvailability = ['status' => 'QUOTE_REFERENCE_ONLY',
                     'destination_currencies' => [$beneficiary->currency], 'payout_rail' => 'LOCAL',
+                    'supported_amount_modes' => ['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'],
+                    'pricing_status' => 'CONTRACTUAL_CUSTOMER_TERMS',
                     'reason_codes' => []];
             } catch (Throwable $exception) {
                 $quoteAvailability['reason_codes'] = [$this->quoteReason($exception)];
             }
         }
 
+        $dynamicReasons = $quoteAvailability['reason_codes'];
+        $available = $quoteAvailability['status'] === 'QUOTE_REFERENCE_ONLY' && $dynamicReasons === [];
         return $this->json(['beneficiary' => [
             'id' => $beneficiary->id, 'name' => $beneficiary->company_name ?: $beneficiary->full_name,
             'country_code' => $beneficiary->country_code, 'currency' => $beneficiary->currency,
-        ], 'status' => $quoteAvailability['status'], 'source_currency' => 'USD',
+        ], 'status' => $available ? 'QUOTE_REFERENCE_ONLY' : 'UNAVAILABLE', 'dynamic_available' => $available, 'source_currency' => 'USD',
             'payout_rail' => $beneficiary->payout_method,
-            'supported_corridors' => [], 'destination_currencies' => [],
+            // Authenticated options allow quoting, never confirmation or dispatch by themselves.
+            'supported_corridors' => $available ? [['destination_country' => $beneficiary->country_code,
+                'destination_currency' => $beneficiary->currency, 'payout_method' => 'LOCAL']] : [],
+            'destination_currencies' => $available ? [$beneficiary->currency] : [],
+            'eligible_payout_rails' => $available ? ['LOCAL'] : [],
+            'supported_amount_modes' => $available ? ['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'] : [],
             'quote_availability' => $quoteAvailability,
-            'reason_codes' => $quoteAvailability['reason_codes']]);
+            'reason_codes' => $dynamicReasons]);
     }
 
     public function quote(Request $request, User $user): JsonResponse
@@ -196,7 +207,7 @@ final class NiumDynamicPayoutController extends Controller
             if (in_array($reason, OriginDynamicPayoutEvidenceSource::MISSING_DEPENDENCIES, true)) {
                 return $this->unavailable(OriginDynamicPayoutEvidenceSource::MISSING_DEPENDENCIES);
             }
-            if (in_array($reason, [...NiumDynamicReviewService::PROVIDER_REFUSALS,
+            if (in_array($reason, [...NiumDynamicReviewService::PROVIDER_REFUSALS, ...DynamicPayoutFinancialAuthorization::REFUSALS,
                 'dynamic_registered_account_payload_changed', 'dynamic_registered_account_customer_scope_unavailable'], true)) {
                 return $this->unavailable([$reason]);
             }
@@ -209,6 +220,10 @@ final class NiumDynamicPayoutController extends Controller
             $conflicts[] = 'dynamic_quote_binding_changed';
             if (in_array($reason, $conflicts, true)) {
                 return $this->unavailable([$reason], 409);
+            }
+            if (in_array($reason, ['dynamic_provider_environment_unverified', 'dynamic_provider_scope_unverified',
+                'dynamic_production_remittance_contract_unverified', 'dynamic_production_transactions_contract_unverified'], true)) {
+                return $this->unavailable([$reason]);
             }
             $disabled = ['dynamic_durable_confirmation_disabled', 'dynamic_automatic_dispatch_disabled',
                 'dynamic_live_dispatch_requires_operator_authorization', 'dynamic_dispatch_requires_reconciliation'];
@@ -254,8 +269,15 @@ final class NiumDynamicPayoutController extends Controller
             || ! is_string($beneficiary->external_beneficiary_id) || $beneficiary->external_beneficiary_id === '') {
             return [['dynamic_beneficiary_or_customer_ineligible'], null];
         }
-        if ($beneficiary->payout_method !== 'LOCAL' || in_array($beneficiary->currency, ['USD', 'SGD'], true)) {
+        if ($beneficiary->payout_method === 'SWIFT') {
+            return [[$beneficiary->currency === 'USD'
+                ? 'dynamic_same_currency_quote_contract_unverified' : 'dynamic_swift_fee_contract_unverified'], null];
+        }
+        if ($beneficiary->payout_method !== 'LOCAL') {
             return [['dynamic_corridor_unsupported'], null];
+        }
+        if ($beneficiary->currency === 'USD') {
+            return [['dynamic_same_currency_quote_contract_unverified'], null];
         }
         try {
             $account = $this->accounts->assertEligible($user);
@@ -309,7 +331,14 @@ final class NiumDynamicPayoutController extends Controller
         }
         $reason = $exception->getMessage();
 
-        return in_array($reason, NiumDynamicReviewService::PROVIDER_REFUSALS, true)
+        return in_array($reason, DynamicPayoutFinancialAuthorization::REFUSALS, true)
+            || in_array($reason, ['dynamic_provider_environment_unverified', 'dynamic_provider_scope_unverified',
+                'dynamic_production_quote_contract_unverified', 'dynamic_production_customer_corridors_contract_unverified',
+                'dynamic_production_payout_schema_contract_unverified', 'dynamic_production_wallet_contract_unverified',
+                'dynamic_production_validation_contract_unverified', 'dynamic_production_remittance_contract_unverified',
+                'dynamic_production_transactions_contract_unverified', 'dynamic_registered_account_payload_changed',
+                'dynamic_registered_account_customer_scope_unavailable'], true)
+            || in_array($reason, NiumDynamicReviewService::PROVIDER_REFUSALS, true)
             || in_array($reason, ['dynamic_confirmation_evidence_expired', 'dynamic_review_binding_changed',
                 'dynamic_compliance_hold_or_evidence_unavailable', 'dynamic_customer_account_beneficiary_or_wallet_ineligible',
                 'dynamic_durable_confirmation_disabled', 'dynamic_registered_account_payload_changed',

@@ -267,11 +267,14 @@ final class NiumDynamicMultiCurrencyTest extends TestCase
         $this->assertDeniedWith((new EligibilityResolver)->resolve($corridor, $this->now(), ...[...$this->complete($corridor), $other]), 'evidence_scope_mismatch');
     }
 
-    public function test_sgd_local_stays_held_even_with_complete_verified_evidence(): void
+    public function test_sgd_local_requires_the_same_complete_scoped_evidence_as_other_corridors(): void
     {
         foreach (['sandbox', 'production'] as $environment) {
             $corridor = $this->corridor(['environment' => $environment, 'destinationCountry' => 'SG', 'destinationCurrency' => 'SGD']);
-            $this->assertDeniedWith((new EligibilityResolver)->resolve($corridor, $this->now(), ...$this->complete($corridor)), 'sgd_local_hold');
+            $decision = (new EligibilityResolver)->resolve($corridor, $this->now(), ...$this->complete($corridor));
+            $this->assertSame('ALLOWED', $decision->preparation);
+            $this->assertSame('DENIED', $decision->dispatch);
+            $this->assertDeniedWith((new EligibilityResolver)->resolve($corridor, $this->now()), 'account_entitlement_missing');
         }
     }
 

@@ -22,6 +22,7 @@ final readonly class PayoutQuoteContext
         public string $beneficiaryId,
         public string $externalBeneficiaryId,
         public string $receivingAccountFingerprint,
+        public ?string $providerOrigin = null,
     ) {
         foreach ([$providerId, $providerAccountId, $beneficiaryId, $externalBeneficiaryId] as $id) {
             if ($id === '' || strlen($id) > 255 || trim($id) !== $id || preg_match('/[\x00-\x1F\x7F]/', $id)) {
@@ -30,6 +31,10 @@ final readonly class PayoutQuoteContext
         }
         if (preg_match('/^[a-f0-9]{64}$/D', $receivingAccountFingerprint) !== 1) {
             throw new InvalidArgumentException('payout_receiving_account_binding_invalid');
+        }
+        if ($providerOrigin !== null && (filter_var($providerOrigin, FILTER_VALIDATE_URL) === false
+            || parse_url($providerOrigin, PHP_URL_SCHEME) !== 'https')) {
+            throw new InvalidArgumentException('payout_provider_origin_invalid');
         }
     }
 
@@ -45,11 +50,6 @@ final readonly class PayoutQuoteContext
             || $b->payoutMethod !== $c->payoutMethod || $b->beneficiaryType !== $c->beneficiaryType) {
             throw new InvalidArgumentException('payout_context_unavailable');
         }
-        if (($c->destinationCurrency === 'SGD' && $c->payoutMethod === 'LOCAL')
-            || ($c->destinationCountry === 'HK' && $c->sourceCurrency === 'USD'
-                && $c->destinationCurrency === 'USD' && $c->payoutMethod === 'SWIFT')) {
-            throw new InvalidArgumentException('payout_legacy_or_hold_corridor');
-        }
     }
 
     public function snapshot(): array
@@ -57,6 +57,7 @@ final readonly class PayoutQuoteContext
         $b = $this->beneficiary;
 
         return [
+            ...($this->providerOrigin === null ? [] : ['provider_origin' => $this->providerOrigin]),
             'corridor' => get_object_vars($this->corridor), 'owner' => $b->scope->ownerUserId,
             'provider_id' => $this->providerId, 'provider_account_id' => $this->providerAccountId,
             'beneficiary_id' => $this->beneficiaryId, 'external_beneficiary_id' => $this->externalBeneficiaryId,

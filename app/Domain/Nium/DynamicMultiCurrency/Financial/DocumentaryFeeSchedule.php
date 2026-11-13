@@ -5,11 +5,10 @@ declare(strict_types=1);
 namespace App\Domain\Nium\DynamicMultiCurrency\Financial;
 
 /**
- * User-supplied documentary references only, including the user's signed-agreement
- * attestation. No account applicability, current validity/amendments, effective
- * version, fee payer or debit treatment has been independently verified.
- * There is deliberately no corridor selector, fallback or conversion to evidence.
- * Percentages are percent units, not rates to apply to an FX calculation.
+ * Retained schedule references. contractedLocal() exposes only the exact LOCAL
+ * rows accepted for Origin customer pricing. Provider entitlement and actual
+ * settlement remain independently verified. Historical documentary provenance
+ * below is preserved; percentages are metadata, never a second FX adjustment.
  */
 final class DocumentaryFeeSchedule
 {
@@ -37,6 +36,21 @@ final class DocumentaryFeeSchedule
         ['method' => 'LOCAL', 'fee' => '5', 'fee_currency' => 'USD', 'margin_percent' => '1.5'],
         ['method' => 'WIRES', 'fee' => '20', 'fee_currency' => 'USD', 'margin_percent' => '1.5'],
     ];
+
+    /** Exact row of the LOCAL schedule accepted by the customer-pricing contract.
+     * This lookup grants neither provider entitlement nor settlement evidence.
+     */
+    public static function contractedLocal(string $funding, string $country, string $currency, string $method): ?array
+    {
+        foreach (self::LOCAL_REFERENCES as $row) {
+            if ($row['funding'] === $funding && $row['country'] === $country
+                && $row['destination'] === $currency && $row['method'] === $method) {
+                return $row;
+            }
+        }
+
+        return null;
+    }
 
     /**
      * Documentary mapping of the signed summary supplied for AUTO-02C.

@@ -243,6 +243,18 @@ final class NiumDynamicPayoutConfirmationTest extends TestCase
         $source->terms->quoteId = 'changed';
     }
 
+    public function test_provider_origin_is_part_of_the_immutable_quote_and_confirmation_context(): void
+    {
+        $gateway = $this->fixture(changes: ['corridor' => ['environment' => 'production'],
+            'context' => ['providerOrigin' => 'https://gateway.nium.com']]);
+        $spend = $this->fixture(changes: ['corridor' => ['environment' => 'production'],
+            'context' => ['providerOrigin' => 'https://api.spend.nium.com']]);
+        $this->assertSame('https://gateway.nium.com', $gateway['context']->snapshot()['provider_origin']);
+        $this->assertNotSame($gateway['context']->fingerprint(), $spend['context']->fingerprint());
+        $this->expectExceptionMessage('payout_quote_terms_binding_mismatch');
+        PayoutConfirmation::prepare(...array_replace($gateway, ['quote' => $spend['quote']]));
+    }
+
     public static function invalidConfirmations(): array
     {
         return [['actor'], ['fingerprint'], ['expiry']];
@@ -258,11 +270,14 @@ final class NiumDynamicPayoutConfirmationTest extends TestCase
             $case === 'expiry' ? $this->time('01:00:00') : $this->time());
     }
 
-    public function test_sgd_local_remains_held(): void
+    public function test_sgd_local_can_only_prepare_with_complete_synthetic_scoped_evidence(): void
     {
-        $f = $this->fixture(changes: ['corridor' => ['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD']]);
-        $this->expectException(InvalidArgumentException::class);
-        PayoutConfirmation::prepare(...$f);
+        $f = $this->fixture(changes: ['corridor' => ['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD'],
+            'contract' => ['currencyScales' => ['EUR' => 2, 'SGD' => 2]]]);
+        $review = PayoutConfirmation::prepare(...$f);
+        $this->assertTrue($review->synthetic);
+        $this->assertSame('SGD', $review->context->corridor->destinationCurrency);
+        $this->assertSame('DENIED', $review->confirm('synthetic-user', $review->fingerprint(), $this->time())->confirmationBinding()['dispatch']);
     }
 
     public function test_hk_swift_same_currency_is_not_admitted_by_new_quote_contract(): void

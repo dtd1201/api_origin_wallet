@@ -17,11 +17,8 @@ final class DynamicPayoutGate
             || config('nium_dynamic_quotes.confirmation_contract_enabled', false) !== true) {
             throw new RuntimeException('dynamic_automatic_dispatch_disabled');
         }
-        $host = parse_url((string) config('services.nium.base_url'), PHP_URL_HOST);
-        if (! in_array($host, ['gatewaysandbox.nium.com', 'gateway.nium.com'], true)) {
-            throw new RuntimeException('dynamic_provider_environment_unverified');
-        }
-        if ($host === 'gateway.nium.com') {
+        $environment = DynamicPayoutEnvironment::configured();
+        if ($environment->identity === 'production') {
             $reference = config('nium_dynamic_payouts.operator_authorization_reference');
             if (config('nium_dynamic_payouts.live_automatic_dispatch_authorized', false) !== true
                 || ! is_string($reference) || trim($reference) === '' || strlen($reference) > 255
@@ -32,6 +29,10 @@ final class DynamicPayoutGate
         if (config('nium_dynamic_payouts.reconciliation_enabled', false) !== true) {
             throw new RuntimeException('dynamic_dispatch_requires_reconciliation');
         }
+        $environment->assertContract('remittance');
+        // A supported POST must not admit funds while its GET recovery contract
+        // is known to be unverified, even when the reconciliation flag is enabled.
+        $environment->assertContract('transactions');
     }
 
     public static function assertWalletClear(int $providerId, string $wallet, ?string $exceptIntent = null): void

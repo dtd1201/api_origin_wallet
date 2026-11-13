@@ -384,13 +384,13 @@ final class NiumDynamicTransferOptionsTest extends TestCase
         $this->assertContains('financial_readiness_denied', $option['reason_codes']);
     }
 
-    public function test_sgd_local_remains_unavailable_despite_complete_assertions(): void
+    public function test_sgd_local_remains_unavailable_without_financial_terms(): void
     {
         $scope = $this->scope(['fundingWallets' => ['SGD' => 'fixture-wallet']]);
         $corridor = $this->corridor(['sourceCurrency' => 'SGD', 'destinationCurrency' => 'SGD', 'destinationCountry' => 'SG']);
-        $candidate = $this->candidate(['scope' => $scope, 'corridor' => $corridor], false);
+        $candidate = $this->candidate(['scope' => $scope, 'corridor' => $corridor, 'financialTerms' => null], false);
         $option = (new TransferOptionsService)->options('fixture-user', 'fixture-user', $scope, $this->time(), $candidate)->toArray()['options'][0];
-        $this->assertContains('sgd_local_hold', $option['reason_codes']);
+        $this->assertContains('financial_readiness_unverified', $option['reason_codes']);
         $this->assertNotSame('VERIFIED', $option['financial_readiness']);
         $this->assertClosed($option);
     }

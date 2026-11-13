@@ -157,22 +157,22 @@ final class NiumFinalizedUsdPayoutPreparationTest extends TestCase
             ['JP', 'JPY', 'LOCAL', '0.28'],
             ['KR', 'KRW', 'LOCAL', '0.44'],
             ['TH', 'THB', 'LOCAL', '0.28'],
-            ['CH', 'EUR', 'LOCAL', '0.13'],
-            ['FR', 'EUR', 'LOCAL', '0.13'],
-            ['CH', 'GBP', 'LOCAL', '0.13'],
+            ['CH', 'EUR', 'LOCAL', '0.30'],
+            ['FR', 'EUR', 'LOCAL', '1.5'],
+            ['CH', 'GBP', 'LOCAL', '1.5'],
             ['AU', 'AUD', 'LOCAL', '1.5'],
         ];
     }
 
     #[DataProvider('margins')]
-    public function test_margin_metadata_uses_observed_default_plan_without_granting_eligibility(
+    public function test_margin_metadata_uses_exact_signed_tuple_without_granting_provider_eligibility(
         string $country, string $currency, string $method, string $margin,
     ): void {
         $p = $this->preparation(context: $this->context(['destinationCountry' => $country,
             'destinationCurrency' => $currency, 'payoutMethod' => $method]));
         $s = $p->withQuote($this->quote($p), 'synthetic-user', $this->at())->snapshot('synthetic-user', $this->at());
-        $this->assertSame($margin, $s['expected_fx_margin_percent']);
-        $this->assertSame('production_v2_active_default_fee_plan_observation', $s['margin_basis']);
+        $this->assertTrue((new \App\Domain\Nium\DynamicMultiCurrency\Financial\Decimal($margin))->equals(new \App\Domain\Nium\DynamicMultiCurrency\Financial\Decimal($s['expected_fx_margin_percent'])));
+        $this->assertSame($margin === '1.5' ? 'uncontracted_planning_reference_only' : 'accepted_signed_local_schedule', $s['margin_basis']);
         $this->assertSame('980', $s['proposed_conversion_principal']['amount']);
         $this->assertSame('1000', $s['planned_customer_wallet_debit']['amount']);
         $this->assertSame('7644', $s['quoted_receive_amount']['amount']);
@@ -200,13 +200,12 @@ final class NiumFinalizedUsdPayoutPreparationTest extends TestCase
         return [
             [['sourceCurrency' => 'EUR']],
             [['destinationCountry' => 'HK', 'destinationCurrency' => 'USD', 'payoutMethod' => 'SWIFT']],
-            [['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD', 'payoutMethod' => 'LOCAL']],
             [['provider' => 'other']],
         ];
     }
 
     #[DataProvider('blockedContexts')]
-    public function test_non_usd_funding_legacy_hk_and_existing_sgd_hold_remain_excluded(array $changes): void
+    public function test_non_usd_funding_same_currency_quote_and_other_provider_remain_excluded(array $changes): void
     {
         $this->expectException(InvalidArgumentException::class);
         $this->preparation(context: $this->context($changes));
@@ -216,6 +215,16 @@ final class NiumFinalizedUsdPayoutPreparationTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->preparation(context: $this->context(registered: false));
+    }
+
+    public function test_sgd_planning_does_not_authorize_a_dynamic_fee_or_change_legacy_zero_fee_pricing(): void
+    {
+        $p = $this->preparation(context: $this->context(['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD']));
+        $snapshot = $p->snapshot('synthetic-user', $this->at());
+        $this->assertSame('UNVERIFIED', $snapshot['pricing_authorization']);
+        $this->assertSame('PREPARATION_ONLY', $snapshot['status']);
+        $this->assertSame('DENIED', $snapshot['admission']);
+        $this->assertSame('DENIED', $snapshot['dispatch']);
     }
 
     public static function mismatches(): array

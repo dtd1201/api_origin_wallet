@@ -18,6 +18,14 @@ final readonly class DynamicPayoutWireClaim
         DynamicPayoutGate::assertDispatchEnabled();
         $outbox = NiumDynamicPayoutOutbox::query()->findOrFail($this->outboxId);
         $intent = NiumDynamicIntent::query()->findOrFail($outbox->intent_id);
+        $environment = DynamicPayoutEnvironment::configured();
+        $corridor = $intent->confirmed_terms['context']['corridor'];
+        $origin = $intent->confirmed_terms['context']['provider_origin'] ?? match ($corridor['environment']) {
+            'production' => 'https://gateway.nium.com',
+            'sandbox' => 'https://gatewaysandbox.nium.com',
+            default => throw new RuntimeException('dynamic_provider_scope_unverified'),
+        };
+        $environment->assertBinding($origin, $corridor['environment']);
         $client = $intent->confirmed_terms['context']['corridor']['client'];
         $path = '/api/v1/client/'.rawurlencode($client).'/customer/'.rawurlencode($intent->customer)
             .'/wallet/'.rawurlencode($intent->source_wallet).'/remittance';
@@ -27,7 +35,7 @@ final readonly class DynamicPayoutWireClaim
                 $header = is_array($value) ? ($value[0] ?? null) : $value;
             }
         }
-        $expected = rtrim((string) config('services.nium.base_url'), '/').$path;
+        $expected = $environment->origin.$path;
         if ($method !== 'POST' || ($url !== $path && $url !== $expected)
             || ! is_string($outbox->claim_token) || ! hash_equals($outbox->claim_token, $this->token)
             || $header !== $outbox->operation_key || $outbox->state !== 'claimed' || $outbox->attempts !== 0

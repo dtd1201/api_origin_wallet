@@ -26,11 +26,6 @@ final class EligibilityResolver
             $reasons[] = ReasonCode::UnsupportedProvider;
         }
 
-        // Deliberately cannot be cleared by activation, evidence or configuration.
-        if ($corridor->provider === 'nium' && $corridor->destinationCurrency === 'SGD' && $corridor->payoutMethod === 'LOCAL') {
-            $reasons[] = ReasonCode::SgdLocalHold;
-        }
-
         foreach ($evidence as $record) {
             $hasSyntheticEvidence = $hasSyntheticEvidence || $record->synthetic;
             $origins[$record->synthetic ? 'synthetic' : 'attested'] = true;

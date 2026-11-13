@@ -440,11 +440,13 @@ final class NiumDynamicFinancialTermsTest extends TestCase
         $this->assertContains('pricing_evidence_origin_mixed', $decision->reasons);
     }
 
-    public function test_sgd_local_remains_held_and_even_claimed_real_production_terms_cannot_dispatch(): void
+    public function test_sgd_local_uses_scoped_financial_contract_and_production_terms_cannot_dispatch(): void
     {
         $sgd = $this->fx(['corridor' => $this->corridor(['destinationCountry' => 'SG', 'destinationCurrency' => 'SGD']),
             'conversionAmount' => $this->money('SGD', '80'), 'estimatedRecipient' => $this->money('SGD', '80')]);
-        $this->assertBlocked($this->check($sgd, ['currencyScales' => ['EUR' => 2, 'SGD' => 2]]), 'sgd_local_hold');
+        $sgdDecision = $this->check($sgd, ['currencyScales' => ['EUR' => 2, 'SGD' => 2]]);
+        $this->assertSame('VERIFIED', $sgdDecision->status);
+        $this->assertSame('DENIED', $sgdDecision->dispatch);
         // These are still synthetic fixtures; only their asserted source labels differ.
         $terms = $this->sameCurrency(['corridor' => $this->corridor(['environment' => 'production'])]);
         $records = [$this->evidence($terms, PricingStage::Effective, ['source' => EvidenceSource::LocalAttestation]),
