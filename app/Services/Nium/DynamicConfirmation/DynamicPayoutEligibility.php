@@ -22,13 +22,33 @@ final class DynamicPayoutEligibility
 {
     public function __construct(private readonly NiumService $nium) {}
 
+    /** Authenticated listing only. Neither pricing nor payout entitlement is inferred. */
+    public function discover(User $user, Beneficiary $beneficiary, array $binding): array
+    {
+        $body = $this->read($user, $beneficiary, $binding, 'customer_corridors', null, now(), listing: true);
+        try {
+            $decoded = ExactProviderJson::decode($body);
+        } catch (\Throwable $exception) {
+            throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable', previous: $exception);
+        }
+        foreach (['clientHashId' => 'client', 'customerHashId' => 'customer'] as $field => $key) {
+            if (array_key_exists($field, $decoded) && $decoded[$field] !== $binding[$key]) {
+                throw new RuntimeException('dynamic_eligibility_scope_changed');
+            }
+        }
+
+        return [...self::listing($decoded, $beneficiary->country_code, $beneficiary->currency, $beneficiary->payout_method),
+            'response_sha256' => hash('sha256', $body)];
+    }
+
     public function observe(User $user, Beneficiary $beneficiary, NiumDynamicPayoutQuote $quote,
         string $legalEntity, array $amounts): array
     {
         $evidence = $this->options($user, $beneficiary, $quote->binding, $legalEntity, $quote->id,
             PayoutAmountMode::from($quote->binding['amount_mode']));
         foreach (['USD' => $amounts['quoted_principal']['amount'], $beneficiary->currency => $amounts['quoted_destination_amount']['amount']] as $currency => $amount) {
-            if (! (new Decimal($amount))->fitsScale($evidence['currency_scales'][$currency])) {
+            if (! isset($evidence['currency_scales'][$currency])
+                || ! (new Decimal($amount))->fitsScale($evidence['currency_scales'][$currency])) {
                 throw new RuntimeException('dynamic_payout_amount_precision_unsupported');
             }
         }
@@ -46,45 +66,8 @@ final class DynamicPayoutEligibility
         $started = now();
         $bodies = [];
         foreach (['customer_corridors', 'payout_schema'] as $endpoint) {
-            $this->assertScope($binding, $user, $beneficiary);
-            $path = $this->nium->path(NiumEntitlementEvidenceTransport::ENDPOINTS[$endpoint],
-                ['client' => $binding['client'], 'customer' => $binding['customer'], 'currencyCode' => $beneficiary->currency]);
+            $bodies[$endpoint] = $this->read($user, $beneficiary, $binding, $endpoint, $reference, $started);
             $environment = DynamicPayoutEnvironment::configured();
-            $query = $endpoint === 'payout_schema' ? ['destinationCountry' => $beneficiary->country_code, 'payoutMethod' => 'LOCAL'] : [];
-            if ($endpoint === 'customer_corridors') {
-                $environment->assertCustomerCorridorsReadEndpoint($path, $binding['client'], $binding['customer']);
-            } else {
-                $environment->payoutSchemaDialect($path, $query, $binding['client'], $binding['customer'], $beneficiary->currency);
-            }
-            $expectedUrl = $environment->origin.$path.($query === [] ? '' : '?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986));
-            $dispatched = false;
-            $response = $this->nium->get(path: $path,
-                query: $query,
-                user: $user, operation: 'dynamic_'.$endpoint, externalReference: $reference ?? (string) $beneficiary->id,
-                beforeDispatch: function (Request $request) use ($binding, $user, $beneficiary, $path, $query, $endpoint, $environment, $expectedUrl, &$dispatched): void {
-                    if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
-                        throw new RuntimeException('dynamic_eligibility_network_requires_no_transaction');
-                    }
-                    $this->assertScope($binding, $user, $beneficiary);
-                    if ($endpoint === 'customer_corridors') {
-                        $environment->assertCustomerCorridorsReadEndpoint($path, $binding['client'], $binding['customer']);
-                    } else {
-                        $environment->payoutSchemaDialect($path, $query, $binding['client'], $binding['customer'], $beneficiary->currency);
-                    }
-                    if ($dispatched || $request->method() !== 'GET' || $request->url() !== $expectedUrl) {
-                        throw new RuntimeException('dynamic_eligibility_scope_changed');
-                    }
-                    $dispatched = true;
-                });
-            $this->assertScope($binding, $user, $beneficiary);
-            if (! $dispatched) {
-                throw new RuntimeException('dynamic_eligibility_scope_changed');
-            }
-            if (! $response->successful() || strlen($response->body()) > 1048576
-                || $started->copy()->addSeconds(30)->isPast()) {
-                throw new RuntimeException('dynamic_'.$endpoint.'_unavailable');
-            }
-            $bodies[$endpoint] = $response->body();
             if ($endpoint === 'customer_corridors') {
                 try {
                     $body = ExactProviderJson::decode($bodies[$endpoint]);
@@ -96,25 +79,75 @@ final class DynamicPayoutEligibility
                         throw new RuntimeException('dynamic_eligibility_scope_changed');
                     }
                 }
-                // Parse the evidenced listing before requesting any unverified API.
-                // Missing authorization must not be masked by the Schema guard.
-                $selected = self::select($body, $beneficiary->country_code, $beneficiary->currency, $legalEntity);
+                $selected = self::select($body, $beneficiary->country_code, $beneficiary->currency, $legalEntity, $beneficiary->payout_method);
                 $environment->assertContract('customer_corridors');
             } else {
                 $schema = self::schemaObservation($bodies[$endpoint], [
                     ...array_intersect_key($binding, array_flip(['base_url', 'client', 'customer'])),
-                    'currency' => $beneficiary->currency, 'path' => $path, 'query' => $query,
+                    'currency' => $beneficiary->currency,
+                    'path' => $this->nium->path(NiumEntitlementEvidenceTransport::ENDPOINTS[$endpoint],
+                        ['client' => $binding['client'], 'customer' => $binding['customer'], 'currencyCode' => $beneficiary->currency]),
+                    'query' => ['destinationCountry' => $beneficiary->country_code, 'payoutMethod' => $beneficiary->payout_method],
                 ], $mode);
                 $environment->assertContract('payout_schema');
             }
         }
         return ['version' => 'nium-customer-payout-oas-example-v1',
             'selection' => $selected, 'currency_scales' => $schema['currency_scales'],
+            'supported_amount_modes' => $schema['supported_amount_modes'],
             'schema_observation' => $schema,
             'customer_corridors_sha256' => hash('sha256', $bodies['customer_corridors']),
             'payout_schema_sha256' => hash('sha256', $bodies['payout_schema']),
             'observed_at' => now()->toISOString(), 'expires_at' => $started->copy()->addSeconds(30)->toISOString(),
             'scope' => array_intersect_key($binding, array_flip(['base_url', 'client', 'customer', 'wallet']))];
+    }
+
+    private function read(User $user, Beneficiary $beneficiary, array $binding, string $endpoint,
+        ?string $reference, \Carbon\CarbonInterface $started, bool $listing = false): string
+    {
+        if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
+            throw new RuntimeException('dynamic_eligibility_network_requires_no_transaction');
+        }
+        $this->assertScope($binding, $user, $beneficiary);
+        $path = $this->nium->path(NiumEntitlementEvidenceTransport::ENDPOINTS[$endpoint],
+            ['client' => $binding['client'], 'customer' => $binding['customer'], 'currencyCode' => $beneficiary->currency]);
+        $environment = DynamicPayoutEnvironment::configured();
+        $query = $endpoint === 'payout_schema' ? ['destinationCountry' => $beneficiary->country_code, 'payoutMethod' => $beneficiary->payout_method] : [];
+        if ($endpoint === 'customer_corridors') {
+            $environment->assertCustomerCorridorsReadEndpoint($path, $binding['client'], $binding['customer']);
+        } else {
+            $environment->payoutSchemaDialect($path, $query, $binding['client'], $binding['customer'], $beneficiary->currency);
+        }
+        $expectedUrl = $environment->origin.$path.($query === [] ? '' : '?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986));
+        $dispatched = false;
+        $response = $this->nium->get(path: $path,
+            query: $query,
+            user: $user, operation: $listing ? 'dynamic_customer_corridor_listing' : 'dynamic_'.$endpoint,
+            externalReference: $reference ?? (string) $beneficiary->id,
+            beforeDispatch: function (Request $request) use ($binding, $user, $beneficiary, $path, $query, $endpoint, $environment, $expectedUrl, &$dispatched): void {
+                if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
+                    throw new RuntimeException('dynamic_eligibility_network_requires_no_transaction');
+                }
+                $this->assertScope($binding, $user, $beneficiary);
+                if ($endpoint === 'customer_corridors') {
+                    $environment->assertCustomerCorridorsReadEndpoint($path, $binding['client'], $binding['customer']);
+                } else {
+                    $environment->payoutSchemaDialect($path, $query, $binding['client'], $binding['customer'], $beneficiary->currency);
+                }
+                if ($dispatched || $request->method() !== 'GET' || $request->url() !== $expectedUrl) {
+                    throw new RuntimeException('dynamic_eligibility_scope_changed');
+                }
+                $dispatched = true;
+            });
+        $this->assertScope($binding, $user, $beneficiary);
+        if (! $dispatched) {
+            throw new RuntimeException('dynamic_eligibility_scope_changed');
+        }
+        if (! $response->successful() || strlen($response->body()) > 1048576
+            || $started->copy()->addSeconds(30)->isPast()) {
+            throw new RuntimeException('dynamic_'.$endpoint.'_unavailable');
+        }
+        return $response->body();
     }
 
     /** Spend's four-field records prove listing only. Preserve every matching row. */
@@ -241,11 +274,17 @@ final class DynamicPayoutEligibility
             }
             $scales[$code] = (int) $property->maximumDecimals;
         }
-        if ($spend && $mode !== null) {
+        // Source instruction support must be explicit in this schema, not copied
+        // from destination precision or advertised because a quote accepts a mode.
+        $modes = $spend ? [] : array_values(array_filter(PayoutAmountMode::cases(),
+            static fn (PayoutAmountMode $candidate): bool => property_exists($root->properties, 'payout.'.$candidate->quoteField())));
+        $modes = array_map(static fn (PayoutAmountMode $candidate): string => $candidate->value, $modes);
+        if ($mode !== null && ! in_array($mode->value, $modes, true)) {
             throw new RuntimeException($mode === PayoutAmountMode::Source
                 ? 'dynamic_payout_source_amount_contract_unverified' : 'dynamic_payout_destination_amount_contract_unverified');
         }
         return ['schema_uri' => $dialect, 'currency_scales' => $scales,
+            'supported_amount_modes' => $modes,
             // Retain the exact constraints, including number types/tokens, for evidence.
             // The parsed summary is never evaluated as a payload validator.
             'schema_json' => $body,
@@ -290,7 +329,11 @@ final class DynamicPayoutEligibility
             || $account->external_account_id !== $binding['wallet'] || $wallet->external_account_id !== $binding['wallet']
             || $currentBeneficiary->country_code !== $beneficiary->country_code
             || $currentBeneficiary->currency !== $beneficiary->currency
-            || $currentBeneficiary->payout_method !== 'LOCAL') {
+            || $currentBeneficiary->payout_method !== $beneficiary->payout_method
+            || preg_match('/^[A-Z][A-Z0-9_]*$/D', (string) $beneficiary->payout_method) !== 1
+            || (isset($binding['payout_method']) && $binding['payout_method'] !== $currentBeneficiary->payout_method)
+            || (isset($binding['destination_country']) && $binding['destination_country'] !== $currentBeneficiary->country_code)
+            || (isset($binding['destination_currency']) && $binding['destination_currency'] !== $currentBeneficiary->currency)) {
             throw new RuntimeException('dynamic_eligibility_scope_changed');
         }
     }

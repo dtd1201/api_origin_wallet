@@ -30,9 +30,9 @@ final class DynamicPayoutGate
             throw new RuntimeException('dynamic_dispatch_requires_reconciliation');
         }
         $environment->assertContract('remittance');
-        // A supported POST must not admit funds while its GET recovery contract
-        // is known to be unverified, even when the reconciliation flag is enabled.
-        $environment->assertContract('transactions');
+        // Require the technical GET recovery contract. Complete financial evidence
+        // is evaluated separately; missing fees must never become matched settlement.
+        $environment->assertTransactionsReadContract();
     }
 
     public static function assertWalletClear(int $providerId, string $wallet, ?string $exceptIntent = null): void

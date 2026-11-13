@@ -490,6 +490,16 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertNotNull($outbox->fresh()->next_reconciliation_at);
         $this->assertNull($outbox->fresh()->provider_status);
         $this->assertNotSame('paid', $this->customerStatus($outbox)['status']);
+        $receipt = $outbox->fresh()->financial_evidence;
+        $this->assertSame('980', $receipt['observed_remittance_debit_usd']);
+        $this->assertNull($receipt['principal_usd']);
+        $this->assertNull($receipt['fee_usd']);
+        $this->assertNull($receipt['wallet_debit_usd']);
+        $this->assertSame('20', $receipt['customer_fee_allocation_usd']);
+        $this->assertSame('MISSING_FEE_RECORDS', $receipt['fee_evidence']);
+        $this->assertSame([], $receipt['provider_fee_records']);
+        $this->dispatcher->dispatch($outbox->id);
+        $this->assertSame(1, $this->wire->submissions);
         $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
         $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
@@ -498,6 +508,11 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->travelTo($this->at('00:12:00'));
         $this->reconciler->reconcile($outbox->id);
         $this->assertSame('matched', $outbox->fresh()->state);
+        $this->assertSame('SETTLED_FEE_RECORDS', $outbox->fresh()->financial_evidence['fee_evidence']);
+        $this->assertSame('20', $outbox->fresh()->financial_evidence['fee_usd']);
+        $this->dispatcher->dispatch($outbox->id);
+        $this->assertSame(1, $this->wire->submissions);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
     public function test_provider_mismatch_consumes_only_customer_consent_alerts_operations_and_blocks_wallet(): void

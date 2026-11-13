@@ -133,8 +133,8 @@ final class NiumDynamicPayoutCustomerApiTest extends DynamicConfirmationDatabase
 
     public static function excludedLanes(): array
     {
-        return [['USD', 'SWIFT', 'dynamic_same_currency_quote_contract_unverified'],
-            ['SGD', 'LOCAL', 'dynamic_provider_quote_disabled'], ['GBP', 'SWIFT', 'dynamic_swift_fee_contract_unverified']];
+        return [['USD', 'SWIFT', 'dynamic_provider_quote_disabled'],
+            ['SGD', 'LOCAL', 'dynamic_provider_quote_disabled'], ['GBP', 'SWIFT', 'dynamic_provider_quote_disabled']];
     }
 
     #[DataProvider('excludedLanes')]
@@ -274,19 +274,20 @@ final class NiumDynamicPayoutCustomerApiTest extends DynamicConfirmationDatabase
     }
 
     #[DataProvider('modes')]
-    public function test_spend_submit_cannot_reserve_when_get_recovery_contract_is_unverified(string $mode, string $amount): void
+    public function test_spend_get_recovery_compatibility_cannot_replace_authoritative_customer_review(string $mode, string $amount): void
     {
-        // Synthetic consent cannot turn shared POST compatibility into GET evidence.
+        // A synthetic fingerprint and verified GET cannot replace the real Origin
+        // evidence source. Do not install the success-path confirmation stub here.
+        $this->assertInstanceOf(OriginDynamicPayoutEvidenceSource::class, app(DynamicPayoutEvidenceSource::class));
         $this->source->review = $this->usdReview(PayoutAmountMode::from($mode), [
             'instruction' => new PayoutInstruction('IR005', 'Salary', 'Invoice')]);
-        $this->app->instance(DynamicTransferConfirmationService::class, $this->confirmation);
         config(['services.nium.base_url' => 'https://api.spend.nium.com',
             'services.nium.transfer_endpoint' => '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance',
             'nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
             'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-operator-reference']);
 
         $this->postJson($this->path(), $this->submission())->assertStatus(503)
-            ->assertJsonPath('reason_codes', ['dynamic_production_transactions_contract_unverified']);
+            ->assertJsonPath('reason_codes', OriginDynamicPayoutEvidenceSource::MISSING_DEPENDENCIES);
         $this->noReservation();
         // The database test base also asserts no HTTP, jobs or queued dispatch.
     }

@@ -39,6 +39,7 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         $result = DynamicPayoutEligibility::schemaObservation($this->body(), $this->scope());
         $this->assertSame('https://json-schema.org/draft/2020-12/schema', $result['schema_uri']);
         $this->assertSame(['GBP' => 2], $result['currency_scales']);
+        $this->assertSame([], $result['supported_amount_modes']);
         $this->assertFalse($result['source_amount_present']);
         $this->assertSame($this->schema()['required'], $result['required']);
         $this->assertSame($this->schema()['allOf'], $result['allOf']);
@@ -107,15 +108,53 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
     {
         $schema = $this->schema();
         $schema['$schema'] = 'http://json-schema.org/draft-07/schema#';
+        $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
         $schema['properties']['payout.destinationAmount']['maximumDecimals'] = '2';
         foreach (['https://gateway.nium.com', 'https://gatewaysandbox.nium.com'] as $origin) {
             $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope($origin), PayoutAmountMode::Source);
             $this->assertSame(['USD' => 2, 'GBP' => 2], $result['currency_scales']);
+            $this->assertSame(['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'], $result['supported_amount_modes']);
             $this->assertTrue($result['requires_instruction_validation']);
             $this->assertFalse($result['instruction_validated']);
             $encoded = json_encode($this->body($schema), JSON_THROW_ON_ERROR);
             $this->assertSame($result, DynamicPayoutEligibility::schemaObservation($encoded, $this->scope($origin), PayoutAmountMode::Source));
         }
+    }
+
+    public function test_gateway_destination_only_schema_does_not_advertise_source_mode(): void
+    {
+        $schema = $this->schema();
+        $schema['$schema'] = 'http://json-schema.org/draft-07/schema#';
+        $scope = $this->scope('https://gatewaysandbox.nium.com');
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope, PayoutAmountMode::Destination);
+        $this->assertSame(['DESTINATION_AMOUNT'], $result['supported_amount_modes']);
+        $this->assertFalse($result['instruction_validated']);
+        $this->expectExceptionMessage('dynamic_payout_source_amount_contract_unverified');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope, PayoutAmountMode::Source);
+    }
+
+    public static function gatewayTuples(): array
+    {
+        return [['DE', 'EUR', 'LOCAL', 2], ['JP', 'JPY', 'LOCAL', 0], ['GB', 'GBP', 'SWIFT', 2]];
+    }
+
+    #[DataProvider('gatewayTuples')]
+    public function test_gateway_read_dialect_tracks_actual_tuple_and_precision_without_authorizing_execution(
+        string $country, string $currency, string $rail, int $precision): void
+    {
+        $schema = $this->schema();
+        $schema['$schema'] = 'http://json-schema.org/draft-07/schema#';
+        $schema['properties']['payout.destinationAmount']['maximumDecimals'] = $precision;
+        $scope = $this->scope('https://gatewaysandbox.nium.com');
+        $scope['currency'] = $currency;
+        $scope['path'] = '/api/v1/client/fixture-client/customer/fixture-customer/currency/'.$currency.'/payout/schema';
+        $scope['query'] = ['destinationCountry' => $country, 'payoutMethod' => $rail];
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope);
+        $this->assertSame($precision, $result['currency_scales'][$currency]);
+        $this->assertSame(['DESTINATION_AMOUNT'], $result['supported_amount_modes']);
+        $this->assertFalse($result['eligible']);
+        $this->assertTrue($result['requires_instruction_validation']);
+        $this->assertFalse((new Decimal('1.001'))->fitsScale($precision));
     }
 
     public static function wrongDialects(): array

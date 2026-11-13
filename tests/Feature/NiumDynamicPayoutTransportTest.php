@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Models\NiumDynamicIntent;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutEnvironment;
 use App\Services\Nium\DynamicConfirmation\NiumDynamicPayoutTransport;
 use App\Services\Nium\NiumService;
 use GuzzleHttp\Psr7\Response as PsrResponse;
@@ -118,6 +119,7 @@ final class NiumDynamicPayoutTransportTest extends DynamicConfirmationDatabaseTe
     public function test_verified_spend_transactions_read_preserves_null_ids_and_original_numeric_tokens(): void
     {
         config(['services.nium.base_url' => 'https://api.spend.nium.com']);
+        DynamicPayoutEnvironment::configured()->assertContract('transactions');
         $snapshot = $this->intent->confirmed_terms;
         $snapshot['context']['corridor']['environment'] = 'production';
         $snapshot['context']['provider_origin'] = 'https://api.spend.nium.com';
@@ -138,6 +140,33 @@ final class NiumDynamicPayoutTransportTest extends DynamicConfirmationDatabaseTe
         $this->assertSame('999999999999.12345678', $row['settlementAuthAmount']);
         $this->assertSame('123.00000001', $row['settlementTransactionAmount']);
         $this->assertSame('fixture-registered-payee', $row['labels']['beneficiaryId']);
+    }
+
+    public function test_spend_incomplete_pagination_is_still_rejected_after_technical_contract_acceptance(): void
+    {
+        config(['services.nium.base_url' => 'https://api.spend.nium.com']);
+        $snapshot = $this->intent->confirmed_terms;
+        $snapshot['context']['corridor']['environment'] = 'production';
+        $snapshot['context']['provider_origin'] = 'https://api.spend.nium.com';
+        $this->intent->forceFill(['confirmed_terms' => $snapshot]);
+        $this->nium->shouldReceive('getDynamicPayoutTransactions')->twice()->andReturn(
+            $this->response('{"content":[{"authCode":"RT-fixture"}],"totalPages":2,"totalElements":2}'),
+            $this->response('{"content":[],"totalPages":2,"totalElements":2}'));
+        $this->expectExceptionMessage('dynamic_transaction_snapshot_incomplete');
+        (new NiumDynamicPayoutTransport($this->nium))->transactions($this->intent);
+    }
+
+    public function test_spend_read_contract_does_not_permit_a_different_wire_path(): void
+    {
+        config(['services.nium.base_url' => 'https://api.spend.nium.com']);
+        $snapshot = $this->intent->confirmed_terms;
+        $snapshot['context']['corridor']['environment'] = 'production';
+        $snapshot['context']['provider_origin'] = 'https://api.spend.nium.com';
+        $this->intent->forceFill(['confirmed_terms' => $snapshot]);
+        $this->nium->shouldReceive('path')->once()->andReturn('/api/v2/unverified/transactions');
+        $this->nium->shouldNotReceive('getDynamicPayoutTransactions');
+        $this->expectExceptionMessage('dynamic_transactions_endpoint_unverified');
+        (new NiumDynamicPayoutTransport($this->nium))->transactions($this->intent);
     }
 
     public function test_historical_production_gateway_snapshot_cannot_replay_on_spend_host(): void

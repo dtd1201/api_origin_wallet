@@ -49,6 +49,11 @@ final readonly class DynamicPayoutEnvironment
             if ($operation === 'wallet') {
                 return;
             }
+            // Authenticated Spend V1 GET evidence establishes the paginated
+            // Transactions read dialect, not fees, settlement or payout authority.
+            if ($operation === 'transactions') {
+                return;
+            }
             // STEP 497: retained HK successes, the legacy submitter and the official
             // remittance schema establish this shared POST method/path. Require the
             // legacy endpoint to match Dynamic's fixed path; a custom route is not
@@ -57,8 +62,8 @@ final readonly class DynamicPayoutEnvironment
                 === '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance') {
                 return;
             }
-            // Quote variants, customer corridors/schema, validation and transaction
-            // accounting need their own evidence. A working POST proves none of them.
+            // Quote variants, customer corridors/schema and validation still need
+            // their own evidence. A working POST or GET proves none of them.
             throw new RuntimeException('dynamic_production_'.$operation.'_contract_unverified');
         }
     }
@@ -66,13 +71,17 @@ final readonly class DynamicPayoutEnvironment
     /** Read compatibility does not prove complete fee accounting or authorize dispatch. */
     public function assertTransactionsReadContract(): void
     {
-        // STEP 573: authenticated Spend V1 GETs establish the paginated response
-        // contract. No observed Fee_Debit or verified no-charge contract yet.
-        if ($this->origin === 'https://api.spend.nium.com') {
-            return;
-        }
-
         $this->assertContract('transactions');
+    }
+
+    public function assertTransactionsReadEndpoint(string $path, string $client, string $customer, string $wallet): void
+    {
+        $this->assertTransactionsReadContract();
+        if ($client === '' || $customer === '' || $wallet === ''
+            || $path !== '/api/v1/client/'.urlencode($client).'/customer/'.urlencode($customer)
+                .'/wallet/'.urlencode($wallet).'/transactions') {
+            throw new RuntimeException('dynamic_transactions_endpoint_unverified');
+        }
     }
 
     /** Endpoint evidence permits reference acquisition, never an assumed response or payout contract. */
@@ -101,12 +110,13 @@ final readonly class DynamicPayoutEnvironment
             || $path !== '/api/v1/client/'.urlencode($client).'/customer/'.urlencode($customer).'/currency/'.$currency.'/payout/schema'
             || count($query) !== 2 || ! is_string($query['destinationCountry'] ?? null)
             || preg_match('/^[A-Z]{2}$/D', $query['destinationCountry']) !== 1
-            || ($query['payoutMethod'] ?? null) !== 'LOCAL') {
+            || ! is_string($query['payoutMethod'] ?? null)
+            || preg_match('/^[A-Z][A-Z0-9_]*$/D', $query['payoutMethod']) !== 1) {
             throw new RuntimeException('dynamic_payout_schema_endpoint_unverified');
         }
         if ($this->origin === 'https://api.spend.nium.com') {
             // STEP 607: only the observed GBP/GB/LOCAL root-object dialect.
-            if ($currency !== 'GBP' || $query['destinationCountry'] !== 'GB') {
+            if ($currency !== 'GBP' || $query['destinationCountry'] !== 'GB' || $query['payoutMethod'] !== 'LOCAL') {
                 throw new RuntimeException('dynamic_payout_schema_endpoint_unverified');
             }
             return 'https://json-schema.org/draft/2020-12/schema';

@@ -64,14 +64,15 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
             'timestamp' => 'synthetic-timestamp', 'data' => $rows, ...$echoes], JSON_THROW_ON_ERROR);
     }
 
-    private function expectCorridors(string $body, ?\Closure $outgoing = null, ?\Closure $during = null): void
+    private function expectCorridors(string $body, ?\Closure $outgoing = null, ?\Closure $during = null,
+        string $expectedOperation = 'dynamic_customer_corridors'): void
     {
         $url = 'https://api.spend.nium.com/api/v1/client/fixture-client/customer/fixture-customer/supportedCorridors';
-        $this->nium->shouldReceive('get')->once()->withArgs(function ($path, $query, $user, $operation): bool {
+        $this->nium->shouldReceive('get')->once()->withArgs(function ($path, $query, $user, $operation) use ($expectedOperation): bool {
             $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/supportedCorridors', $path);
             $this->assertSame([], $query);
             $this->assertSame($this->owner->id, $user->id);
-            return $operation === 'dynamic_customer_corridors';
+            return $operation === $expectedOperation;
         })->andReturnUsing(function ($path, $query, $user, $operation, $reference, $beforeDispatch) use ($body, $url, $outgoing, $during): Response {
             $request = $outgoing === null ? new Request(new PsrRequest('GET', $url)) : $outgoing($url);
             if ($request !== null) {
@@ -106,6 +107,62 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
     {
         $this->expectCorridors($this->body([$this->row(), [...$this->row(), 'routing_code_type' => 'synthetic-route-b']]));
         $this->assertRefused('dynamic_customer_corridor_legal_entity_unverified');
+    }
+
+    public static function listedTuples(): array
+    {
+        return [['GB', 'GBP', 'LOCAL'], ['DE', 'EUR', 'LOCAL'], ['JP', 'JPY', 'LOCAL'], ['GB', 'GBP', 'SWIFT']];
+    }
+
+    #[DataProvider('listedTuples')]
+    public function test_discovery_preserves_actual_tuple_and_all_matching_rows_without_granting_authority(
+        string $country, string $currency, string $rail): void
+    {
+        $this->beneficiary->update(['country_code' => $country, 'currency' => $currency, 'payout_method' => $rail]);
+        $row = [...$this->row(), 'destination_country' => [$country], 'destination_currency' => $currency, 'payout_method' => $rail];
+        $body = $this->body([$row, [...$row, 'routing_code_type' => 'synthetic-route-b']]);
+        $this->expectCorridors($body, expectedOperation: 'dynamic_customer_corridor_listing');
+        $listing = app(DynamicPayoutEligibility::class)->discover($this->owner, $this->beneficiary, $this->binding);
+        $this->assertSame('LISTED', $listing['status']);
+        $this->assertFalse($listing['eligible']);
+        $this->assertCount(2, $listing['matches']);
+        $this->assertSame($rail, $listing['matches'][0]['payout_method']);
+        $this->assertSame(hash('sha256', $body), $listing['response_sha256']);
+        $this->assertContains('dynamic_customer_corridor_authorization_unverified', $listing['reason_codes']);
+        $this->assertSame(0, NiumDynamicIntent::query()->count());
+        $this->assertSame(0, NiumDynamicPayoutOutbox::query()->count());
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+    }
+
+    #[DataProvider('wrongBindings')]
+    public function test_discovery_rejects_foreign_scope_before_read(string $key, string $value, string $reason): void
+    {
+        $this->binding[$key] = $value;
+        $this->nium->shouldNotReceive('get');
+        $this->expectExceptionMessage($reason);
+        app(DynamicPayoutEligibility::class)->discover($this->owner, $this->beneficiary, $this->binding);
+    }
+
+    #[DataProvider('wrongRequests')]
+    public function test_discovery_requires_the_exact_authenticated_customer_get(string $mutation): void
+    {
+        $this->expectCorridors($this->body([$this->row()]), outgoing: static function ($url) use ($mutation): ?Request {
+            if ($mutation === 'missing_callback') return null;
+            if ($mutation === 'origin') $url = str_replace('api.spend.nium.com', 'gateway.nium.com', $url);
+            if ($mutation === 'customer') $url = str_replace('fixture-customer', 'foreign-customer', $url);
+            if ($mutation === 'query') $url .= '?customerHashId=foreign-customer';
+            return new Request(new PsrRequest($mutation === 'method' ? 'POST' : 'GET', $url));
+        }, expectedOperation: 'dynamic_customer_corridor_listing');
+        $this->expectExceptionMessage('dynamic_eligibility_scope_changed');
+        app(DynamicPayoutEligibility::class)->discover($this->owner, $this->beneficiary, $this->binding);
+    }
+
+    #[DataProvider('foreignResponseEchoes')]
+    public function test_discovery_rejects_foreign_or_null_customer_client_echoes(array $echoes): void
+    {
+        $this->expectCorridors($this->body([$this->row()], $echoes), expectedOperation: 'dynamic_customer_corridor_listing');
+        $this->expectExceptionMessage('dynamic_eligibility_scope_changed');
+        app(DynamicPayoutEligibility::class)->discover($this->owner, $this->beneficiary, $this->binding);
     }
 
     public function test_missing_lookup_policy_is_not_false_even_with_a_matching_legal_entity(): void

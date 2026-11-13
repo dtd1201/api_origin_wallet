@@ -29,12 +29,12 @@ final class NiumDynamicReviewService
         'dynamic_payout_schema_endpoint_unverified', 'dynamic_payout_schema_destination_amount_unverified',
         'dynamic_payout_source_amount_contract_unverified', 'dynamic_payout_destination_amount_contract_unverified',
         'dynamic_payout_amount_precision_unsupported', 'dynamic_eligibility_scope_changed',
+        'dynamic_payout_amount_modes_unverified',
     ];
 
     public function __construct(private readonly NiumDynamicPayoutQuoteService $quotes,
         private readonly DynamicRegisteredAccountEvidence $registration,
         private readonly DynamicPayoutWalletSnapshot $wallets,
-        private readonly NiumSupportedCorridorService $corridors,
         private readonly DynamicPayoutInstructionValidation $instructions,
         private readonly DynamicPayoutEligibility $eligibility,
         private readonly DynamicPayoutFinancialAuthorization $financial) {}
@@ -42,18 +42,43 @@ final class NiumDynamicReviewService
     /** Options permit quoting only; Review must repeat fresh evidence before consent. */
     public function availability(User $user, Beneficiary $beneficiary, Balance $wallet): array
     {
-        $binding = $this->quotes->availability($user, $beneficiary, $wallet);
-        foreach (['wallet', 'validation', 'remittance', 'transactions'] as $operation) {
-            DynamicPayoutEnvironment::configured()->assertContract($operation);
-        }
+        $discovery = $this->quotes->discovery($user, $beneficiary, $wallet);
+        $binding = $discovery['binding'];
         $account = UserProviderAccount::query()->where('user_id', $user->id)->findOrFail($binding['provider_account_id']);
         $registered = $this->registration->inspect($beneficiary, $account, $binding);
-        if ($registered['reason_codes'] !== []) throw new RuntimeException($registered['reason_codes'][0]);
-        if (! is_string($registered['legal_entity']) || preg_match('/^[A-Z]{2}$/D', $registered['legal_entity']) !== 1) {
-            throw new RuntimeException('dynamic_quote_registration_evidence_unavailable');
+        $reasons = [...$registered['reason_codes'], ...($discovery['provider_listing']['status'] === 'LISTED'
+            ? [] : $discovery['provider_listing']['reason_codes'])];
+        $options = null;
+        if ($reasons === []) {
+            try {
+                if (! is_string($registered['legal_entity']) || preg_match('/^[A-Z]{2}$/D', $registered['legal_entity']) !== 1) {
+                    throw new RuntimeException('dynamic_quote_registration_evidence_unavailable');
+                }
+                $options = $this->eligibility->options($user, $beneficiary, $binding, $registered['legal_entity']);
+                foreach (['wallet', 'validation', 'remittance', 'transactions'] as $operation) {
+                    DynamicPayoutEnvironment::configured()->assertContract($operation);
+                }
+            } catch (RuntimeException $exception) {
+                // The controller sanitizes these reason codes before projection.
+                $reasons[] = $exception->getMessage();
+            }
         }
+        $financial = $this->financial->unavailableReasons($beneficiary);
+        $reasons = [...$reasons, ...$financial];
+        // Discovery does not enrol existing Standard SGD or same-currency flows.
+        if (in_array($beneficiary->currency, ['SGD', 'USD'], true)) {
+            $reasons[] = $beneficiary->currency === 'USD'
+                ? 'dynamic_same_currency_quote_contract_unverified' : 'dynamic_quote_local_eligibility_changed';
+        }
+        $modes = $options['supported_amount_modes'] ?? [];
+        if ($options !== null && $modes === []) $reasons[] = 'dynamic_payout_amount_modes_unverified';
 
-        return $this->eligibility->options($user, $beneficiary, $binding, $registered['legal_entity']);
+        return ['provider_listing' => $discovery['provider_listing'],
+            'customer_entitlement' => $options === null ? 'UNAVAILABLE' : 'VERIFIED',
+            'financial_authorization' => $financial === [] ? 'CUSTOMER_PRICING_AUTHORIZED' : 'UNAVAILABLE',
+            'supported_amount_modes' => $reasons === [] ? $modes : [],
+            'executable_amount_modes' => [], 'requires_instruction_validation' => true,
+            'reason_codes' => array_values(array_unique($reasons))];
     }
 
     public function prepare(User $user, Beneficiary $beneficiary, Balance $wallet,
@@ -68,7 +93,7 @@ final class NiumDynamicReviewService
         $this->quotes->assertCurrent($quote, $user, $beneficiary, $wallet);
         $projected = $this->quotes->project($quote);
         $record = [
-            'version' => 'nium-dynamic-review-v3', 'owner' => (string) $user->id,
+            'version' => 'nium-dynamic-review-v4', 'owner' => (string) $user->id,
             'provider_id' => (string) $quote->provider_id, 'provider_account_id' => $quote->provider_account_id,
             'balance_id' => $wallet->id, 'beneficiary_id' => $beneficiary->id,
             'dynamic_quote_id' => $quote->id, 'provider_quote_id' => $quote->quote_id,
@@ -81,7 +106,7 @@ final class NiumDynamicReviewService
             'total_usd_debit' => $projected['planned_total_usd_debit'],
             'destination_amount' => $projected['quoted_destination_amount'],
             'customer_pricing' => $projected['customer_pricing'],
-            'origin_service_fee' => $projected['origin_service_fee'], 'payout_rail' => 'LOCAL',
+            'origin_service_fee' => $projected['origin_service_fee'], 'payout_rail' => $projected['payout_rail'],
             'quote_expires_at' => $projected['quote_expires_at'], 'nium_quoted_fx_rate' => $projected['nium_quoted_fx_rate'],
             'instruction' => ['purpose_code' => $instruction->purposeCode, 'source_of_funds' => $instruction->sourceOfFunds, 'comment' => $instruction->comment],
             'evidence' => $evidence, 'reason_codes' => [...$evidence['registered_receiving_account']['reason_codes'],
@@ -116,7 +141,6 @@ final class NiumDynamicReviewService
     {
         $account = UserProviderAccount::query()->where('user_id', $user->id)->findOrFail($quote->provider_account_id);
         $registered = $this->registration->inspect($beneficiary, $account, $quote->binding);
-        $catalogue = $this->corridors->assertSupported($beneficiary, 'LOCAL', [], allowConfigured: false);
         $amounts = $this->quotes->project($quote);
         $execution = null;
         if ($registered['reason_codes'] === []) {
@@ -126,7 +150,7 @@ final class NiumDynamicReviewService
             $execution = $this->eligibility->observe($user, $beneficiary, $quote, $registered['legal_entity'], $amounts);
         }
         return ['registered_receiving_account' => $registered,
-            'catalogue_sha256' => hash('sha256', json_encode($catalogue, JSON_THROW_ON_ERROR)),
+            'provider_capability_sha256' => $execution['customer_corridors_sha256'] ?? null,
             'execution_eligibility' => $execution,
             'instruction_validation' => $this->instructions->validate($user, $beneficiary, $quote, $instruction, $amounts, $operation),
             'wallet_availability' => $this->wallets->refresh($user, $wallet, $exceptIntent)];
@@ -138,10 +162,10 @@ final class NiumDynamicReviewService
         $beneficiary = Beneficiary::query()->findOrFail($record['beneficiary_id']);
         $this->financial->assertAvailable($beneficiary);
         $projected = $this->quotes->project($stored);
-        if (($record['version'] ?? null) !== 'nium-dynamic-review-v3'
+        if (($record['version'] ?? null) !== 'nium-dynamic-review-v4'
             || ($record['customer_pricing'] ?? null) !== $projected['customer_pricing']
             || ($record['origin_service_fee'] ?? null) !== $projected['origin_service_fee']
-            || ($record['payout_rail'] ?? null) !== 'LOCAL') {
+            || ($record['payout_rail'] ?? null) !== $projected['payout_rail']) {
             throw new RuntimeException('dynamic_financial_terms_changed');
         }
         foreach (['principal' => 'quoted_principal', 'included_fee' => 'planned_included_fee',
@@ -155,17 +179,23 @@ final class NiumDynamicReviewService
         $e = $record['evidence'];
         $b = $record['binding'];
         $selected = $e['execution_eligibility']['selection'];
+        if ($selected['payout_method'] !== $b['payout_method']
+            || $selected['destination_country'] !== $b['destination_country']
+            || $selected['destination_currency'] !== $b['destination_currency']
+            || ! in_array($record['amount_mode'], $e['execution_eligibility']['supported_amount_modes'], true)) {
+            throw new RuntimeException('dynamic_review_binding_changed');
+        }
         $user = User::query()->findOrFail($record['owner']);
         $type = $user->kycProfile->applicant_type === 'business' ? 'CORPORATE' : 'INDIVIDUAL';
         DynamicPayoutEnvironment::configured()->assertBinding($b['base_url']);
         $c = new CorridorIdentity('nium', DynamicPayoutEnvironment::resolve($b['base_url'])->identity,
             $b['client'], $selected['legal_entity'], $b['customer'], $b['wallet'], $b['wallet'], 'USD',
-            $selected['destination_country'], $selected['destination_currency'], 'LOCAL', $type,
+            $selected['destination_country'], $selected['destination_currency'], $selected['payout_method'], $type,
             $beneficiary->beneficiary_type === 'business' ? 'CORPORATE' : 'INDIVIDUAL', self::CUSTOMER_CONTRACT, $record['profile_version']);
         $scope = new CustomerAccountScope($record['owner'], 'nium', $c->environment, $c->client, $c->legalEntity,
             $c->customer, $c->account, $type, $c->profileVersion, ['USD' => $c->fundingWallet], EvidenceState::Verified,
             $from, $until, RevocationStatus::NotRevoked);
-        $recipient = new BeneficiarySnapshot($scope, $c->destinationCountry, $c->destinationCurrency, 'LOCAL',
+        $recipient = new BeneficiarySnapshot($scope, $c->destinationCountry, $c->destinationCurrency, $c->payoutMethod,
             $c->beneficiaryType, EvidenceState::Verified, true, $from, $until, RevocationStatus::NotRevoked);
         $context = new PayoutQuoteContext($c, $recipient, $record['provider_id'], (string) $record['provider_account_id'],
             (string) $record['beneficiary_id'], $beneficiary->external_beneficiary_id, $b['current_receiving_record_sha256'], $b['base_url']);
@@ -185,7 +215,7 @@ final class NiumDynamicReviewService
             self::CUSTOMER_CONTRACT, self::CUSTOMER_CONTRACT, 'accepted-signed-local-'.$c->destinationCountry.'-'.$c->destinationCurrency);
         $rateScale = strlen(explode('.', $quote->rate->value)[1] ?? '');
         $contract = new PayoutContract($c, self::CUSTOMER_CONTRACT, EvidenceState::Verified, EvidenceSource::LocalAttestation,
-            RevocationStatus::NotRevoked, $terms->pricingVersion, $terms->feePlanId, ['LOCAL'],
+            RevocationStatus::NotRevoked, $terms->pricingVersion, $terms->feePlanId, [$c->payoutMethod],
             $e['execution_eligibility']['currency_scales'], $rateScale, 'EXACT', 'origin-customer-principal-plus-usd20-v1',
             'nium-payout-quote-exact-instruction-oas-v1', 'USD', FeePayer::Sender, FeeAllocation::SenderAdditional, $from, $until);
         $pricing = [];
@@ -194,7 +224,7 @@ final class NiumDynamicReviewService
                 $stage, EvidenceState::Verified, $stage === PricingStage::ProviderQuote ? EvidenceSource::ProviderResponse : EvidenceSource::LocalAttestation,
                 $stage === PricingStage::ProviderQuote ? $provenance : self::CUSTOMER_CONTRACT, $terms, $from, $from, $until, RevocationStatus::NotRevoked);
         }
-        $references = [EvidenceKind::ProviderCapability->value => $e['catalogue_sha256'],
+        $references = [EvidenceKind::ProviderCapability->value => $e['provider_capability_sha256'],
             EvidenceKind::AccountEntitlement->value => $e['execution_eligibility']['customer_corridors_sha256'],
             EvidenceKind::OperationalReadiness->value => $e['instruction_validation']['response_sha256'],
             EvidenceKind::FinancialReadiness->value => self::CUSTOMER_CONTRACT,
@@ -205,7 +235,7 @@ final class NiumDynamicReviewService
             $eligibility[] = new CorridorEvidence($c, $kind, EvidenceState::Verified, $references[$kind->value], $from, $until, false);
         }
         return PayoutConfirmation::prepare($record['owner'], $context, $quote, $terms, $contract, $pricing, $eligibility,
-            [$record['amount_mode'] => 'nium-payout-oas-selected-amount-v1:customer-quote-reference'], $from, $preparation,
+            [$record['amount_mode'] => 'nium-instruction-sha256:'.$e['instruction_validation']['request_sha256']], $from, $preparation,
             new PayoutInstruction(...array_values($record['instruction'])), $record['operation_key'], $e['instruction_validation']['request_sha256']);
     }
 

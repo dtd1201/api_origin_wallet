@@ -178,7 +178,7 @@ final class NiumDynamicPayoutEnvironmentTest extends TestCase
 
     public static function unverifiedSpendOperations(): array
     {
-        return array_values(array_filter(self::operations(), static fn ($row) => ! in_array($row[0], ['remittance', 'wallet'], true)));
+        return array_values(array_filter(self::operations(), static fn ($row) => ! in_array($row[0], ['remittance', 'wallet', 'transactions'], true)));
     }
 
     public function test_spend_wallet_contract_does_not_depend_on_or_authorize_remittance_configuration(): void
@@ -190,12 +190,35 @@ final class NiumDynamicPayoutEnvironmentTest extends TestCase
         $environment->assertContract('remittance');
     }
 
-    public function test_spend_transaction_read_evidence_does_not_authorize_complete_financial_recovery(): void
+    public function test_spend_transactions_contract_and_read_guard_accept_the_same_verified_dialect(): void
     {
         $environment = DynamicPayoutEnvironment::resolve('https://api.spend.nium.com');
         $environment->assertTransactionsReadContract();
-        $this->expectExceptionMessage('dynamic_production_transactions_contract_unverified');
         $environment->assertContract('transactions');
+        $environment->assertTransactionsReadEndpoint(
+            '/api/v1/client/client/customer/customer/wallet/wallet/transactions', 'client', 'customer', 'wallet');
+        $this->assertSame('production', $environment->identity);
+    }
+
+    public static function unverifiedTransactionsEndpoints(): array
+    {
+        return array_map(static fn (string $path): array => [$path], [
+            '/api/v2/client/client/customer/customer/wallet/wallet/transactions',
+            '/api/v1/client/foreign/customer/customer/wallet/wallet/transactions',
+            '/api/v1/client/client/customer/foreign/wallet/wallet/transactions',
+            '/api/v1/client/client/customer/customer/wallet/foreign/transactions',
+            '/api/v1/client/client/customer/customer/wallet/wallet/transactions/',
+            '/api/v1/client/client/customer/customer/wallet/wallet/transactions?externalId=operation',
+            'https://api.spend.nium.com/api/v1/client/client/customer/customer/wallet/wallet/transactions',
+        ]);
+    }
+
+    #[DataProvider('unverifiedTransactionsEndpoints')]
+    public function test_transactions_evidence_never_authorizes_a_different_endpoint_or_scope(string $path): void
+    {
+        $this->expectExceptionMessage('dynamic_transactions_endpoint_unverified');
+        DynamicPayoutEnvironment::resolve('https://api.spend.nium.com')->assertTransactionsReadEndpoint(
+            $path, 'client', 'customer', 'wallet');
     }
 
     #[DataProvider('unverifiedSpendOperations')]
@@ -267,16 +290,76 @@ final class NiumDynamicPayoutEnvironmentTest extends TestCase
         DynamicPayoutGate::assertDispatchEnabled();
     }
 
-    public function test_feature_flags_do_not_supply_missing_production_contract_or_financial_evidence(): void
+    public function test_authorized_spend_processing_gate_accepts_get_recovery_without_inventing_financial_evidence(): void
     {
         $this->enableProcessingFlags();
         config(['services.nium.base_url' => 'https://api.spend.nium.com',
             'services.nium.transfer_endpoint' => '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance',
             'nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
             'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-operator-reference']);
+        DynamicPayoutGate::assertDispatchEnabled();
         $this->assertSame(['dynamic_financial_scope_required'],
             (new DynamicPayoutFinancialAuthorization)->unavailableReasons());
-        $this->expectExceptionMessage('dynamic_production_transactions_contract_unverified');
+    }
+
+    public static function invalidLiveAuthorization(): array
+    {
+        return [
+            'false' => [false, 'synthetic-reference'],
+            'missing authorization' => [null, 'synthetic-reference'],
+            'string true' => ['true', 'synthetic-reference'],
+            'integer true' => [1, 'synthetic-reference'],
+            'missing reference' => [true, null],
+            'empty reference' => [true, ''],
+            'blank reference' => [true, '  '],
+            'non-string reference' => [true, 123],
+            'control character' => [true, "synthetic\nreference"],
+            'oversized reference' => [true, str_repeat('a', 256)],
+        ];
+    }
+
+    #[DataProvider('invalidLiveAuthorization')]
+    public function test_verified_get_contract_never_bypasses_explicit_live_authorization(mixed $authorized, mixed $reference): void
+    {
+        $this->enableProcessingFlags();
+        config(['services.nium.base_url' => 'https://api.spend.nium.com',
+            'services.nium.transfer_endpoint' => '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance',
+            'nium_dynamic_payouts.live_automatic_dispatch_authorized' => $authorized,
+            'nium_dynamic_payouts.operator_authorization_reference' => $reference]);
+        $this->expectExceptionMessage('dynamic_live_dispatch_requires_operator_authorization');
+        DynamicPayoutGate::assertDispatchEnabled();
+    }
+
+    public static function disabledProcessingRequirements(): array
+    {
+        return [
+            ['nium_dynamic_confirmation.automatic_dispatch_enabled', 'dynamic_automatic_dispatch_disabled'],
+            ['nium_dynamic_confirmation.enabled', 'dynamic_automatic_dispatch_disabled'],
+            ['nium_dynamic_quotes.quote_contract_enabled', 'dynamic_automatic_dispatch_disabled'],
+            ['nium_dynamic_quotes.confirmation_contract_enabled', 'dynamic_automatic_dispatch_disabled'],
+            ['nium_dynamic_payouts.reconciliation_enabled', 'dynamic_dispatch_requires_reconciliation'],
+        ];
+    }
+
+    #[DataProvider('disabledProcessingRequirements')]
+    public function test_spend_get_compatibility_does_not_bypass_disabled_processing(string $flag, string $reason): void
+    {
+        $this->enableProcessingFlags();
+        config(['services.nium.base_url' => 'https://api.spend.nium.com',
+            'nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
+            'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-reference', $flag => false]);
+        $this->expectExceptionMessage($reason);
+        DynamicPayoutGate::assertDispatchEnabled();
+    }
+
+    public function test_spend_get_compatibility_does_not_bypass_an_unverified_remittance_contract(): void
+    {
+        $this->enableProcessingFlags();
+        config(['services.nium.base_url' => 'https://api.spend.nium.com',
+            'services.nium.transfer_endpoint' => '/unverified/remittance',
+            'nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
+            'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-reference']);
+        $this->expectExceptionMessage('dynamic_production_remittance_contract_unverified');
         DynamicPayoutGate::assertDispatchEnabled();
     }
 

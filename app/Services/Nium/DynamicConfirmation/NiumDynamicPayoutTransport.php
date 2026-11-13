@@ -46,8 +46,10 @@ final class NiumDynamicPayoutTransport implements DynamicPayoutTransport
         $endDate = now('UTC')->toDateString();
         for ($page = 0; $page < $max; $page++) {
             $this->assertScope($intent);
-            DynamicPayoutEnvironment::configured()->assertTransactionsReadContract();
-            $response = $this->nium->getDynamicPayoutTransactions($this->path($intent, 'transactions'), [
+            $path = $this->path($intent, 'transactions');
+            DynamicPayoutEnvironment::configured()->assertTransactionsReadEndpoint(
+                $path, $this->nium->clientId(), $intent->customer, $intent->source_wallet);
+            $response = $this->nium->getDynamicPayoutTransactions($path, [
                 'startDate' => $intent->created_at->copy()->utc()->subDay()->toDateString(), 'endDate' => $endDate,
                 'page' => $page, 'size' => 100,
             ], User::query()->findOrFail($intent->user_id), $intent->id);

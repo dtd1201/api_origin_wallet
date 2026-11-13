@@ -123,11 +123,6 @@ final class DynamicPayoutAccounting
         if (! in_array($status, ['APPROVED', 'PAID'], true)) {
             return ['state' => 'unavailable', 'reason' => 'dynamic_provider_status_unsupported', 'provider_reference' => $reference];
         }
-        if ($fees === []) {
-            // Neither an absent Fee_Debit nor a zero CUSTOMER fee proves a zero
-            // PROVIDER fee. No scoped authoritative no-charge contract is installed.
-            return ['state' => 'pending', 'reason' => 'dynamic_fee_records_missing', 'provider_reference' => $reference];
-        }
         foreach ([$remit, ...$fees] as $row) {
             if (in_array(strtoupper(trim((string) ($row['status'] ?? ''))), ['RETURNED', 'REJECTED', 'DECLINED', 'FAILED', 'ERROR', 'BLOCKED', 'CANCELLED', 'REVERSAL'], true)
                 || in_array($row['settlementStatus'] ?? null, ['Released', 'Disputed', 'Waived'], true)) {
@@ -191,6 +186,29 @@ final class DynamicPayoutAccounting
             || ! (new Decimal($t['principal']['amount']))->plus(new Decimal($t['transaction_fee']['amount']))
                 ->equals(new Decimal($intent->total_debit))) {
             return ['state' => 'unavailable', 'reason' => 'dynamic_customer_accounting_terms_unverified', 'provider_reference' => $reference];
+        }
+        if ($fees === []) {
+            // CUG observations and agreed customer pricing do not establish this
+            // account/corridor/agreement's Production fee collection model. Retain
+            // the authenticated remittance debit, without classifying it as principal
+            // or inferring either a zero fee or the complete wallet debit.
+            return ['state' => 'pending', 'reason' => 'dynamic_fee_records_missing', 'provider_reference' => $reference,
+                'receipt' => [
+                    'observed_remittance_debit_usd' => $principal->value,
+                    'principal_usd' => null, 'fee_usd' => null, 'wallet_debit_usd' => null,
+                    'provider_wallet_debits' => null,
+                    'destination_amount' => $destination->value, 'destination_currency' => $intent->destination_currency,
+                    'estimated_destination_amount' => $t['estimated_recipient']['amount'],
+                    'intended_destination_amount' => $intent->amount_mode === PayoutAmountMode::Destination->value
+                        ? $t['estimated_recipient']['amount'] : null,
+                    'customer_authorized_debit_usd' => (new Decimal($intent->total_debit))->value,
+                    'customer_principal_usd' => $t['principal']['amount'],
+                    'customer_fee_allocation_usd' => $t['transaction_fee']['amount'],
+                    'provider_fee_records' => [], 'fee_evidence' => 'MISSING_FEE_RECORDS',
+                    'discrepancy' => null, 'provider_minus_customer_usd' => null,
+                    'transaction_ids' => [$reference],
+                    'response_sha256' => $batch['response_sha256'], 'observed_at' => $batch['observed_at'],
+                ]];
         }
         $matched = $allUsd && $total->equals(new Decimal($intent->total_debit))
             && $principal->equals(new Decimal($t['principal']['amount']))

@@ -91,7 +91,92 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
         $this->assertSame('pending', $result['state']);
         $this->assertSame('dynamic_fee_records_missing', $result['reason']);
         $this->assertArrayNotHasKey('provider_status', $result);
+        $this->assertSame('980', $result['receipt']['observed_remittance_debit_usd']);
+        $this->assertNull($result['receipt']['principal_usd']);
+        $this->assertNull($result['receipt']['fee_usd']);
+        $this->assertNull($result['receipt']['wallet_debit_usd']);
+        $this->assertSame('MISSING_FEE_RECORDS', $result['receipt']['fee_evidence']);
+        $this->assertSame([], $result['receipt']['provider_fee_records']);
+    }
+
+    private function spendIntentScope(): array
+    {
+        // Synthetic scope, not account entitlement or an installed fee agreement.
+        return ['confirmed_terms' => ['context' => [
+            'provider_origin' => 'https://api.spend.nium.com',
+            'corridor' => ['environment' => 'production', 'destinationCountry' => 'GB',
+                'destinationCurrency' => 'GBP', 'payoutMethod' => 'LOCAL'],
+        ]]];
+    }
+
+    public function test_spend_settled_remittance_and_linked_fee_keep_usd_twenty_inclusive_consent(): void
+    {
+        // Synthetic fee row exercises accounting; no Production Fee_Debit shape
+        // or linkage is claimed to have been retained from the CUG observations.
+        $result = $this->evaluate([0 => ['status' => 'PAID']], intentChanges: $this->spendIntentScope());
+        $this->assertSame('matched', $result['state']);
+        $this->assertSame('980', $result['receipt']['principal_usd']);
+        $this->assertSame('20', $result['receipt']['fee_usd']);
+        $this->assertSame('1000', $result['receipt']['wallet_debit_usd']);
+        $this->assertSame('784', $result['receipt']['destination_amount']);
+        $this->assertSame('1000', $result['receipt']['customer_authorized_debit_usd']);
+        $this->assertSame('20', $result['receipt']['customer_fee_allocation_usd']);
+        $this->assertSame('PAID', $result['provider_status']);
+    }
+
+    public function test_cug_style_missing_fee_observations_never_authorize_production_zero_fee_settlement(): void
+    {
+        config(['nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
+            'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-reference']);
+        foreach (['980', '1000'] as $observedDebit) {
+            $result = $this->evaluate([0 => ['status' => 'PAID', 'settlementAuthAmount' => $observedDebit], 1 => null],
+                intentChanges: $this->spendIntentScope());
+            $this->assertSame('pending', $result['state']);
+            $this->assertSame('dynamic_fee_records_missing', $result['reason']);
+            $this->assertArrayNotHasKey('provider_status', $result);
+            $this->assertSame($observedDebit, $result['receipt']['observed_remittance_debit_usd']);
+            $this->assertNull($result['receipt']['principal_usd']);
+            $this->assertNull($result['receipt']['fee_usd']);
+            $this->assertNull($result['receipt']['wallet_debit_usd']);
+            $this->assertNull($result['receipt']['provider_wallet_debits']);
+            $this->assertSame('980', $result['receipt']['customer_principal_usd']);
+            $this->assertSame('20', $result['receipt']['customer_fee_allocation_usd']);
+            $this->assertSame('1000', $result['receipt']['customer_authorized_debit_usd']);
+            $this->assertSame([], $result['receipt']['provider_fee_records']);
+            $this->assertSame([str_repeat('a', 64)], $result['receipt']['response_sha256']);
+        }
+    }
+
+    public function test_explicit_zero_provider_fee_does_not_reprice_production_customer_consent(): void
+    {
+        $result = $this->evaluate([0 => ['status' => 'PAID'], 1 => ['settlementAuthAmount' => '0']],
+            intentChanges: $this->spendIntentScope());
+        $this->assertSame('mismatched', $result['state']);
+        $this->assertSame('20', $result['receipt']['customer_fee_allocation_usd']);
+        $this->assertSame('0', $result['receipt']['fee_usd']);
+        $this->assertSame('-20', $result['receipt']['provider_minus_customer_usd']);
+        $this->assertArrayNotHasKey('provider_status', $result);
+    }
+
+    public function test_missing_fee_does_not_hide_invalid_remittance_observations(): void
+    {
+        foreach ([['debit' => false], ['authCurrencyCode' => 'EUR'], ['settlementAuthAmount' => '0'],
+            ['transactionCurrencyCode' => 'EUR'], ['settlementTransactionAmount' => null]] as $fields) {
+            $result = $this->evaluate([0 => $fields, 1 => null]);
+            $this->assertSame('unavailable', $result['state']);
+            $this->assertArrayNotHasKey('receipt', $result);
+            $this->assertArrayNotHasKey('provider_status', $result);
+        }
+    }
+
+    #[DataProvider('invalidCustomerTerms')]
+    public function test_missing_fee_does_not_hide_invalid_customer_authorization_terms(array $changes): void
+    {
+        $result = $this->evaluate([1 => null], intentChanges: $changes);
+        $this->assertSame('unavailable', $result['state']);
+        $this->assertSame('dynamic_customer_accounting_terms_unverified', $result['reason']);
         $this->assertArrayNotHasKey('receipt', $result);
+        $this->assertArrayNotHasKey('provider_status', $result);
     }
 
     public function test_explicit_linked_settled_zero_fee_record_is_distinct_from_an_absent_record(): void

@@ -22,6 +22,7 @@ use App\Services\Nium\NiumDynamicReviewService;
 use App\Services\Nium\NiumService;
 use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutDispatcher;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutReconciler;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutTransport;
 use Tests\Support\DynamicPayoutTransportStub;
 use GuzzleHttp\Psr7\Request as PsrRequest;
@@ -118,20 +119,25 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         return new Response(new PsrResponse(200, ['Content-Type' => 'application/json'], $body));
     }
 
-    private function catalogue(bool $supported = true): void
+    private function customerListing(bool $listed = true): void
     {
-        // Configured corridor entries must not substitute for provider catalogue evidence.
+        // A configured client catalogue never substitutes for this authenticated customer GET.
         config(['services.nium.supported_corridors' => [['destinationCountry' => 'GB',
-            'destinationCurrency' => 'GBP', 'payoutMethod' => 'LOCAL',
-            'beneficiaryAccountType' => 'INDIVIDUAL', 'customerType' => 'INDIVIDUAL']]]);
-        $this->nium->shouldReceive('get')->once()->withArgs(function ($path, $query, $user): bool {
-            $this->assertSame(0, DB::transactionLevel());
-
-            return $path === '/api/v3/client/fixture-client/supportedCorridors'
-                && $query['destinationCurrency'] === 'GBP' && $user->id === $this->owner->id;
-        })->andReturn($this->response($supported
-            ? '{"content":[{"destinationCountry":"GB","destinationCurrency":"GBP","payoutMethod":"LOCAL","beneficiaryAccountType":"INDIVIDUAL","customerType":"INDIVIDUAL"}]}'
-            : '{"content":[]}'));
+            'destinationCurrency' => 'GBP', 'payoutMethod' => 'LOCAL']]]);
+        $this->nium->shouldReceive('get')->withArgs(static fn ($path, $query, $user, $operation): bool =>
+            $operation === 'dynamic_customer_corridor_listing')->andReturnUsing(function ($path, $query, $user,
+                $operation, $reference, $beforeDispatch) use ($listed): Response {
+                $this->assertSame(0, DB::transactionLevel());
+                $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/supportedCorridors', $path);
+                $this->assertSame([], $query);
+                $this->assertSame($this->owner->id, $user->id);
+                $beforeDispatch(new Request(new PsrRequest('GET', rtrim((string) config('services.nium.base_url'), '/').$path)));
+                return $this->response(json_encode(['data' => $listed ? [[
+                    'destination_country' => [$this->beneficiary->country_code],
+                    'destination_currency' => $this->beneficiary->currency,
+                    'payout_method' => $this->beneficiary->payout_method, 'routing_code_type' => 'synthetic-route',
+                ]] : []], JSON_THROW_ON_ERROR));
+            });
     }
 
     private function providerQuote(string $mode = 'SOURCE_AMOUNT', ?string $body = null, ?\Closure $during = null,
@@ -161,7 +167,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             }
 
             return $this->response($body ?? '{"id":"real-shaped-quote","quoteType":"payout","quoteIntent":"EXECUTABLE",'
-                .'"customerHashId":"fixture-customer","sourceCurrencyCode":"USD","destinationCurrencyCode":"GBP",'
+                .'"customerHashId":"fixture-customer","sourceCurrencyCode":"USD","destinationCurrencyCode":"'.$this->beneficiary->currency.'",'
                 .'"conversionSchedule":"immediate","executionType":"at_conversion_time","lockPeriod":"5_mins",'
                 .'"sourceAmount":980,"destinationAmount":784,"netExchangeRate":0.800000000000000001,'
                 .'"expiryTime":"2030-01-01T01:00:00Z"}');
@@ -170,7 +176,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     private function input(string $mode = 'SOURCE_AMOUNT'): array
     {
-        return ['beneficiary_id' => $this->beneficiary->id, 'destination_currency' => 'GBP',
+        return ['beneficiary_id' => $this->beneficiary->id, 'destination_currency' => $this->beneficiary->currency,
             'amount_mode' => $mode, 'entered_amount' => $mode === 'SOURCE_AMOUNT' ? '1000' : '784'];
     }
 
@@ -192,7 +198,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     private function fullRegistration(): void
     {
-        $this->beneficiary->update(['raw_data' => ['nium' => ['payoutMethod' => 'LOCAL']]]);
+        $this->beneficiary->update(['raw_data' => ['nium' => ['payoutMethod' => $this->beneficiary->payout_method]]]);
+        $this->exchange->apiRequestLog->update(['request_body' => ['payout_method' => $this->beneficiary->payout_method]]);
         $request = json_encode(app(NiumBeneficiaryService::class)->receivingAccountBinding($this->beneficiary), JSON_THROW_ON_ERROR);
         $response = json_encode(['beneficiaryHashId' => $this->beneficiary->external_beneficiary_id,
             'customerHashId' => $this->account->external_customer_id], JSON_THROW_ON_ERROR);
@@ -210,21 +217,24 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
                 $this->assertSame($this->owner->id, $user->id);
                 $beforeDispatch(new Request(new PsrRequest('GET', rtrim((string) config('services.nium.base_url'), '/').$path)));
                 return $this->response($this->corridorWithdrawn ? '{"data":[]}' : ($corridors === null
-                    ? '{"data":[{"client_legal_entity":["LEGAL_ENTITY_HK"],"destination_country":["GB"],"destination_currency":"GBP","payout_method":"LOCAL","routing_code_type":"SORT CODE","ignoreLookup":false}]}'
+                    ? json_encode(['data' => [['client_legal_entity' => ['LEGAL_ENTITY_HK'],
+                        'destination_country' => [$this->beneficiary->country_code], 'destination_currency' => $this->beneficiary->currency,
+                        'payout_method' => $this->beneficiary->payout_method, 'routing_code_type' => 'synthetic-route', 'ignoreLookup' => false]]], JSON_THROW_ON_ERROR)
                     : $corridors()));
             });
         $this->nium->shouldReceive('get')->withArgs(static fn ($path, $query = [], $user = null, $operation = null): bool =>
             $operation === 'dynamic_payout_schema')->andReturnUsing(function ($path, $query, $user, $operation,
                 $reference, $beforeDispatch) use ($schemaBody, $schemaOutgoing): Response {
                 $this->assertSame(0, DB::transactionLevel());
-                $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/currency/GBP/payout/schema', $path);
-                $this->assertSame(['destinationCountry' => 'GB', 'payoutMethod' => 'LOCAL'], $query);
+                $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/currency/'.$this->beneficiary->currency.'/payout/schema', $path);
+                $this->assertSame(['destinationCountry' => $this->beneficiary->country_code, 'payoutMethod' => $this->beneficiary->payout_method], $query);
                 $url = rtrim((string) config('services.nium.base_url'), '/').$path.'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986);
                 $beforeDispatch($schemaOutgoing === null ? new Request(new PsrRequest('GET', $url)) : $schemaOutgoing($url));
                 return $this->response($schemaBody ?? '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object",'
                     .'"required":["payout.destinationAmount"],"allOf":[{"if":{"properties":{"synthetic.flag":{"const":true}}},'
                     .'"then":{"required":["synthetic.conditionalField"]}}],'
-                    .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":"2"}}}');
+                    .'"properties":{"payout.sourceAmount":{"type":"number","maximumDecimals":"2"},'
+                    .'"payout.destinationAmount":{"type":"number","maximumDecimals":"'.($this->beneficiary->currency === 'JPY' ? '0' : '2').'"}}}');
             });
     }
 
@@ -232,7 +242,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         // Real accepted customer authorization; only provider HTTP is synthetic.
         $this->fullRegistration();
-        $this->catalogue();
+        $this->customerListing();
         $this->executionEvidence();
         $this->providerQuote($mode);
         $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
@@ -294,7 +304,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_quote_without_current_pricing_fingerprint_cannot_be_reviewed_or_consumed(): void
     {
-        $this->fullRegistration(); $this->catalogue(); $this->providerQuote();
+        $this->fullRegistration(); $this->customerListing(); $this->providerQuote();
         $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
         $stored = NiumDynamicPayoutQuote::query()->findOrFail($id);
         $binding = $stored->binding;
@@ -370,7 +380,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_spend_reference_quote_keeps_exact_rate_and_production_identity_without_admission(string $mode): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote($mode);
         $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
         $stored = NiumDynamicPayoutQuote::query()->findOrFail($id);
@@ -425,7 +435,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_quote_rechecks_configuration_at_transport_and_response(string $stage, string $key, mixed $value, string $reason): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $change = static fn () => config([$key => $value]);
         $this->providerQuote(during: $stage === 'after' ? $change : null,
             outgoing: function ($url, $payload) use ($stage, $change): Request {
@@ -448,7 +458,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_quote_wire_guard_refuses_changed_request(string $mutation): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote(outgoing: static function ($url, $payload) use ($mutation): ?Request {
             if ($mutation === 'missing_callback') {
                 return null;
@@ -477,7 +487,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_stored_spend_reference_cannot_be_rebound_to_gateway_production(): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $stored = $this->createReference();
         config(['services.nium.base_url' => 'https://gateway.nium.com']);
@@ -491,7 +501,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_stored_quote_cannot_bypass_a_subsequently_disabled_feature_gate(): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $stored = $this->createReference();
         config(['nium_dynamic_quotes.quote_contract_enabled' => false]);
@@ -531,7 +541,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_spend_consumption_uses_production_key_and_refuses_reacquisition(): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $stored = $this->createReference();
         $intent = $this->retainedConsumption($stored, 'production');
@@ -558,7 +568,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_consuming_intent_must_match_the_spend_quote_scope(string $mutation): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $stored = $this->createReference();
         $intent = $this->retainedConsumption($stored, 'production');
@@ -598,7 +608,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_quote_request_refuses_lossy_numeric_transport_serialization(): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->nium->shouldNotReceive('post');
         $previous = ini_get('serialize_precision');
         try {
@@ -616,9 +626,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_spend_response_amount_cannot_be_rounded_into_storage_precision(): void
     {
         $this->useQuoteOrigin();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote(body: '{"id":"precision-quote","quoteType":"payout","quoteIntent":"EXECUTABLE",'
-            .'"customerHashId":"fixture-customer","sourceCurrencyCode":"USD","destinationCurrencyCode":"GBP",'
+            .'"customerHashId":"fixture-customer","sourceCurrencyCode":"USD","destinationCurrencyCode":"'.$this->beneficiary->currency.'",'
             .'"conversionSchedule":"immediate","executionType":"at_conversion_time","lockPeriod":"5_mins",'
             .'"sourceAmount":980,"destinationAmount":784.001,"netExchangeRate":0.800000000000000001,'
             .'"expiryTime":"2030-01-01T01:00:00Z"}');
@@ -639,14 +649,12 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
-    public function test_sgd_local_reference_support_uses_registration_and_provider_catalogue_without_legacy_pricing(): void
+    public function test_sgd_local_listing_does_not_enable_dynamic_or_change_legacy_pricing(): void
     {
         $this->beneficiary->update(['country_code' => 'SG', 'currency' => 'SGD']);
         $request = '{"payoutMethod":"LOCAL","destinationCountry":"SG","destinationCurrency":"SGD"}';
         $this->exchange->update(['raw_request_body' => $request, 'request_body_sha256' => hash('sha256', $request)]);
-        $this->nium->shouldReceive('get')->once()->withArgs(static fn ($path, $query): bool =>
-            $path === '/api/v3/client/fixture-client/supportedCorridors' && $query['destinationCurrency'] === 'SGD')
-            ->andReturn($this->response('{"content":[{"destinationCountry":"SG","destinationCurrency":"SGD","payoutMethod":"LOCAL","beneficiaryAccountType":"INDIVIDUAL","customerType":"INDIVIDUAL"}]}'));
+        $this->customerListing();
         $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
             ->assertJsonPath('status', 'UNAVAILABLE')->assertJsonPath('dynamic_available', false)
             ->assertJsonPath('quote_availability.destination_currencies', [])
@@ -654,11 +662,25 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
-    #[DataProvider('modes')]
-    public function test_contracted_authorization_exercises_review_submit_and_single_dispatch_in_both_modes(string $mode): void
+    public static function contractedTuplesAndModes(): array
+    {
+        $cases = [];
+        foreach ([['GB', 'GBP'], ['DE', 'EUR'], ['JP', 'JPY']] as [$country, $currency]) {
+            foreach (['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'] as $mode) {
+                $cases[$country.' '.$mode] = [$country, $currency, $mode];
+            }
+        }
+        return $cases;
+    }
+
+    #[DataProvider('contractedTuplesAndModes')]
+    public function test_contracted_authorization_exercises_review_submit_single_dispatch_and_reconciliation(
+        string $country, string $currency, string $mode): void
     {
         // Only HTTP is synthetic; the actual financial authorization and engine are exercised.
+        $this->beneficiary->update(['country_code' => $country, 'currency' => $currency]);
         $review = $this->readyReview($mode);
+        $this->assertSame('LOCAL', $review['payout_rail']);
         $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/D', $review['accepted_fingerprint']);
         $this->assertSame(0, LedgerEntry::query()->count());
         $request = $this->submitReady($review);
@@ -679,10 +701,36 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(1, $wire->submissions);
         $this->assertSame(1, $outbox->fresh()->attempts);
         $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $this->assertSame($country, $record['binding']['destination_country']);
+        $this->assertSame($currency, $record['binding']['destination_currency']);
+        $this->assertSame('LOCAL', $record['binding']['payout_method']);
+        $corridor = NiumDynamicIntent::query()->sole()->confirmed_terms['context']['corridor'];
+        $this->assertSame($country, $corridor['destinationCountry']);
+        $this->assertSame($currency, $corridor['destinationCurrency']);
+        $this->assertSame('LOCAL', $corridor['payoutMethod']);
         $this->assertSame($record['evidence']['instruction_validation']['request_json'], $wire->bodies[0]);
         $this->assertSame($record['operation_key'], $outbox->fresh()->operation_key);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
         $this->assertSame('1000.00000000', NiumDynamicIntent::query()->sole()->total_debit);
+
+        // Synthetic settlement rows exercise tuple/currency binding; they do not verify Nium fees.
+        $scope = ['clientHashId' => 'fixture-client', 'customerHashId' => 'fixture-customer',
+            'walletHashId' => 'fixture-wallet', 'authCurrencyCode' => 'USD', 'debit' => true,
+            'settlementStatus' => 'Settled', 'status' => 'Approved'];
+        $wire->batch = ['records' => [
+            [...$scope, 'authCode' => 'RT-fixture-dynamic', 'externalId' => null, 'originalAuthorizationCode' => null,
+                'transactionType' => 'Remittance_Debit', 'settlementAuthAmount' => '980', 'effectiveAuthAmount' => '1000',
+                'transactionCurrencyCode' => $currency, 'settlementTransactionAmount' => '784',
+                'labels' => ['beneficiaryId' => 'fixture-registered-payee']],
+            [...$scope, 'authCode' => 'FT-fixture-fee', 'transactionType' => 'Fee_Debit', 'settlementAuthAmount' => '20',
+                'labels' => ['originalAuthorizationCode' => 'RT-fixture-dynamic', 'feeName' => 'REMIT_BANK_FEE']],
+        ], 'response_sha256' => [str_repeat('a', 64)], 'observed_at' => now()->toISOString()];
+        app(DynamicPayoutReconciler::class)->reconcile($outbox->id);
+        app(DynamicPayoutReconciler::class)->reconcile($outbox->id);
+        $this->assertSame('matched', $outbox->fresh()->state);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame('consumed', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame(1, $wire->submissions);
     }
 
     public function test_withdrawn_customer_corridor_is_refused_before_dispatch_without_releasing_or_resubmitting(): void
@@ -832,7 +880,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     #[DataProvider('earlyCallbacks')]
     public function test_missing_or_undocumented_customer_entitlement_refuses_only_this_review(bool $missing): void
     {
-        $this->fullRegistration(); $this->catalogue();
+        $this->fullRegistration(); $this->customerListing();
         $this->executionEvidence(fn () => $missing ? '{"data":[]}' : '{"content":[]}');
         $this->providerQuote();
         $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
@@ -862,7 +910,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         // Sandbox execution fixtures isolate authorization from unrelated Spend guards.
         // The four-field response shape is synthetic, following the observed Spend shape.
         $this->fullRegistration();
-        $this->catalogue();
+        $this->customerListing();
         $this->executionEvidence(static fn (): string => json_encode(['requestId' => 'synthetic-request',
             'correlationId' => 'synthetic-correlation', 'timestamp' => 'synthetic-timestamp', 'data' => $rows], JSON_THROW_ON_ERROR));
         $this->providerQuote();
@@ -877,7 +925,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_schema_if_then_is_not_treated_as_a_successful_instruction_validation(): void
     {
         $this->fullRegistration();
-        $this->catalogue();
+        $this->customerListing();
         $this->executionEvidence(); // Includes a synthetic if/then requirement.
         $this->providerQuote();
         $this->validationResponse = '{"valid":false,"issues":["synthetic_conditional_requirement_missing"]}';
@@ -892,7 +940,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_schema_missing_destination_amount_cannot_default_precision_and_produce_a_review(): void
     {
         $this->fullRegistration();
-        $this->catalogue();
+        $this->customerListing();
         $this->executionEvidence(schemaBody: '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object",'
             .'"required":["synthetic.field"],"allOf":[{"if":{},"then":{}}],"properties":{}}');
         $this->providerQuote();
@@ -907,7 +955,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_schema_from_a_different_transport_origin_cannot_produce_a_review(): void
     {
         $this->fullRegistration();
-        $this->catalogue();
+        $this->customerListing();
         $this->executionEvidence(schemaOutgoing: static fn ($url): Request =>
             new Request(new PsrRequest('GET', str_replace('gatewaysandbox.nium.com', 'api.spend.nium.com', $url))));
         $this->providerQuote();
@@ -923,7 +971,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_real_quote_is_exact_persisted_and_cannot_authorize_review_or_submission(string $mode): void
     {
         DB::statement("SET TIME ZONE 'Asia/Bangkok'");
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote($mode);
         $response = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()
             ->assertJsonPath('status', 'QUOTE_REFERENCE_ONLY')->assertJsonPath('quoted_principal.amount', '980')
@@ -960,7 +1008,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_options_require_registered_account_and_do_not_promote_catalogue_only_support(): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->nium->shouldNotReceive('post');
         $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
             ->assertJsonPath('status', 'UNAVAILABLE')->assertJsonPath('dynamic_available', false)
@@ -973,7 +1021,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_options_do_not_offer_a_signed_corridor_without_customer_entitlement(): void
     {
-        $this->fullRegistration(); $this->catalogue(); $this->executionEvidence(fn () => '{"data":[]}');
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence(fn () => '{"data":[]}');
         $this->nium->shouldNotReceive('post');
         $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
             ->assertJsonPath('dynamic_available', false)->assertJsonPath('destination_currencies', [])
@@ -984,7 +1032,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_options_expose_only_customer_verified_beneficiary_currency_and_local_rail(): void
     {
-        $this->fullRegistration(); $this->catalogue(); $this->executionEvidence();
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence();
         $this->nium->shouldNotReceive('post');
         $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
             ->assertJsonPath('dynamic_available', true)->assertJsonPath('destination_currencies', ['GBP'])
@@ -994,9 +1042,101 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
+    public static function unpricedListedTuples(): array
+    {
+        return [['FR', 'EUR', 'LOCAL'], ['GB', 'GBP', 'SWIFT'], ['TH', 'THB', 'CASH']];
+    }
+
+    #[DataProvider('unpricedListedTuples')]
+    public function test_customer_listing_never_extends_usd20_pricing_to_other_countries_or_rails(
+        string $country, string $currency, string $rail): void
+    {
+        $this->beneficiary->update(['country_code' => $country, 'currency' => $currency, 'payout_method' => $rail]);
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence();
+        $this->nium->shouldNotReceive('post');
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('provider_listing.status', 'LISTED')
+            ->assertJsonPath('provider_listing.eligible', false)
+            ->assertJsonPath('provider_listing.matches.0.payout_method', $rail)
+            ->assertJsonPath('customer_entitlement', 'VERIFIED')
+            ->assertJsonPath('financial_authorization', 'UNAVAILABLE')
+            ->assertJsonPath('dynamic_available', false)->assertJsonPath('supported_amount_modes', [])
+            ->assertJsonPath('executable_amount_modes', [])
+            ->assertJsonPath('reason_codes', ['dynamic_pricing_corridor_unsupported']);
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_pricing_corridor_unsupported']);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_spend_four_field_listing_stays_distinct_from_entitlement_and_execution(): void
+    {
+        $this->useQuoteOrigin();
+        $this->fullRegistration(); $this->customerListing();
+        $this->executionEvidence(fn () => '{"data":[{"destination_currency":"GBP","payout_method":"LOCAL",'
+            .'"destination_country":["GB"],"routing_code_type":"synthetic-route"}]}');
+        $this->nium->shouldNotReceive('post');
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('provider_listing.status', 'LISTED')->assertJsonPath('provider_listing.eligible', false)
+            ->assertJsonPath('customer_entitlement', 'UNAVAILABLE')
+            ->assertJsonPath('financial_authorization', 'CUSTOMER_PRICING_AUTHORIZED')
+            ->assertJsonPath('dynamic_available', false)->assertJsonPath('supported_amount_modes', [])
+            ->assertJsonPath('executable_amount_modes', [])->assertJsonPath('requires_instruction_validation', true)
+            ->assertJsonPath('reason_codes', ['dynamic_customer_corridor_legal_entity_unverified']);
+        $this->noAdmission();
+    }
+
+    #[DataProvider('modes')]
+    public function test_destination_only_schema_limits_options_and_review_without_guessing_source_support(string $mode): void
+    {
+        $this->fullRegistration(); $this->customerListing();
+        $this->executionEvidence(schemaBody: '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object",'
+            .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":2}},'
+            .'"required":["payout.destinationAmount"],"allOf":[{"if":{"properties":{"synthetic.flag":{"const":true}}},'
+            .'"then":{"required":["synthetic.conditionalField"]}}]}');
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('supported_amount_modes', ['DESTINATION_AMOUNT'])
+            ->assertJsonPath('executable_amount_modes', [])->assertJsonPath('requires_instruction_validation', true);
+        $this->providerQuote($mode);
+        $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
+        $review = $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => $id, 'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']]);
+        if ($mode === 'SOURCE_AMOUNT') {
+            $review->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_payout_source_amount_contract_unverified'])
+                ->assertJsonMissingPath('accepted_fingerprint');
+        } else {
+            $review->assertOk()->assertJsonPath('status', 'READY')->assertJsonPath('amount_mode', 'DESTINATION_AMOUNT');
+        }
+        $this->noAdmission();
+    }
+
+    public function test_review_cannot_substitute_a_different_rail_after_quote_binding(): void
+    {
+        $review = $this->readyReview();
+        $service = app(NiumDynamicReviewService::class);
+        $record = $service->load($review['accepted_fingerprint']);
+        $record['evidence']['execution_eligibility']['selection']['payout_method'] = 'SWIFT';
+        $stored = NiumDynamicPayoutQuote::query()->findOrFail($record['dynamic_quote_id']);
+        $this->assertQuoteFailure('dynamic_review_binding_changed', fn () => $service->assemble($record, $stored));
+        $this->noAdmission();
+    }
+
+    public function test_quote_without_the_new_frozen_tuple_version_requires_fresh_preparation(): void
+    {
+        $this->customerListing(); $this->providerQuote();
+        $stored = $this->createReference();
+        // Mutate an in-memory copy only; retained provider references remain immutable.
+        $binding = $stored->binding;
+        $binding['version'] = 'nium-dynamic-reference-quote-v2';
+        unset($binding['destination_country'], $binding['payout_method']);
+        $stored->binding = $binding;
+        $this->assertQuoteFailure('dynamic_quote_binding_changed', fn () => app(NiumDynamicPayoutQuoteService::class)->project($stored));
+        $this->noAdmission();
+    }
+
     public function test_server_owned_review_preparation_is_immutable_and_never_becomes_executable_by_accepting_its_digest(): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
         $input = ['beneficiary_id' => $this->beneficiary->id, 'dynamic_quote_id' => $id,
@@ -1020,7 +1160,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_corrupted_review_storage_fails_binding_validation_without_reserving_funds(): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
         $prepared = $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
@@ -1047,7 +1187,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_withdrawn_original_registration_evidence_invalidates_stored_reference_review(): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $quote = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
         $this->exchange->update(['response_received' => false]);
@@ -1063,7 +1203,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     #[DataProvider('modes')]
     public function test_consumed_reference_cannot_be_reviewed_or_reacquired_even_after_cancellation(string $mode): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote($mode);
         $quote = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
 
@@ -1083,7 +1223,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             ->assertJsonPath('reason_codes', ['dynamic_quote_already_consumed']);
 
         // A provider returning the same ID again cannot create a reusable reference.
-        // The catalogue is cached, so only quote transport is expected again.
+        // Each new quote repeats the authenticated customer listing read.
         $this->providerQuote($mode);
         $this->postJson($this->path('/quotes'), $this->input($mode))->assertStatus(409)
             ->assertJsonPath('reason_codes', ['dynamic_quote_already_consumed']);
@@ -1099,7 +1239,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         $this->source->review = $this->usdReview(); // Different provider quote ID.
         $this->confirmDynamic();
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $quote = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
         $this->postJson($this->path('/reviews'), [
@@ -1129,7 +1269,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     #[DataProvider('referenceMutations')]
     public function test_database_rejects_reference_quote_rewriting_outside_model_hooks(?array $changes): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
         $before = NiumDynamicPayoutQuote::query()->findOrFail($id)->getRawOriginal();
@@ -1148,16 +1288,16 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_configured_corridor_cannot_override_missing_provider_support(): void
     {
-        $this->catalogue(false);
+        $this->customerListing(false);
         $this->nium->shouldNotReceive('post');
         $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
-            ->assertJsonPath('reason_codes', ['dynamic_corridor_unsupported']);
+            ->assertJsonPath('reason_codes', ['dynamic_customer_corridor_not_permitted']);
         $this->noAdmission();
     }
 
     public function test_provider_contract_missing_echoes_is_unavailable_without_persisting_quote(): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote(body: '{"id":"quote","sourceAmount":980,"destinationAmount":784,"netExchangeRate":0.8}');
         $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
             ->assertJsonPath('reason_codes', ['dynamic_provider_quote_contract_unavailable']);
@@ -1168,7 +1308,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_balance_including_existing_holds_is_checked_after_provider_response(): void
     {
         $this->wallet->update(['reserved_balance' => '1500']);
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $this->postJson($this->path('/quotes'), $this->input())->assertStatus(409)
             ->assertJsonPath('reason_codes', ['dynamic_insufficient_available_funds']);
@@ -1179,7 +1319,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_destination_quote_requires_funds_for_principal_plus_the_included_fee(): void
     {
         $this->wallet->update(['available_balance' => '999', 'raw_data' => ['provider_available_balance' => '999']]);
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote('DESTINATION_AMOUNT');
         $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(409)
             ->assertJsonPath('reason_codes', ['dynamic_insufficient_available_funds']);
@@ -1189,7 +1329,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_account_change_during_quote_io_cannot_be_persisted(): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote(during: fn () => $this->account->update(['external_customer_id' => 'changed-customer']));
         $this->postJson($this->path('/quotes'), $this->input())->assertStatus(409)
             ->assertJsonPath('reason_codes', ['dynamic_quote_binding_changed']);
@@ -1208,7 +1348,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public function test_foreign_customer_cannot_review_a_persisted_reference_quote(): void
     {
-        $this->catalogue();
+        $this->customerListing();
         $this->providerQuote();
         $quote = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
         $other = User::factory()->create();
@@ -1230,7 +1370,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public static function legacyLanes(): array
     {
         return [['USD', 'SWIFT', 'dynamic_same_currency_quote_contract_unverified'],
-            ['GBP', 'SWIFT', 'dynamic_swift_fee_contract_unverified'], ['GBP', 'CASH', 'dynamic_corridor_unsupported']];
+            ['GBP', 'SWIFT', 'dynamic_pricing_corridor_unsupported'], ['GBP', 'CASH', 'dynamic_pricing_corridor_unsupported']];
     }
 
     #[DataProvider('legacyLanes')]
