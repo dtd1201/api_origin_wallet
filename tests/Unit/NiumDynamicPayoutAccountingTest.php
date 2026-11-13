@@ -280,13 +280,13 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
     public function test_actual_recipient_amount_is_recorded_separately_from_quote_estimate(): void
     {
         $result = $this->evaluate([0 => ['settlementTransactionAmount' => '783']]);
-        $this->assertSame('matched', $result['state']);
+        $this->assertSame('mismatched', $result['state']);
         $this->assertSame('783', $result['receipt']['destination_amount']);
         $this->assertSame('784', $result['receipt']['estimated_destination_amount']);
         $this->assertSame('-1', $result['receipt']['destination_minus_estimate']);
     }
 
-    public function test_destination_mode_requires_exact_intended_credit_without_repricing_or_claiming_a_guarantee(): void
+    public function test_both_modes_require_exact_quoted_credit_without_repricing_or_claiming_a_guarantee(): void
     {
         $exact = $this->evaluate(mode: 'DESTINATION_AMOUNT');
         $this->assertSame('matched', $exact['state']);
@@ -298,8 +298,10 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
         $this->assertSame('1000', $different['receipt']['customer_authorized_debit_usd']);
         $this->assertTrue($different['receipt']['discrepancy']);
         $source = $this->evaluate([0 => ['settlementTransactionAmount' => '783']]);
-        $this->assertSame('matched', $source['state']);
-        $this->assertNull($source['receipt']['intended_destination_amount']);
+        $this->assertSame('mismatched', $source['state']);
+        $this->assertSame('784', $source['receipt']['intended_destination_amount']);
+        $this->assertSame('1000', $source['receipt']['customer_authorized_debit_usd']);
+        $this->assertTrue($source['receipt']['discrepancy']);
     }
 
     public function test_explicit_zero_fee_observation_is_retained_as_a_provider_cost_difference(): void
@@ -389,7 +391,10 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
             'different provider fee is an operational discrepancy' => [[1 => ['labels' => ['originalAuthorizationCode' => 'RT-1', 'feeName' => 'OTHER_PROVIDER_FEE']]], 'mismatched'],
             'confirmed extra dollar' => [[1 => ['settlementAuthAmount' => '21']], 'mismatched'],
             'confirmed principal mismatch' => [[0 => ['settlementAuthAmount' => '1000']], 'mismatched'],
-            'actual receive amount differs from reference estimate' => [[0 => ['settlementTransactionAmount' => '783']], 'matched'],
+            // The fixture's confirmed estimated_recipient is the quoted credit;
+            // production confirmation binds this historical field to quoted_receive_amount.
+            'actual receive amount below authoritative quoted credit' => [[0 => ['settlementTransactionAmount' => '783']], 'mismatched'],
+            'actual receive amount above authoritative quoted credit' => [[0 => ['settlementTransactionAmount' => '785']], 'mismatched'],
             'zero principal cannot prove a wallet debit' => [[0 => ['settlementAuthAmount' => '0']], 'unavailable'],
             'contradictory fee linkage' => [[1 => ['originalAuthorizationCode' => 'other']], 'unavailable'],
             'returned payout' => [[0 => ['status' => 'Returned']], 'exception'],

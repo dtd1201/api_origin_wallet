@@ -199,8 +199,7 @@ final class DynamicPayoutAccounting
                     'provider_wallet_debits' => null,
                     'destination_amount' => $destination->value, 'destination_currency' => $intent->destination_currency,
                     'estimated_destination_amount' => $t['estimated_recipient']['amount'],
-                    'intended_destination_amount' => $intent->amount_mode === PayoutAmountMode::Destination->value
-                        ? $t['estimated_recipient']['amount'] : null,
+                    'intended_destination_amount' => $t['estimated_recipient']['amount'],
                     'customer_authorized_debit_usd' => (new Decimal($intent->total_debit))->value,
                     'customer_principal_usd' => $t['principal']['amount'],
                     'customer_fee_allocation_usd' => $t['transaction_fee']['amount'],
@@ -214,12 +213,9 @@ final class DynamicPayoutAccounting
             && $principal->equals(new Decimal($t['principal']['amount']))
             && $fee->equals(new Decimal($t['transaction_fee']['amount']));
         $matched = $matched && array_filter($fees, static fn (array $row): bool => $row['labels']['feeName'] !== 'REMIT_BANK_FEE') === [];
-        // A destination-driven instruction specifies the intended recipient amount.
-        // A different observed credit is an exception, never silently a matched payout.
-        $destinationSpecified = $intent->amount_mode === PayoutAmountMode::Destination->value;
-        if ($destinationSpecified) {
-            $matched = $matched && $destination->equals(new Decimal($t['estimated_recipient']['amount']));
-        }
+        // Both modes consent to the exact quoted recipient amount. This detects
+        // settlement differences; it does not guarantee provider delivery or reprice it.
+        $matched = $matched && $destination->equals(new Decimal($t['estimated_recipient']['amount']));
         if (isset($remit['labels']['netExchangeRate'])) {
             if (! is_string($remit['labels']['netExchangeRate']) || ! is_string($t['fx_rate'] ?? null)) {
                 return ['state' => 'unavailable', 'reason' => 'dynamic_provider_fx_observation_unverified', 'provider_reference' => $reference];
@@ -234,9 +230,9 @@ final class DynamicPayoutAccounting
                 'wallet_debit_usd' => $allUsd ? $total->value : null,
                 'provider_wallet_debits' => array_map(static fn (Decimal $amount): string => $amount->value, $debits),
                 'destination_amount' => $destination->value, 'destination_currency' => $intent->destination_currency,
-                // Quote amounts are reference estimates, not settlement guarantees.
+                // Retain the historical key and distinguish consent from actual credit.
                 'estimated_destination_amount' => $t['estimated_recipient']['amount'],
-                'intended_destination_amount' => $destinationSpecified ? $t['estimated_recipient']['amount'] : null,
+                'intended_destination_amount' => $t['estimated_recipient']['amount'],
                 'destination_minus_estimate' => (string) \Brick\Math\BigDecimal::of($destination->value)
                     ->minus($t['estimated_recipient']['amount'])->stripTrailingZeros(),
                 'customer_authorized_debit_usd' => (new Decimal($intent->total_debit))->value,

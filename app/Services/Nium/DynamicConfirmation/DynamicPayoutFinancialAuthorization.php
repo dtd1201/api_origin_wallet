@@ -12,7 +12,7 @@ use RuntimeException;
 /** Accepted customer pricing only. Provider settlement must be observed independently. */
 class DynamicPayoutFinancialAuthorization
 {
-    public const VERSION = 'origin-nium-contracted-local-usd-inclusive-v2';
+    public const VERSION = 'origin-nium-contracted-local-usd-inclusive-v3';
     public const REFUSALS = ['dynamic_financial_scope_required', 'dynamic_pricing_corridor_unsupported',
         'dynamic_financial_terms_changed'];
 
@@ -40,7 +40,9 @@ class DynamicPayoutFinancialAuthorization
             throw new RuntimeException('dynamic_financial_terms_changed');
         }
 
-        return ['version' => self::VERSION, ...$row, 'origin_service_fee_usd' => '0',
+        // This is the same included customer fee, never an additional charge or
+        // an assertion about Nium's independently observed provider charges.
+        return ['version' => self::VERSION, ...$row, 'origin_service_fee_usd' => FinalizedUsdPayoutPreparation::FEE_USD,
             'fee_payer' => 'SENDER', 'fee_treatment' => 'INCLUDED_IN_TOTAL_USD_DEBIT',
             'rate_treatment' => 'PRESERVE_NIUM_QUOTED_RATE_NO_ADDITIONAL_MARGIN',
             'provider_settlement' => 'INDEPENDENT_AUTHENTICATED_RECONCILIATION'];

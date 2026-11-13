@@ -366,6 +366,103 @@ final class NiumDynamicPayoutCustomerApiTest extends DynamicConfirmationDatabase
         $this->assertDatabaseCount('transfers', 0);
     }
 
+    public function test_lost_response_or_browser_identity_recovers_owned_transfer_without_new_admission(): void
+    {
+        $intent = $this->confirmDynamic('recover-exact-reference');
+        config(['nium_dynamic_confirmation.enabled' => false,
+            'nium_dynamic_confirmation.automatic_dispatch_enabled' => false,
+            'nium_dynamic_quotes.quote_contract_enabled' => false,
+            'nium_dynamic_quotes.confirmation_contract_enabled' => false,
+            'nium_dynamic_payouts.reconciliation_enabled' => false]);
+        $this->travelTo($this->at('02:00:00')); // Recovery outlives quote and Review expiry.
+        $expected = $this->getJson($this->path('/'.$intent->id))->assertOk()->json();
+        $recovered = $this->getJson($this->path('?client_reference=recover-exact-reference'))
+            ->assertOk()->assertHeader('Cache-Control', 'no-store, private')
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $intent->id)
+            ->assertJsonPath('has_more', false)->assertJsonPath('next_page', null);
+        $this->assertSame($expected, $recovered->json('data.0'));
+        foreach (['terms_fingerprint', 'accepted_fingerprint', 'reference_sha256', 'client_reference', 'consent_binding',
+            'admission_evidence', 'confirmed_terms', 'claim_token', 'provider_reference', 'financial_evidence', 'exception_code'] as $private) {
+            $this->assertArrayNotHasKey($private, $recovered->json('data.0'));
+        }
+        $this->getJson($this->path())->assertOk()->assertJsonPath('data.0.id', $intent->id);
+        $this->getJson($this->path('?client_reference=missing-reference'))->assertOk()->assertJsonPath('data', []);
+        $this->getJson($this->path('?client_reference=Recover-exact-reference'))->assertOk()->assertJsonPath('data', []);
+        $this->assertSame(1, NiumDynamicIntent::query()->count());
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+        $this->assertSame(1, NiumDynamicPayoutOutbox::query()->count());
+        $this->assertSame(0, NiumDynamicPayoutOutbox::query()->sole()->attempts);
+        $this->assertSame(1, LedgerEntry::query()->count());
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+    }
+
+    public function test_recovery_collection_paginates_without_duplicates_for_equal_creation_times(): void
+    {
+        $first = $this->confirmDynamic('recovery-page-one');
+        $this->source->review = $this->usdReview(changes: [
+            'response' => ['id' => 'fixture-finalized-quote-two'],
+            'instruction' => new PayoutInstruction('IR005', 'Salary', 'Second invoice')]);
+        $second = $this->confirmDynamic('recovery-page-two');
+        $pageOne = $this->getJson($this->path('?per_page=1'))->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('page', 1)->assertJsonPath('per_page', 1)
+            ->assertJsonPath('has_more', true)->assertJsonPath('next_page', 2);
+        $pageTwo = $this->getJson($this->path('?per_page=1&page=2'))->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('page', 2)->assertJsonPath('has_more', false)->assertJsonPath('next_page', null);
+        $this->assertEqualsCanonicalizing([$first->id, $second->id], [$pageOne->json('data.0.id'), $pageTwo->json('data.0.id')]);
+        $this->getJson($this->path('?per_page=1&page=3'))->assertOk()->assertJsonPath('data', []);
+        $this->assertSame(2, NiumDynamicIntent::query()->count());
+        $this->assertSame(2, LedgerEntry::query()->where('entry_type', 'hold')->count());
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame(0, (int) NiumDynamicPayoutOutbox::query()->sum('attempts'));
+    }
+
+    public function test_recovery_preserves_unknown_provider_outcome_without_dispatch_or_another_debit(): void
+    {
+        $intent = $this->confirmDynamic('recover-unknown-outcome');
+        $wire = new DynamicPayoutTransportStub;
+        $wire->afterWire = static fn () => throw new RuntimeException('synthetic response lost after dispatch');
+        $dispatcher = new DynamicPayoutDispatcher($this->confirmation, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $dispatcher->dispatch($outbox->id);
+        $this->assertSame('ambiguous', $outbox->fresh()->state);
+        config(['nium_dynamic_confirmation.automatic_dispatch_enabled' => false]);
+        for ($read = 0; $read < 2; $read++) {
+            $this->getJson($this->path('?client_reference=recover-unknown-outcome'))->assertOk()
+                ->assertJsonPath('data.0.id', $intent->id)
+                ->assertJsonPath('data.0.status', 'pending_provider_confirmation')
+                ->assertJsonPath('data.0.financial_reconciled', false);
+        }
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(0, $wire->reads);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $this->assertNull($outbox->fresh()->provider_reference);
+        $this->assertSame(1, NiumDynamicIntent::query()->count());
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+    }
+
+    public static function invalidRecoveryQueries(): array
+    {
+        return [['page=0'], ['page=1000001'], ['per_page=0'], ['per_page=51'], ['per_page=1.5'],
+            ['client_reference='], ['client_reference=bad%20reference'], ['user_id=999'], ['accepted_fingerprint=untrusted']];
+    }
+
+    #[DataProvider('invalidRecoveryQueries')]
+    public function test_recovery_rejects_unbounded_or_unexpected_query_fields(string $query): void
+    {
+        $this->getJson($this->path('?'.$query))->assertUnprocessable();
+        $this->noReservation();
+    }
+
+    public function test_recovery_authentication_and_canonical_route_owner_are_enforced(): void
+    {
+        $this->getJson('/api/user/users/0'.$this->owner->id.'/nium/dynamic-payouts')->assertForbidden();
+        $this->withHeader('Authorization', '')->getJson($this->path())->assertUnauthorized();
+        $this->noReservation();
+    }
+
     public function test_customer_cannot_read_another_customers_existing_intent(): void
     {
         $intent = $this->confirmDynamic();
@@ -373,6 +470,10 @@ final class NiumDynamicPayoutCustomerApiTest extends DynamicConfirmationDatabase
         ApiToken::query()->create(['user_id' => $other->id, 'name' => 'offline-other-customer',
             'token_hash' => hash('sha256', 'offline-other-dynamic-customer'), 'expires_at' => now()->addDay()]);
         $this->withToken('offline-other-dynamic-customer');
+        $otherPath = '/api/user/users/'.$other->id.'/nium/dynamic-payouts';
+        $this->getJson($otherPath)->assertOk()->assertJsonPath('data', []);
+        $this->getJson($otherPath.'?client_reference=fixture-client-reference')->assertOk()->assertJsonPath('data', []);
+        $this->getJson($this->path())->assertForbidden();
         $this->getJson('/api/user/users/'.$other->id.'/nium/dynamic-payouts/'.$intent->id)->assertNotFound();
         $this->getJson($this->path('/'.$intent->id))->assertForbidden();
     }

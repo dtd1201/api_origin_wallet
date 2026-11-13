@@ -35,7 +35,9 @@ final class NiumDynamicPayoutFinancialAuthorizationTest extends TestCase
         $this->assertSame($margin, $price['margin_percent']);
         $this->assertSame('20', $price['fee']);
         $this->assertSame('USD', $price['fee_currency']);
-        $this->assertSame('0', $price['origin_service_fee_usd']);
+        $this->assertSame('20', $price['origin_service_fee_usd']);
+        $this->assertSame('origin-nium-contracted-local-usd-inclusive-v3', $price['version']);
+        $this->assertArrayNotHasKey('provider_fee_usd', $price);
         $this->assertSame('INCLUDED_IN_TOTAL_USD_DEBIT', $price['fee_treatment']);
         $this->assertSame('PRESERVE_NIUM_QUOTED_RATE_NO_ADDITIONAL_MARGIN', $price['rate_treatment']);
         $this->assertSame('INDEPENDENT_AUTHENTICATED_RECONCILIATION', $price['provider_settlement']);

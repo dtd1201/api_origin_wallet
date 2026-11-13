@@ -52,6 +52,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     private NiumApiExchangeEvidence $exchange;
     private bool $corridorWithdrawn = false;
     private string $validationResponse = '{"valid":true,"issues":[]}';
+    private ?\Closure $duringValidation = null;
 
     protected function setUp(): void
     {
@@ -97,6 +98,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
                 $this->assertArrayNotHasKey('additionalFees', $payload['payout']);
                 $beforeDispatch(new Request(new PsrRequest('POST', 'https://gatewaysandbox.nium.com'.$path,
                     ['Content-Type' => 'application/json'], json_encode($payload, JSON_THROW_ON_ERROR))));
+                if ($this->duringValidation !== null) ($this->duringValidation)();
                 return $this->response($this->validationResponse);
             });
         $this->nium->shouldReceive('get')->withArgs(static fn ($path, $query = [], $user = null, $operation = null): bool =>
@@ -267,7 +269,13 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $quote = app(NiumDynamicPayoutQuoteService::class)->project(NiumDynamicPayoutQuote::query()->sole());
         $this->assertSame('CONTRACTUAL_CUSTOMER_TERMS', $quote['pricing_status']);
         $this->assertSame('0.800000000000000001', $quote['nium_quoted_fx_rate']);
-        $this->assertSame(['currency' => 'USD', 'amount' => '0'], $review['origin_service_fee']);
+        $this->assertSame(['currency' => 'USD', 'amount' => '20'], $review['origin_service_fee']);
+        $this->assertSame($quote['origin_service_fee'], $review['origin_service_fee']);
+        $this->assertSame($quote['provider_quote_id'], $review['provider_quote_id']);
+        $this->assertSame($quote['nium_quoted_fx_rate'], $review['nium_quoted_fx_rate']);
+        $this->assertSame('20', $review['customer_pricing']['origin_service_fee_usd']);
+        $this->assertSame('CUSTOMER_PRICING_AUTHORIZED_PROVIDER_SETTLEMENT_UNVERIFIED', $quote['financial_verification']);
+        $this->assertArrayNotHasKey('provider_fee_usd', $quote);
         $this->assertSame('0.13', $review['customer_pricing']['margin_percent']);
         $this->assertSame('INCLUDED_IN_TOTAL_USD_DEBIT', $review['customer_pricing']['fee_treatment']);
         $this->assertSame('784', $review['destination_amount']['amount']);
@@ -286,6 +294,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             'altered debit' => ['total_usd_debit', '1001'],
             'altered recipient' => ['destination_amount', ['currency' => 'GBP', 'amount' => '785']],
             'altered rate' => ['nium_quoted_fx_rate', '0.81'],
+            'altered provider quote identity' => ['provider_quote_id', 'different-provider-quote'],
         ];
     }
 
@@ -1039,6 +1048,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             ->assertJsonPath('dynamic_available', true)->assertJsonPath('destination_currencies', ['GBP'])
             ->assertJsonPath('eligible_payout_rails', ['LOCAL'])
             ->assertJsonPath('supported_amount_modes', ['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'])
+            ->assertJsonPath('currency_scales', ['USD' => 2, 'GBP' => 2])
             ->assertJsonPath('quote_availability.payout_rail', 'LOCAL')->assertJsonPath('reason_codes', []);
         $this->noAdmission();
     }
@@ -1133,6 +1143,108 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         // Keep the cached SOURCE_AMOUNT summary and original consent snapshot.
         $stored = NiumDynamicPayoutQuote::query()->findOrFail($record['dynamic_quote_id']);
         $this->assertQuoteFailure('dynamic_payout_source_amount_contract_unverified', fn () => $service->assemble($record, $stored));
+        $this->noAdmission();
+    }
+
+    public static function disabledReviewProcessing(): array
+    {
+        return [
+            ['nium_dynamic_confirmation.automatic_dispatch_enabled'],
+            ['nium_dynamic_confirmation.enabled'],
+            ['nium_dynamic_payouts.reconciliation_enabled'],
+        ];
+    }
+
+    #[DataProvider('disabledReviewProcessing')]
+    public function test_review_cannot_be_ready_without_automatic_processing(string $flag): void
+    {
+        $this->customerListing(); $this->providerQuote();
+        $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
+        config([$flag => false]);
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => $id, 'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_payout_submission_disabled'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->noAdmission();
+    }
+
+    public function test_review_cannot_be_ready_without_production_operator_authorization(): void
+    {
+        $this->customerListing(); $this->providerQuote();
+        $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
+        config(['services.nium.base_url' => 'https://gateway.nium.com',
+            'nium_dynamic_payouts.live_automatic_dispatch_authorized' => false,
+            'nium_dynamic_payouts.operator_authorization_reference' => null]);
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => $id, 'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_payout_submission_disabled'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->noAdmission();
+    }
+
+    public function test_review_rechecks_processing_after_provider_observations(): void
+    {
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence(); $this->providerQuote();
+        $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
+        $this->duringValidation = static fn () => config(['nium_dynamic_confirmation.automatic_dispatch_enabled' => false]);
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => $id, 'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_payout_submission_disabled'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->noAdmission();
+    }
+
+    public static function retainedSchemaMismatches(): array
+    {
+        return [['currency_scales'], ['supported_amount_modes'], ['payout_schema_sha256'], ['raw_precision']];
+    }
+
+    #[DataProvider('retainedSchemaMismatches')]
+    public function test_reconstructed_review_refuses_schema_summary_or_hash_mismatch(string $field): void
+    {
+        $review = $this->readyReview();
+        $service = app(NiumDynamicReviewService::class);
+        $record = $service->load($review['accepted_fingerprint']);
+        $eligibility = &$record['evidence']['execution_eligibility'];
+        if ($field === 'raw_precision') {
+            $schema = json_decode($eligibility['schema_observation']['schema_json'], true, 64, JSON_THROW_ON_ERROR);
+            $schema['properties']['payout.destinationAmount']['maximumDecimals'] = '0';
+            $eligibility['schema_observation']['schema_json'] = json_encode($schema, JSON_THROW_ON_ERROR);
+            $eligibility['payout_schema_sha256'] = hash('sha256', $eligibility['schema_observation']['schema_json']);
+        } else {
+            $eligibility[$field] = match ($field) {
+                'currency_scales' => ['USD' => 2, 'GBP' => 0],
+                'supported_amount_modes' => ['SOURCE_AMOUNT'],
+                default => str_repeat('0', 64),
+            };
+        }
+        $stored = NiumDynamicPayoutQuote::query()->findOrFail($record['dynamic_quote_id']);
+        $this->assertQuoteFailure('dynamic_payout_schema_contract_unavailable', fn () => $service->assemble($record, $stored));
+        $this->noAdmission();
+    }
+
+    public function test_verified_options_expose_zero_decimal_destination_scale_without_a_global_currency_guess(): void
+    {
+        $this->beneficiary->update(['country_code' => 'JP', 'currency' => 'JPY']);
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence();
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('dynamic_available', true)->assertJsonPath('currency_scales', ['USD' => 2, 'JPY' => 0]);
+        $this->noAdmission();
+    }
+
+    public function test_previous_zero_origin_fee_pricing_requires_a_new_quote_and_consent(): void
+    {
+        $this->customerListing(); $this->providerQuote();
+        $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
+        $stored = NiumDynamicPayoutQuote::query()->findOrFail($id);
+        $price = app(\App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization::class)->pricing($this->beneficiary);
+        $price['version'] = 'origin-nium-contracted-local-usd-inclusive-v2';
+        $price['origin_service_fee_usd'] = '0';
+        $binding = $stored->binding;
+        $binding['customer_pricing_sha256'] = hash('sha256', json_encode($price, JSON_THROW_ON_ERROR));
+        // Model-only stale snapshot: immutable persisted quotes are never rewritten.
+        $stored->binding = $binding;
+        $this->assertQuoteFailure('dynamic_quote_binding_changed', fn () => app(NiumDynamicPayoutQuoteService::class)->project($stored));
         $this->noAdmission();
     }
 

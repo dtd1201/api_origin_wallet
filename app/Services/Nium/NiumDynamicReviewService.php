@@ -82,6 +82,7 @@ final class NiumDynamicReviewService
             'customer_entitlement' => $options === null ? 'UNAVAILABLE' : 'VERIFIED',
             'financial_authorization' => $financial === [] ? 'CUSTOMER_PRICING_AUTHORIZED' : 'UNAVAILABLE',
             'supported_amount_modes' => $reasons === [] ? $modes : [],
+            'currency_scales' => $reasons === [] ? $options['currency_scales'] : [],
             'executable_amount_modes' => [], 'requires_instruction_validation' => true,
             'reason_codes' => array_values(array_unique($reasons))];
     }
@@ -130,7 +131,8 @@ final class NiumDynamicReviewService
         $this->storeObservations($fingerprint, $evidence, $quote);
         $public = array_intersect_key($record, array_flip(['provider_account_id', 'balance_id', 'beneficiary_id',
             'dynamic_quote_id', 'amount_mode', 'entered_amount', 'principal', 'included_fee', 'total_usd_debit',
-            'destination_amount', 'quote_expires_at', 'instruction', 'reason_codes', 'customer_pricing', 'origin_service_fee', 'payout_rail']));
+            'destination_amount', 'quote_expires_at', 'instruction', 'reason_codes', 'customer_pricing', 'origin_service_fee', 'payout_rail',
+            'provider_quote_id', 'nium_quoted_fx_rate']));
         $expires = [$quote->expires_at->toDateTimeImmutable()];
         foreach (['execution_eligibility', 'instruction_validation', 'wallet_availability'] as $name) {
             if (isset($evidence[$name]['expires_at'])) $expires[] = new DateTimeImmutable($evidence[$name]['expires_at']);
@@ -176,7 +178,7 @@ final class NiumDynamicReviewService
         foreach (['principal' => 'quoted_principal', 'included_fee' => 'planned_included_fee',
             'total_usd_debit' => 'planned_total_usd_debit', 'destination_amount' => 'quoted_destination_amount',
             'amount_mode' => 'amount_mode', 'entered_amount' => 'entered_amount', 'nium_quoted_fx_rate' => 'nium_quoted_fx_rate',
-            'quote_expires_at' => 'quote_expires_at'] as $field => $quoted) {
+            'quote_expires_at' => 'quote_expires_at', 'provider_quote_id' => 'provider_quote_id'] as $field => $quoted) {
             if (($record[$field] ?? null) !== $projected[$quoted]) throw new RuntimeException('dynamic_financial_terms_changed');
         }
         $from = new DateTimeImmutable($record['prepared_at']);
@@ -187,13 +189,18 @@ final class NiumDynamicReviewService
         // observation made before a contract correction cannot bypass its guards.
         $schemaBody = $e['execution_eligibility']['schema_observation']['schema_json'] ?? null;
         if (! is_string($schemaBody)) throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
-        DynamicPayoutEligibility::schemaObservation($schemaBody, [
+        $schema = DynamicPayoutEligibility::schemaObservation($schemaBody, [
             'base_url' => $b['base_url'], 'client' => $b['client'], 'customer' => $b['customer'],
             'currency' => $b['destination_currency'],
             'path' => '/api/v1/client/'.urlencode($b['client']).'/customer/'.urlencode($b['customer'])
                 .'/currency/'.$b['destination_currency'].'/payout/schema',
             'query' => ['destinationCountry' => $b['destination_country'], 'payoutMethod' => $b['payout_method']],
         ], PayoutAmountMode::from($record['amount_mode']));
+        if (($e['execution_eligibility']['payout_schema_sha256'] ?? null) !== hash('sha256', $schemaBody)
+            || ($e['execution_eligibility']['currency_scales'] ?? null) !== $schema['currency_scales']
+            || ($e['execution_eligibility']['supported_amount_modes'] ?? null) !== $schema['supported_amount_modes']) {
+            throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
+        }
         $selected = $e['execution_eligibility']['selection'];
         if ($selected['payout_method'] !== $b['payout_method']
             || $selected['destination_country'] !== $b['destination_country']

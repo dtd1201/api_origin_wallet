@@ -88,6 +88,7 @@ final class NiumDynamicPayoutController extends Controller
             'destination_currencies' => $available ? [$beneficiary->currency] : [],
             'eligible_payout_rails' => $available ? [$beneficiary->payout_method] : [],
             'supported_amount_modes' => $quoteAvailability['supported_amount_modes'],
+            'currency_scales' => $available ? $availability['currency_scales'] : [],
             'quote_availability' => $quoteAvailability,
             'reason_codes' => $dynamicReasons]);
     }
@@ -169,11 +170,13 @@ final class NiumDynamicPayoutController extends Controller
         [$reasons, $wallet] = $this->candidate($user, $beneficiary);
         if ($dynamicQuote && $reasons === []) {
             try {
+                DynamicPayoutGate::assertDispatchEnabled();
                 $this->quotes->assertCurrent($quote, $user, $beneficiary, $wallet);
                 $review = $this->reviews->prepare($user, $beneficiary, $wallet, $quote,
                     new PayoutInstruction($instruction['purpose_code'], $instruction['source_of_funds'], $instruction['comment']));
                 if ($review['status'] === 'READY') {
                     $this->confirmation->validateReview($user, $review['provider_account_id'], $beneficiary->id, $wallet->id, $review['accepted_fingerprint']);
+                    DynamicPayoutGate::assertDispatchEnabled();
                     return $this->json($review);
                 }
                 return $this->json(['status' => $review['status'], 'reason_codes' => $review['reason_codes'],
@@ -243,6 +246,33 @@ final class NiumDynamicPayoutController extends Controller
             Log::warning('Dynamic customer submission unavailable.', ['user_id' => $user->id, 'exception' => $exception::class]);
 
             return $this->unavailable(['dynamic_payout_admission_unavailable']);
+        }
+    }
+
+    /** Read-only recovery when the browser has lost its submission response or UUID. */
+    public function index(Request $request, User $user): JsonResponse
+    {
+        $this->assertActor($request, $user);
+        $input = $this->input($request, [
+            'client_reference' => ['sometimes', 'required', 'string', 'regex:/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/D'],
+            'page' => ['sometimes', 'integer', 'min:1', 'max:1000000'],
+            'per_page' => ['sometimes', 'integer', 'min:1', 'max:50'],
+        ]);
+        $query = NiumDynamicIntent::query()->where('user_id', $user->id);
+        if (isset($input['client_reference'])) {
+            $query->where('reference_sha256', hash('sha256', $input['client_reference']));
+        }
+        try {
+            $page = $query->orderByDesc('created_at')->orderByDesc('id')->simplePaginate(
+                (int) ($input['per_page'] ?? 20), ['*'], 'page', (int) ($input['page'] ?? 1));
+
+            return $this->json(['data' => array_map(fn (NiumDynamicIntent $intent): array => $this->project($intent), $page->items()),
+                'page' => $page->currentPage(), 'per_page' => $page->perPage(),
+                'has_more' => $page->hasMorePages(), 'next_page' => $page->hasMorePages() ? $page->currentPage() + 1 : null]);
+        } catch (Throwable $exception) {
+            Log::warning('Dynamic customer recovery unavailable.', ['user_id' => $user->id, 'exception' => $exception::class]);
+
+            return $this->unavailable(['dynamic_transfer_status_unavailable']);
         }
     }
 
@@ -342,6 +372,11 @@ final class NiumDynamicPayoutController extends Controller
             return 'dynamic_corridor_unsupported';
         }
         $reason = $exception->getMessage();
+
+        if (in_array($reason, ['dynamic_durable_confirmation_disabled', 'dynamic_automatic_dispatch_disabled',
+            'dynamic_live_dispatch_requires_operator_authorization', 'dynamic_dispatch_requires_reconciliation'], true)) {
+            return 'dynamic_payout_submission_disabled';
+        }
 
         return in_array($reason, DynamicPayoutFinancialAuthorization::REFUSALS, true)
             || in_array($reason, ['dynamic_provider_environment_unverified', 'dynamic_provider_scope_unverified',

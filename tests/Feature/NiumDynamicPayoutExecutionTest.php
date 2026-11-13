@@ -534,9 +534,10 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->confirmDynamic('different-customer-reference');
     }
 
-    public function test_destination_credit_difference_becomes_an_exception_without_extra_debit_or_second_post(): void
+    #[DataProvider('modes')]
+    public function test_destination_credit_difference_becomes_an_exception_without_extra_debit_or_second_post(PayoutAmountMode $mode): void
     {
-        $outbox = $this->prepare(PayoutAmountMode::Destination);
+        $outbox = $this->prepare($mode);
         $this->dispatcher->dispatch($outbox->id);
         $this->wire->batch = $this->records($outbox->fresh());
         $this->wire->batch['records'][0]['settlementTransactionAmount'] = '783';
@@ -548,6 +549,8 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame('784', $outbox->fresh()->financial_evidence['intended_destination_amount']);
         $this->assertSame('783', $outbox->fresh()->financial_evidence['destination_amount']);
         $this->assertSame('1000', $outbox->fresh()->financial_evidence['customer_authorized_debit_usd']);
+        $this->assertSame('requires_attention', $this->customerStatus($outbox)['status']);
+        $this->assertFalse($this->customerStatus($outbox)['financial_reconciled']);
         $this->assertSame('consumed', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
         $this->assertSame('-1000.00000000', LedgerEntry::query()->where('entry_type', 'debit')->sole()->amount);

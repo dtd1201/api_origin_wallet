@@ -23,6 +23,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('users/{user}/overview', [OverviewController::class, 'show']);
 Route::prefix('users/{user}/nium/dynamic-payouts')->whereNumber('user')->group(function (): void {
+    Route::get('/', [NiumDynamicPayoutController::class, 'index']);
     Route::get('options', [NiumDynamicPayoutController::class, 'options']);
     Route::post('quotes', [NiumDynamicPayoutController::class, 'quote']);
     Route::post('reviews', [NiumDynamicPayoutController::class, 'review']);
