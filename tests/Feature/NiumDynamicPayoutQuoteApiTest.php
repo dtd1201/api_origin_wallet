@@ -231,7 +231,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
                 $url = rtrim((string) config('services.nium.base_url'), '/').$path.'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986);
                 $beforeDispatch($schemaOutgoing === null ? new Request(new PsrRequest('GET', $url)) : $schemaOutgoing($url));
                 return $this->response($schemaBody ?? '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object",'
-                    .'"required":["payout.destinationAmount"],"allOf":[{"if":{"properties":{"synthetic.flag":{"const":true}}},'
+                    // Synthetic both-mode schema; the retained destination-required example is tested separately.
+                    .'"required":["beneficiary.id"],"allOf":[{"if":{"required":["synthetic.flag"],"properties":{"synthetic.flag":{"const":true}}},'
                     .'"then":{"required":["synthetic.conditionalField"]}}],'
                     .'"properties":{"payout.sourceAmount":{"type":"number","maximumDecimals":"2"},'
                     .'"payout.destinationAmount":{"type":"number","maximumDecimals":"'.($this->beneficiary->currency === 'JPY' ? '0' : '2').'"}}}');
@@ -1092,7 +1093,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->fullRegistration(); $this->customerListing();
         $this->executionEvidence(schemaBody: '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object",'
             .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":2}},'
-            .'"required":["payout.destinationAmount"],"allOf":[{"if":{"properties":{"synthetic.flag":{"const":true}}},'
+            .'"required":["payout.destinationAmount"],"allOf":[{"if":{"required":["synthetic.flag"],"properties":{"synthetic.flag":{"const":true}}},'
             .'"then":{"required":["synthetic.conditionalField"]}}]}');
         $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
             ->assertJsonPath('supported_amount_modes', ['DESTINATION_AMOUNT'])
@@ -1118,6 +1119,20 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $record['evidence']['execution_eligibility']['selection']['payout_method'] = 'SWIFT';
         $stored = NiumDynamicPayoutQuote::query()->findOrFail($record['dynamic_quote_id']);
         $this->assertQuoteFailure('dynamic_review_binding_changed', fn () => $service->assemble($record, $stored));
+        $this->noAdmission();
+    }
+
+    public function test_cached_review_cannot_bypass_a_newly_enforced_schema_amount_requirement(): void
+    {
+        $review = $this->readyReview('SOURCE_AMOUNT');
+        $service = app(NiumDynamicReviewService::class);
+        $record = $service->load($review['accepted_fingerprint']);
+        $schema = json_decode($record['evidence']['execution_eligibility']['schema_observation']['schema_json'], true, 64, JSON_THROW_ON_ERROR);
+        $schema['required'][] = 'payout.destinationAmount';
+        $record['evidence']['execution_eligibility']['schema_observation']['schema_json'] = json_encode($schema, JSON_THROW_ON_ERROR);
+        // Keep the cached SOURCE_AMOUNT summary and original consent snapshot.
+        $stored = NiumDynamicPayoutQuote::query()->findOrFail($record['dynamic_quote_id']);
+        $this->assertQuoteFailure('dynamic_payout_source_amount_contract_unverified', fn () => $service->assemble($record, $stored));
         $this->noAdmission();
     }
 

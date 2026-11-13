@@ -22,6 +22,17 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
             'destination_country' => ['GB'], 'routing_code_type' => 'synthetic-route-a'];
     }
 
+    public function test_retained_v1_openapi_example_is_selected_by_legal_entity_and_exact_tuple(): void
+    {
+        // Documented example only; no Origin account authorization is implied.
+        $row = ['client_legal_entity' => ['LEGAL_ENTITY_BR'], 'destination_country' => ['BR'],
+            'destination_currency' => 'BRL', 'ignoreLookup' => false, 'payout_method' => 'LOCAL',
+            'routing_code_type' => 'BRANCH CODE'];
+        $result = DynamicPayoutEligibility::select(['data' => [$row]], 'BR', 'BRL', 'BR', 'LOCAL');
+        $this->assertSame(['legal_entity' => 'BR', 'destination_country' => 'BR', 'destination_currency' => 'BRL',
+            'payout_method' => 'LOCAL', 'routing_code_type' => 'BRANCH CODE'], $result);
+    }
+
     public function test_spend_four_field_envelope_is_a_listing_without_payout_authorization(): void
     {
         $body = ['requestId' => 'synthetic-request', 'correlationId' => 'synthetic-correlation',

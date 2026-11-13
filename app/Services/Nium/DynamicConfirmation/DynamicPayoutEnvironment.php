@@ -62,8 +62,9 @@ final readonly class DynamicPayoutEnvironment
                 === '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance') {
                 return;
             }
-            // Quote variants, customer corridors/schema and validation still need
-            // their own evidence. A working POST or GET proves none of them.
+            // No blanket authority for these operations. Endpoint-scoped reads
+            // and non-settling validation apply their own exact response checks;
+            // they never open schema, pricing or payout authority globally.
             throw new RuntimeException('dynamic_production_'.$operation.'_contract_unverified');
         }
     }
@@ -100,6 +101,16 @@ final readonly class DynamicPayoutEnvironment
         if ($client === '' || $customer === ''
             || $path !== '/api/v1/client/'.urlencode($client).'/customer/'.urlencode($customer).'/supportedCorridors') {
             throw new RuntimeException('dynamic_customer_corridors_endpoint_unverified');
+        }
+    }
+
+    /** Documented non-settling POST only; its response grants no payout or settlement authority. */
+    public function assertInstructionValidationEndpoint(string $path, string $client, string $customer, string $wallet): void
+    {
+        if ($client === '' || $customer === '' || $wallet === ''
+            || $path !== '/api/v1/client/'.urlencode($client).'/customer/'.urlencode($customer)
+                .'/wallet/'.urlencode($wallet).'/remittance/validate') {
+            throw new RuntimeException('dynamic_instruction_validation_endpoint_unverified');
         }
     }
 

@@ -48,7 +48,7 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
         $this->nium->shouldReceive('clientId')->andReturnUsing(static fn (): string => (string) config('services.nium.client_id'));
         $this->nium->shouldNotReceive('post');
         $this->nium->shouldNotReceive('get')->withArgs(static fn ($path, $query, $user, $operation): bool =>
-            $operation === 'dynamic_payout_schema');
+            $operation === 'dynamic_payout_schema')->byDefault();
         $this->app->instance(NiumService::class, $this->nium);
     }
 
@@ -65,7 +65,7 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
     }
 
     private function expectCorridors(string $body, ?\Closure $outgoing = null, ?\Closure $during = null,
-        string $expectedOperation = 'dynamic_customer_corridors'): void
+        string $expectedOperation = 'dynamic_customer_corridors', int $status = 200): void
     {
         $url = 'https://api.spend.nium.com/api/v1/client/fixture-client/customer/fixture-customer/supportedCorridors';
         $this->nium->shouldReceive('get')->once()->withArgs(function ($path, $query, $user, $operation) use ($expectedOperation): bool {
@@ -73,7 +73,7 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
             $this->assertSame([], $query);
             $this->assertSame($this->owner->id, $user->id);
             return $operation === $expectedOperation;
-        })->andReturnUsing(function ($path, $query, $user, $operation, $reference, $beforeDispatch) use ($body, $url, $outgoing, $during): Response {
+        })->andReturnUsing(function ($path, $query, $user, $operation, $reference, $beforeDispatch) use ($body, $url, $outgoing, $during, $status): Response {
             $request = $outgoing === null ? new Request(new PsrRequest('GET', $url)) : $outgoing($url);
             if ($request !== null) {
                 $beforeDispatch($request);
@@ -81,7 +81,7 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
             if ($during !== null) {
                 $during();
             }
-            return new Response(new PsrResponse(200, ['Content-Type' => 'application/json'], $body));
+            return new Response(new PsrResponse($status, ['Content-Type' => 'application/json'], $body));
         });
     }
 
@@ -171,10 +171,29 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
         $this->assertRefused('dynamic_customer_corridor_lookup_policy_unverified');
     }
 
-    public function test_synthetic_extra_fields_do_not_open_the_full_spend_contract(): void
+    public function test_partial_http_response_is_not_a_complete_customer_corridor_observation(): void
+    {
+        $this->expectCorridors($this->body([[...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK'],
+            'ignoreLookup' => false]]), status: 206);
+        $this->assertRefused('dynamic_customer_corridors_unavailable');
+    }
+
+    public function test_complete_documented_corridor_reaches_schema_but_does_not_open_spend_execution(): void
     {
         $this->expectCorridors($this->body([[...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false]]));
-        $this->assertRefused('dynamic_production_customer_corridors_contract_unverified');
+        $this->nium->shouldReceive('get')->once()->withArgs(static fn ($path, $query, $user, $operation): bool =>
+            $operation === 'dynamic_payout_schema')->andReturnUsing(function ($path, $query, $user, $operation,
+                $reference, $beforeDispatch): Response {
+                $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/currency/GBP/payout/schema', $path);
+                $this->assertSame(['destinationCountry' => 'GB', 'payoutMethod' => 'LOCAL'], $query);
+                $beforeDispatch(new Request(new PsrRequest('GET', 'https://api.spend.nium.com'.$path
+                    .'?destinationCountry=GB&payoutMethod=LOCAL')));
+                return new Response(new PsrResponse(200, [], '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
+                    .'"type":"object","required":["payout.destinationAmount"],'
+                    .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":2}},'
+                    .'"allOf":[{"if":{},"then":{}}]}'));
+            });
+        $this->assertRefused('dynamic_production_payout_schema_contract_unverified');
     }
 
     public static function wrongBindings(): array

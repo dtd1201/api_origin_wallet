@@ -80,7 +80,8 @@ final class DynamicPayoutEligibility
                     }
                 }
                 $selected = self::select($body, $beneficiary->country_code, $beneficiary->currency, $legalEntity, $beneficiary->payout_method);
-                $environment->assertContract('customer_corridors');
+                // The authenticated exact V1 read plus complete documented row is
+                // the scoped observation. Incomplete Spend rows still fail select().
             } else {
                 $schema = self::schemaObservation($bodies[$endpoint], [
                     ...array_intersect_key($binding, array_flip(['base_url', 'client', 'customer'])),
@@ -143,7 +144,7 @@ final class DynamicPayoutEligibility
         if (! $dispatched) {
             throw new RuntimeException('dynamic_eligibility_scope_changed');
         }
-        if (! $response->successful() || strlen($response->body()) > 1048576
+        if ($response->status() !== 200 || strlen($response->body()) > 1048576
             || $started->copy()->addSeconds(30)->isPast()) {
             throw new RuntimeException('dynamic_'.$endpoint.'_unavailable');
         }
@@ -257,6 +258,29 @@ final class DynamicPayoutEligibility
                     throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
                 }
             }
+            // Retain only the documented properties/const -> required subset.
+            // This recognises structure, never evaluates or satisfies the condition.
+            if (array_diff(array_keys(get_object_vars($condition)), ['if', 'then']) !== []
+                || array_diff(array_keys(get_object_vars($condition->if)), ['properties', 'required']) !== []
+                || array_diff(array_keys(get_object_vars($condition->then)), ['required']) !== []) {
+                throw new RuntimeException('dynamic_payout_schema_conditional_unsupported');
+            }
+            foreach (($condition->if->properties ?? new \stdClass) as $property) {
+                if (! ($property instanceof \stdClass) || ! property_exists($property, 'const')
+                    || array_keys(get_object_vars($property)) !== ['const']
+                    || (! is_scalar($property->const) && $property->const !== null)) {
+                    throw new RuntimeException('dynamic_payout_schema_conditional_unsupported');
+                }
+            }
+            // Conditional amount requirements need an instruction-specific mode
+            // mapping that the retained example does not establish.
+            if (array_intersect($condition->then->required ?? [], ['payout.sourceAmount', 'payout.destinationAmount']) !== []) {
+                throw new RuntimeException('dynamic_payout_schema_conditional_unsupported');
+            }
+        }
+        if (array_diff(array_keys(get_object_vars($root)), ['$schema', '$id', 'type', 'title',
+            'description', 'properties', 'required', 'allOf']) !== []) {
+            throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
         }
         if (! property_exists($root->properties, 'payout.destinationAmount')) {
             throw new RuntimeException('dynamic_payout_schema_destination_amount_unverified');
@@ -268,6 +292,8 @@ final class DynamicPayoutEligibility
             if (! property_exists($root->properties, $name)) continue;
             $property = $root->properties->{$name};
             if (! ($property instanceof \stdClass) || ($property->type ?? null) !== 'number'
+                || array_diff(array_keys(get_object_vars($property)), ['$id', 'title', 'description',
+                    'type', 'maximum', 'maximumDecimals']) !== []
                 || ! in_array($property->maximumDecimals ?? null, [0, 1, 2, '0', '1', '2'], true)
                 || ($spend && ($name !== 'payout.destinationAmount' || ! in_array($property->maximumDecimals, [2, '2'], true)))) {
                 throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
@@ -277,7 +303,9 @@ final class DynamicPayoutEligibility
         // Source instruction support must be explicit in this schema, not copied
         // from destination precision or advertised because a quote accepts a mode.
         $modes = $spend ? [] : array_values(array_filter(PayoutAmountMode::cases(),
-            static fn (PayoutAmountMode $candidate): bool => property_exists($root->properties, 'payout.'.$candidate->quoteField())));
+            static fn (PayoutAmountMode $candidate): bool => property_exists($root->properties, 'payout.'.$candidate->quoteField())
+                && ! in_array($candidate === PayoutAmountMode::Source ? 'payout.destinationAmount' : 'payout.sourceAmount',
+                    $root->required, true)));
         $modes = array_map(static fn (PayoutAmountMode $candidate): string => $candidate->value, $modes);
         if ($mode !== null && ! in_array($mode->value, $modes, true)) {
             throw new RuntimeException($mode === PayoutAmountMode::Source

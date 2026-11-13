@@ -30,6 +30,7 @@ final class NiumDynamicReviewService
         'dynamic_payout_source_amount_contract_unverified', 'dynamic_payout_destination_amount_contract_unverified',
         'dynamic_payout_amount_precision_unsupported', 'dynamic_eligibility_scope_changed',
         'dynamic_payout_amount_modes_unverified',
+        'dynamic_payout_schema_conditional_unsupported', 'dynamic_instruction_validation_endpoint_unverified',
     ];
 
     public function __construct(private readonly NiumDynamicPayoutQuoteService $quotes,
@@ -55,8 +56,12 @@ final class NiumDynamicReviewService
                     throw new RuntimeException('dynamic_quote_registration_evidence_unavailable');
                 }
                 $options = $this->eligibility->options($user, $beneficiary, $binding, $registered['legal_entity']);
-                foreach (['wallet', 'validation', 'remittance', 'transactions'] as $operation) {
-                    DynamicPayoutEnvironment::configured()->assertContract($operation);
+                $environment = DynamicPayoutEnvironment::configured();
+                $environment->assertInstructionValidationEndpoint('/api/v1/client/'.urlencode($binding['client'])
+                    .'/customer/'.urlencode($binding['customer']).'/wallet/'.urlencode($binding['wallet']).'/remittance/validate',
+                    $binding['client'], $binding['customer'], $binding['wallet']);
+                foreach (['wallet', 'remittance', 'transactions'] as $operation) {
+                    $environment->assertContract($operation);
                 }
             } catch (RuntimeException $exception) {
                 // The controller sanitizes these reason codes before projection.
@@ -178,6 +183,17 @@ final class NiumDynamicReviewService
         $until = new DateTimeImmutable($record['quote_expires_at']);
         $e = $record['evidence'];
         $b = $record['binding'];
+        // Recheck retained schema bytes during locked reconstruction too. A cached
+        // observation made before a contract correction cannot bypass its guards.
+        $schemaBody = $e['execution_eligibility']['schema_observation']['schema_json'] ?? null;
+        if (! is_string($schemaBody)) throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
+        DynamicPayoutEligibility::schemaObservation($schemaBody, [
+            'base_url' => $b['base_url'], 'client' => $b['client'], 'customer' => $b['customer'],
+            'currency' => $b['destination_currency'],
+            'path' => '/api/v1/client/'.urlencode($b['client']).'/customer/'.urlencode($b['customer'])
+                .'/currency/'.$b['destination_currency'].'/payout/schema',
+            'query' => ['destinationCountry' => $b['destination_country'], 'payoutMethod' => $b['payout_method']],
+        ], PayoutAmountMode::from($record['amount_mode']));
         $selected = $e['execution_eligibility']['selection'];
         if ($selected['payout_method'] !== $b['payout_method']
             || $selected['destination_country'] !== $b['destination_country']

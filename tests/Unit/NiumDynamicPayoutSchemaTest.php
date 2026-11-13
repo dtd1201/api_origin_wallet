@@ -109,6 +109,8 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         $schema = $this->schema();
         $schema['$schema'] = 'http://json-schema.org/draft-07/schema#';
         $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
+        // Both-mode synthetic schema: neither exclusive amount field is mandatory.
+        $schema['required'] = ['beneficiary.id'];
         $schema['properties']['payout.destinationAmount']['maximumDecimals'] = '2';
         foreach (['https://gateway.nium.com', 'https://gatewaysandbox.nium.com'] as $origin) {
             $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope($origin), PayoutAmountMode::Source);
@@ -131,6 +133,84 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         $this->assertFalse($result['instruction_validated']);
         $this->expectExceptionMessage('dynamic_payout_source_amount_contract_unverified');
         DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope, PayoutAmountMode::Source);
+    }
+
+    public function test_retained_draft07_example_keeps_required_destination_and_remitter_conditions(): void
+    {
+        // Retained OpenAPI example, not an authenticated Origin customer response.
+        $schema = ['$schema' => 'http://json-schema.org/draft-07/schema#', '$id' => 'unified.sgd.local.json',
+            'type' => 'object', 'title' => 'SGD Local Unified Schema',
+            'required' => ['payout.destinationAmount', 'beneficiary.destinationCountry', 'remitter.name',
+                'remitter.accountType', 'beneficiary.name', 'beneficiary.accountType',
+                'beneficiary.routingCodeType1', 'beneficiary.routingCodeValue1'],
+            'properties' => [
+                'beneficiary.accountType' => ['enum' => ['INDIVIDUAL', 'CORPORATE'], 'title' => 'Beneficiary Account Type', 'type' => 'string'],
+                'payout.destinationAmount' => ['$id' => '/properties/payout.destinationAmount', 'maximum' => '10000000',
+                    'maximumDecimals' => '2', 'title' => 'Destination Amount', 'type' => 'number'],
+                'remitter.accountType' => ['enum' => ['INDIVIDUAL', 'CORPORATE'], 'title' => 'Remitter Account Type', 'type' => 'string']],
+            'allOf' => [['if' => ['properties' => ['remitter.accountType' => ['const' => 'INDIVIDUAL']],
+                'required' => ['remitter.accountType']],
+                'then' => ['required' => ['remitter.dob', 'remitter.identificationType', 'remitter.identificationNumber']]]]];
+        $scope = $this->scope('https://gatewaysandbox.nium.com');
+        $scope['currency'] = 'SGD';
+        $scope['path'] = '/api/v1/client/fixture-client/customer/fixture-customer/currency/SGD/payout/schema';
+        $scope['query']['destinationCountry'] = 'SG';
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope);
+        $this->assertSame(['USD' => 2, 'SGD' => 2], $result['currency_scales']);
+        $this->assertSame(['DESTINATION_AMOUNT'], $result['supported_amount_modes']);
+        $this->assertSame($schema['required'], $result['required']);
+        $this->assertSame($schema['allOf'], $result['allOf']);
+        $this->assertFalse($result['instruction_validated']);
+        $this->assertFalse($result['eligible']); // Parsing does not enrol Dynamic SGD.
+    }
+
+    public function test_source_property_does_not_override_an_unconditional_destination_requirement(): void
+    {
+        $schema = $this->schema();
+        $schema['$schema'] = 'http://json-schema.org/draft-07/schema#';
+        $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
+        $scope = $this->scope('https://gatewaysandbox.nium.com');
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope);
+        $this->assertSame(['DESTINATION_AMOUNT'], $result['supported_amount_modes']);
+        $this->expectExceptionMessage('dynamic_payout_source_amount_contract_unverified');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope, PayoutAmountMode::Source);
+    }
+
+    public static function unsupportedConditions(): array
+    {
+        return [
+            [['if' => (object) [], 'then' => (object) [], 'else' => (object) []]],
+            [['if' => ['anyOf' => [(object) []]], 'then' => (object) []]],
+            [['if' => ['properties' => ['remitter.accountType' => ['enum' => ['INDIVIDUAL']]]], 'then' => (object) []]],
+            [['if' => ['properties' => ['synthetic.flag' => ['const' => []]]], 'then' => (object) []]],
+            [['if' => (object) [], 'then' => ['required' => ['payout.sourceAmount']]]],
+            [['if' => (object) [], 'then' => ['properties' => (object) []]]],
+        ];
+    }
+
+    #[DataProvider('unsupportedConditions')]
+    public function test_unknown_conditional_semantics_are_explicitly_refused(array $condition): void
+    {
+        $schema = $this->schema();
+        $schema['allOf'] = [$condition];
+        $this->expectExceptionMessage('dynamic_payout_schema_conditional_unsupported');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
+    }
+
+    public function test_unknown_root_composition_is_not_silently_ignored(): void
+    {
+        $schema = $this->schema();
+        $schema['oneOf'] = [(object) []];
+        $this->expectExceptionMessage('dynamic_payout_schema_contract_unavailable');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
+    }
+
+    public function test_amount_reference_with_additional_unknown_semantics_cannot_supply_precision_authority(): void
+    {
+        $schema = $this->schema();
+        $schema['properties']['payout.destinationAmount']['$ref'] = '#/$defs/unknownAmount';
+        $this->expectExceptionMessage('dynamic_payout_schema_contract_unavailable');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
     }
 
     public static function gatewayTuples(): array

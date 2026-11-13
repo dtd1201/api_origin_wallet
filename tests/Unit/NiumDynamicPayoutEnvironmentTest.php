@@ -80,6 +80,31 @@ final class NiumDynamicPayoutEnvironmentTest extends TestCase
     }
 
     #[DataProvider('approvedOrigins')]
+    public function test_documented_validation_endpoint_is_separate_from_payout_authority(string $origin, string $identity): void
+    {
+        $environment = DynamicPayoutEnvironment::resolve($origin);
+        $environment->assertInstructionValidationEndpoint(
+            '/api/v1/client/fixture-client/customer/fixture-customer/wallet/fixture-wallet/remittance/validate',
+            'fixture-client', 'fixture-customer', 'fixture-wallet');
+        $this->assertSame($identity, $environment->identity);
+    }
+
+    public static function invalidValidationEndpoints(): array
+    {
+        return [['remittance'], ['remittance/validate/'], ['remittance/validate?extra=true'],
+            ['transactions'], ['foreign-customer/wallet/fixture-wallet/remittance/validate']];
+    }
+
+    #[DataProvider('invalidValidationEndpoints')]
+    public function test_validation_endpoint_cannot_be_replaced_by_a_payout_or_other_route(string $suffix): void
+    {
+        $this->expectExceptionMessage('dynamic_instruction_validation_endpoint_unverified');
+        DynamicPayoutEnvironment::resolve('https://api.spend.nium.com')->assertInstructionValidationEndpoint(
+            '/api/v1/client/fixture-client/customer/fixture-customer/wallet/fixture-wallet/'.$suffix,
+            'fixture-client', 'fixture-customer', 'fixture-wallet');
+    }
+
+    #[DataProvider('approvedOrigins')]
     public function test_customer_corridor_read_is_scoped_to_exact_client_customer_endpoint(string $origin, string $identity): void
     {
         $environment = DynamicPayoutEnvironment::resolve($origin);
