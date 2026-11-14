@@ -96,12 +96,42 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         $this->assertFalse($result['eligible']);
     }
 
-    public function test_unobserved_source_amount_schema_extension_cannot_enable_source_mode(): void
+    public function test_explicit_source_precision_cannot_override_a_required_destination_amount(): void
     {
         $schema = $this->schema();
         $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
-        $this->expectExceptionMessage('dynamic_payout_schema_contract_unavailable');
+        $this->expectExceptionMessage('dynamic_payout_source_amount_contract_unverified');
         DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope(), PayoutAmountMode::Source);
+    }
+
+    public static function spendTuplesAndModes(): array
+    {
+        $cases = [];
+        foreach ([['SG', 'SGD', 2], ['GB', 'GBP', 2], ['JP', 'JPY', 0], ['GB', 'GBP', 1]] as [$country, $currency, $scale]) {
+            foreach (PayoutAmountMode::cases() as $mode) $cases[] = [$country, $currency, $scale, $mode];
+        }
+        return $cases;
+    }
+
+    #[DataProvider('spendTuplesAndModes')]
+    public function test_complete_spend_schema_exposes_exact_modes_and_precision_without_granting_execution(
+        string $country, string $currency, int $scale, PayoutAmountMode $mode): void
+    {
+        $schema = $this->schema();
+        $schema['required'] = ['beneficiary.id'];
+        $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
+        $schema['properties']['payout.destinationAmount']['maximumDecimals'] = $scale;
+        $scope = $this->scope();
+        $scope['currency'] = $currency;
+        $scope['path'] = '/api/v1/client/fixture-client/customer/fixture-customer/currency/'.$currency.'/payout/schema';
+        $scope['query']['destinationCountry'] = $country;
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope, $mode);
+        $this->assertSame(['USD' => 2, $currency => $scale], $result['currency_scales']);
+        $this->assertSame(['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'], $result['supported_amount_modes']);
+        $this->assertSame($schema['allOf'], $result['allOf']);
+        $this->assertFalse($result['eligible']);
+        $this->assertFalse($result['instruction_validated']);
+        $this->assertTrue($result['requires_instruction_validation']);
     }
 
     public function test_draft_07_remains_scoped_to_gateway_and_requires_final_instruction_validation(): void
@@ -161,7 +191,7 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         $this->assertSame($schema['required'], $result['required']);
         $this->assertSame($schema['allOf'], $result['allOf']);
         $this->assertFalse($result['instruction_validated']);
-        $this->assertFalse($result['eligible']); // Parsing does not enrol Dynamic SGD.
+        $this->assertFalse($result['eligible']); // Parsing alone grants no customer entitlement or executable Review.
     }
 
     public function test_source_property_does_not_override_an_unconditional_destination_requirement(): void
@@ -274,7 +304,7 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
             [['properties' => ['payout.destinationAmount' => ['type' => 'number', 'maximumDecimals' => '2.5']]]],
             [['properties' => ['payout.destinationAmount' => ['type' => 'number', 'maximumDecimals' => true]]]],
             [['properties' => ['payout.destinationAmount' => ['type' => 'number', 'maximumDecimals' => 3]]]],
-            [['properties' => ['payout.destinationAmount' => ['type' => 'number', 'maximumDecimals' => 0]]]],
+            [['properties' => ['payout.destinationAmount' => ['type' => 'number', 'maximumDecimals' => -1]]]],
         ];
     }
 
@@ -322,8 +352,8 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         return [
             [['path' => '/custom/payout/schema']],
             [['customer' => 'foreign-customer']], [['client' => 'foreign-client']],
-            [['query' => ['destinationCountry' => 'US', 'payoutMethod' => 'LOCAL']]],
-            [['query' => ['destinationCountry' => 'GB', 'payoutMethod' => 'SWIFT']]],
+            [['query' => ['destinationCountry' => 'G', 'payoutMethod' => 'LOCAL']]],
+            [['query' => ['destinationCountry' => 'GB', 'payoutMethod' => 'local']]],
             [['query' => ['destinationCountry' => 'GB', 'payoutMethod' => 'LOCAL', 'extra' => 'ignored']]],
         ];
     }

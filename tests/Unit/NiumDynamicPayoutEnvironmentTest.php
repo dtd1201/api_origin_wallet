@@ -162,12 +162,18 @@ final class NiumDynamicPayoutEnvironmentTest extends TestCase
         $environment->assertContract('payout_schema');
     }
 
-    public function test_spend_schema_read_evidence_does_not_extend_to_other_currency_routes(): void
+    public function test_spend_schema_endpoint_is_tuple_scoped_without_a_sample_currency_allowlist(): void
     {
-        $this->expectExceptionMessage('dynamic_payout_schema_endpoint_unverified');
-        DynamicPayoutEnvironment::resolve('https://api.spend.nium.com')->payoutSchemaDialect(
+        $environment = DynamicPayoutEnvironment::resolve('https://api.spend.nium.com');
+        $this->assertSame('https://json-schema.org/draft/2020-12/schema', $environment->payoutSchemaDialect(
             '/api/v1/client/fixture-client/customer/fixture-customer/currency/EUR/payout/schema',
-            ['destinationCountry' => 'GB', 'payoutMethod' => 'LOCAL'], 'fixture-client', 'fixture-customer', 'EUR');
+            ['destinationCountry' => 'DE', 'payoutMethod' => 'LOCAL'], 'fixture-client', 'fixture-customer', 'EUR'));
+        $this->assertSame('https://json-schema.org/draft/2020-12/schema', $environment->payoutSchemaDialect(
+            '/api/v1/client/fixture-client/customer/fixture-customer/currency/SGD/payout/schema',
+            ['destinationCountry' => 'SG', 'payoutMethod' => 'LOCAL'], 'fixture-client', 'fixture-customer', 'SGD'));
+        $this->expectExceptionMessage('dynamic_payout_schema_endpoint_unverified');
+        $environment->payoutSchemaDialect('/api/v1/client/fixture-client/customer/fixture-customer/currency/GBP/payout/schema',
+            ['destinationCountry' => 'SG', 'payoutMethod' => 'LOCAL'], 'fixture-client', 'fixture-customer', 'SGD');
     }
 
     #[DataProvider('unsupportedOrigins')]

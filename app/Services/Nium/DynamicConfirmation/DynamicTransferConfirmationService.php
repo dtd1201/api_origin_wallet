@@ -229,7 +229,7 @@ final class DynamicTransferConfirmationService
             || $r->account->status !== 'active' || $r->account->provider_status !== 'clear'
             || ! in_array($r->account->provider_sub_status, [null, ''], true)
             || ! in_array($r->account->compliance_status, ['clear', 'approved'], true)
-            || ! in_array($r->account->rfi_status, ['clear', 'closed', 'not_required'], true)
+            || ! in_array($r->account->rfi_status, ['clear', 'cleared', 'closed', 'not_required'], true)
             || ! in_array($r->account->odd_status, ['clear', 'not_required'], true)
             || $r->account->reconciliation_status !== 'reconciled' || $r->account->security_conflict_at !== null
             || $r->account->customer_id_verified_at === null || $r->account->wallet_id_verified_at === null
@@ -262,7 +262,11 @@ final class DynamicTransferConfirmationService
         }
         $rfi = NiumRfiCase::query()->where('user_provider_account_id', $r->account->id)
             ->orderBy('id')->lockForUpdate()->get();
-        if ($rfi->contains(fn ($case): bool => $case->status !== 'closed')) {
+        // NiumRfiWorkflowService closes authenticated clear observations using
+        // this status. A historical webhook or an unverified resolution is not approval.
+        if ($rfi->contains(fn ($case): bool => $case->status !== 'closed'
+            && ! ($r->account->rfi_status === 'cleared' && $case->status === 'resolved_authoritative_clear'
+                && $case->reconciled_at !== null && ! $case->reconciled_at->isFuture()))) {
             throw new RuntimeException('dynamic_compliance_hold_or_evidence_unavailable');
         }
     }

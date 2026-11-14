@@ -67,7 +67,6 @@ final class DynamicPayoutEligibility
         $bodies = [];
         foreach (['customer_corridors', 'payout_schema'] as $endpoint) {
             $bodies[$endpoint] = $this->read($user, $beneficiary, $binding, $endpoint, $reference, $started);
-            $environment = DynamicPayoutEnvironment::configured();
             if ($endpoint === 'customer_corridors') {
                 try {
                     $body = ExactProviderJson::decode($bodies[$endpoint]);
@@ -90,7 +89,8 @@ final class DynamicPayoutEligibility
                         ['client' => $binding['client'], 'customer' => $binding['customer'], 'currencyCode' => $beneficiary->currency]),
                     'query' => ['destinationCountry' => $beneficiary->country_code, 'payoutMethod' => $beneficiary->payout_method],
                 ], $mode);
-                $environment->assertContract('payout_schema');
+                // schemaObservation validates the exact origin, endpoint, tuple
+                // and returned dialect. A blanket origin grant supplies no evidence.
             }
         }
         return ['version' => 'nium-customer-payout-oas-example-v1',
@@ -294,15 +294,14 @@ final class DynamicPayoutEligibility
             if (! ($property instanceof \stdClass) || ($property->type ?? null) !== 'number'
                 || array_diff(array_keys(get_object_vars($property)), ['$id', 'title', 'description',
                     'type', 'maximum', 'maximumDecimals']) !== []
-                || ! in_array($property->maximumDecimals ?? null, [0, 1, 2, '0', '1', '2'], true)
-                || ($spend && ($name !== 'payout.destinationAmount' || ! in_array($property->maximumDecimals, [2, '2'], true)))) {
+                || ! in_array($property->maximumDecimals ?? null, [0, 1, 2, '0', '1', '2'], true)) {
                 throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
             }
             $scales[$code] = (int) $property->maximumDecimals;
         }
         // Source instruction support must be explicit in this schema, not copied
         // from destination precision or advertised because a quote accepts a mode.
-        $modes = $spend ? [] : array_values(array_filter(PayoutAmountMode::cases(),
+        $modes = ! isset($scales['USD'], $scales[$currency]) ? [] : array_values(array_filter(PayoutAmountMode::cases(),
             static fn (PayoutAmountMode $candidate): bool => property_exists($root->properties, 'payout.'.$candidate->quoteField())
                 && ! in_array($candidate === PayoutAmountMode::Source ? 'payout.destinationAmount' : 'payout.sourceAmount',
                     $root->required, true)));

@@ -11,6 +11,9 @@ use App\Services\Nium\NiumApiExchangeEvidenceStore;
 use App\Services\Nium\NiumEvidencePersistenceException;
 use App\Services\Nium\NiumRemittanceDispatchHeldException;
 use App\Services\Nium\NiumSafeValueProjector;
+use App\Services\Nium\NiumProviderAccountStateService;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutEnvironment;
+use App\Services\Nium\DynamicConfirmation\ExactProviderJson;
 use App\Support\SensitiveDataSanitizer;
 use Carbon\Carbon;
 use Carbon\CarbonImmutable;
@@ -40,6 +43,7 @@ class ProviderHttpClient implements ProviderClient
         private readonly bool $readOnlyVirtualAccountReconciliation = false,
         private readonly ?\Closure $beforeDispatch = null,
         private readonly ?\App\Services\Nium\DynamicConfirmation\DynamicPayoutWireClaim $dynamicPayoutClaim = null,
+        private readonly ?\App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutQuoteRequest $dynamicReferenceQuote = null,
     ) {}
 
     public function get(string $path, array $query = [], ?User $user = null, ?int $relatedTransferId = null): Response
@@ -95,6 +99,28 @@ class ProviderHttpClient implements ProviderClient
         return $baseUrl.'/'.ltrim($path, '/');
     }
 
+    /** A typed Dynamic reference quote cannot grant legacy locking or remittance authority. */
+    private function assertDynamicReferenceQuote(string $method, string $url, string $json,
+        ?User $user, ?int $relatedTransferId): void
+    {
+        OwnerFirst::outside();
+        $quote = $this->dynamicReferenceQuote;
+        $client = (string) config('services.nium.client_id');
+        $environment = DynamicPayoutEnvironment::configured();
+        $path = '/api/v1/client/'.urlencode($client).'/quotes';
+        $environment->assertQuoteReferenceEndpoint($path, $client);
+        if ($this->serviceConfigKey !== 'nium' || $method !== 'POST' || $url !== $environment->origin.$path
+            || $user === null || $relatedTransferId !== null || $this->dynamicPayoutClaim !== null
+            || ($this->operationalContext['operation'] ?? null) !== 'dynamic_payout_reference_quote'
+            || $this->beforeDispatch === null || $quote === null || $quote->sourceCurrency !== 'USD'
+            || config('nium_dynamic_quotes.quote_contract_enabled', false) !== true
+            || ! (bool) config('services.nium.payout_fx_enabled', false)
+            || ExactProviderJson::decode($json) !== ExactProviderJson::decode($quote->json())
+            || app(NiumProviderAccountStateService::class)->assertEligible($user)->external_customer_id !== $quote->customer) {
+            throw new RuntimeException('dynamic_quote_transport_binding_changed');
+        }
+    }
+
     private function send(
         string $method,
         string $path,
@@ -109,13 +135,17 @@ class ProviderHttpClient implements ProviderClient
         $assignmentTarget = null;
         $sgdLease = null;
         $sgdQuote = false;
+        if ($this->dynamicReferenceQuote !== null) {
+            $this->assertDynamicReferenceQuote($method, $this->buildUrl($path),
+                json_encode($payload, JSON_THROW_ON_ERROR), $user, $relatedTransferId);
+        }
         if ($this->serviceConfigKey === 'nium') {
             $fence = app(\App\Services\Nium\NiumSgdAdmissionFence::class);
             $kind = $fence->wireKind($method, $path, $payload, $relatedTransferId);
             if ($kind === 'remittance' && $this->dynamicPayoutClaim === null) {
                 throw new NiumRemittanceDispatchHeldException(\App\Services\Nium\NiumSgdAdmissionFence::DISPATCH_HOLD);
             }
-            if ($kind === 'quote') {
+            if ($kind === 'quote' && $this->dynamicReferenceQuote === null) {
                 $sgdLease = $fence->acquire();
                 $fence->assertQuoteRequest($method, $path, $payload, $relatedTransferId, $this->headers['x-request-id'] ?? null, $this->provider->id);
                 $sgdQuote = true;
@@ -159,6 +189,13 @@ class ProviderHttpClient implements ProviderClient
             // immediately before transport. Never redirect or automatically retry it.
             $request = $request->withoutRedirecting()->retry(1, 0)
                 ->beforeSending($this->beforeDispatch);
+        }
+        if ($this->dynamicReferenceQuote !== null) {
+            $request = $request->withoutRedirecting()->retry(1, 0)
+                ->beforeSending(function (Request $outgoing) use ($user, $relatedTransferId): void {
+                    $this->assertDynamicReferenceQuote($outgoing->method(), $outgoing->url(),
+                        $outgoing->body(), $user, $relatedTransferId);
+                });
         }
         if ($sgdQuote) {
             $request = $request->withoutRedirecting()->retry(1, 0)

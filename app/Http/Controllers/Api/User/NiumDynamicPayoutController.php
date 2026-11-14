@@ -315,9 +315,6 @@ final class NiumDynamicPayoutController extends Controller
         if (! $discovery && $beneficiary->currency === 'USD') {
             return [['dynamic_same_currency_quote_contract_unverified'], null];
         }
-        if (! $discovery && $beneficiary->currency === 'SGD') {
-            return [['dynamic_quote_local_eligibility_changed'], null];
-        }
         if (! $discovery && ($financial = $this->financial->unavailableReasons($beneficiary)) !== []) {
             return [$financial, null];
         }

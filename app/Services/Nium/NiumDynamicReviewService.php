@@ -70,10 +70,9 @@ final class NiumDynamicReviewService
         }
         $financial = $this->financial->unavailableReasons($beneficiary);
         $reasons = [...$reasons, ...$financial];
-        // Discovery does not enrol existing Standard SGD or same-currency flows.
-        if (in_array($beneficiary->currency, ['SGD', 'USD'], true)) {
-            $reasons[] = $beneficiary->currency === 'USD'
-                ? 'dynamic_same_currency_quote_contract_unverified' : 'dynamic_quote_local_eligibility_changed';
+        // This acquisition path requires FX; it does not replace same-currency payments.
+        if ($beneficiary->currency === 'USD') {
+            $reasons[] = 'dynamic_same_currency_quote_contract_unverified';
         }
         $modes = $options['supported_amount_modes'] ?? [];
         if ($options !== null && $modes === []) $reasons[] = 'dynamic_payout_amount_modes_unverified';

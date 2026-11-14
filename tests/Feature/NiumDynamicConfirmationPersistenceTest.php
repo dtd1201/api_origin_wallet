@@ -183,8 +183,24 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
             'missing authoritative wallet amount' => ['wallet', ['raw_data' => []]],
             'blocked account' => ['account', ['status' => 'blocked']],
             'account RFI' => ['account', ['rfi_status' => 'requested']],
+            'missing RFI' => ['account', ['rfi_status' => null]],
+            'unknown RFI' => ['account', ['rfi_status' => 'unknown']],
+            'pending RFI' => ['account', ['rfi_status' => 'pending']],
+            'failed RFI' => ['account', ['rfi_status' => 'failed']],
+            'responded RFI' => ['account', ['rfi_status' => 'responded']],
             'account ODD' => ['account', ['odd_status' => 'pending']],
+            'unknown ODD' => ['account', ['odd_status' => 'unknown']],
+            'missing ODD' => ['account', ['odd_status' => null]],
+            'failed ODD' => ['account', ['odd_status' => 'failed']],
+            'unverified ODD ineligible' => ['account', ['odd_status' => 'odd_ineligible']],
+            'unverified ODD not due' => ['account', ['odd_status' => 'odd_not_due']],
+            'unverified ODD completed' => ['account', ['odd_status' => 'completed']],
             'account compliance' => ['account', ['compliance_status' => 'blocked']],
+            'missing compliance' => ['account', ['compliance_status' => null]],
+            'unknown compliance' => ['account', ['compliance_status' => 'unknown']],
+            'pending compliance' => ['account', ['compliance_status' => 'pending']],
+            'failed compliance' => ['account', ['compliance_status' => 'failed']],
+            'unverified compliance completed' => ['account', ['compliance_status' => 'completed']],
             'unreconciled account' => ['account', ['reconciliation_status' => 'pending']],
             'revoked customer KYC' => ['owner', ['kyc_status' => 'unverified']],
         ];
@@ -227,6 +243,41 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
 
         $this->rejected(fn () => $this->confirmDynamic(), 'dynamic_compliance_hold_or_evidence_unavailable');
 
+        $this->assertEmptyDynamicState();
+    }
+
+    public function test_canonical_cleared_rfi_with_an_authoritatively_resolved_case_allows_confirmation(): void
+    {
+        $this->account->update(['rfi_status' => 'cleared']);
+        NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
+            'user_provider_account_id' => $this->account->id, 'scope' => 'customer',
+            'provider_reference_fingerprint' => str_repeat('a', 64), 'status' => 'resolved_authoritative_clear',
+            'reconciled_at' => now(), 'evidence' => []]);
+        $intent = $this->confirmDynamic();
+        $this->assertSame($this->owner->id, $intent->user_id);
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+        $this->assertSame(1, NiumDynamicPayoutOutbox::query()->count());
+        $this->assertSame(0, Transfer::query()->count());
+    }
+
+    public static function unresolvedRfiCases(): array
+    {
+        return [
+            ['requested', true, false], ['responded_under_review', true, false],
+            ['historical_webhook_evidence', true, false], ['unknown', true, false],
+            ['resolved_authoritative_clear', false, false], ['resolved_authoritative_clear', true, true],
+        ];
+    }
+
+    #[DataProvider('unresolvedRfiCases')]
+    public function test_cleared_account_does_not_hide_an_unverified_or_unresolved_rfi_case(string $status, bool $observed, bool $future): void
+    {
+        $this->account->update(['rfi_status' => 'cleared']);
+        NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
+            'user_provider_account_id' => $this->account->id, 'scope' => 'customer',
+            'provider_reference_fingerprint' => str_repeat('a', 64), 'status' => $status,
+            'reconciled_at' => $observed ? ($future ? now()->addMinute() : now()) : null, 'evidence' => []]);
+        $this->rejected(fn () => $this->confirmDynamic(), 'dynamic_compliance_hold_or_evidence_unavailable');
         $this->assertEmptyDynamicState();
     }
 

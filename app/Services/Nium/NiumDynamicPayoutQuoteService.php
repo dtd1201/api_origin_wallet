@@ -93,7 +93,7 @@ final class NiumDynamicPayoutQuoteService
                     throw new RuntimeException('dynamic_quote_transport_binding_changed');
                 }
                 $dispatched = true;
-            });
+            }, dynamicReferenceQuote: $request);
         if (! $dispatched) {
             throw new RuntimeException('dynamic_quote_transport_binding_changed');
         }
@@ -261,7 +261,7 @@ final class NiumDynamicPayoutQuoteService
             || preg_match('/^[A-Z]{3}$/D', (string) $beneficiary->currency) !== 1
             || $wallet->currency !== 'USD' || $wallet->external_account_id !== $account->external_account_id
             || ! in_array($account->compliance_status, ['clear', 'approved'], true)
-            || ! in_array($account->rfi_status, ['clear', 'closed', 'not_required'], true)
+            || ! in_array($account->rfi_status, ['clear', 'cleared', 'closed', 'not_required'], true)
             || ! in_array($account->odd_status, ['clear', 'not_required'], true)
             || $account->reconciliation_status !== 'reconciled'
             || $account->customer_id_verified_at->isFuture() || $account->wallet_id_verified_at->isFuture()) {
@@ -339,9 +339,9 @@ final class NiumDynamicPayoutQuoteService
 
     private function assertQuoteDestination(string $currency): void
     {
-        // Preserve customer-scoped discovery without enrolling SGD Standard or HK
-        // same-currency payments in this Dynamic Quote acquisition path.
-        if (in_array($currency, ['SGD', 'USD'], true)) {
+        // The FX quote contract requires distinct currencies. SGD uses the same
+        // customer entitlement, pricing and execution evidence as other FX tuples.
+        if ($currency === 'USD') {
             throw new RuntimeException('dynamic_quote_local_eligibility_changed');
         }
     }

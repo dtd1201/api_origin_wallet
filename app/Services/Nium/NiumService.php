@@ -52,9 +52,11 @@ class NiumService
         ?string $operation = null,
         ?string $externalReference = null,
         ?\Closure $beforeDispatch = null,
+        ?\App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutQuoteRequest $dynamicReferenceQuote = null,
     ): Response {
         OwnerFirst::outside();
-        return $this->client($operation, $externalReference, beforeDispatch: $beforeDispatch)->post($path, $payload, $user, $relatedTransferId);
+        return $this->client($operation, $externalReference, beforeDispatch: $beforeDispatch,
+            dynamicReferenceQuote: $dynamicReferenceQuote)->post($path, $payload, $user, $relatedTransferId);
     }
 
     public function postWithRequestId(
@@ -246,6 +248,7 @@ class NiumService
         ?\Closure $beforeDispatch = null,
         ?\App\Services\Nium\DynamicConfirmation\DynamicPayoutWireClaim $dynamicPayoutClaim = null,
         bool $readOnly = false,
+        ?\App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutQuoteRequest $dynamicReferenceQuote = null,
     ): ProviderHttpClient
     {
         $provider = $this->provider();
@@ -270,6 +273,7 @@ class NiumService
             beforeDispatch: $beforeDispatch,
             dynamicPayoutClaim: $dynamicPayoutClaim,
             readOnlyVirtualAccountReconciliation: $readOnly,
+            dynamicReferenceQuote: $dynamicReferenceQuote,
         );
     }
 

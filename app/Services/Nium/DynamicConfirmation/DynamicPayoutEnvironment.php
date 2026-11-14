@@ -126,10 +126,8 @@ final readonly class DynamicPayoutEnvironment
             throw new RuntimeException('dynamic_payout_schema_endpoint_unverified');
         }
         if ($this->origin === 'https://api.spend.nium.com') {
-            // STEP 607: only the observed GBP/GB/LOCAL root-object dialect.
-            if ($currency !== 'GBP' || $query['destinationCountry'] !== 'GB' || $query['payoutMethod'] !== 'LOCAL') {
-                throw new RuntimeException('dynamic_payout_schema_endpoint_unverified');
-            }
+            // The exact customer/tuple endpoint selects the response. Accept only
+            // the structurally verified dialect; a sample tuple is not an allowlist.
             return 'https://json-schema.org/draft/2020-12/schema';
         }
 
