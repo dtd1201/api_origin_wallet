@@ -98,7 +98,7 @@ final class NiumDynamicReviewService
         $this->quotes->assertCurrent($quote, $user, $beneficiary, $wallet);
         $projected = $this->quotes->project($quote);
         $record = [
-            'version' => 'nium-dynamic-review-v4', 'owner' => (string) $user->id,
+            'version' => 'nium-dynamic-review-v5', 'owner' => (string) $user->id,
             'provider_id' => (string) $quote->provider_id, 'provider_account_id' => $quote->provider_account_id,
             'balance_id' => $wallet->id, 'beneficiary_id' => $beneficiary->id,
             'dynamic_quote_id' => $quote->id, 'provider_quote_id' => $quote->quote_id,
@@ -111,7 +111,7 @@ final class NiumDynamicReviewService
             'total_usd_debit' => $projected['planned_total_usd_debit'],
             'destination_amount' => $projected['quoted_destination_amount'],
             'customer_pricing' => $projected['customer_pricing'],
-            'origin_service_fee' => $projected['origin_service_fee'], 'payout_rail' => $projected['payout_rail'],
+            'contracted_nium_transaction_fee' => $projected['contracted_nium_transaction_fee'], 'payout_rail' => $projected['payout_rail'],
             'quote_expires_at' => $projected['quote_expires_at'], 'nium_quoted_fx_rate' => $projected['nium_quoted_fx_rate'],
             'instruction' => ['purpose_code' => $instruction->purposeCode, 'source_of_funds' => $instruction->sourceOfFunds, 'comment' => $instruction->comment],
             'evidence' => $evidence, 'reason_codes' => [...$evidence['registered_receiving_account']['reason_codes'],
@@ -130,7 +130,7 @@ final class NiumDynamicReviewService
         $this->storeObservations($fingerprint, $evidence, $quote);
         $public = array_intersect_key($record, array_flip(['provider_account_id', 'balance_id', 'beneficiary_id',
             'dynamic_quote_id', 'amount_mode', 'entered_amount', 'principal', 'included_fee', 'total_usd_debit',
-            'destination_amount', 'quote_expires_at', 'instruction', 'reason_codes', 'customer_pricing', 'origin_service_fee', 'payout_rail',
+            'destination_amount', 'quote_expires_at', 'instruction', 'reason_codes', 'customer_pricing', 'contracted_nium_transaction_fee', 'payout_rail',
             'provider_quote_id', 'nium_quoted_fx_rate']));
         $expires = [$quote->expires_at->toDateTimeImmutable()];
         foreach (['execution_eligibility', 'instruction_validation', 'wallet_availability'] as $name) {
@@ -168,9 +168,9 @@ final class NiumDynamicReviewService
         $beneficiary = Beneficiary::query()->findOrFail($record['beneficiary_id']);
         $this->financial->assertAvailable($beneficiary);
         $projected = $this->quotes->project($stored);
-        if (($record['version'] ?? null) !== 'nium-dynamic-review-v4'
+        if (($record['version'] ?? null) !== 'nium-dynamic-review-v5'
             || ($record['customer_pricing'] ?? null) !== $projected['customer_pricing']
-            || ($record['origin_service_fee'] ?? null) !== $projected['origin_service_fee']
+            || ($record['contracted_nium_transaction_fee'] ?? null) !== $projected['contracted_nium_transaction_fee']
             || ($record['payout_rail'] ?? null) !== $projected['payout_rail']) {
             throw new RuntimeException('dynamic_financial_terms_changed');
         }
@@ -228,7 +228,7 @@ final class NiumDynamicReviewService
         $plan = $preparation->withQuote($quote, $record['owner'], $from)->snapshot($record['owner'], $from);
         $money = static fn (array $v): Money => new Money($v['currency'], new Decimal($v['amount']));
         $provenance = 'nium-quote-sha256:'.$quote->responseSha256;
-        // This contract attests Origin customer pricing. It makes no assertion
+        // This contract binds the customer allocation of the Nium transaction fee. It makes no assertion
         // that provider fees/debits equal that pricing, or that settlement is guaranteed.
         $terms = new FinancialTerms($c, $money($record['principal']), FxRequirement::Required, $quote->rate,
             $quote->id, $provenance, new Decimal($plan['expected_fx_margin_percent']), $money($record['destination_amount']),
@@ -238,7 +238,7 @@ final class NiumDynamicReviewService
         $rateScale = strlen(explode('.', $quote->rate->value)[1] ?? '');
         $contract = new PayoutContract($c, self::CUSTOMER_CONTRACT, EvidenceState::Verified, EvidenceSource::LocalAttestation,
             RevocationStatus::NotRevoked, $terms->pricingVersion, $terms->feePlanId, [$c->payoutMethod],
-            $e['execution_eligibility']['currency_scales'], $rateScale, 'EXACT', 'origin-customer-principal-plus-usd20-v1',
+            $e['execution_eligibility']['currency_scales'], $rateScale, 'EXACT', 'customer-consented-principal-plus-contracted-nium-fee-v2',
             'nium-payout-quote-exact-instruction-oas-v1', 'USD', FeePayer::Sender, FeeAllocation::SenderAdditional, $from, $until);
         $pricing = [];
         foreach ([PricingStage::Effective, PricingStage::ProviderQuote] as $stage) {

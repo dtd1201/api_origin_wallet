@@ -216,7 +216,7 @@ final class NiumDynamicPayoutQuoteService
             'quoted_destination_amount' => ['currency' => $stored->binding['destination_currency'], 'amount' => $quote['destinationAmount']->value],
             'nium_quoted_fx_rate' => $quote['netExchangeRate']->value,
             'customer_pricing' => $this->financial->pricing($beneficiary),
-            'origin_service_fee' => ['currency' => 'USD', 'amount' => FinalizedUsdPayoutPreparation::FEE_USD],
+            'contracted_nium_transaction_fee' => ['currency' => 'USD', 'amount' => FinalizedUsdPayoutPreparation::FEE_USD],
             'financial_verification' => 'CUSTOMER_PRICING_AUTHORIZED_PROVIDER_SETTLEMENT_UNVERIFIED',
             'review' => 'REQUIRED', 'admission' => 'REVIEW_REQUIRED', 'dispatch' => 'DENIED',
             'pricing_status' => 'CONTRACTUAL_CUSTOMER_TERMS', 'reason_codes' => []];

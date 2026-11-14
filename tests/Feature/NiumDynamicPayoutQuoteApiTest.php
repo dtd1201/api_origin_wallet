@@ -284,11 +284,17 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $quote = app(NiumDynamicPayoutQuoteService::class)->project(NiumDynamicPayoutQuote::query()->sole());
         $this->assertSame('CONTRACTUAL_CUSTOMER_TERMS', $quote['pricing_status']);
         $this->assertSame('0.800000000000000001', $quote['nium_quoted_fx_rate']);
-        $this->assertSame(['currency' => 'USD', 'amount' => '20'], $review['origin_service_fee']);
-        $this->assertSame($quote['origin_service_fee'], $review['origin_service_fee']);
+        $this->assertSame(['currency' => 'USD', 'amount' => '20'], $review['contracted_nium_transaction_fee']);
+        $this->assertSame($quote['contracted_nium_transaction_fee'], $review['contracted_nium_transaction_fee']);
+        $this->assertSame('NIUM', $review['customer_pricing']['fee_owner']);
+        $this->assertSame('NIUM', $review['customer_pricing']['fx_margin_owner']);
+        $this->assertSame('UNVERIFIED', $review['customer_pricing']['fee_collection']);
+        $this->assertSame('NOT_RECOGNIZED', $review['customer_pricing']['origin_revenue']);
+        $this->assertArrayNotHasKey('origin_service_fee', $quote);
+        $this->assertArrayNotHasKey('origin_service_fee', $review);
         $this->assertSame($quote['provider_quote_id'], $review['provider_quote_id']);
         $this->assertSame($quote['nium_quoted_fx_rate'], $review['nium_quoted_fx_rate']);
-        $this->assertSame('20', $review['customer_pricing']['origin_service_fee_usd']);
+        $this->assertSame('20', $review['customer_pricing']['contracted_nium_transaction_fee_usd']);
         $this->assertSame('CUSTOMER_PRICING_AUTHORIZED_PROVIDER_SETTLEMENT_UNVERIFIED', $quote['financial_verification']);
         $this->assertArrayNotHasKey('provider_fee_usd', $quote);
         $this->assertSame('0.13', $review['customer_pricing']['margin_percent']);
@@ -304,7 +310,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         return [
             'historical review version' => ['version', 'nium-dynamic-review-v2'],
             'missing pricing' => ['customer_pricing', null],
-            'altered service fee' => ['origin_service_fee', ['currency' => 'USD', 'amount' => '1']],
+            'altered Nium contractual fee' => ['contracted_nium_transaction_fee', ['currency' => 'USD', 'amount' => '1']],
             'altered included fee' => ['included_fee', ['currency' => 'USD', 'amount' => '21']],
             'altered debit' => ['total_usd_debit', '1001'],
             'altered recipient' => ['destination_amount', ['currency' => 'GBP', 'amount' => '785']],
@@ -707,8 +713,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->account->update(['rfi_status' => 'cleared']);
         $review = $this->readyReview($mode);
         $this->assertSame('LOCAL', $review['payout_rail']);
-        $this->assertSame('origin-nium-contracted-local-usd-inclusive-v3', $review['customer_pricing']['version']);
-        $this->assertSame('20', $review['customer_pricing']['origin_service_fee_usd']);
+        $this->assertSame('nium-contracted-local-usd-inclusive-v4', $review['customer_pricing']['version']);
+        $this->assertSame('20', $review['customer_pricing']['contracted_nium_transaction_fee_usd']);
         $this->assertSame('INCLUDED_IN_TOTAL_USD_DEBIT', $review['customer_pricing']['fee_treatment']);
         $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/D', $review['accepted_fingerprint']);
         $this->assertSame(0, LedgerEntry::query()->count());
@@ -762,6 +768,14 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         app(DynamicPayoutReconciler::class)->reconcile($outbox->id);
         $this->assertSame('matched', $outbox->fresh()->state);
         $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $debit = LedgerEntry::query()->where('entry_type', 'debit')->sole();
+        $this->assertSame('-1000.00000000', $debit->amount);
+        $this->assertSame('NIUM', $debit->raw_data['fee_classification']['fee_owner']);
+        $this->assertFalse($debit->raw_data['origin_revenue_recognized']);
+        $this->assertSame(0, LedgerEntry::query()->whereNotIn('entry_type', ['hold', 'debit'])->count());
+        $this->assertSame('20', $outbox->fresh()->financial_evidence['fee_usd']);
+        $this->assertSame('1000', $outbox->fresh()->financial_evidence['wallet_debit_usd']);
+        $this->assertFalse($outbox->fresh()->financial_evidence['origin_revenue_recognized']);
         $this->assertSame('consumed', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame(1, $wire->submissions);
         $this->assertSame(0, Transfer::query()->count()); // No legacy instruction or Admin approval path.
@@ -1346,9 +1360,42 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $price = app(\App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization::class)->pricing($this->beneficiary);
         $price['version'] = 'origin-nium-contracted-local-usd-inclusive-v2';
         $price['origin_service_fee_usd'] = '0';
+        unset($price['contracted_nium_transaction_fee_usd'], $price['fee_owner'], $price['fee_type'],
+            $price['fee_basis'], $price['fx_margin_owner'], $price['fee_collection'], $price['origin_revenue']);
         $binding = $stored->binding;
         $binding['customer_pricing_sha256'] = hash('sha256', json_encode($price, JSON_THROW_ON_ERROR));
         // Model-only stale snapshot: immutable persisted quotes are never rewritten.
+        $stored->binding = $binding;
+        $this->assertQuoteFailure('dynamic_quote_binding_changed', fn () => app(NiumDynamicPayoutQuoteService::class)->project($stored));
+        $this->noAdmission();
+    }
+
+    public function test_same_amount_cannot_reassign_nium_fee_or_margin_to_origin(): void
+    {
+        $review = $this->readyReview();
+        $service = app(NiumDynamicReviewService::class);
+        $record = $service->load($review['accepted_fingerprint']);
+        $stored = NiumDynamicPayoutQuote::query()->findOrFail($record['dynamic_quote_id']);
+        foreach (['fee_owner' => 'ORIGIN', 'fx_margin_owner' => 'ORIGIN', 'origin_revenue' => 'RECOGNIZED'] as $field => $value) {
+            $altered = $record;
+            $altered['customer_pricing'][$field] = $value;
+            $this->assertQuoteFailure('dynamic_financial_terms_changed', fn () => $service->assemble($altered, $stored));
+        }
+        $this->noAdmission();
+    }
+
+    public function test_previous_origin_owned_fee_cannot_be_reinterpreted_as_nium_consent(): void
+    {
+        $this->customerListing(); $this->providerQuote();
+        $stored = $this->createReference();
+        $price = app(\App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization::class)->pricing($this->beneficiary);
+        $price['version'] = 'origin-nium-contracted-local-usd-inclusive-v3';
+        $price['origin_service_fee_usd'] = $price['contracted_nium_transaction_fee_usd'];
+        unset($price['contracted_nium_transaction_fee_usd'], $price['fee_owner'], $price['fee_type'],
+            $price['fee_basis'], $price['fx_margin_owner'], $price['fee_collection'], $price['origin_revenue']);
+        // Old immutable records require a new quote/consent; never migrate their meaning in place.
+        $binding = $stored->binding;
+        $binding['customer_pricing_sha256'] = hash('sha256', json_encode($price, JSON_THROW_ON_ERROR));
         $stored->binding = $binding;
         $this->assertQuoteFailure('dynamic_quote_binding_changed', fn () => app(NiumDynamicPayoutQuoteService::class)->project($stored));
         $this->noAdmission();

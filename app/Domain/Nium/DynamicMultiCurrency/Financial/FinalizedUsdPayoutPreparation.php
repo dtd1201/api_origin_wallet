@@ -12,12 +12,12 @@ use InvalidArgumentException;
 /**
  * AUTO-02C.49 business-rule preparation only, not provider financial evidence.
  * No remittance payload, FinancialTerms, confirmation, reservation or dispatch.
- * Net principal is a quote/instruction input. Origin customer pricing is separate
- * from later provider fee and settlement observations; no provider debit equality is asserted.
+ * Net principal is a quote/instruction input. The contracted Nium transaction fee
+ * is separate from observed settlement fees; collection and provider debit remain unverified.
  */
 final readonly class FinalizedUsdPayoutPreparation
 {
-    public const VERSION = 'nium-usd-inclusive-fee-preparation-v4';
+    public const VERSION = 'nium-usd-inclusive-fee-preparation-v5';
 
     // Arithmetic shared with the accepted USD-inclusive LOCAL customer contract.
     // Preparation alone still grants no financial or provider authority.
@@ -130,6 +130,9 @@ final readonly class FinalizedUsdPayoutPreparation
             'planned_customer_wallet_debit' => $this->plannedCustomerDebit?->snapshot(),
             'proposed_conversion_principal' => $this->proposedConversionPrincipal?->snapshot(),
             'included_fee' => ['currency' => 'USD', 'amount' => self::FEE_USD],
+            'fee_classification' => DocumentaryFeeSchedule::contractedLocal($this->context->corridor->sourceCurrency,
+                $this->context->corridor->destinationCountry, $this->context->corridor->destinationCurrency,
+                $this->context->corridor->payoutMethod) === null ? null : DocumentaryFeeSchedule::LOCAL_FEE_CLASSIFICATION,
             'expected_fx_margin_percent' => $this->expectedFxMarginPercent->value, 'margin_basis' => $this->marginBasis,
             'quoted_receive_amount' => $this->quote === null ? null
                 : (new Money($this->context->corridor->destinationCurrency, $this->quote->destinationAmount))->snapshot(),

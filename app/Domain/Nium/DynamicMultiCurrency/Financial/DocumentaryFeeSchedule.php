@@ -6,7 +6,7 @@ namespace App\Domain\Nium\DynamicMultiCurrency\Financial;
 
 /**
  * Retained schedule references. contractedLocal() exposes only the exact LOCAL
- * rows accepted for Origin customer pricing. Provider entitlement and actual
+ * rows of Nium transaction fees and Nium FX margins. Provider entitlement and actual
  * settlement remain independently verified. Historical documentary provenance
  * below is preserved; percentages are metadata, never a second FX adjustment.
  */
@@ -17,6 +17,12 @@ final class DocumentaryFeeSchedule
     public const SOURCE = 'user_supplied_unverified_fee_schedule';
 
     public const VOLATILITY_ADJUSTMENTS_POSSIBLE = true;
+
+    // Contract ownership does not establish how, when or from which account Nium collects it.
+    public const LOCAL_FEE_CLASSIFICATION = [
+        'fee_owner' => 'NIUM', 'fee_type' => 'TRANSACTION_FEE', 'fee_basis' => 'CONTRACT_SCHEDULE',
+        'fx_margin_owner' => 'NIUM', 'fee_collection' => 'UNVERIFIED', 'origin_revenue' => 'NOT_RECOGNIZED',
+    ];
 
     public const LOCAL_REFERENCES = [
         ['funding' => 'USD', 'country' => 'HK', 'destination' => 'HKD', 'method' => 'LOCAL', 'margin_percent' => '0.13', 'fee' => '20', 'fee_currency' => 'USD'],
@@ -37,7 +43,7 @@ final class DocumentaryFeeSchedule
         ['method' => 'WIRES', 'fee' => '20', 'fee_currency' => 'USD', 'margin_percent' => '1.5'],
     ];
 
-    /** Exact row of the LOCAL schedule accepted by the customer-pricing contract.
+    /** Exact row of Nium Local Currency Pay Outs – Non-Tiered Pricing.
      * This lookup grants neither provider entitlement nor settlement evidence.
      */
     public static function contractedLocal(string $funding, string $country, string $currency, string $method): ?array
@@ -72,6 +78,7 @@ final class DocumentaryFeeSchedule
                 'schedule' => 'Appendix A-1, Parts 1 and 3',
             ],
             'contracted_local' => self::LOCAL_REFERENCES,
+            'local_fee_classification' => self::LOCAL_FEE_CLASSIFICATION,
             // Preserve WIRE exactly as supplied in this signed summary. The older
             // NON_CONTRACTED_REFERENCES spelling WIRES remains a separate reference;
             // neither spelling establishes a provider SWIFT method or rail alias.

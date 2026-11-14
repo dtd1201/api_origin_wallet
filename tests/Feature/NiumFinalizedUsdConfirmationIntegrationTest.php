@@ -74,6 +74,9 @@ final class NiumFinalizedUsdConfirmationIntegrationTest extends DynamicConfirmat
         $this->assertSame($fingerprint, hash('sha256', json_encode($snapshot, JSON_THROW_ON_ERROR)));
         $this->assertSame('980', $snapshot['financial_terms']['principal']['amount']);
         $this->assertSame('20', $snapshot['financial_terms']['transaction_fee']['amount']);
+        $this->assertSame('NIUM', $binding['fee_classification']['fee_owner']);
+        $this->assertSame('CONTRACT_SCHEDULE', $binding['fee_classification']['fee_basis']);
+        $this->assertSame('UNVERIFIED', $binding['fee_classification']['fee_collection']);
         $this->assertSame('1000', $binding['planned_customer_wallet_debit']['amount']);
         $this->assertSame($mode === PayoutAmountMode::Source ? '1000' : '784', $binding['entered_amount']['amount']);
         $this->assertSame($mode === PayoutAmountMode::Source ? '980' : '784', $snapshot['input_amount']);
@@ -86,6 +89,9 @@ final class NiumFinalizedUsdConfirmationIntegrationTest extends DynamicConfirmat
         $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
         $this->assertSame('1000.00000000', $this->wallet->fresh()->available_balance);
         $this->assertSame('-1000.00000000', LedgerEntry::query()->sole()->amount);
+        $this->assertSame('hold', LedgerEntry::query()->sole()->entry_type);
+        $this->assertSame($binding['fee_classification'], LedgerEntry::query()->sole()->raw_data['fee_classification']);
+        $this->assertFalse(LedgerEntry::query()->sole()->raw_data['origin_revenue_recognized']);
         $this->assertSame('1000.00000000', NiumDynamicReservation::query()->sole()->amount);
         $outbox = NiumDynamicPayoutOutbox::query()->sole();
         $this->assertSame('held', $outbox->state);

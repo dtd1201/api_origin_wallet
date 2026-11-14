@@ -49,6 +49,14 @@ final class DynamicPayoutCustomerStatus
             'total_usd_debit' => $intent->total_debit,
             'principal' => $this->money($terms['financial_terms']['principal']),
             'included_fee' => $this->money($terms['financial_terms']['transaction_fee']),
+            'fee_classification' => $terms['finalized_usd_preparation']['fee_classification'] ?? null,
+            // An absent Fee_Debit is not evidence of a zero provider fee. Never synthesize USD20 here.
+            'provider_fee_observation' => [
+                'status' => ($outbox->financial_evidence['fee_evidence'] ?? null) === 'SETTLED_FEE_RECORDS'
+                    ? 'SETTLED_FEE_RECORDS' : 'UNVERIFIED',
+                'fees' => ($outbox->financial_evidence['fee_evidence'] ?? null) === 'SETTLED_FEE_RECORDS'
+                    ? array_map(fn (array $fee): array => $this->money($fee), $outbox->financial_evidence['provider_fee_records']) : null,
+            ],
             'destination_amount' => $this->money($terms['financial_terms']['estimated_recipient']),
             'status' => $status, 'financial_reconciled' => $reconciled,
             'message' => match ($status) {

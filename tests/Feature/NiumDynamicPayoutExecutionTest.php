@@ -515,21 +515,33 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
-    public function test_provider_mismatch_consumes_only_customer_consent_alerts_operations_and_blocks_wallet(): void
+    public static function providerFeeDifferences(): array
+    {
+        return [['0', '980'], ['10', '990'], ['21', '1001'], ['30', '1010']];
+    }
+
+    #[DataProvider('providerFeeDifferences')]
+    public function test_provider_mismatch_consumes_only_customer_consent_alerts_operations_and_blocks_wallet(string $fee, string $providerDebit): void
     {
         $outbox = $this->prepare();
         $this->dispatcher->dispatch($outbox->id);
-        $this->wire->batch = $this->records($outbox->fresh(), '21');
+        $this->wire->batch = $this->records($outbox->fresh(), $fee);
         $this->reconciler->reconcile($outbox->id);
         $this->reconciler->reconcile($outbox->id);
         $this->assertSame('mismatched', $outbox->fresh()->financial_state);
         $this->assertSame('exception', $outbox->fresh()->state);
-        $this->assertSame('1001', $outbox->fresh()->financial_evidence['wallet_debit_usd']);
+        $this->assertSame($providerDebit, $outbox->fresh()->financial_evidence['wallet_debit_usd']);
+        $this->assertSame($fee, $outbox->fresh()->financial_evidence['fee_usd']);
+        $this->assertSame('20', $outbox->fresh()->financial_evidence['customer_fee_allocation_usd']);
+        $this->assertFalse($outbox->fresh()->financial_evidence['origin_revenue_recognized']);
         $this->assertSame(1, AuditLog::query()->where('action', 'nium_dynamic_financial_exception')->count());
         $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
         $this->assertSame('1000.00000000', $this->wallet->fresh()->ledger_balance);
         $this->assertSame('consumed', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame('-1000.00000000', LedgerEntry::query()->where('entry_type', 'debit')->sole()->amount);
+        $this->assertFalse(LedgerEntry::query()->where('entry_type', 'debit')->sole()->raw_data['origin_revenue_recognized']);
+        $this->assertSame('NIUM', LedgerEntry::query()->where('entry_type', 'debit')->sole()->raw_data['fee_classification']['fee_owner']);
+        $this->assertSame(0, LedgerEntry::query()->whereNotIn('entry_type', ['hold', 'debit'])->count());
         $this->expectExceptionMessage('dynamic_wallet_has_unresolved_payout');
         $this->confirmDynamic('different-customer-reference');
     }

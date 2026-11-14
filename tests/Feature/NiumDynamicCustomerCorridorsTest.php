@@ -10,6 +10,7 @@ use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
 use App\Models\NiumDynamicReservation;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutEligibility;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutEnvironment;
 use App\Services\Nium\NiumService;
 use GuzzleHttp\Psr7\Request as PsrRequest;
 use GuzzleHttp\Psr7\Response as PsrResponse;
@@ -87,20 +88,30 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
 
     private function assertRefused(string $reason): void
     {
+        $refusal = null;
         try {
             app(DynamicPayoutEligibility::class)->options($this->owner, $this->beneficiary, $this->binding, 'HK');
-            $this->fail('Listing cannot grant payout eligibility.');
         } catch (RuntimeException $exception) {
-            $this->assertSame($reason, $exception->getMessage());
+            $refusal = $exception;
         }
+        // PHPUnit assertion failures also extend RuntimeException; do not catch our own assertion.
+        $this->assertNotNull($refusal, 'Expected corridor refusal: '.$reason);
+        $this->assertSame($reason, $refusal->getMessage());
+        $this->assertNoAdmission();
+    }
+
+    private function assertNoAdmission(): void
+    {
         $this->assertSame(0, FxQuote::query()->count());
         $this->assertSame(0, NiumDynamicIntent::query()->count());
         $this->assertSame(0, NiumDynamicReservation::query()->count());
         $this->assertSame(0, NiumDynamicPayoutOutbox::query()->count());
         $this->assertSame(0, LedgerEntry::query()->count());
         $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertFalse(config('nium_dynamic_confirmation.enabled'));
         $this->assertFalse(config('nium_dynamic_confirmation.automatic_dispatch_enabled'));
         $this->assertFalse(config('nium_dynamic_quotes.quote_contract_enabled'));
+        $this->assertFalse(config('nium_dynamic_quotes.confirmation_contract_enabled'));
     }
 
     public function test_two_spend_records_are_read_but_authorization_is_refused_before_schema(): void
@@ -180,20 +191,42 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
 
     public function test_complete_documented_corridor_reaches_schema_but_does_not_open_spend_execution(): void
     {
-        $this->expectCorridors($this->body([[...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false]]));
+        $corridorsBody = $this->body([[...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false]]);
+        $schemaBody = '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
+            .'"type":"object","required":["payout.destinationAmount"],'
+            .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":2}},'
+            .'"allOf":[{"if":{},"then":{}}]}';
+        $this->expectCorridors($corridorsBody);
         $this->nium->shouldReceive('get')->once()->withArgs(static fn ($path, $query, $user, $operation): bool =>
             $operation === 'dynamic_payout_schema')->andReturnUsing(function ($path, $query, $user, $operation,
-                $reference, $beforeDispatch): Response {
+                $reference, $beforeDispatch) use ($schemaBody): Response {
                 $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/currency/GBP/payout/schema', $path);
                 $this->assertSame(['destinationCountry' => 'GB', 'payoutMethod' => 'LOCAL'], $query);
+                $this->assertSame($this->owner->id, $user->id);
                 $beforeDispatch(new Request(new PsrRequest('GET', 'https://api.spend.nium.com'.$path
                     .'?destinationCountry=GB&payoutMethod=LOCAL')));
-                return new Response(new PsrResponse(200, [], '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
-                    .'"type":"object","required":["payout.destinationAmount"],'
-                    .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":2}},'
-                    .'"allOf":[{"if":{},"then":{}}]}'));
+                return new Response(new PsrResponse(200, [], $schemaBody));
             });
-        $this->assertRefused('dynamic_production_payout_schema_contract_unverified');
+        // Endpoint-scoped reads return observations, not blanket contract or instruction authority.
+        $options = app(DynamicPayoutEligibility::class)->options($this->owner, $this->beneficiary, $this->binding, 'HK');
+        $this->assertSame(['legal_entity' => 'HK', 'destination_country' => 'GB', 'destination_currency' => 'GBP',
+            'payout_method' => 'LOCAL', 'routing_code_type' => 'synthetic-route-a'], $options['selection']);
+        $this->assertSame(hash('sha256', $corridorsBody), $options['customer_corridors_sha256']);
+        $this->assertSame(hash('sha256', $schemaBody), $options['payout_schema_sha256']);
+        $this->assertSame(['GBP' => 2], $options['currency_scales']);
+        $this->assertSame([], $options['supported_amount_modes']); // No USD source precision was evidenced.
+        $this->assertSame($schemaBody, $options['schema_observation']['schema_json']);
+        $this->assertSame('https://json-schema.org/draft/2020-12/schema', $options['schema_observation']['schema_uri']);
+        $this->assertFalse($options['schema_observation']['source_amount_present']);
+        $this->assertFalse($options['schema_observation']['eligible']);
+        $this->assertFalse($options['schema_observation']['instruction_validated']);
+        $this->assertTrue($options['schema_observation']['requires_instruction_validation']);
+        $this->assertNoAdmission();
+
+        // Preserve the original refusal at the global guard; an observed schema cannot open it.
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('dynamic_production_payout_schema_contract_unverified');
+        DynamicPayoutEnvironment::configured()->assertContract('payout_schema');
     }
 
     public static function wrongBindings(): array

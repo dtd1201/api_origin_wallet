@@ -9,10 +9,10 @@ use App\Domain\Nium\DynamicMultiCurrency\Financial\FinalizedUsdPayoutPreparation
 use App\Models\Beneficiary;
 use RuntimeException;
 
-/** Accepted customer pricing only. Provider settlement must be observed independently. */
+/** Contracted Nium fees allocated in customer consent; actual collection requires separate evidence. */
 class DynamicPayoutFinancialAuthorization
 {
-    public const VERSION = 'origin-nium-contracted-local-usd-inclusive-v3';
+    public const VERSION = 'nium-contracted-local-usd-inclusive-v4';
     public const REFUSALS = ['dynamic_financial_scope_required', 'dynamic_pricing_corridor_unsupported',
         'dynamic_financial_terms_changed'];
 
@@ -40,9 +40,10 @@ class DynamicPayoutFinancialAuthorization
             throw new RuntimeException('dynamic_financial_terms_changed');
         }
 
-        // This is the same included customer fee, never an additional charge or
-        // an assertion about Nium's independently observed provider charges.
-        return ['version' => self::VERSION, ...$row, 'origin_service_fee_usd' => FinalizedUsdPayoutPreparation::FEE_USD,
+        // Preserve the existing allocation arithmetic as consent, not collection proof.
+        // Neither this fee nor Nium's FX margin is Origin revenue.
+        return ['version' => self::VERSION, ...$row, ...DocumentaryFeeSchedule::LOCAL_FEE_CLASSIFICATION,
+            'contracted_nium_transaction_fee_usd' => FinalizedUsdPayoutPreparation::FEE_USD,
             'fee_payer' => 'SENDER', 'fee_treatment' => 'INCLUDED_IN_TOTAL_USD_DEBIT',
             'rate_treatment' => 'PRESERVE_NIUM_QUOTED_RATE_NO_ADDITIONAL_MARGIN',
             'provider_settlement' => 'INDEPENDENT_AUTHENTICATED_RECONCILIATION'];

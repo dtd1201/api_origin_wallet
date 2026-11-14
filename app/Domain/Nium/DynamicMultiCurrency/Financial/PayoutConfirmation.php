@@ -124,7 +124,7 @@ final readonly class PayoutConfirmation
         // Only immutable business inputs/quote identity enter consent. No planning
         // status is promoted to provider authority; contract/pricing validation below is mandatory.
         $binding = array_intersect_key($snapshot, array_flip(['version', 'basis', 'input_mode', 'entered_amount',
-            'planned_customer_wallet_debit', 'proposed_conversion_principal', 'included_fee',
+            'planned_customer_wallet_debit', 'proposed_conversion_principal', 'included_fee', 'fee_classification',
             'expected_fx_margin_percent', 'margin_basis', 'quoted_receive_amount', 'quoted_rate',
             'quote_id', 'quote_response_sha256', 'quote_expires_at']));
         $binding['quote_request_sha256'] = hash('sha256', $prepared->quoteRequest->json());

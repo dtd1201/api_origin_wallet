@@ -24,6 +24,11 @@ final class NiumSignedPayoutFeeScheduleTest extends TestCase
         ], $reference['agreement']);
         $this->assertNull($reference['document_sha256']);
         $this->assertFalse($reference['signature_independently_verified']);
+        $this->assertSame('NIUM', $reference['local_fee_classification']['fee_owner']);
+        $this->assertSame('NIUM', $reference['local_fee_classification']['fx_margin_owner']);
+        $this->assertSame('TRANSACTION_FEE', $reference['local_fee_classification']['fee_type']);
+        $this->assertSame('UNVERIFIED', $reference['local_fee_classification']['fee_collection']);
+        $this->assertSame('NOT_RECOGNIZED', $reference['local_fee_classification']['origin_revenue']);
         $this->assertNotInstanceOf(PricingEvidence::class, $reference);
     }
 

@@ -223,7 +223,11 @@ final class DynamicReservationLedger
             'source_type' => 'nium_dynamic_reservation', 'source_id' => $reservationId,
             'description' => $type === 'debit' ? 'Immutable customer-authorized dynamic payout debit.'
                 : 'Dynamic payout reservation '.$type.'.',
-            'posted_at' => now(), 'raw_data' => ['intent_id' => $intent->id, 'terms_fingerprint' => $intent->terms_fingerprint],
+            // Customer wallet movements only. Never post the contractual fee as Origin revenue.
+            // Historical consent without classification remains unknown; do not relabel it.
+            'posted_at' => now(), 'raw_data' => ['intent_id' => $intent->id, 'terms_fingerprint' => $intent->terms_fingerprint,
+                'fee_classification' => $intent->confirmed_terms['finalized_usd_preparation']['fee_classification'] ?? null,
+                'origin_revenue_recognized' => false],
         ]);
         if (! $entry->exists) {
             throw new RuntimeException('dynamic_reservation_ledger_entry_not_persisted');

@@ -114,6 +114,9 @@ final class NiumFinalizedUsdPayoutPreparationTest extends TestCase
         $this->assertSame(['currency' => 'USD', 'amount' => '1000'], $s['entered_amount']);
         $this->assertSame('1000', $s['planned_customer_wallet_debit']['amount']);
         $this->assertSame(['currency' => 'USD', 'amount' => '20'], $s['included_fee']);
+        $this->assertSame('NIUM', $s['fee_classification']['fee_owner']);
+        $this->assertSame('NIUM', $s['fee_classification']['fx_margin_owner']);
+        $this->assertSame('NOT_RECOGNIZED', $s['fee_classification']['origin_revenue']);
         $this->assertSame(['currency' => 'HKD', 'amount' => '7644'], $s['quoted_receive_amount']);
         $this->assertSame('7.8', $s['quoted_rate']);
         $this->assertSame('synthetic-quote', $s['quote_id']);

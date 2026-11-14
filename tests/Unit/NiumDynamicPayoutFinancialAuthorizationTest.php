@@ -35,8 +35,15 @@ final class NiumDynamicPayoutFinancialAuthorizationTest extends TestCase
         $this->assertSame($margin, $price['margin_percent']);
         $this->assertSame('20', $price['fee']);
         $this->assertSame('USD', $price['fee_currency']);
-        $this->assertSame('20', $price['origin_service_fee_usd']);
-        $this->assertSame('origin-nium-contracted-local-usd-inclusive-v3', $price['version']);
+        $this->assertSame('20', $price['contracted_nium_transaction_fee_usd']);
+        $this->assertSame('NIUM', $price['fee_owner']);
+        $this->assertSame('NIUM', $price['fx_margin_owner']);
+        $this->assertSame('TRANSACTION_FEE', $price['fee_type']);
+        $this->assertSame('CONTRACT_SCHEDULE', $price['fee_basis']);
+        $this->assertSame('UNVERIFIED', $price['fee_collection']);
+        $this->assertSame('NOT_RECOGNIZED', $price['origin_revenue']);
+        $this->assertArrayNotHasKey('origin_service_fee_usd', $price);
+        $this->assertSame('nium-contracted-local-usd-inclusive-v4', $price['version']);
         $this->assertArrayNotHasKey('provider_fee_usd', $price);
         $this->assertSame('INCLUDED_IN_TOTAL_USD_DEBIT', $price['fee_treatment']);
         $this->assertSame('PRESERVE_NIUM_QUOTED_RATE_NO_ADDITIONAL_MARGIN', $price['rate_treatment']);

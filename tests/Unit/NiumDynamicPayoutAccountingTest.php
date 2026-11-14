@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit;
 
+use App\Domain\Nium\DynamicMultiCurrency\Financial\DocumentaryFeeSchedule;
 use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutAccounting;
@@ -20,6 +21,7 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
             'source_currency' => 'USD',
             'destination_currency' => 'GBP', 'amount_mode' => $mode, 'total_debit' => '1000', 'confirmed_terms' => [
                 'context' => ['corridor' => ['client' => 'client'], 'external_beneficiary_id' => 'beneficiary'],
+                'finalized_usd_preparation' => ['fee_classification' => DocumentaryFeeSchedule::LOCAL_FEE_CLASSIFICATION],
                 'financial_terms' => ['fx_rate' => '0.8', 'principal' => ['amount' => '980', 'currency' => 'USD'],
                     'transaction_fee' => ['amount' => '20', 'currency' => 'USD'], 'wallet_debit' => ['amount' => '1000', 'currency' => 'USD'],
                     'estimated_recipient' => ['amount' => '784', 'currency' => 'GBP']],
@@ -54,6 +56,10 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
         $result = $this->evaluate();
         $this->assertSame('matched', $result['state']);
         $this->assertSame('1000', $result['receipt']['wallet_debit_usd']);
+        $this->assertSame('NIUM', $result['receipt']['contracted_fee_classification']['fee_owner']);
+        $this->assertSame('NIUM', $result['receipt']['provider_fee_records'][0]['record_provider']);
+        $this->assertSame('REMIT_BANK_FEE', $result['receipt']['provider_fee_records'][0]['fee_name']);
+        $this->assertFalse($result['receipt']['origin_revenue_recognized']);
     }
 
     public function test_provider_reference_and_scoped_identities_accept_null_external_id(): void
@@ -143,6 +149,8 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
             $this->assertSame('20', $result['receipt']['customer_fee_allocation_usd']);
             $this->assertSame('1000', $result['receipt']['customer_authorized_debit_usd']);
             $this->assertSame([], $result['receipt']['provider_fee_records']);
+            $this->assertSame('UNVERIFIED', $result['receipt']['contracted_fee_classification']['fee_collection']);
+            $this->assertFalse($result['receipt']['origin_revenue_recognized']);
             $this->assertSame([str_repeat('a', 64)], $result['receipt']['response_sha256']);
         }
     }
@@ -272,6 +280,9 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
             $this->assertSame('mismatched', $result['state']);
             $this->assertSame('1000', $result['receipt']['customer_authorized_debit_usd']);
             $this->assertSame('20', $result['receipt']['customer_fee_allocation_usd']);
+            $this->assertSame((string) $providerFee, $result['receipt']['fee_usd']);
+            $this->assertSame('NOT_RECOGNIZED', $result['receipt']['contracted_fee_classification']['origin_revenue']);
+            $this->assertFalse($result['receipt']['origin_revenue_recognized']);
             $this->assertSame($delta, $result['receipt']['provider_minus_customer_usd']);
             $this->assertTrue($result['receipt']['discrepancy']);
         }
