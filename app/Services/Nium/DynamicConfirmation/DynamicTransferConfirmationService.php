@@ -305,6 +305,22 @@ final class DynamicTransferConfirmationService
             }
             // Keep the existing closed-case contract and authoritative resolution rule.
             if ($case->status === 'closed') continue;
+            if ($case->status === 'historical_webhook_evidence') {
+                // reconcileCustomerEvidence() archives customer webhooks while the
+                // authoritative RFI is tracked separately; a later CLEAR leaves this
+                // history intact. It is not itself proof that the RFI was resolved.
+                if ($case->scope !== 'customer' || $case->origin !== 'webhook'
+                    || $account->rfi_status !== 'cleared'
+                    || ! self::hasVerifiedClearCustomerObservation($account, $at)
+                    || ! in_array($account->security_conflict_reason, [null, ''], true)
+                    || $case->reconciled_at === null || $case->reconciled_at > $at
+                    || $case->reconciled_at->getTimestamp() > $account->reconciled_at->getTimestamp()
+                    || ($account->reconciliation_requested_at !== null
+                        && $account->reconciliation_requested_at->getTimestamp() > $account->reconciled_at->getTimestamp())) {
+                    $unknownCase = true;
+                }
+                continue;
+            }
             if ($case->status !== 'resolved_authoritative_clear' || $account->rfi_status !== 'cleared'
                 || $case->reconciled_at === null || $case->reconciled_at > $at) $unknownCase = true;
         }
@@ -314,7 +330,7 @@ final class DynamicTransferConfirmationService
         if ($summary === null) {
             // A null optional summary alone is not NO_RFI. Require the existing
             // authenticated customer GET projection and no contradictory history.
-            return $cases->isEmpty() && self::hasVerifiedNoRfiObservation($account, $at) ? 'NO_RFI' : 'UNKNOWN';
+            return $cases->isEmpty() && self::hasVerifiedClearCustomerObservation($account, $at) ? 'NO_RFI' : 'UNKNOWN';
         }
         if ($cases->isEmpty() && $summary === 'not_required') return 'NO_RFI';
         // Resolved account evidence does not require a historical case row.
@@ -326,7 +342,7 @@ final class DynamicTransferConfirmationService
         return in_array(self::rfiState($account), ['NO_RFI', 'RESOLVED_RFI'], true);
     }
 
-    private static function hasVerifiedNoRfiObservation(UserProviderAccount $account, \DateTimeImmutable $at): bool
+    private static function hasVerifiedClearCustomerObservation(UserProviderAccount $account, \DateTimeImmutable $at): bool
     {
         $metadata = $account->metadata;
         if ($account->status !== 'active' || $account->provider_status !== 'clear'

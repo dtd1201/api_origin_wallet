@@ -719,6 +719,73 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->account->update($updates);
     }
 
+    /** Produce the mixed history through the same writer used by customer reconciliation. */
+    private function reconciledCustomerRfiHistory(): void
+    {
+        for ($index = 0; $index < 4; $index++) {
+            NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
+                'user_provider_account_id' => $this->account->id, 'scope' => 'customer', 'origin' => 'webhook',
+                'provider_reference_fingerprint' => hash('sha256', 'historical-webhook-'.$index),
+                'status' => 'provisional', 'evidence' => ['status' => 'pending', 'subStatus' => 'rfi_requested']]);
+        }
+        $this->account->update(['provider_status' => 'pending', 'provider_sub_status' => 'under_review',
+            'rfi_status' => 'responded']);
+        $rfis = [];
+        for ($index = 0; $index < 7; $index++) {
+            $rfis[] = ['rfiHashId' => 'fixture-rfi-'.$index, 'templateId' => 'fixture-template-'.$index,
+                'template' => [], 'status' => 'RFI_RESPONDED'];
+        }
+        $workflow = app(\App\Services\Nium\NiumRfiWorkflowService::class);
+        $workflow->reconcileCustomerEvidence($this->account->fresh(), $rfis);
+        $this->travelTo(now()->addSecond());
+        $this->account->refresh();
+        $updates = app(\App\Services\Nium\NiumAuthenticatedStateProjector::class)->accountUpdates($this->account, [
+            'customerHashId' => $this->account->external_customer_id,
+            'walletHashId' => $this->account->external_account_id, 'status' => 'clear', 'subStatus' => null,
+        ], 'nium_v5_customer_get_response');
+        $this->account->update($updates);
+        $workflow->reconcileCustomerEvidence($this->account);
+        $this->account->refresh();
+    }
+
+    public static function historicalRfiCorridors(): array
+    {
+        return [['HK', 'HKD'], ['SG', 'SGD'], ['GB', 'GBP'], ['DK', 'EUR'], ['DE', 'EUR'],
+            ['JP', 'JPY'], ['TH', 'THB'], ['KR', 'KRW'], ['CH', 'EUR']];
+    }
+
+    #[DataProvider('historicalRfiCorridors')]
+    public function test_reconciled_mixed_rfi_history_allows_dynamic_options_through_single_dispatch(
+        string $country, string $currency): void
+    {
+        $this->beneficiary->update(['country_code' => $country, 'currency' => $currency]);
+        $this->reconciledCustomerRfiHistory();
+        $this->assertSame(7, NiumRfiCase::query()->where('status', 'resolved_authoritative_clear')->count());
+        $this->assertSame(4, NiumRfiCase::query()->where('status', 'historical_webhook_evidence')->count());
+        $this->assertSame('RESOLVED_RFI', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $beforeAccount = $this->account->fresh()->getAttributes();
+        $beforeCases = NiumRfiCase::query()->orderBy('id')->get()->toArray();
+        $review = $this->readyReview(checkOptions: true);
+        $request = $this->submitReady($review);
+        $id = $this->postJson($this->path(''), $request)->assertCreated()->json('id');
+        $this->postJson($this->path(''), $request)->assertOk()->assertJsonPath('id', $id);
+        $wire = new DynamicPayoutTransportStub;
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $this->travelTo(now()->addSeconds(31));
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $this->assertSame($record['evidence']['instruction_validation']['request_json'], $wire->bodies[0]);
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame($beforeAccount, $this->account->fresh()->getAttributes());
+        $this->assertSame($beforeCases, NiumRfiCase::query()->orderBy('id')->get()->toArray());
+    }
+
     #[DataProvider('modes')]
     public function test_authenticated_clear_customer_without_rfi_history_can_complete_dynamic_admission(string $mode): void
     {
@@ -765,7 +832,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             'resolution future timestamp' => ['cleared', 'resolved_authoritative_clear', 'future', true, 'UNKNOWN'],
             'resolution contradictory summary' => ['unknown', 'resolved_authoritative_clear', 'past', true, 'UNKNOWN'],
             'null summary with history' => [null, 'closed', 'past', true, 'UNKNOWN'],
-            'historical webhook is not resolution' => ['cleared', 'historical_webhook_evidence', 'past', true, 'UNKNOWN'],
+            'historical webhook covered by authenticated clear' => ['cleared', 'historical_webhook_evidence', 'past', true, 'RESOLVED_RFI'],
+            'historical webhook alone is not resolution' => ['cleared', 'historical_webhook_evidence', 'past', false, 'UNKNOWN'],
             'unknown case' => ['cleared', 'unknown', 'past', true, 'UNKNOWN'],
             'open case overrides clear summary' => ['cleared', 'requested', 'past', true, 'OPEN_RFI'],
             'provisional case overrides no RFI' => [null, 'provisional', null, true, 'OPEN_RFI'],
@@ -824,6 +892,83 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
+    public static function invalidHistoricalRfiEvidence(): array
+    {
+        $cases = [];
+        foreach (self::unverifiedNoRfiObservations() as $name => [$changes, $metadata]) {
+            $cases[$name] = [$changes, [], $metadata, null, 'UNKNOWN'];
+        }
+        $cases += [
+            'history missing reconciliation' => [[], ['reconciled_at' => null], [], null, 'UNKNOWN'],
+            'history future reconciliation' => [[], ['reconciled_at' => 'future'], [], null, 'UNKNOWN'],
+            'history newer than CLEAR' => [[], ['reconciled_at' => 'newer_than_clear'], [], null, 'UNKNOWN'],
+            'history with wrong origin' => [[], ['origin' => 'authoritative_fetch'], [], null, 'UNKNOWN'],
+            'history with transaction scope' => [[], ['scope' => 'transaction'], [], null, 'UNKNOWN'],
+            'history with null summary' => [['rfi_status' => null], [], [], null, 'UNKNOWN'],
+            'history with unknown summary' => [['rfi_status' => 'unknown'], [], [], null, 'UNKNOWN'],
+            'history with legacy clear summary' => [['rfi_status' => 'clear'], [], [], null, 'UNKNOWN'],
+            'contradictory provider status' => [['provider_status' => 'pending'], [], [], null, 'UNKNOWN'],
+            'contradictory provider substatus' => [['provider_sub_status' => 'rfi_requested'], [], [], null, 'UNKNOWN'],
+            'failed reconciliation' => [['reconciliation_status' => 'failed'], [], [], null, 'UNKNOWN'],
+            'new reconciliation supersedes CLEAR' => [['reconciliation_requested_at' => '2030-01-01T00:10:02Z'], [], [], null, 'UNKNOWN'],
+            'security conflict' => [['security_conflict_reason' => 'verified_identifier_conflict'], [], [], null, 'UNKNOWN'],
+        ];
+        foreach (['provisional', 'requested', 'responded_under_review', 'rejected_authoritative', 'unknown'] as $status) {
+            $cases['new '.$status.' case'] = [[], [], [], $status, $status === 'unknown' ? 'UNKNOWN' : 'OPEN_RFI'];
+        }
+        return $cases;
+    }
+
+    #[DataProvider('invalidHistoricalRfiEvidence')]
+    public function test_history_cannot_override_missing_invalidated_or_contradictory_rfi_evidence(
+        array $accountChanges, array $caseChanges, array $metadataChanges, ?string $newCaseStatus, string $expected): void
+    {
+        $this->reconciledCustomerRfiHistory();
+        $review = $this->readyReview();
+        $historical = NiumRfiCase::query()->where('status', 'historical_webhook_evidence')->orderBy('id')->firstOrFail();
+        if (($caseChanges['reconciled_at'] ?? null) === 'future') $caseChanges['reconciled_at'] = now()->addMinute();
+        if (($caseChanges['reconciled_at'] ?? null) === 'newer_than_clear') {
+            $this->travelTo(now()->addSecond());
+            $caseChanges['reconciled_at'] = now();
+        }
+        if ($caseChanges !== []) $historical->update($caseChanges);
+        if ($accountChanges !== [] || $metadataChanges !== []) {
+            $this->account->update([...$accountChanges, 'metadata' => [...$this->account->metadata, ...$metadataChanges]]);
+        }
+        if ($newCaseStatus !== null) NiumRfiCase::query()->create([
+            'provider_id' => $this->account->provider_id, 'user_provider_account_id' => $this->account->id,
+            'scope' => 'customer', 'origin' => 'authoritative_fetch',
+            'provider_reference_fingerprint' => hash('sha256', 'new-rfi-after-clear'),
+            'status' => $newCaseStatus, 'evidence' => [], 'reconciled_at' => now(),
+        ]);
+        $beforeAccount = $this->account->fresh()->getAttributes();
+        $beforeCases = NiumRfiCase::query()->orderBy('id')->get()->toArray();
+
+        $this->assertSame($expected, DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $this->assertFalse(DynamicTransferConfirmationService::permitsRfi($this->account->fresh()));
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('dynamic_available', false)
+            ->assertJsonPath('reason_codes.0', fn (string $reason): bool => in_array($reason,
+                ['dynamic_quote_local_eligibility_changed', 'dynamic_provider_account_ineligible'], true));
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => NiumDynamicPayoutQuote::query()->sole()->id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonMissingPath('accepted_fingerprint')
+            ->assertJsonPath('reason_codes.0', fn (string $reason): bool => in_array($reason,
+                ['dynamic_quote_local_eligibility_changed', 'dynamic_provider_account_ineligible'], true));
+        try {
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'invalidated-rfi-history', $review['accepted_fingerprint']);
+            $this->fail('Invalidated RFI evidence must block confirmation of the previously accepted Review.');
+        } catch (RuntimeException $exception) {
+            $this->assertContains($exception->getMessage(), ['dynamic_compliance_hold_or_evidence_unavailable',
+                'dynamic_customer_account_beneficiary_or_wallet_ineligible']);
+        }
+        $this->assertSame($beforeAccount, $this->account->fresh()->getAttributes());
+        $this->assertSame($beforeCases, NiumRfiCase::query()->orderBy('id')->get()->toArray());
+        $this->noAdmission();
+    }
+
     public function test_open_rfi_after_no_rfi_review_blocks_review_and_confirmation(): void
     {
         $this->authenticatedAccountWithoutRfi();
@@ -845,13 +990,15 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     public static function rfiArrivalStages(): array
     {
-        return ['before claim' => [false], 'before wire' => [true]];
+        return ['before claim without history' => [false, false], 'before wire without history' => [true, false],
+            'before claim with reconciled history' => [false, true], 'before wire with reconciled history' => [true, true]];
     }
 
     #[DataProvider('rfiArrivalStages')]
-    public function test_open_rfi_after_no_rfi_confirmation_blocks_dispatch_without_a_wire_attempt(bool $beforeWire): void
+    public function test_open_rfi_after_confirmation_blocks_dispatch_without_a_wire_attempt(bool $beforeWire, bool $history): void
     {
-        $this->authenticatedAccountWithoutRfi();
+        if ($history) $this->reconciledCustomerRfiHistory();
+        else $this->authenticatedAccountWithoutRfi();
         $review = $this->readyReview();
         $this->postJson($this->path(''), $this->submitReady($review))->assertCreated();
         $wire = new DynamicPayoutTransportStub;
@@ -875,8 +1022,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame('exception', $outbox->fresh()->state);
         $this->assertSame($beforeWire ? 'dynamic_submission_not_started'
             : 'dynamic_compliance_hold_or_evidence_unavailable', $outbox->fresh()->exception_code);
-        $this->assertNull($this->account->fresh()->rfi_status);
-        $this->assertSame('requested', NiumRfiCase::query()->sole()->status);
+        $this->assertSame($history ? 'cleared' : null, $this->account->fresh()->rfi_status);
+        $this->assertSame(1, NiumRfiCase::query()->where('status', 'requested')->count());
+        $this->assertSame($history ? 12 : 1, NiumRfiCase::query()->count());
         $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
