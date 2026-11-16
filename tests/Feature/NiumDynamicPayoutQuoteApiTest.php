@@ -102,7 +102,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
                 $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/wallet/fixture-wallet/remittance/validate', $path);
                 $this->assertArrayNotHasKey('additionalFees', $payload);
                 $this->assertArrayNotHasKey('additionalFees', $payload['payout']);
-                $beforeDispatch(new Request(new PsrRequest('POST', 'https://gatewaysandbox.nium.com'.$path,
+                $beforeDispatch(new Request(new PsrRequest('POST', rtrim((string) config('services.nium.base_url'), '/').$path,
                     ['Content-Type' => 'application/json'], json_encode($payload, JSON_THROW_ON_ERROR))));
                 if ($this->duringValidation !== null) ($this->duringValidation)();
                 return $this->response($this->validationResponse);
@@ -111,8 +111,11 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             $operation === 'dynamic_wallet_availability')->andReturnUsing(function ($path, $query, $user, $operation,
                 $reference, $beforeDispatch): Response {
                 $this->assertSame(0, DB::transactionLevel());
-                $beforeDispatch(new Request(new PsrRequest('GET', 'https://gatewaysandbox.nium.com'.$path,
+                $beforeDispatch(new Request(new PsrRequest('GET', rtrim((string) config('services.nium.base_url'), '/').$path,
                     ['x-api-key' => 'synthetic-wallet-test-key'])));
+                if (config('services.nium.base_url') === 'https://api.spend.nium.com') {
+                    return $this->response('[{"walletHashId":"fixture-wallet","currencyCode":"USD","balance":2000}]');
+                }
                 return $this->response('{"walletHashId":"fixture-wallet","currencies":[{"currencyCode":"USD","availableBalance":2000}]}');
             });
     }
@@ -250,10 +253,14 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
                 $this->assertSame(['destinationCountry' => $this->beneficiary->country_code, 'payoutMethod' => $this->beneficiary->payout_method], $query);
                 $url = rtrim((string) config('services.nium.base_url'), '/').$path.'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986);
                 $beforeDispatch($schemaOutgoing === null ? new Request(new PsrRequest('GET', $url)) : $schemaOutgoing($url));
-                return $this->response($schemaBody ?? '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object",'
-                    // Synthetic both-mode schema; the retained destination-required example is tested separately.
+                $dialect = config('services.nium.base_url') === 'https://api.spend.nium.com'
+                    ? 'https://json-schema.org/draft/2020-12/schema' : 'http://json-schema.org/draft-07/schema#';
+                return $this->response($schemaBody ?? '{"$schema":"'.$dialect.'","type":"object",'
+                    // Hypothetical both-mode requirements; not retained Production evidence.
                     .'"required":["beneficiary.id"],"allOf":[{"if":{"required":["synthetic.flag"],"properties":{"synthetic.flag":{"const":true}}},'
-                    .'"then":{"required":["synthetic.conditionalField"]}}],'
+                    .'"then":{"required":["synthetic.conditionalField"]}},'
+                    .'{"if":{"required":["payout.sourceAmount"]},"then":{"required":["payout.sourceAmount","payout.sourceCurrency"]}},'
+                    .'{"if":{"required":["payout.destinationAmount"]},"then":{"required":["payout.destinationAmount","payout.sourceCurrency"]}}],'
                     .'"properties":{"payout.sourceAmount":{"type":"number","maximumDecimals":"2"},'
                     .'"payout.destinationAmount":{"type":"number","maximumDecimals":"'.($this->beneficiary->currency === 'JPY' ? '0' : '2').'"}}}');
             });
@@ -839,7 +846,11 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $schema = ['$schema' => 'https://json-schema.org/draft/2020-12/schema', 'type' => 'object',
             'properties' => $properties, 'required' => ['beneficiary.id'],
             'allOf' => [['if' => ['properties' => ['synthetic.flag' => ['const' => true]]],
-                'then' => ['required' => ['synthetic.conditionalField']]]]];
+                'then' => ['required' => ['synthetic.conditionalField']]],
+                ['if' => ['required' => ['payout.sourceAmount']],
+                    'then' => ['required' => ['payout.sourceAmount', 'payout.sourceCurrency']]],
+                ['if' => ['required' => ['payout.destinationAmount']],
+                    'then' => ['required' => ['payout.destinationAmount', 'payout.sourceCurrency']]]]];
         $this->executionEvidence(schemaBody: json_encode($schema, JSON_THROW_ON_ERROR));
         $response = $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
             ->assertJsonPath('customer_entitlement', 'VERIFIED')
@@ -856,6 +867,76 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         }
         $this->noAdmission();
         $this->assertSame(0, Transfer::query()->count());
+    }
+
+    #[DataProvider('modes')]
+    public function test_spend_conditional_amount_instruction_keeps_one_validated_body_through_confirmation_and_retry(string $mode): void
+    {
+        // Only the origin/dialect are Production-shaped. All HTTP remains synthetic.
+        $this->useQuoteOrigin();
+        config(['nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
+            'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-offline-test',
+            'services.nium.transfer_endpoint' => '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance']);
+        $review = $this->readyReview($mode, checkOptions: true);
+        $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $schema = $record['evidence']['execution_eligibility']['schema_observation'];
+        $this->assertFalse($schema['eligible']);
+        $this->assertFalse($schema['instruction_validated']);
+        $this->assertSame('https://json-schema.org/draft/2020-12/schema', $schema['schema_uri']);
+        $request = $this->submitReady($review);
+        $id = $this->postJson($this->path(''), $request)->assertCreated()->json('id');
+        $this->postJson($this->path(''), $request)->assertOk()->assertJsonPath('id', $id);
+        $this->travelTo(now()->addSeconds(31)); // Refresh the same instruction before wire admission.
+        $wire = new DynamicPayoutTransportStub;
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $this->assertSame($record['evidence']['instruction_validation']['request_json'], $wire->bodies[0]);
+        $this->assertSame($record['evidence']['instruction_validation']['request_sha256'], hash('sha256', $wire->bodies[0]));
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+    }
+
+    #[DataProvider('modes')]
+    public function test_spend_conditional_amount_observation_cannot_replace_provider_instruction_acceptance(string $mode): void
+    {
+        $this->useQuoteOrigin();
+        config(['nium_dynamic_payouts.live_automatic_dispatch_authorized' => true,
+            'nium_dynamic_payouts.operator_authorization_reference' => 'synthetic-offline-test',
+            'services.nium.transfer_endpoint' => '/api/v1/client/{clientHashId}/customer/{customerHashId}/wallet/{walletHashId}/remittance']);
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence();
+        $this->providerQuote($mode);
+        $this->validationResponse = '{"valid":false,"issues":[{"field":"payout.sourceAmount","code":"synthetic-rejection"}]}';
+        $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id, 'dynamic_quote_id' => $id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_payout_instruction_rejected'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->noAdmission();
+    }
+
+    #[DataProvider('modes')]
+    public function test_precision_only_schema_cannot_offer_modes_or_create_an_accepted_review(string $mode): void
+    {
+        $this->fullRegistration(); $this->customerListing();
+        $this->executionEvidence(schemaBody: '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object",'
+            .'"required":["beneficiary.id"],"allOf":[{"if":{},"then":{}}],'
+            .'"properties":{"payout.sourceAmount":{"type":"number","maximumDecimals":2},'
+            .'"payout.destinationAmount":{"type":"number","maximumDecimals":2}}}');
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('dynamic_available', false)->assertJsonPath('supported_amount_modes', [])
+            ->assertJsonPath('reason_codes', ['dynamic_payout_amount_modes_unverified']);
+        $this->providerQuote($mode);
+        $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id, 'dynamic_quote_id' => $id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonMissingPath('accepted_fingerprint')
+            ->assertJsonPath('reason_codes', [$mode === 'SOURCE_AMOUNT'
+                ? 'dynamic_payout_source_amount_contract_unverified' : 'dynamic_payout_destination_amount_contract_unverified']);
+        $this->noAdmission();
     }
 
     public static function unverifiedAccountStates(): array

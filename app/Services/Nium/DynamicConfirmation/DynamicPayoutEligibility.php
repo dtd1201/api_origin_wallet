@@ -247,6 +247,7 @@ final class DynamicPayoutEligibility
             || ! is_array($root->allOf ?? null) || ! array_is_list($root->allOf) || $root->allOf === []) {
             throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
         }
+        $amountRequirements = $root->required;
         foreach ($root->allOf as $condition) {
             if (! ($condition instanceof \stdClass) || ! (($condition->if ?? null) instanceof \stdClass)
                 || ! (($condition->then ?? null) instanceof \stdClass)) {
@@ -272,11 +273,11 @@ final class DynamicPayoutEligibility
                     throw new RuntimeException('dynamic_payout_schema_conditional_unsupported');
                 }
             }
-            // Conditional amount requirements need an instruction-specific mode
-            // mapping that the retained example does not establish.
-            if (array_intersect($condition->then->required ?? [], ['payout.sourceAmount', 'payout.destinationAmount']) !== []) {
-                throw new RuntimeException('dynamic_payout_schema_conditional_unsupported');
-            }
+            // Amount names have the same documented meaning in required and
+            // then.required. Retain the condition; do not assume its predicate
+            // matches a registered-beneficiary request. Nium must validate the
+            // exact remittance body, including its resolved beneficiary/remitter.
+            $amountRequirements = [...$amountRequirements, ...($condition->then->required ?? [])];
         }
         if (array_diff(array_keys(get_object_vars($root)), ['$schema', '$id', 'type', 'title',
             'description', 'properties', 'required', 'allOf']) !== []) {
@@ -299,10 +300,14 @@ final class DynamicPayoutEligibility
             }
             $scales[$code] = (int) $property->maximumDecimals;
         }
-        // Source instruction support must be explicit in this schema, not copied
-        // from destination precision or advertised because a quote accepts a mode.
+        // Precision properties alone establish no amount mode. A required amount
+        // (possibly conditional) supplies a candidate for non-settling validation,
+        // never executable eligibility. An unconditional opposite amount still
+        // rules out our single-amount request. Provider validation evaluates all
+        // predicates/requirements for the selected registered instruction.
         $modes = ! isset($scales['USD'], $scales[$currency]) ? [] : array_values(array_filter(PayoutAmountMode::cases(),
             static fn (PayoutAmountMode $candidate): bool => property_exists($root->properties, 'payout.'.$candidate->quoteField())
+                && in_array('payout.'.$candidate->quoteField(), $amountRequirements, true)
                 && ! in_array($candidate === PayoutAmountMode::Source ? 'payout.destinationAmount' : 'payout.sourceAmount',
                     $root->required, true)));
         $modes = array_map(static fn (PayoutAmountMode $candidate): string => $candidate->value, $modes);

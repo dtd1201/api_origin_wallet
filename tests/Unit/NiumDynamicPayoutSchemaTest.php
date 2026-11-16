@@ -34,6 +34,15 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         return json_encode($schema ?? $this->schema(), JSON_THROW_ON_ERROR);
     }
 
+    /** Hypothetical mode requirements, never claimed as a Production response. */
+    private function amountConditions(): array
+    {
+        return array_map(static fn (PayoutAmountMode $mode): array => [
+            'if' => ['required' => ['payout.'.$mode->quoteField()]],
+            'then' => ['required' => ['payout.'.$mode->quoteField(), 'payout.sourceCurrency']],
+        ], PayoutAmountMode::cases());
+    }
+
     public function test_spend_2020_12_schema_retains_conditions_and_observes_only_destination_precision(): void
     {
         $result = DynamicPayoutEligibility::schemaObservation($this->body(), $this->scope());
@@ -119,6 +128,7 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
     {
         $schema = $this->schema();
         $schema['required'] = ['beneficiary.id'];
+        $schema['allOf'] = [...$schema['allOf'], ...$this->amountConditions()];
         $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
         $schema['properties']['payout.destinationAmount']['maximumDecimals'] = $scale;
         $scope = $this->scope();
@@ -141,6 +151,7 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
         // Both-mode synthetic schema: neither exclusive amount field is mandatory.
         $schema['required'] = ['beneficiary.id'];
+        $schema['allOf'] = [...$schema['allOf'], ...$this->amountConditions()];
         $schema['properties']['payout.destinationAmount']['maximumDecimals'] = '2';
         foreach (['https://gateway.nium.com', 'https://gatewaysandbox.nium.com'] as $origin) {
             $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope($origin), PayoutAmountMode::Source);
@@ -213,7 +224,6 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
             [['if' => ['anyOf' => [(object) []]], 'then' => (object) []]],
             [['if' => ['properties' => ['remitter.accountType' => ['enum' => ['INDIVIDUAL']]]], 'then' => (object) []]],
             [['if' => ['properties' => ['synthetic.flag' => ['const' => []]]], 'then' => (object) []]],
-            [['if' => (object) [], 'then' => ['required' => ['payout.sourceAmount']]]],
             [['if' => (object) [], 'then' => ['properties' => (object) []]]],
         ];
     }
@@ -233,6 +243,37 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         $schema['oneOf'] = [(object) []];
         $this->expectExceptionMessage('dynamic_payout_schema_contract_unavailable');
         DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
+    }
+
+    public function test_both_precision_properties_without_amount_requirements_supply_no_modes(): void
+    {
+        $schema = $this->schema();
+        $schema['required'] = ['beneficiary.id'];
+        $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
+        $this->assertSame(['USD' => 2, 'GBP' => 2], $result['currency_scales']);
+        $this->assertSame([], $result['supported_amount_modes']);
+        $this->assertFalse($result['eligible']);
+        $this->expectExceptionMessage('dynamic_payout_source_amount_contract_unverified');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope(), PayoutAmountMode::Source);
+    }
+
+    #[DataProvider('modes')]
+    public function test_conditional_amount_requirement_is_retained_for_exact_provider_validation(PayoutAmountMode $mode, string $reason): void
+    {
+        $schema = $this->schema();
+        $schema['required'] = ['beneficiary.id'];
+        $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
+        $schema['allOf'] = [$this->amountConditions()[$mode === PayoutAmountMode::Source ? 0 : 1]];
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope(), $mode);
+        $this->assertSame([$mode->value], $result['supported_amount_modes']);
+        $this->assertSame($schema['allOf'], $result['allOf']);
+        $this->assertFalse($result['eligible']);
+        $this->assertFalse($result['instruction_validated']);
+        $this->assertTrue($result['requires_instruction_validation']);
+        $schema['allOf'] = $this->schema()['allOf'];
+        $this->expectExceptionMessage($reason);
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope(), $mode);
     }
 
     public function test_amount_reference_with_additional_unknown_semantics_cannot_supply_precision_authority(): void
