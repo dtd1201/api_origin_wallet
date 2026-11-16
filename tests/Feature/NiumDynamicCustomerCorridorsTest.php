@@ -114,10 +114,10 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
         $this->assertFalse(config('nium_dynamic_quotes.confirmation_contract_enabled'));
     }
 
-    public function test_two_spend_records_are_read_but_authorization_is_refused_before_schema(): void
+    public function test_two_spend_records_are_ambiguous_before_schema(): void
     {
         $this->expectCorridors($this->body([$this->row(), [...$this->row(), 'routing_code_type' => 'synthetic-route-b']]));
-        $this->assertRefused('dynamic_customer_corridor_legal_entity_unverified');
+        $this->assertRefused('dynamic_customer_corridor_ambiguous');
     }
 
     public static function listedTuples(): array
@@ -139,7 +139,7 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
         $this->assertCount(2, $listing['matches']);
         $this->assertSame($rail, $listing['matches'][0]['payout_method']);
         $this->assertSame(hash('sha256', $body), $listing['response_sha256']);
-        $this->assertContains('dynamic_customer_corridor_authorization_unverified', $listing['reason_codes']);
+        $this->assertSame([], $listing['reason_codes']);
         $this->assertSame(0, NiumDynamicIntent::query()->count());
         $this->assertSame(0, NiumDynamicPayoutOutbox::query()->count());
         $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
@@ -176,10 +176,16 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
         app(DynamicPayoutEligibility::class)->discover($this->owner, $this->beneficiary, $this->binding);
     }
 
-    public function test_missing_lookup_policy_is_not_false_even_with_a_matching_legal_entity(): void
+    public function test_an_explicit_conflicting_legal_entity_is_refused_before_schema(): void
     {
-        $this->expectCorridors($this->body([[...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK']]]));
-        $this->assertRefused('dynamic_customer_corridor_lookup_policy_unverified');
+        $this->expectCorridors($this->body([[...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_SG']]]));
+        $this->assertRefused('dynamic_customer_corridor_not_permitted');
+    }
+
+    public function test_an_explicit_unsupported_lookup_flag_is_refused_before_schema(): void
+    {
+        $this->expectCorridors($this->body([[...$this->row(), 'ignoreLookup' => true]]));
+        $this->assertRefused('dynamic_customer_corridor_response_contract_unavailable');
     }
 
     public function test_partial_http_response_is_not_a_complete_customer_corridor_observation(): void
@@ -189,9 +195,17 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
         $this->assertRefused('dynamic_customer_corridors_unavailable');
     }
 
-    public function test_complete_documented_corridor_reaches_schema_but_does_not_open_spend_execution(): void
+    public static function optionalCorridorMetadata(): array
     {
-        $corridorsBody = $this->body([[...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false]]);
+        return ['four fields' => [[]], 'entity only' => [['client_legal_entity' => ['LEGAL_ENTITY_HK']]],
+            'lookup only' => [['ignoreLookup' => false]],
+            'both present' => [['client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false]]];
+    }
+
+    #[DataProvider('optionalCorridorMetadata')]
+    public function test_customer_corridor_reaches_schema_without_granting_instruction_authority(array $metadata): void
+    {
+        $corridorsBody = $this->body([[...$this->row(), ...$metadata]]);
         $schemaBody = '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
             .'"type":"object","required":["payout.destinationAmount"],'
             .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":2}},'

@@ -33,7 +33,7 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
             'payout_method' => 'LOCAL', 'routing_code_type' => 'BRANCH CODE'], $result);
     }
 
-    public function test_spend_four_field_envelope_is_a_listing_without_payout_authorization(): void
+    public function test_spend_four_field_envelope_lists_support_without_authorizing_an_instruction(): void
     {
         $body = ['requestId' => 'synthetic-request', 'correlationId' => 'synthetic-correlation',
             'timestamp' => 'synthetic-provider-timestamp', 'data' => [$this->spendRow()]];
@@ -41,9 +41,7 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
         $this->assertSame('LISTED', $listing['status']);
         $this->assertFalse($listing['eligible']);
         $this->assertSame([$this->spendRow()], $listing['matches']);
-        $this->assertSame(['dynamic_customer_corridor_legal_entity_unverified',
-            'dynamic_customer_corridor_lookup_policy_unverified',
-            'dynamic_customer_corridor_authorization_unverified'], $listing['reason_codes']);
+        $this->assertSame([], $listing['reason_codes']);
         $this->assertArrayNotHasKey('client_legal_entity', $listing['matches'][0]);
         $this->assertArrayNotHasKey('ignoreLookup', $listing['matches'][0]);
     }
@@ -54,28 +52,29 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
         $listing = DynamicPayoutEligibility::listing(['data' => $rows], 'GB', 'GBP');
         $this->assertSame($rows, $listing['matches']);
         $this->assertFalse($listing['eligible']);
-        $this->expectExceptionMessage('dynamic_customer_corridor_legal_entity_unverified');
+        $this->expectExceptionMessage('dynamic_customer_corridor_ambiguous');
         DynamicPayoutEligibility::select(['data' => $rows], 'GB', 'GBP', 'HK');
     }
 
-    public static function missingAuthorizationFields(): array
+    public static function omittedMetadata(): array
     {
         return [
-            ['client_legal_entity', 'dynamic_customer_corridor_legal_entity_unverified'],
-            ['ignoreLookup', 'dynamic_customer_corridor_lookup_policy_unverified'],
+            ['client_legal_entity'], ['ignoreLookup'],
         ];
     }
 
-    #[DataProvider('missingAuthorizationFields')]
-    public function test_missing_authorization_is_not_inferred_from_the_requested_scope(string $field, string $reason): void
+    #[DataProvider('omittedMetadata')]
+    public function test_missing_optional_metadata_is_not_required_or_fabricated(string $field): void
     {
         $row = $this->row();
         unset($row[$field]);
         $listing = DynamicPayoutEligibility::listing(['data' => [$row]], 'GB', 'GBP');
         $this->assertFalse($listing['eligible']);
-        $this->assertContains($reason, $listing['reason_codes']);
-        $this->expectExceptionMessage($reason);
-        DynamicPayoutEligibility::select(['data' => [$row]], 'GB', 'GBP', 'HK');
+        $this->assertSame([], $listing['reason_codes']);
+        $this->assertArrayNotHasKey($field, $listing['matches'][0]);
+        $selected = DynamicPayoutEligibility::select(['data' => [$row]], 'GB', 'GBP', 'HK');
+        $this->assertSame('HK', $selected['legal_entity']); // Supplied registration entity, not a corridor default.
+        $this->assertArrayNotHasKey($field, $selected);
     }
 
     public static function malformedSpendFields(): array
@@ -106,9 +105,9 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
         }
     }
 
-    public function test_complete_row_cannot_hide_another_matching_row_with_missing_authorization(): void
+    public function test_complete_row_cannot_hide_another_matching_four_field_row(): void
     {
-        $this->expectExceptionMessage('dynamic_customer_corridor_legal_entity_unverified');
+        $this->expectExceptionMessage('dynamic_customer_corridor_ambiguous');
         DynamicPayoutEligibility::select(['data' => [$this->row(), $this->spendRow()]], 'GB', 'GBP', 'HK');
     }
 
@@ -145,18 +144,23 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
 
     public static function registeredCorridors(): array
     {
-        return [['HK', 'USD', 'SWIFT'], ['SG', 'SGD', 'LOCAL'], ['GB', 'GBP', 'LOCAL']];
+        return [['HK', 'HKD', 'LOCAL'], ['SG', 'SGD', 'LOCAL'], ['GB', 'GBP', 'LOCAL'],
+            ['DK', 'EUR', 'LOCAL'], ['DE', 'EUR', 'LOCAL'], ['JP', 'JPY', 'LOCAL'],
+            ['TH', 'THB', 'LOCAL'], ['KR', 'KRW', 'LOCAL'], ['CH', 'EUR', 'LOCAL']];
     }
 
     #[DataProvider('registeredCorridors')]
     public function test_exact_customer_tuple_can_be_observed_without_granting_dynamic_dispatch(string $country, string $currency, string $rail): void
     {
-        // Synthetic rows exercise the documented shape, not actual account entitlement.
-        $row = [...$this->row(), 'destination_country' => [$country], 'destination_currency' => $currency,
+        // Synthetic four-field rows; the caller's registration evidence supplies entity.
+        $row = [...$this->spendRow(), 'destination_country' => [$country], 'destination_currency' => $currency,
             'payout_method' => $rail];
         $selected = DynamicPayoutEligibility::select(['data' => [$row]], $country, $currency, 'HK', $rail);
         $this->assertSame($rail, $selected['payout_method']);
         $this->assertSame($currency, $selected['destination_currency']);
+        $this->assertSame('HK', $selected['legal_entity']);
+        $this->assertArrayNotHasKey('client_legal_entity', $selected);
+        $this->assertArrayNotHasKey('ignoreLookup', $selected);
         $this->expectExceptionMessage('dynamic_customer_corridor_not_permitted');
         DynamicPayoutEligibility::select(['data' => [$row]], $country, $currency, 'HK', $rail === 'LOCAL' ? 'SWIFT' : 'LOCAL');
     }
@@ -171,6 +175,12 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
     {
         $this->expectExceptionMessage('dynamic_customer_corridor_response_contract_unavailable');
         DynamicPayoutEligibility::select(['data' => [[...$this->row(), 'ignoreLookup' => true]]], 'GB', 'GBP', 'HK');
+    }
+
+    public function test_four_field_row_cannot_supply_a_missing_registration_entity(): void
+    {
+        $this->expectExceptionMessage('dynamic_quote_registration_evidence_unavailable');
+        DynamicPayoutEligibility::select(['data' => [$this->spendRow()]], 'GB', 'GBP', '');
     }
 
     public function test_payout_schema_can_narrow_documented_remittance_precision_without_rounding(): void

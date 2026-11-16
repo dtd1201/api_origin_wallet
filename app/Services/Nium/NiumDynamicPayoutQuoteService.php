@@ -22,6 +22,7 @@ use App\Services\Nium\DynamicConfirmation\DynamicReceivingAccountBinding;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutEnvironment;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutEligibility;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization;
+use App\Services\Nium\DynamicConfirmation\DynamicRegisteredAccountEvidence;
 use App\Services\Nium\DynamicConfirmation\DynamicReservationLedger;
 use App\Services\Nium\DynamicConfirmation\ExactProviderJson;
 use Brick\Math\BigDecimal;
@@ -37,7 +38,8 @@ final class NiumDynamicPayoutQuoteService
         private readonly DynamicPayoutEligibility $eligibility,
         private readonly NiumBeneficiaryPayoutMethodResolver $registration,
         private readonly NiumProviderAccountStateService $accounts,
-        private readonly DynamicPayoutFinancialAuthorization $financial) {}
+        private readonly DynamicPayoutFinancialAuthorization $financial,
+        private readonly DynamicRegisteredAccountEvidence $registeredAccount) {}
 
     /** Authenticated customer listing permits reference quoting, never execution. */
     public function availability(User $user, Beneficiary $beneficiary, Balance $wallet): array
@@ -45,7 +47,14 @@ final class NiumDynamicPayoutQuoteService
         $this->outsideTransaction();
         $this->quotePath();
         $this->assertQuoteDestination($beneficiary->currency);
-        $binding = $this->binding($user, $beneficiary, $wallet);
+        $binding = $this->binding($user, $beneficiary, $wallet, refreshCustomerBinding: true);
+        $registered = $this->registeredAccount->inspect($beneficiary, $this->accounts->assertEligible($user), $binding);
+        if ($registered['payload_matches'] && ! $registered['customer_scope_confirmed']) {
+            throw new RuntimeException('dynamic_registered_account_customer_scope_unavailable');
+        }
+        if (isset($binding['beneficiary_customer_binding_sha256'])) {
+            $this->registeredAccount->bindingObservation($beneficiary, $this->accounts->assertEligible($user), $binding);
+        }
         $listing = $this->eligibility->discover($user, $beneficiary, $binding);
         if ($listing['status'] !== 'LISTED') {
             throw new RuntimeException('dynamic_customer_corridor_not_permitted');
@@ -59,7 +68,7 @@ final class NiumDynamicPayoutQuoteService
     {
         $this->outsideTransaction();
         $this->quotePath();
-        $binding = $this->binding($user, $beneficiary, $wallet, requirePricing: false);
+        $binding = $this->binding($user, $beneficiary, $wallet, requirePricing: false, refreshCustomerBinding: true);
 
         return ['binding' => $binding, 'provider_listing' => $this->eligibility->discover($user, $beneficiary, $binding)];
     }
@@ -188,6 +197,18 @@ final class NiumDynamicPayoutQuoteService
         }
     }
 
+    /** Refresh only existing V2-bound quotes, outside admission/dispatch locks. */
+    public function refreshCustomerBinding(NiumDynamicPayoutQuote $stored, User $user, Beneficiary $beneficiary, Balance $wallet): void
+    {
+        if (! isset($stored->binding['beneficiary_customer_binding_sha256'])) return;
+        $this->outsideTransaction();
+        $current = $this->binding($user, $beneficiary, $wallet, refreshCustomerBinding: true);
+        $original = $stored->binding;
+        unset($original['amount_mode'], $original['entered_amount']);
+        ksort($original, SORT_STRING);
+        if ($current !== $original) throw new RuntimeException('dynamic_quote_binding_changed');
+    }
+
     private function assertUnused(int $providerId, array $binding, string $quoteId): void
     {
         $environment = $this->quoteEnvironment($binding['base_url'])->identity;
@@ -243,7 +264,8 @@ final class NiumDynamicPayoutQuoteService
         return $quote;
     }
 
-    private function binding(User $user, Beneficiary $beneficiary, Balance $wallet, bool $requirePricing = true): array
+    private function binding(User $user, Beneficiary $beneficiary, Balance $wallet, bool $requirePricing = true,
+        bool $refreshCustomerBinding = false): array
     {
         if (config('nium_dynamic_quotes.quote_contract_enabled', false) !== true
             || ! (bool) config('services.nium.payout_fx_enabled', false)) {
@@ -309,6 +331,13 @@ final class NiumDynamicPayoutQuoteService
             ...($requirePricing ? ['customer_pricing_sha256' => $this->financial->fingerprint($beneficiary)] : []),
             'customer_verified_at' => $account->customer_id_verified_at->toISOString(),
             'wallet_verified_at' => $account->wallet_id_verified_at->toISOString()];
+        $registrationResponse = $registeredResponse['data'] ?? $registeredResponse;
+        if (! array_key_exists('customerHashId', $registrationResponse)) {
+            $registered = $this->registeredAccount->inspect($beneficiary, $account, $binding, $refreshCustomerBinding);
+            if (isset($registered['customer_binding_sha256'])) {
+                $binding['beneficiary_customer_binding_sha256'] = $registered['customer_binding_sha256'];
+            }
+        }
         ksort($binding, SORT_STRING);
 
         return $binding;

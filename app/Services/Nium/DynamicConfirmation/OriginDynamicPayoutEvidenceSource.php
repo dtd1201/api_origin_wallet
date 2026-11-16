@@ -34,7 +34,9 @@ final class OriginDynamicPayoutEvidenceSource implements DynamicPayoutEvidenceSo
         $refresh = false;
         try {
             $observations = $this->reviews->observations($intent->terms_fingerprint);
-            foreach (['execution_eligibility', 'instruction_validation', 'wallet_availability'] as $name) {
+            $names = ['execution_eligibility', 'instruction_validation', 'wallet_availability'];
+            if (isset($observations['registered_receiving_account']['customer_binding_sha256'])) $names[] = 'beneficiary_customer_binding';
+            foreach ($names as $name) {
                 if (new DateTimeImmutable($observations[$name]['expires_at']) <= now()->addSeconds(5)->toDateTimeImmutable()) {
                     $refresh = true;
                 }
@@ -112,7 +114,18 @@ final class OriginDynamicPayoutEvidenceSource implements DynamicPayoutEvidenceSo
             }
             $live = $this->reviews->observations($records->acceptedFingerprint);
             $until = $quote->expires_at->toDateTimeImmutable();
-            foreach (['execution_eligibility', 'instruction_validation', 'wallet_availability'] as $name) {
+            $names = ['execution_eligibility', 'instruction_validation', 'wallet_availability'];
+            if (isset($quote->binding['beneficiary_customer_binding_sha256'])) {
+                $names[] = 'beneficiary_customer_binding';
+                $currentBinding = $this->registration->bindingObservation($records->beneficiary, $records->account, $quote->binding);
+                if (($live['beneficiary_customer_binding']['binding_sha256'] ?? null) !== $currentBinding['binding_sha256']
+                    || ($live['beneficiary_customer_binding']['scope'] ?? null) !== $currentBinding['scope']) {
+                    throw new RuntimeException('dynamic_review_binding_changed');
+                }
+                $bindingExpiry = new DateTimeImmutable($currentBinding['expires_at']);
+                if ($bindingExpiry < $until) $until = $bindingExpiry;
+            }
+            foreach ($names as $name) {
                 $observation = $live[$name];
                 $expiry = new DateTimeImmutable($observation['expires_at']);
                 if (new DateTimeImmutable($observation['observed_at']) > $at || $expiry <= $at) {

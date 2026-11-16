@@ -89,6 +89,7 @@ final class NiumDynamicReviewService
     public function prepare(User $user, Beneficiary $beneficiary, Balance $wallet,
         NiumDynamicPayoutQuote $quote, PayoutInstruction $instruction): array
     {
+        $this->quotes->refreshCustomerBinding($quote, $user, $beneficiary, $wallet);
         $this->quotes->assertCurrent($quote, $user, $beneficiary, $wallet);
         $operation = (string) Str::uuid();
         $evidence = $this->observe($user, $beneficiary, $wallet, $quote, $instruction, $operation);
@@ -133,7 +134,7 @@ final class NiumDynamicReviewService
             'destination_amount', 'quote_expires_at', 'instruction', 'reason_codes', 'customer_pricing', 'contracted_nium_transaction_fee', 'payout_rail',
             'provider_quote_id', 'nium_quoted_fx_rate']));
         $expires = [$quote->expires_at->toDateTimeImmutable()];
-        foreach (['execution_eligibility', 'instruction_validation', 'wallet_availability'] as $name) {
+        foreach (['execution_eligibility', 'instruction_validation', 'wallet_availability', 'beneficiary_customer_binding'] as $name) {
             if (isset($evidence[$name]['expires_at'])) $expires[] = new DateTimeImmutable($evidence[$name]['expires_at']);
         }
         usort($expires, static fn ($a, $b) => $a <=> $b);
@@ -155,7 +156,9 @@ final class NiumDynamicReviewService
             }
             $execution = $this->eligibility->observe($user, $beneficiary, $quote, $registered['legal_entity'], $amounts);
         }
+        $customerBinding = $this->registration->bindingObservation($beneficiary, $account, $quote->binding);
         return ['registered_receiving_account' => $registered,
+            ...($customerBinding === null ? [] : ['beneficiary_customer_binding' => $customerBinding]),
             'provider_capability_sha256' => $execution['customer_corridors_sha256'] ?? null,
             'execution_eligibility' => $execution,
             'instruction_validation' => $this->instructions->validate($user, $beneficiary, $quote, $instruction, $amounts, $operation),
@@ -252,6 +255,16 @@ final class NiumDynamicReviewService
             EvidenceKind::FinancialReadiness->value => self::CUSTOMER_CONTRACT,
             EvidenceKind::LocalActivation->value => 'existing-dynamic-feature-gates-v1',
             EvidenceKind::OverrideClearance->value => 'origin-locked-kyc-aml-rfi-account-controls-v1'];
+        if (isset($b['beneficiary_customer_binding_sha256'])) {
+            if (($e['registered_receiving_account']['customer_binding_sha256'] ?? null) !== $b['beneficiary_customer_binding_sha256']
+                || ($e['beneficiary_customer_binding']['binding_sha256'] ?? null) !== $b['beneficiary_customer_binding_sha256']) {
+                throw new RuntimeException('dynamic_review_binding_changed');
+            }
+            // Include the stable V2 binding in the accepted consent fingerprint,
+            // while fresh response bytes/times remain independently renewable.
+            $references[EvidenceKind::AccountEntitlement->value] = hash('sha256', json_encode([
+                $e['execution_eligibility']['customer_corridors_sha256'], $b['beneficiary_customer_binding_sha256']], JSON_THROW_ON_ERROR));
+        }
         $eligibility = [];
         foreach (EvidenceKind::required() as $kind) {
             $eligibility[] = new CorridorEvidence($c, $kind, EvidenceState::Verified, $references[$kind->value], $from, $until, false);
@@ -269,6 +282,7 @@ final class NiumDynamicReviewService
         $beneficiary = Beneficiary::query()->findOrFail($intent->beneficiary_id);
         $wallet = Balance::query()->findOrFail($intent->balance_id);
         $quote = NiumDynamicPayoutQuote::query()->findOrFail($record['dynamic_quote_id']);
+        $this->quotes->refreshCustomerBinding($quote, $user, $beneficiary, $wallet);
         $this->quotes->assertCurrent($quote, $user, $beneficiary, $wallet, $intent);
         $evidence = $this->observe($user, $beneficiary, $wallet, $quote, new PayoutInstruction(...array_values($record['instruction'])), $record['operation_key'], $intent->id);
         $this->quotes->assertCurrent($quote, $user->fresh(), $beneficiary->fresh(), $wallet->fresh(), $intent);

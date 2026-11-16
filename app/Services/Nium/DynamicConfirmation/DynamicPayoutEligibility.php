@@ -22,7 +22,7 @@ final class DynamicPayoutEligibility
 {
     public function __construct(private readonly NiumService $nium) {}
 
-    /** Authenticated listing only. Neither pricing nor payout entitlement is inferred. */
+    /** Customer-scoped corridor support only; pricing and instruction admission remain separate. */
     public function discover(User $user, Beneficiary $beneficiary, array $binding): array
     {
         $body = $this->read($user, $beneficiary, $binding, 'customer_corridors', null, now(), listing: true);
@@ -79,8 +79,8 @@ final class DynamicPayoutEligibility
                     }
                 }
                 $selected = self::select($body, $beneficiary->country_code, $beneficiary->currency, $legalEntity, $beneficiary->payout_method);
-                // The authenticated exact V1 read plus complete documented row is
-                // the scoped observation. Incomplete Spend rows still fail select().
+                // CLEAR customer + authenticated exact V1 tuple establishes corridor
+                // support. Spend may omit the optional OAS example metadata.
             } else {
                 $schema = self::schemaObservation($bodies[$endpoint], [
                     ...array_intersect_key($binding, array_flip(['base_url', 'client', 'customer'])),
@@ -93,7 +93,7 @@ final class DynamicPayoutEligibility
                 // and returned dialect. A blanket origin grant supplies no evidence.
             }
         }
-        return ['version' => 'nium-customer-payout-oas-example-v1',
+        return ['version' => 'nium-customer-payout-v2',
             'selection' => $selected, 'currency_scales' => $schema['currency_scales'],
             'supported_amount_modes' => $schema['supported_amount_modes'],
             'schema_observation' => $schema,
@@ -151,14 +151,13 @@ final class DynamicPayoutEligibility
         return $response->body();
     }
 
-    /** Spend's four-field records prove listing only. Preserve every matching row. */
+    /** Preserve every matching row. A listing alone never authorizes an instruction. */
     public static function listing(array $body, string $country, string $currency, string $rail = 'LOCAL'): array
     {
         if (! is_array($body['data'] ?? null) || ! array_is_list($body['data'])) {
             throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
         }
         $matches = [];
-        $reasons = [];
         foreach ($body['data'] as $row) {
             if (! is_array($row)) {
                 throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
@@ -177,49 +176,46 @@ final class DynamicPayoutEligibility
             if (! is_string($row['routing_code_type'] ?? null)) {
                 throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
             }
-            if (! array_key_exists('client_legal_entity', $row)) {
-                $reasons[] = 'dynamic_customer_corridor_legal_entity_unverified';
-            } elseif (! is_array($row['client_legal_entity']) || ! array_is_list($row['client_legal_entity'])
-                || count(array_filter($row['client_legal_entity'], 'is_string')) !== count($row['client_legal_entity'])) {
+            if (array_key_exists('client_legal_entity', $row)
+                && (! is_array($row['client_legal_entity']) || ! array_is_list($row['client_legal_entity'])
+                || count(array_filter($row['client_legal_entity'], 'is_string')) !== count($row['client_legal_entity']))) {
                 throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
             }
-            if (! array_key_exists('ignoreLookup', $row)) {
-                $reasons[] = 'dynamic_customer_corridor_lookup_policy_unverified';
-            } elseif (! is_bool($row['ignoreLookup'])) {
+            if (array_key_exists('ignoreLookup', $row) && ! is_bool($row['ignoreLookup'])) {
                 throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
             }
             $matches[] = array_intersect_key($row, array_flip(['destination_currency', 'payout_method',
                 'destination_country', 'routing_code_type', 'client_legal_entity', 'ignoreLookup']));
         }
         return ['status' => $matches === [] ? 'NOT_LISTED' : 'LISTED', 'eligible' => false,
-            'matches' => $matches, 'reason_codes' => $matches === [] ? ['dynamic_customer_corridor_not_permitted']
-                : array_values(array_unique([...$reasons, 'dynamic_customer_corridor_authorization_unverified']))];
+            'matches' => $matches, 'reason_codes' => $matches === [] ? ['dynamic_customer_corridor_not_permitted'] : []];
     }
 
-    /** Listing is not legal-entity/lookup authorization; preserve the stricter execution requirements. */
+    /** Select one customer-scoped tuple; never fabricate metadata omitted by Nium. */
     public static function select(array $body, string $country, string $currency, string $entity, string $rail = 'LOCAL'): array
     {
         $listing = self::listing($body, $country, $currency, $rail);
-        $matches = [];
-        foreach ($listing['matches'] as $row) {
-            if (! array_key_exists('client_legal_entity', $row)) {
-                throw new RuntimeException('dynamic_customer_corridor_legal_entity_unverified');
-            }
-            if (! in_array('LEGAL_ENTITY_'.$entity, $row['client_legal_entity'], true)) continue;
-            if (! array_key_exists('ignoreLookup', $row)) {
-                throw new RuntimeException('dynamic_customer_corridor_lookup_policy_unverified');
-            }
-            // No undocumented interpretation of lookup-bypass flags, including absence.
-            if ($row['ignoreLookup'] !== false) {
-                throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
-            }
-            $matches[] = ['legal_entity' => $entity, 'destination_country' => $country,
-                'destination_currency' => $currency, 'payout_method' => $rail, 'routing_code_type' => $row['routing_code_type']];
-        }
+        $matches = $listing['matches'];
         if (count($matches) !== 1) {
             throw new RuntimeException(count($matches) === 0 ? 'dynamic_customer_corridor_not_permitted' : 'dynamic_customer_corridor_ambiguous');
         }
-        return $matches[0];
+        $row = $matches[0];
+        // The caller supplies entity from the authenticated original registration
+        // request. A missing corridor field neither supplies nor changes that entity.
+        if (preg_match('/^[A-Z]{2}$/D', $entity) !== 1) {
+            throw new RuntimeException('dynamic_quote_registration_evidence_unavailable');
+        }
+        if (array_key_exists('client_legal_entity', $row)
+            && ! in_array('LEGAL_ENTITY_'.$entity, $row['client_legal_entity'], true)) {
+            throw new RuntimeException('dynamic_customer_corridor_not_permitted');
+        }
+        // Retain the existing refusal for an explicit unsupported lookup-bypass
+        // flag. Absence has no assigned value and creates no lookup policy.
+        if (array_key_exists('ignoreLookup', $row) && $row['ignoreLookup'] !== false) {
+            throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
+        }
+        return ['legal_entity' => $entity, 'destination_country' => $country,
+            'destination_currency' => $currency, 'payout_method' => $rail, 'routing_code_type' => $row['routing_code_type']];
     }
 
     /** Structural/precision observation, never a partial JSON Schema instruction validator. */
