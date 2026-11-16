@@ -720,7 +720,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     }
 
     /** Produce the mixed history through the same writer used by customer reconciliation. */
-    private function reconciledCustomerRfiHistory(): void
+    private function reconciledCustomerRfiHistory(bool $verifiedNotification = false,
+        string $template = 'CUSTOMER_STATUS_WEBHOOK'): void
     {
         for ($index = 0; $index < 4; $index++) {
             NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
@@ -744,22 +745,90 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             'walletHashId' => $this->account->external_account_id, 'status' => 'clear', 'subStatus' => null,
         ], 'nium_v5_customer_get_response');
         $this->account->update($updates);
+        if ($verifiedNotification) {
+            // Match processCustomerLifecyclePayload(): GET first, verified details
+            // second, RFI reconciliation last. Metadata may be recorded seconds later.
+            $this->travelTo(now()->addSeconds(2));
+            $this->account = app(\App\Services\Nium\NiumProviderAccountStateService::class)->recordVerifiedNotificationDetails(
+                $this->account, ['template' => $template, 'status' => 'clear', 'subStatus' => null],
+                'nium_webhook_notification:'.strtolower($template));
+        }
         $workflow->reconcileCustomerEvidence($this->account);
         $this->account->refresh();
     }
 
     public static function historicalRfiCorridors(): array
     {
-        return [['HK', 'HKD'], ['SG', 'SGD'], ['GB', 'GBP'], ['DK', 'EUR'], ['DE', 'EUR'],
-            ['JP', 'JPY'], ['TH', 'THB'], ['KR', 'KRW'], ['CH', 'EUR']];
+        $cases = [];
+        foreach ([['HK', 'HKD'], ['SG', 'SGD'], ['GB', 'GBP'], ['DK', 'EUR'], ['DE', 'EUR'],
+            ['JP', 'JPY'], ['TH', 'THB'], ['KR', 'KRW'], ['CH', 'EUR']] as [$country, $currency]) {
+            foreach ([false, true] as $verifiedNotification) {
+                $cases[$country.' '.$currency.($verifiedNotification ? ' verified notification' : ' GET')] = [
+                    $country, $currency, $verifiedNotification];
+            }
+        }
+        return $cases;
+    }
+
+    public static function verifiedLifecycleTemplates(): array
+    {
+        return [['CUSTOMER_STATUS_WEBHOOK'], ['CUSTOMER_ENTITY_KYC_STATUS'], ['CUSTOMER_COMPLIANCE_STATUS'],
+            ['CUSTOMER_ODD_STATUS_WEBHOOK'], ['CARD_CUSTOMER_REGISTRATION_WEBHOOK']];
+    }
+
+    #[DataProvider('verifiedLifecycleTemplates')]
+    public function test_verified_notification_details_preserve_clearance_without_rewriting_rfi(string $template): void
+    {
+        $this->reconciledCustomerRfiHistory(verifiedNotification: true, template: $template);
+        $before = $this->account->fresh()->getAttributes();
+        $cases = NiumRfiCase::query()->orderBy('id')->get()->toArray();
+        $this->assertSame('RESOLVED_RFI', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $this->assertTrue(DynamicTransferConfirmationService::permitsRfi($this->account->fresh()));
+        $this->assertSame($before, $this->account->fresh()->getAttributes());
+        $this->assertSame($cases, NiumRfiCase::query()->orderBy('id')->get()->toArray());
+        $this->noAdmission();
+    }
+
+    public function test_notification_source_cannot_replace_missing_authoritative_reconciliation(): void
+    {
+        $this->reconciledCustomerRfiHistory();
+        $this->account->update(['provider_status_updated_at' => null, 'reconciled_at' => null]);
+        $this->account = app(\App\Services\Nium\NiumProviderAccountStateService::class)->recordVerifiedNotificationDetails(
+            $this->account, ['template' => 'CUSTOMER_STATUS_WEBHOOK', 'status' => 'clear'],
+            'nium_webhook_notification:customer_status_webhook');
+        $this->assertSame('UNKNOWN', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $this->assertFalse(DynamicTransferConfirmationService::permitsRfi($this->account->fresh()));
+        $this->noAdmission();
+    }
+
+    public static function webhookReconciliationFailures(): array
+    {
+        return ['pending reconciliation' => [false], 'failed reconciliation' => [true]];
+    }
+
+    #[DataProvider('webhookReconciliationFailures')]
+    public function test_restrictive_notification_invalidates_previous_rfi_clearance(bool $failed): void
+    {
+        $this->reconciledCustomerRfiHistory(verifiedNotification: true);
+        $state = app(\App\Services\Nium\NiumProviderAccountStateService::class);
+        $source = 'nium_webhook_notification:customer_status_webhook';
+        $this->account = $state->applyRestrictiveNotification($this->account,
+            ['status' => 'pending', 'subStatus' => 'rfi_requested'], $source);
+        if ($failed) $this->account = $state->markReconciliationFailure($this->account, 'authoritative_get_customer_failed', $source);
+        $this->assertSame($failed ? 'failed' : 'pending', $this->account->reconciliation_status);
+        $this->assertSame('OPEN_RFI', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $this->assertFalse(DynamicTransferConfirmationService::permitsRfi($this->account->fresh()));
+        $this->noAdmission();
     }
 
     #[DataProvider('historicalRfiCorridors')]
     public function test_reconciled_mixed_rfi_history_allows_dynamic_options_through_single_dispatch(
-        string $country, string $currency): void
+        string $country, string $currency, bool $verifiedNotification): void
     {
         $this->beneficiary->update(['country_code' => $country, 'currency' => $currency]);
-        $this->reconciledCustomerRfiHistory();
+        $this->reconciledCustomerRfiHistory($verifiedNotification);
+        $this->assertSame($verifiedNotification ? 'nium_webhook_notification:customer_status_webhook' : 'nium_v5_customer_get_response',
+            $this->account->metadata['nium_last_state_source']);
         $this->assertSame(7, NiumRfiCase::query()->where('status', 'resolved_authoritative_clear')->count());
         $this->assertSame(4, NiumRfiCase::query()->where('status', 'historical_webhook_evidence')->count());
         $this->assertSame('RESOLVED_RFI', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
@@ -896,6 +965,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         $cases = [];
         foreach (self::unverifiedNoRfiObservations() as $name => [$changes, $metadata]) {
+            // A known notification source now preserves an existing reconciled
+            // clearance. The NO_RFI absence policy remains unchanged.
+            if ($name === 'webhook alone') continue;
             $cases[$name] = [$changes, [], $metadata, null, 'UNKNOWN'];
         }
         $cases += [
@@ -912,6 +984,11 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             'failed reconciliation' => [['reconciliation_status' => 'failed'], [], [], null, 'UNKNOWN'],
             'new reconciliation supersedes CLEAR' => [['reconciliation_requested_at' => '2030-01-01T00:10:02Z'], [], [], null, 'UNKNOWN'],
             'security conflict' => [['security_conflict_reason' => 'verified_identifier_conflict'], [], [], null, 'UNKNOWN'],
+            'unrecognized webhook source' => [[], [], ['nium_last_state_source' => 'nium_webhook_notification:unverified'], null, 'UNKNOWN'],
+            'future notification timestamp' => [[], [], ['nium_last_state_at' => '2030-01-01T00:11:00Z'], null, 'UNKNOWN'],
+            'missing provider observation time' => [['provider_status_updated_at' => null], [], [], null, 'UNKNOWN'],
+            'provider observation differs from reconciliation' => [['provider_status_updated_at' => '2030-01-01T00:10:02Z'], [], [], null, 'UNKNOWN'],
+            'wallet verified after authoritative reconciliation' => [['wallet_id_verified_at' => '2030-01-01T00:10:02Z'], [], [], null, 'UNKNOWN'],
         ];
         foreach (['provisional', 'requested', 'responded_under_review', 'rejected_authoritative', 'unknown'] as $status) {
             $cases['new '.$status.' case'] = [[], [], [], $status, $status === 'unknown' ? 'UNKNOWN' : 'OPEN_RFI'];
@@ -923,7 +1000,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_history_cannot_override_missing_invalidated_or_contradictory_rfi_evidence(
         array $accountChanges, array $caseChanges, array $metadataChanges, ?string $newCaseStatus, string $expected): void
     {
-        $this->reconciledCustomerRfiHistory();
+        $this->reconciledCustomerRfiHistory(verifiedNotification: true);
         $review = $this->readyReview();
         $historical = NiumRfiCase::query()->where('status', 'historical_webhook_evidence')->orderBy('id')->firstOrFail();
         if (($caseChanges['reconciled_at'] ?? null) === 'future') $caseChanges['reconciled_at'] = now()->addMinute();
@@ -997,7 +1074,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     #[DataProvider('rfiArrivalStages')]
     public function test_open_rfi_after_confirmation_blocks_dispatch_without_a_wire_attempt(bool $beforeWire, bool $history): void
     {
-        if ($history) $this->reconciledCustomerRfiHistory();
+        if ($history) $this->reconciledCustomerRfiHistory(verifiedNotification: true);
         else $this->authenticatedAccountWithoutRfi();
         $review = $this->readyReview();
         $this->postJson($this->path(''), $this->submitReady($review))->assertCreated();

@@ -311,7 +311,7 @@ final class DynamicTransferConfirmationService
                 // history intact. It is not itself proof that the RFI was resolved.
                 if ($case->scope !== 'customer' || $case->origin !== 'webhook'
                     || $account->rfi_status !== 'cleared'
-                    || ! self::hasVerifiedClearCustomerObservation($account, $at)
+                    || ! self::hasVerifiedClearCustomerObservation($account, $at, allowVerifiedNotification: true)
                     || ! in_array($account->security_conflict_reason, [null, ''], true)
                     || $case->reconciled_at === null || $case->reconciled_at > $at
                     || $case->reconciled_at->getTimestamp() > $account->reconciled_at->getTimestamp()
@@ -342,16 +342,29 @@ final class DynamicTransferConfirmationService
         return in_array(self::rfiState($account), ['NO_RFI', 'RESOLVED_RFI'], true);
     }
 
-    private static function hasVerifiedClearCustomerObservation(UserProviderAccount $account, \DateTimeImmutable $at): bool
+    private static function hasVerifiedClearCustomerObservation(UserProviderAccount $account, \DateTimeImmutable $at,
+        bool $allowVerifiedNotification = false): bool
     {
         $metadata = $account->metadata;
+        // The lifecycle handler retrieves Customer first, then records verified
+        // notification details. That overwrites the last metadata source/time but
+        // preserves the GET's provider_status_updated_at/reconciled_at pair.
+        $verifiedNotification = $allowVerifiedNotification && is_array($metadata)
+            && in_array($metadata['nium_last_state_source'] ?? null, [
+                'nium_webhook_notification:customer_status_webhook',
+                'nium_webhook_notification:customer_entity_kyc_status',
+                'nium_webhook_notification:customer_compliance_status',
+                'nium_webhook_notification:customer_odd_status_webhook',
+                'nium_webhook_notification:card_customer_registration_webhook',
+            ], true);
         if ($account->status !== 'active' || $account->provider_status !== 'clear'
             || ! in_array($account->provider_sub_status, [null, ''], true)
             || $account->reconciliation_status !== 'reconciled' || $account->reconciliation_error !== null
             || $account->security_conflict_at !== null
             || ! is_string($account->external_customer_id) || trim($account->external_customer_id) === ''
             || ! is_string($account->external_account_id) || trim($account->external_account_id) === ''
-            || ! is_array($metadata) || ($metadata['nium_last_state_source'] ?? null) !== 'nium_v5_customer_get_response') return false;
+            || ! is_array($metadata)
+            || (! $verifiedNotification && ($metadata['nium_last_state_source'] ?? null) !== 'nium_v5_customer_get_response')) return false;
         foreach (['customer_id_verified_at', 'wallet_id_verified_at', 'provider_status_updated_at', 'reconciled_at'] as $field) {
             if (! ($account->{$field} instanceof \DateTimeInterface) || $account->{$field} > $at) return false;
         }
@@ -363,11 +376,12 @@ final class DynamicTransferConfirmationService
             if ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0)) return false;
         } catch (\Throwable) { return false; }
         // Database timestamps can have seconds precision while metadata retains fractions.
+        $reconciledAt = $account->reconciled_at->getTimestamp();
         return $observed <= $at
-            && $observed->getTimestamp() === $account->provider_status_updated_at->getTimestamp()
-            && $observed->getTimestamp() === $account->reconciled_at->getTimestamp()
-            && $account->customer_id_verified_at->getTimestamp() <= $observed->getTimestamp()
-            && $account->wallet_id_verified_at->getTimestamp() <= $observed->getTimestamp();
+            && $account->provider_status_updated_at->getTimestamp() === $reconciledAt
+            && ($verifiedNotification ? $observed->getTimestamp() >= $reconciledAt : $observed->getTimestamp() === $reconciledAt)
+            && $account->customer_id_verified_at->getTimestamp() <= $reconciledAt
+            && $account->wallet_id_verified_at->getTimestamp() <= $reconciledAt;
     }
 
     private function assertBindings(LockedPayoutRecords $r, DynamicPayoutEvidence $evidence): void
