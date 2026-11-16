@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutAmountMode;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutQuoteRequest;
 use App\Models\ApiRequestLog;
+use App\Models\AmlScreening;
 use App\Models\ApiToken;
 use App\Models\FxQuote;
 use App\Models\NiumApiExchangeEvidence;
@@ -14,6 +15,7 @@ use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
 use App\Models\NiumDynamicPayoutQuote;
 use App\Models\NiumDynamicReservation;
+use App\Models\NiumRfiCase;
 use App\Models\LedgerEntry;
 use App\Models\Transfer;
 use App\Models\User;
@@ -26,6 +28,7 @@ use App\Services\Nium\NiumBeneficiaryService;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutDispatcher;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutReconciler;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutTransport;
+use App\Services\Nium\DynamicConfirmation\DynamicTransferConfirmationService;
 use Tests\Support\DynamicPayoutTransportStub;
 use GuzzleHttp\Psr7\Request as PsrRequest;
 use GuzzleHttp\Psr7\Response as PsrResponse;
@@ -256,13 +259,18 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             });
     }
 
-    private function readyReview(string $mode = 'SOURCE_AMOUNT'): array
+    private function readyReview(string $mode = 'SOURCE_AMOUNT', bool $checkOptions = false): array
     {
         // Real accepted customer authorization; only provider HTTP is synthetic.
         $this->fullRegistration();
         $this->customerListing();
         $this->executionEvidence();
         $this->providerQuote($mode);
+        if ($checkOptions) {
+            $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+                ->assertJsonPath('dynamic_available', true)->assertJsonPath('customer_entitlement', 'VERIFIED')
+                ->assertJsonPath('executable_amount_modes', [])->assertJsonPath('reason_codes', []);
+        }
         $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
         $response = $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id, 'dynamic_quote_id' => $id,
             'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']]);
@@ -698,7 +706,10 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $cases = [];
         foreach ([['SG', 'SGD'], ['GB', 'GBP'], ['DE', 'EUR'], ['JP', 'JPY']] as [$country, $currency]) {
             foreach (['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'] as $mode) {
-                $cases[$country.' '.$mode] = [$country, $currency, $mode];
+                $cases[$country.' '.$mode] = [$country, $currency, $mode, false];
+                if (in_array($country, ['SG', 'GB'], true)) {
+                    $cases[$country.' '.$mode.' missing auxiliary observations'] = [$country, $currency, $mode, true];
+                }
             }
         }
         return $cases;
@@ -706,12 +717,16 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
 
     #[DataProvider('contractedTuplesAndModes')]
     public function test_contracted_authorization_exercises_review_submit_single_dispatch_and_reconciliation(
-        string $country, string $currency, string $mode): void
+        string $country, string $currency, string $mode, bool $missingObservations): void
     {
         // Only HTTP is synthetic; the actual financial authorization and engine are exercised.
         $this->beneficiary->update(['country_code' => $country, 'currency' => $currency]);
         $this->account->update(['rfi_status' => 'cleared']);
-        $review = $this->readyReview($mode);
+        if ($missingObservations) {
+            // Account 6/8-like policy: do not invent clearance or bypass scoped evidence.
+            $this->account->update(['compliance_status' => null, 'odd_status' => 'unknown']);
+        }
+        $review = $this->readyReview($mode, checkOptions: $missingObservations);
         $this->assertSame('LOCAL', $review['payout_rail']);
         $this->assertSame('nium-contracted-local-usd-inclusive-v4', $review['customer_pricing']['version']);
         $this->assertSame('20', $review['customer_pricing']['contracted_nium_transaction_fee_usd']);
@@ -780,6 +795,10 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(1, $wire->submissions);
         $this->assertSame(0, Transfer::query()->count()); // No legacy instruction or Admin approval path.
         $this->assertSame(0, FxQuote::query()->count()); // Dynamic quote storage and pricing only.
+        if ($missingObservations) {
+            $this->assertNull($this->account->fresh()->compliance_status);
+            $this->assertSame('unknown', $this->account->fresh()->odd_status);
+        }
     }
 
     public static function dynamicCountries(): array { return [['SG', 'SGD'], ['GB', 'GBP']]; }
@@ -843,8 +862,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         $cases = [];
         foreach (['rfi_status' => [null, 'unknown', 'pending', 'failed', 'requested', 'responded'],
-            'compliance_status' => [null, 'unknown', 'pending', 'failed', 'action_required', 'completed'],
-            'odd_status' => [null, 'unknown', 'pending', 'failed', 'odd_due', 'odd_ineligible', 'odd_not_due', 'completed']] as $field => $values) {
+            'compliance_status' => ['pending', 'failed', 'action_required', 'rejected', 'blocked', 'hold', 'completed'],
+            'odd_status' => ['pending', 'failed', 'odd_due', 'blocked', 'hold', 'odd_ineligible', 'odd_not_due', 'completed']] as $field => $values) {
             foreach ($values as $value) $cases[$field.' '.($value ?? 'NULL')] = [$field, $value];
         }
         return $cases;
@@ -857,6 +876,124 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertQuoteFailure('dynamic_quote_local_eligibility_changed', fn () => $this->createReference());
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
         $this->noAdmission();
+    }
+
+    public static function providerClearWithAccountRestrictions(): array
+    {
+        // A missing observation in one field must never override a restriction in the other.
+        return [
+            'explicit compliance action required' => [['compliance_status' => 'action_required', 'odd_status' => 'unknown']],
+            'explicit compliance rejected' => [['compliance_status' => 'rejected', 'odd_status' => 'unknown']],
+            'explicit compliance hold' => [['compliance_status' => 'hold', 'odd_status' => null]],
+            'explicit ODD due' => [['compliance_status' => null, 'odd_status' => 'odd_due']],
+            'explicit ODD hold' => [['compliance_status' => 'unknown', 'odd_status' => 'hold']],
+        ];
+    }
+
+    #[DataProvider('providerClearWithAccountRestrictions')]
+    public function test_provider_clear_cannot_override_account_restrictions_at_quote(array $changes): void
+    {
+        $this->account->update(['rfi_status' => 'cleared', ...$changes]);
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('dynamic_available', false)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_local_eligibility_changed']);
+        $this->assertQuoteFailure('dynamic_quote_local_eligibility_changed', fn () => $this->createReference());
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->assertSame(0, LedgerEntry::query()->count());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('providerClearWithAccountRestrictions')]
+    public function test_provider_clear_cannot_override_account_restrictions_at_review(array $changes): void
+    {
+        $this->readyReview();
+        $this->account->update(['rfi_status' => 'cleared', ...$changes]);
+
+        $this->postJson($this->path('/reviews'), [
+            'beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => NiumDynamicPayoutQuote::query()->sole()->id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice'],
+        ])->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_quote_local_eligibility_changed'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->assertSame(0, LedgerEntry::query()->count());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('providerClearWithAccountRestrictions')]
+    public function test_provider_clear_cannot_override_account_restrictions_at_confirmation(array $changes): void
+    {
+        $review = $this->readyReview();
+        $this->account->update(['rfi_status' => 'cleared', ...$changes]);
+
+        $this->assertQuoteFailure('dynamic_customer_account_beneficiary_or_wallet_ineligible', fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'account-clearance-regression', $review['accepted_fingerprint']));
+        $this->assertSame(0, LedgerEntry::query()->count());
+        $this->noAdmission();
+    }
+
+    public static function providerClearWithAccountRestrictionsAtDispatch(): array
+    {
+        $cases = [];
+        foreach (self::providerClearWithAccountRestrictions() as $name => [$changes]) {
+            $cases[$name.' before claim'] = [$changes, false];
+            $cases[$name.' before wire'] = [$changes, true];
+        }
+        foreach (['aml', 'rfi'] as $hold) {
+            foreach ([false, true] as $beforeWire) {
+                $cases[$hold.($beforeWire ? ' before wire' : ' before claim')] = [
+                    ['compliance_status' => null, 'odd_status' => 'unknown'], $beforeWire, $hold,
+                ];
+            }
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('providerClearWithAccountRestrictionsAtDispatch')]
+    public function test_provider_clear_cannot_override_account_restrictions_at_dispatch(
+        array $changes, bool $beforeWire, ?string $evidenceHold = null): void
+    {
+        $review = $this->readyReview();
+        $this->postJson($this->path(''), $this->submitReady($review))->assertCreated();
+        $intent = NiumDynamicIntent::query()->sole();
+        $terms = $intent->getAttributes();
+        $wire = new DynamicPayoutTransportStub;
+        $restrictAccount = function () use ($changes, $evidenceHold): void {
+            $this->account->update(['rfi_status' => 'cleared', ...$changes]);
+            if ($evidenceHold === 'aml') {
+                AmlScreening::query()->where('user_id', $this->owner->id)->update(['compliance_decision' => 'pending_review']);
+            } elseif ($evidenceHold === 'rfi') {
+                NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
+                    'user_provider_account_id' => $this->account->id, 'scope' => 'customer',
+                    'provider_reference_fingerprint' => str_repeat('a', 64), 'status' => 'requested', 'evidence' => []]);
+            }
+        };
+        if ($beforeWire) {
+            $wire->beforeWire = $restrictAccount;
+        } else {
+            $restrictAccount();
+        }
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+
+        $this->assertSame(0, $wire->submissions);
+        $this->assertSame([], $wire->bodies);
+        $this->assertSame(0, $outbox->fresh()->attempts);
+        $this->assertNull($outbox->fresh()->submission_started_at);
+        $this->assertSame('exception', $outbox->fresh()->state);
+        $this->assertSame($beforeWire ? 'dynamic_submission_not_started'
+            : ($evidenceHold !== null ? 'dynamic_compliance_hold_or_evidence_unavailable'
+                : 'dynamic_customer_account_beneficiary_or_wallet_ineligible'), $outbox->fresh()->exception_code);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame($terms, $intent->fresh()->getAttributes());
     }
 
     #[DataProvider('dynamicCountries')]

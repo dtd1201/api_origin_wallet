@@ -182,6 +182,14 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
             'wrong wallet binding' => ['wallet', ['external_account_id' => 'OTHER-WALLET']],
             'missing authoritative wallet amount' => ['wallet', ['raw_data' => []]],
             'blocked account' => ['account', ['status' => 'blocked']],
+            'pending provider account' => ['account', ['provider_status' => 'pending']],
+            'rejected provider account' => ['account', ['provider_status' => 'rejected']],
+            'suspended provider account' => ['account', ['provider_status' => 'suspended']],
+            'blocked provider account' => ['account', ['provider_status' => 'blocked']],
+            'provider account under review' => ['account', ['provider_sub_status' => 'under_review']],
+            'unverified customer binding' => ['account', ['customer_id_verified_at' => null]],
+            'unverified wallet binding' => ['account', ['wallet_id_verified_at' => null]],
+            'account security conflict' => ['account', ['security_conflict_at' => '2030-01-01 00:00:00']],
             'account RFI' => ['account', ['rfi_status' => 'requested']],
             'missing RFI' => ['account', ['rfi_status' => null]],
             'unknown RFI' => ['account', ['rfi_status' => 'unknown']],
@@ -189,15 +197,16 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
             'failed RFI' => ['account', ['rfi_status' => 'failed']],
             'responded RFI' => ['account', ['rfi_status' => 'responded']],
             'account ODD' => ['account', ['odd_status' => 'pending']],
-            'unknown ODD' => ['account', ['odd_status' => 'unknown']],
-            'missing ODD' => ['account', ['odd_status' => null]],
+            'ODD due' => ['account', ['odd_status' => 'odd_due']],
+            'ODD hold' => ['account', ['odd_status' => 'hold']],
             'failed ODD' => ['account', ['odd_status' => 'failed']],
             'unverified ODD ineligible' => ['account', ['odd_status' => 'odd_ineligible']],
             'unverified ODD not due' => ['account', ['odd_status' => 'odd_not_due']],
             'unverified ODD completed' => ['account', ['odd_status' => 'completed']],
             'account compliance' => ['account', ['compliance_status' => 'blocked']],
-            'missing compliance' => ['account', ['compliance_status' => null]],
-            'unknown compliance' => ['account', ['compliance_status' => 'unknown']],
+            'compliance action required' => ['account', ['compliance_status' => 'action_required']],
+            'compliance rejected' => ['account', ['compliance_status' => 'rejected']],
+            'compliance hold' => ['account', ['compliance_status' => 'hold']],
             'pending compliance' => ['account', ['compliance_status' => 'pending']],
             'failed compliance' => ['account', ['compliance_status' => 'failed']],
             'unverified compliance completed' => ['account', ['compliance_status' => 'completed']],
@@ -209,6 +218,7 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
     #[DataProvider('ineligibleChanges')]
     public function test_beneficiary_wallet_and_account_rejections_are_atomic(string $record, array $changes): void
     {
+        $this->account->update(['compliance_status' => null, 'odd_status' => 'unknown', 'rfi_status' => 'cleared']);
         $this->{$record}->update($changes);
 
         $this->rejected(fn () => $this->confirmDynamic());
@@ -228,6 +238,7 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
 
     public function test_current_aml_hold_is_rejected(): void
     {
+        $this->account->update(['compliance_status' => null, 'odd_status' => 'unknown', 'rfi_status' => 'cleared']);
         AmlScreening::query()->update(['compliance_decision' => 'pending_review']);
 
         $this->rejected(fn () => $this->confirmDynamic(), 'dynamic_compliance_hold_or_evidence_unavailable');
@@ -237,6 +248,7 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
 
     public function test_current_rfi_hold_is_rejected(): void
     {
+        $this->account->update(['compliance_status' => null, 'odd_status' => 'unknown', 'rfi_status' => 'cleared']);
         NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
             'user_provider_account_id' => $this->account->id, 'scope' => 'customer',
             'provider_reference_fingerprint' => str_repeat('a', 64), 'status' => 'requested', 'evidence' => []]);

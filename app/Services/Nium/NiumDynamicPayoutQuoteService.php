@@ -16,6 +16,7 @@ use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutQuote;
 use App\Models\User;
 use App\Models\UserProviderAccount;
+use App\Services\Nium\DynamicConfirmation\DynamicAccountEligibility;
 use App\Services\Nium\DynamicConfirmation\DynamicReceivingAccountBinding;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutEnvironment;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutEligibility;
@@ -260,9 +261,8 @@ final class NiumDynamicPayoutQuoteService
             || preg_match('/^[A-Z]{2}$/D', (string) $beneficiary->country_code) !== 1
             || preg_match('/^[A-Z]{3}$/D', (string) $beneficiary->currency) !== 1
             || $wallet->currency !== 'USD' || $wallet->external_account_id !== $account->external_account_id
-            || ! in_array($account->compliance_status, ['clear', 'approved'], true)
+            || ! DynamicAccountEligibility::permitsAuxiliaryObservations($account->compliance_status, $account->odd_status)
             || ! in_array($account->rfi_status, ['clear', 'cleared', 'closed', 'not_required'], true)
-            || ! in_array($account->odd_status, ['clear', 'not_required'], true)
             || $account->reconciliation_status !== 'reconciled'
             || $account->customer_id_verified_at->isFuture() || $account->wallet_id_verified_at->isFuture()) {
             throw new RuntimeException('dynamic_quote_local_eligibility_changed');

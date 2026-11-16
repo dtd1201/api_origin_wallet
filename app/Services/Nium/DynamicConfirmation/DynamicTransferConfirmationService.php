@@ -228,9 +228,8 @@ final class DynamicTransferConfirmationService
             || $r->kyc->status !== 'approved' || $r->provider->code !== 'nium' || $r->provider->status !== 'active'
             || $r->account->status !== 'active' || $r->account->provider_status !== 'clear'
             || ! in_array($r->account->provider_sub_status, [null, ''], true)
-            || ! in_array($r->account->compliance_status, ['clear', 'approved'], true)
+            || ! DynamicAccountEligibility::permitsAuxiliaryObservations($r->account->compliance_status, $r->account->odd_status)
             || ! in_array($r->account->rfi_status, ['clear', 'cleared', 'closed', 'not_required'], true)
-            || ! in_array($r->account->odd_status, ['clear', 'not_required'], true)
             || $r->account->reconciliation_status !== 'reconciled' || $r->account->security_conflict_at !== null
             || $r->account->customer_id_verified_at === null || $r->account->wallet_id_verified_at === null
             || ! in_array($r->beneficiary->status, ['active', 'approved', 'verified'], true)
