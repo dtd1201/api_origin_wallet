@@ -708,6 +708,523 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
+    /** Reuse the real authenticated GET projector; no new RFI marker or case is fabricated. */
+    private function authenticatedAccountWithoutRfi(): void
+    {
+        $this->account->update(['rfi_status' => null]);
+        $updates = app(\App\Services\Nium\NiumAuthenticatedStateProjector::class)->accountUpdates($this->account, [
+            'customerHashId' => $this->account->external_customer_id,
+            'walletHashId' => $this->account->external_account_id, 'status' => 'clear', 'subStatus' => null,
+        ], 'nium_v5_customer_get_response');
+        $this->account->update($updates);
+    }
+
+    #[DataProvider('modes')]
+    public function test_authenticated_clear_customer_without_rfi_history_can_complete_dynamic_admission(string $mode): void
+    {
+        $this->owner->kycProfile()->update(['status' => 'verified', 'applicant_type' => 'business']);
+        $this->beneficiary->update(['country_code' => 'SG', 'currency' => 'SGD']);
+        $this->authenticatedAccountWithoutRfi();
+        $before = $this->account->fresh()->getAttributes();
+        $this->assertSame('NO_RFI', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $review = $this->readyReview($mode, checkOptions: true);
+        $id = $this->postJson($this->path(''), $this->submitReady($review))->assertCreated()->json('id');
+        $this->postJson($this->path(''), $this->submitReady($review))->assertOk()->assertJsonPath('id', $id);
+        $wire = new DynamicPayoutTransportStub;
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $this->travelTo(now()->addSeconds(31));
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $this->assertSame($record['evidence']['instruction_validation']['request_json'], $wire->bodies[0]);
+        $this->assertNull($this->account->fresh()->rfi_status);
+        $this->assertSame($before, $this->account->fresh()->getAttributes());
+        $this->assertSame(0, NiumRfiCase::query()->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+    }
+
+    public static function dynamicRfiEvidenceStates(): array
+    {
+        return [
+            'no history with GET evidence' => [null, null, null, true, 'NO_RFI'],
+            'explicit not required' => ['not_required', null, null, false, 'NO_RFI'],
+            'absence without evidence' => [null, null, null, false, 'UNKNOWN'],
+            'explicit unknown despite GET' => ['unknown', null, null, true, 'UNKNOWN'],
+            'empty summary despite GET' => ['', null, null, true, 'UNKNOWN'],
+            'unsupported pending summary' => ['pending', null, null, true, 'UNKNOWN'],
+            'requested without case' => ['requested', null, null, true, 'OPEN_RFI'],
+            'responded without resolution' => ['responded', null, null, true, 'OPEN_RFI'],
+            'cleared without mandatory case' => ['cleared', null, null, false, 'RESOLVED_RFI'],
+            'legacy clear summary' => ['clear', null, null, false, 'RESOLVED_RFI'],
+            'legacy closed case' => ['closed', 'closed', null, false, 'RESOLVED_RFI'],
+            'resolved authoritative case' => ['cleared', 'resolved_authoritative_clear', 'past', false, 'RESOLVED_RFI'],
+            'resolution missing timestamp' => ['cleared', 'resolved_authoritative_clear', null, true, 'UNKNOWN'],
+            'resolution future timestamp' => ['cleared', 'resolved_authoritative_clear', 'future', true, 'UNKNOWN'],
+            'resolution contradictory summary' => ['unknown', 'resolved_authoritative_clear', 'past', true, 'UNKNOWN'],
+            'null summary with history' => [null, 'closed', 'past', true, 'UNKNOWN'],
+            'historical webhook is not resolution' => ['cleared', 'historical_webhook_evidence', 'past', true, 'UNKNOWN'],
+            'unknown case' => ['cleared', 'unknown', 'past', true, 'UNKNOWN'],
+            'open case overrides clear summary' => ['cleared', 'requested', 'past', true, 'OPEN_RFI'],
+            'provisional case overrides no RFI' => [null, 'provisional', null, true, 'OPEN_RFI'],
+            'responded case still open' => ['cleared', 'responded_under_review', 'past', true, 'OPEN_RFI'],
+            'rejected authoritative case blocks' => ['cleared', 'rejected_authoritative', 'past', true, 'OPEN_RFI'],
+        ];
+    }
+
+    #[DataProvider('dynamicRfiEvidenceStates')]
+    public function test_dynamic_rfi_state_uses_evidence_without_writing_a_status(
+        ?string $summary, ?string $caseStatus, ?string $resolution, bool $authenticated, string $expected): void
+    {
+        if ($authenticated) $this->authenticatedAccountWithoutRfi();
+        $this->account->update(['rfi_status' => $summary]);
+        if ($caseStatus !== null) {
+            NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
+                'user_provider_account_id' => $this->account->id, 'scope' => 'customer',
+                'provider_reference_fingerprint' => str_repeat('b', 64), 'status' => $caseStatus,
+                'reconciled_at' => $resolution === null ? null : ($resolution === 'future' ? now()->addMinute() : now()),
+                'evidence' => []]);
+        }
+        $beforeAccount = $this->account->fresh()->getAttributes();
+        $beforeCases = NiumRfiCase::query()->orderBy('id')->get()->toArray();
+        $this->assertSame($expected, DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $this->assertSame(in_array($expected, ['NO_RFI', 'RESOLVED_RFI'], true),
+            DynamicTransferConfirmationService::permitsRfi($this->account->fresh()));
+        $this->assertSame($beforeAccount, $this->account->fresh()->getAttributes());
+        $this->assertSame($beforeCases, NiumRfiCase::query()->orderBy('id')->get()->toArray());
+        $this->noAdmission();
+    }
+
+    public static function unverifiedNoRfiObservations(): array
+    {
+        return [
+            'missing reconciliation time' => [['reconciled_at' => null], []],
+            'future provider observation' => [['provider_status_updated_at' => '2030-01-01T00:11:00Z'], []],
+            'pending account reconciliation' => [['reconciliation_status' => 'pending'], []],
+            'reconciliation error' => [['reconciliation_error' => 'failed'], []],
+            'customer binding unavailable' => [['customer_id_verified_at' => null], []],
+            'wallet binding unavailable' => [['wallet_id_verified_at' => null], []],
+            'unknown source' => [[], ['nium_last_state_source' => 'unknown']],
+            'webhook alone' => [[], ['nium_last_state_source' => 'nium_webhook_notification:customer_status_webhook']],
+            'missing timestamp' => [[], ['nium_last_state_at' => null]],
+            'malformed timestamp' => [[], ['nium_last_state_at' => 'invalid']],
+            'contradictory observation time' => [[], ['nium_last_state_at' => '2030-01-01T00:09:00Z']],
+        ];
+    }
+
+    #[DataProvider('unverifiedNoRfiObservations')]
+    public function test_no_rfi_absence_cannot_replace_an_unverified_observation(array $changes, array $metadata): void
+    {
+        $this->authenticatedAccountWithoutRfi();
+        $this->account->update([...$changes, 'metadata' => [...$this->account->metadata, ...$metadata]]);
+        $this->assertSame('UNKNOWN', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $this->assertFalse(DynamicTransferConfirmationService::permitsRfi($this->account->fresh()));
+        $this->noAdmission();
+    }
+
+    public function test_open_rfi_after_no_rfi_review_blocks_review_and_confirmation(): void
+    {
+        $this->authenticatedAccountWithoutRfi();
+        $review = $this->readyReview();
+        NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
+            'user_provider_account_id' => $this->account->id, 'scope' => 'customer',
+            'provider_reference_fingerprint' => str_repeat('b', 64), 'status' => 'requested', 'evidence' => []]);
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => NiumDynamicPayoutQuote::query()->sole()->id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonMissingPath('accepted_fingerprint')
+            ->assertJsonPath('reason_codes', ['dynamic_quote_local_eligibility_changed']);
+        $this->assertQuoteFailure('dynamic_compliance_hold_or_evidence_unavailable', fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'new-rfi-after-review', $review['accepted_fingerprint']));
+        $this->assertNull($this->account->fresh()->rfi_status);
+        $this->noAdmission();
+    }
+
+    public static function rfiArrivalStages(): array
+    {
+        return ['before claim' => [false], 'before wire' => [true]];
+    }
+
+    #[DataProvider('rfiArrivalStages')]
+    public function test_open_rfi_after_no_rfi_confirmation_blocks_dispatch_without_a_wire_attempt(bool $beforeWire): void
+    {
+        $this->authenticatedAccountWithoutRfi();
+        $review = $this->readyReview();
+        $this->postJson($this->path(''), $this->submitReady($review))->assertCreated();
+        $wire = new DynamicPayoutTransportStub;
+        $openRfi = function (): void {
+            NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
+                'user_provider_account_id' => $this->account->id, 'scope' => 'customer',
+                'provider_reference_fingerprint' => str_repeat('b', 64), 'status' => 'requested', 'evidence' => []]);
+        };
+        if ($beforeWire) $wire->beforeWire = $openRfi;
+        else $openRfi();
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+
+        $this->assertSame(0, $wire->submissions);
+        $this->assertSame([], $wire->bodies);
+        $this->assertSame(0, $outbox->fresh()->attempts);
+        $this->assertNull($outbox->fresh()->submission_started_at);
+        $this->assertSame('exception', $outbox->fresh()->state);
+        $this->assertSame($beforeWire ? 'dynamic_submission_not_started'
+            : 'dynamic_compliance_hold_or_evidence_unavailable', $outbox->fresh()->exception_code);
+        $this->assertNull($this->account->fresh()->rfi_status);
+        $this->assertSame('requested', NiumRfiCase::query()->sole()->status);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+    }
+
+    public static function acceptedDynamicKycProfiles(): array
+    {
+        return [
+            'approved individual' => ['approved', 'individual'],
+            'verified individual' => ['verified', 'individual'],
+            'approved business' => ['approved', 'business'],
+            'verified business' => ['verified', 'business'],
+        ];
+    }
+
+    #[DataProvider('acceptedDynamicKycProfiles')]
+    public function test_accepted_kyc_profile_reaches_sgd_quote_review_confirmation_and_dispatch(string $status, string $type): void
+    {
+        $this->owner->kycProfile()->update(['status' => $status, 'applicant_type' => $type]);
+        $this->beneficiary->update(['country_code' => 'SG', 'currency' => 'SGD']);
+        $review = $this->readyReview(checkOptions: true);
+        $request = $this->submitReady($review);
+        $id = $this->postJson($this->path(''), $request)->assertCreated()->json('id');
+        $this->postJson($this->path(''), $request)->assertOk()->assertJsonPath('id', $id);
+        $wire = new DynamicPayoutTransportStub;
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $this->assertSame($status, $this->owner->kycProfile()->sole()->status);
+        $this->assertSame($type, $this->owner->kycProfile()->sole()->applicant_type);
+        $this->assertSame('clear', $this->account->fresh()->provider_status);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+    }
+
+    public static function unacceptedDynamicKycProfiles(): array
+    {
+        return [['pending'], ['rejected']];
+    }
+
+    #[DataProvider('unacceptedDynamicKycProfiles')]
+    public function test_pending_or_rejected_profile_blocks_options_and_quote_despite_clear_account(string $status): void
+    {
+        $this->owner->kycProfile()->update(['status' => $status]);
+        $this->nium->shouldNotReceive('get');
+        $this->nium->shouldNotReceive('post');
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('dynamic_available', false)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_local_eligibility_changed']);
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_local_eligibility_changed']);
+        $this->assertSame($status, $this->owner->kycProfile()->sole()->status);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('unacceptedDynamicKycProfiles')]
+    public function test_profile_revoked_after_quote_blocks_review_and_confirmation(string $status): void
+    {
+        $this->owner->kycProfile()->update(['status' => 'verified']);
+        $review = $this->readyReview();
+        $this->owner->kycProfile()->update(['status' => $status]);
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => NiumDynamicPayoutQuote::query()->sole()->id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_quote_local_eligibility_changed'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->assertQuoteFailure('dynamic_customer_account_beneficiary_or_wallet_ineligible', fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'revoked-kyc-profile', $review['accepted_fingerprint']));
+        $this->assertSame($status, $this->owner->kycProfile()->sole()->status);
+        $this->noAdmission();
+    }
+
+    public function test_verified_business_profile_can_dispatch_without_completing_superseded_pending_aml(): void
+    {
+        $this->owner->kycProfile()->update(['status' => 'verified', 'applicant_type' => 'business']);
+        $this->beneficiary->update(['country_code' => 'SG', 'currency' => 'SGD']);
+        $profile = $this->owner->kycProfile()->sole();
+        for ($index = 0; $index < 3; $index++) {
+            AmlScreening::query()->create(['user_id' => $this->owner->id, 'kyc_profile_id' => $profile->id,
+                'subject_type' => 'individual', 'subject_name' => 'Unresolved screening '.$index,
+                'status' => 'pending', 'compliance_decision' => 'pending_review', 'superseded_at' => now()]);
+        }
+        $before = AmlScreening::query()->where('user_id', $this->owner->id)->orderBy('id')->get()->toArray();
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence(); $this->providerQuote();
+        // A valid current clearance exists; superseded jobs need not be completed again.
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('status', 'QUOTE_REFERENCE_ONLY');
+        $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
+        $review = $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id, 'dynamic_quote_id' => $id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertOk()->assertJsonPath('status', 'READY')->json();
+        $this->noAdmission();
+        $request = $this->submitReady($review);
+        $intentId = $this->postJson($this->path(''), $request)->assertCreated()->json('id');
+        $this->postJson($this->path(''), $request)->assertOk()->assertJsonPath('id', $intentId);
+        $wire = new DynamicPayoutTransportStub;
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $this->travelTo(now()->addSeconds(31));
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $this->assertSame($record['evidence']['instruction_validation']['request_json'], $wire->bodies[0]);
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame($before, AmlScreening::query()->where('user_id', $this->owner->id)->orderBy('id')->get()->toArray());
+        $this->assertSame('verified', $this->owner->kycProfile()->sole()->status);
+        $this->assertSame('clear', $this->account->fresh()->provider_status);
+    }
+
+    public function test_approved_to_verified_profile_change_does_not_reuse_old_review_consent(): void
+    {
+        $review = $this->readyReview();
+        $this->owner->kycProfile()->update(['status' => 'verified']);
+        $this->assertQuoteFailure('dynamic_review_binding_changed', fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'changed-accepted-kyc-profile', $review['accepted_fingerprint']));
+        $this->assertSame('verified', $this->owner->kycProfile()->sole()->status);
+        $this->noAdmission();
+    }
+
+    public static function inapplicableLocalAmlExecutionStates(): array
+    {
+        $cases = [];
+        foreach ([null, 'pending', 'running', 'failed', 'unknown'] as $state) {
+            foreach (['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'] as $mode) {
+                $cases[($state === null ? 'no rows' : 'superseded '.$state).' '.$mode] = [$state, $mode];
+            }
+        }
+        return $cases;
+    }
+
+    #[DataProvider('inapplicableLocalAmlExecutionStates')]
+    public function test_dynamic_admission_does_not_require_absent_or_superseded_aml_execution(?string $state, string $mode): void
+    {
+        $this->owner->kycProfile()->update(['status' => 'verified', 'applicant_type' => 'business']);
+        $this->beneficiary->update(['country_code' => 'SG', 'currency' => 'SGD']);
+        $this->authenticatedAccountWithoutRfi();
+        $screening = AmlScreening::query()->where('user_id', $this->owner->id)->sole();
+        if ($state === null) {
+            $screening->delete(); // Remove only the synthetic clear fixture, not provider evidence.
+        } else {
+            // Preserve the current valid clearance and add an obsolete execution record.
+            $historical = $screening->replicate();
+            $historical->fill(['status' => $state, 'compliance_decision' => 'pending_review',
+                'screening_result' => null, 'completed_at' => null, 'superseded_at' => now(),
+                'result_summary' => $state === 'failed' ? ['error' => 'provider_failure'] : null])->save();
+        }
+        $before = AmlScreening::query()->where('user_id', $this->owner->id)->get()->toArray();
+        $review = $this->readyReview($mode, checkOptions: true);
+        $request = $this->submitReady($review);
+        $id = $this->postJson($this->path(''), $request)->assertCreated()->json('id');
+        $this->postJson($this->path(''), $request)->assertOk()->assertJsonPath('id', $id);
+        $wire = new DynamicPayoutTransportStub;
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $this->travelTo(now()->addSeconds(31));
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $this->assertSame($record['evidence']['instruction_validation']['request_json'], $wire->bodies[0]);
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame($before, AmlScreening::query()->where('user_id', $this->owner->id)->get()->toArray());
+        $this->assertNull($this->account->fresh()->rfi_status);
+        $this->assertSame(0, NiumRfiCase::query()->count());
+    }
+
+    public static function verifiedProfileRestrictions(): array
+    {
+        return [
+            'account not clear' => ['account', ['provider_status' => 'pending'], 'dynamic_customer_account_beneficiary_or_wallet_ineligible'],
+            'wrong wallet binding' => ['wallet', ['external_account_id' => 'foreign-wallet'], 'dynamic_customer_account_beneficiary_or_wallet_ineligible'],
+            'changed beneficiary binding' => ['beneficiary', ['account_number' => 'CHANGED'], 'dynamic_quote_binding_changed'],
+            'real compliance hold' => ['account', ['compliance_status' => 'hold'], 'dynamic_customer_account_beneficiary_or_wallet_ineligible'],
+            'unresolved AML finding' => ['screening', ['status' => 'manual_review', 'compliance_decision' => 'pending_review',
+                'screening_result' => 'match'],
+                'dynamic_compliance_hold_or_evidence_unavailable'],
+        ];
+    }
+
+    public static function recordedLocalAmlRestrictions(): array
+    {
+        $cases = [
+            'manual review' => [['status' => 'manual_review'], false],
+            'rejected decision' => [['compliance_decision' => 'rejected'], false],
+            'unresolved sanctions match' => [[], true],
+        ];
+        // The same local admission gate protects all nine contracted Dynamic corridors.
+        foreach ([['HK', 'HKD'], ['SG', 'SGD'], ['GB', 'GBP'], ['DK', 'EUR'], ['DE', 'EUR'],
+            ['JP', 'JPY'], ['TH', 'THB'], ['KR', 'KRW'], ['CH', 'EUR']] as [$country, $currency]) {
+            foreach (['pending', 'running', 'failed', 'unknown'] as $state) {
+                $cases[$country.' '.$currency.' active '.$state] = [
+                    ['status' => $state, 'compliance_decision' => 'pending_review',
+                        'screening_result' => null, 'completed_at' => null,
+                        'result_summary' => $state === 'failed' ? ['error' => 'provider_failure'] : null],
+                    false, $country, $currency,
+                ];
+            }
+        }
+        return $cases;
+    }
+
+    #[DataProvider('recordedLocalAmlRestrictions')]
+    public function test_recorded_aml_restrictions_still_block_review_and_confirmation(
+        array $changes, bool $match, string $country = 'GB', string $currency = 'GBP'): void
+    {
+        $this->owner->kycProfile()->update(['status' => 'verified']);
+        $this->beneficiary->update(['country_code' => $country, 'currency' => $currency]);
+        $this->authenticatedAccountWithoutRfi();
+        $screening = AmlScreening::query()->where('user_id', $this->owner->id)->sole();
+        $review = $this->readyReview();
+        if (! $match) $screening->update(['status' => 'pending', 'compliance_decision' => 'pending_review',
+            'screening_result' => null, 'completed_at' => null, ...$changes]);
+        if ($match) $screening->matches()->create(['list_type' => 'sanctions', 'source' => 'fixture',
+            'matched_name' => 'Fixture unresolved match', 'status' => 'open']);
+        $before = $screening->fresh()->getAttributes();
+        $beforeMatches = $screening->matches()->get()->toArray();
+
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => NiumDynamicPayoutQuote::query()->sole()->id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_compliance_hold_or_evidence_unavailable'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->assertQuoteFailure('dynamic_compliance_hold_or_evidence_unavailable', fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'actual-aml-restriction', $review['accepted_fingerprint']));
+
+        $this->assertSame($before, $screening->fresh()->getAttributes());
+        $this->assertSame($beforeMatches, $screening->matches()->get()->toArray());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('verifiedProfileRestrictions')]
+    public function test_verified_profile_does_not_override_account_binding_or_compliance_restrictions(
+        string $record, array $changes, string $reason): void
+    {
+        $this->owner->kycProfile()->update(['status' => 'verified']);
+        $review = $this->readyReview();
+        $changed = $record === 'screening'
+            ? AmlScreening::query()->where('user_id', $this->owner->id)->sole() : $this->{$record};
+        $changed->update($changes);
+        $before = $changed->fresh()->getAttributes();
+        $this->assertQuoteFailure($reason, fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'verified-kyc-restriction', $review['accepted_fingerprint']));
+        $this->assertSame($before, $changed->fresh()->getAttributes());
+        $this->assertSame('verified', $this->owner->kycProfile()->sole()->status);
+        $this->noAdmission();
+    }
+
+    public static function dynamicProfilesAndModes(): array
+    {
+        return [
+            'approved source' => ['approved', 'SOURCE_AMOUNT'],
+            'approved destination' => ['approved', 'DESTINATION_AMOUNT'],
+            'verified source' => ['verified', 'SOURCE_AMOUNT'],
+            'verified destination' => ['verified', 'DESTINATION_AMOUNT'],
+        ];
+    }
+
+    #[DataProvider('dynamicProfilesAndModes')]
+    public function test_optional_auxiliary_observations_can_change_between_dynamic_boundaries_without_new_consent(
+        string $profileStatus, string $mode): void
+    {
+        $this->owner->kycProfile()->update(['status' => $profileStatus, 'applicant_type' => 'business']);
+        $this->beneficiary->update(['country_code' => 'SG', 'currency' => 'SGD']);
+        $this->authenticatedAccountWithoutRfi();
+        $this->account->update(['compliance_status' => null, 'odd_status' => 'unknown']);
+        // Optional observations can change during the provider validation round trip.
+        $this->duringValidation = function (): void {
+            $this->account->update(['compliance_status' => null, 'odd_status' => null]);
+        };
+        $review = $this->readyReview($mode, checkOptions: true);
+        $this->assertNull($this->account->fresh()->compliance_status);
+        $this->assertNull($this->account->fresh()->odd_status);
+
+        $this->account->update(['compliance_status' => 'unknown', 'odd_status' => 'clear']);
+        $request = $this->submitReady($review);
+        $id = $this->postJson($this->path(''), $request)->assertCreated()->json('id');
+        $this->postJson($this->path(''), $request)->assertOk()->assertJsonPath('id', $id);
+        $intent = NiumDynamicIntent::query()->sole();
+        $terms = $intent->getAttributes();
+        $this->assertSame($review['accepted_fingerprint'], $intent->terms_fingerprint);
+
+        $this->account->update(['compliance_status' => 'approved', 'odd_status' => 'not_required']);
+        $this->duringValidation = null;
+        $wire = new DynamicPayoutTransportStub;
+        $wire->beforeWire = function (): void {
+            $this->account->update(['compliance_status' => 'unknown', 'odd_status' => null]);
+        };
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $this->travelTo(now()->addSeconds(31));
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame(1, $outbox->fresh()->attempts);
+        $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $this->assertSame($record['evidence']['instruction_validation']['request_json'], $wire->bodies[0]);
+        $this->assertSame($terms, $intent->fresh()->getAttributes());
+        $this->assertSame($profileStatus, $this->owner->kycProfile()->sole()->status);
+        $this->assertSame('unknown', $this->account->fresh()->compliance_status);
+        $this->assertNull($this->account->fresh()->odd_status);
+        $this->assertNull($this->account->fresh()->rfi_status);
+        $this->assertSame('NO_RFI', DynamicTransferConfirmationService::rfiState($this->account->fresh()));
+        $this->assertSame(0, NiumRfiCase::query()->count());
+        $this->assertSame(1, NiumDynamicIntent::query()->count());
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+    }
+
+    #[DataProvider('providerClearWithAccountRestrictions')]
+    public function test_review_prepare_keeps_preflight_restrictions_before_provider_validation(array $changes): void
+    {
+        $this->owner->kycProfile()->update(['status' => 'verified']);
+        $this->authenticatedAccountWithoutRfi();
+        $this->account->update(['compliance_status' => null, 'odd_status' => 'unknown']);
+        $this->readyReview();
+        $this->account->update($changes);
+        $before = $this->account->fresh()->getAttributes();
+        $this->duringValidation = function (): void {
+            $this->fail('Review must refuse a current restriction before remittance validation.');
+        };
+
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => NiumDynamicPayoutQuote::query()->sole()->id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_quote_local_eligibility_changed'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+
+        $this->assertSame($before, $this->account->fresh()->getAttributes());
+        $this->noAdmission();
+    }
+
     public static function contractedTuplesAndModes(): array
     {
         $cases = [];
@@ -1020,7 +1537,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             $cases[$name.' before claim'] = [$changes, false];
             $cases[$name.' before wire'] = [$changes, true];
         }
-        foreach (['aml', 'rfi'] as $hold) {
+        foreach (['aml', 'rfi', 'sanctions_match', 'pending', 'running', 'failed', 'unknown'] as $hold) {
             foreach ([false, true] as $beforeWire) {
                 $cases[$hold.($beforeWire ? ' before wire' : ' before claim')] = [
                     ['compliance_status' => null, 'odd_status' => 'unknown'], $beforeWire, $hold,
@@ -1044,6 +1561,17 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             $this->account->update(['rfi_status' => 'cleared', ...$changes]);
             if ($evidenceHold === 'aml') {
                 AmlScreening::query()->where('user_id', $this->owner->id)->update(['compliance_decision' => 'pending_review']);
+            } elseif (in_array($evidenceHold, ['pending', 'running', 'failed', 'unknown'], true)) {
+                AmlScreening::query()->where('user_id', $this->owner->id)->sole()->update([
+                    'status' => $evidenceHold, 'compliance_decision' => 'pending_review',
+                    'screening_result' => null, 'completed_at' => null,
+                    'result_summary' => $evidenceHold === 'failed' ? ['error' => 'provider_failure'] : null]);
+            } elseif ($evidenceHold === 'sanctions_match') {
+                $screening = AmlScreening::query()->where('user_id', $this->owner->id)->sole();
+                $screening->update(['status' => 'failed', 'compliance_decision' => 'pending_review',
+                    'screening_result' => null, 'superseded_at' => now()]);
+                $screening->matches()->create(['list_type' => 'sanctions', 'source' => 'fixture',
+                    'matched_name' => 'Fixture unresolved match', 'status' => 'open']);
             } elseif ($evidenceHold === 'rfi') {
                 NiumRfiCase::query()->create(['provider_id' => $this->account->provider_id,
                     'user_provider_account_id' => $this->account->id, 'scope' => 'customer',

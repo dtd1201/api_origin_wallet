@@ -225,11 +225,11 @@ final class DynamicTransferConfirmationService
     private function assertLocalEligibility(LockedPayoutRecords $r): void
     {
         if ($r->user->status !== 'active' || ! in_array($r->user->kyc_status, ['verified', 'approved'], true)
-            || $r->kyc->status !== 'approved' || $r->provider->code !== 'nium' || $r->provider->status !== 'active'
+            || ! in_array(strtolower((string) $r->kyc->status), ['approved', 'verified'], true)
+            || $r->provider->code !== 'nium' || $r->provider->status !== 'active'
             || $r->account->status !== 'active' || $r->account->provider_status !== 'clear'
             || ! in_array($r->account->provider_sub_status, [null, ''], true)
             || ! DynamicAccountEligibility::permitsAuxiliaryObservations($r->account->compliance_status, $r->account->odd_status)
-            || ! in_array($r->account->rfi_status, ['clear', 'cleared', 'closed', 'not_required'], true)
             || $r->account->reconciliation_status !== 'reconciled' || $r->account->security_conflict_at !== null
             || $r->account->customer_id_verified_at === null || $r->account->wallet_id_verified_at === null
             || ! in_array($r->beneficiary->status, ['active', 'approved', 'verified'], true)
@@ -238,14 +238,14 @@ final class DynamicTransferConfirmationService
             || $r->wallet->external_account_id !== $r->account->external_account_id) {
             throw new RuntimeException('dynamic_customer_account_beneficiary_or_wallet_ineligible');
         }
-        $screenings = AmlScreening::query()->where('user_id', $r->user->id)->whereNull('superseded_at')
+        // Dynamic does not require a separate screening row, but an existing active
+        // control without clearance cannot be treated as optional just from its status.
+        $screenings = AmlScreening::query()->where('user_id', $r->user->id)
             ->orderBy('id')->lockForUpdate()->get();
-        if ($screenings->isEmpty() || $screenings->contains(fn ($screening): bool =>
-            $screening->status !== 'completed' || $screening->compliance_decision !== 'clear'
-            || $screening->completed_at === null || $screening->completed_at->isFuture()
-            || (string) $screening->kyc_profile_id !== (string) $r->kyc->id)) {
+        if ($screenings->contains(fn ($screening): bool => self::hasBlockingAmlEvidence($screening))) {
             throw new RuntimeException('dynamic_compliance_hold_or_evidence_unavailable');
         }
+        // Superseding a screening is not a resolution of its sanctions/AML matches.
         $matches = DB::table('aml_matches')->whereIn('aml_screening_id', $screenings->modelKeys())
             ->orderBy('id')->lockForUpdate()->get();
         if ($matches->contains(fn ($match): bool => $match->status !== 'cleared')) {
@@ -259,15 +259,99 @@ final class DynamicTransferConfirmationService
                 throw new RuntimeException('dynamic_customer_account_beneficiary_or_wallet_ineligible');
             }
         }
-        $rfi = NiumRfiCase::query()->where('user_provider_account_id', $r->account->id)
-            ->orderBy('id')->lockForUpdate()->get();
-        // NiumRfiWorkflowService closes authenticated clear observations using
-        // this status. A historical webhook or an unverified resolution is not approval.
-        if ($rfi->contains(fn ($case): bool => $case->status !== 'closed'
-            && ! ($r->account->rfi_status === 'cleared' && $case->status === 'resolved_authoritative_clear'
-                && $case->reconciled_at !== null && ! $case->reconciled_at->isFuture()))) {
+        if (! self::permitsRfi($r->account)) {
             throw new RuntimeException('dynamic_compliance_hold_or_evidence_unavailable');
         }
+    }
+
+    private static function hasBlockingAmlEvidence(AmlScreening $screening): bool
+    {
+        if ($screening->status === 'completed' && $screening->compliance_decision === 'clear'
+            && $screening->completed_at !== null && ! $screening->completed_at->isFuture()) {
+            return false;
+        }
+        $summary = $screening->result_summary ?? [];
+        // prepareProfile()/assertProfileClear() identify current controls by a null
+        // superseded_at. There is no separate "optional" flag: pending/running are
+        // unfinished controls; failed/unknown are missing evidence, not clearance.
+        // Only an already superseded execution-only row is no longer applicable.
+        // Supersession never clears recorded findings/holds or unresolved matches.
+        return ! ($screening->superseded_at !== null && ! $screening->superseded_at->isFuture()
+            && in_array($screening->status, ['pending', 'running', 'failed', 'unknown'], true)
+            && in_array($screening->compliance_decision, [null, 'pending_review', 'unknown'], true)
+            && $screening->screening_result === null
+            && in_array($screening->risk_level, [null, 'unknown', 'low', 'medium'], true)
+            && $screening->reviewed_by_user_id === null && $screening->reviewed_at === null
+            && is_array($summary) && in_array($summary['outcome'] ?? null, [null, 'clear'], true)
+            && ($summary['match_count'] ?? 0) === 0);
+    }
+
+    /** Dynamic-only read model. These labels are never written to account/case status. */
+    public static function rfiState(UserProviderAccount $account): string
+    {
+        if (! $account->exists) return 'UNKNOWN';
+        $locked = DB::transactionLevel() > 0;
+        if ($locked) OwnerFirst::current([$account->user_id]);
+        $cases = NiumRfiCase::query()->useWritePdo()->where('user_provider_account_id', $account->id)
+            ->orderBy('id')->when($locked, fn ($query) => $query->lockForUpdate())->get();
+        $unknownCase = false;
+        $at = now()->toDateTimeImmutable();
+        foreach ($cases as $case) {
+            // Do not hide contradictory provider/scope rows through a query filter.
+            if ((string) $case->provider_id !== (string) $account->provider_id
+                || ! in_array($case->scope, ['customer', 'transaction'], true)) return 'UNKNOWN';
+            if (in_array($case->status, ['provisional', 'requested', 'responded_under_review', 'rejected_authoritative'], true)) {
+                return 'OPEN_RFI';
+            }
+            // Keep the existing closed-case contract and authoritative resolution rule.
+            if ($case->status === 'closed') continue;
+            if ($case->status !== 'resolved_authoritative_clear' || $account->rfi_status !== 'cleared'
+                || $case->reconciled_at === null || $case->reconciled_at > $at) $unknownCase = true;
+        }
+        $summary = $account->rfi_status;
+        if (in_array($summary, ['requested', 'responded', 'action_required'], true)) return 'OPEN_RFI';
+        if ($unknownCase || ! in_array($summary, [null, 'clear', 'cleared', 'closed', 'not_required'], true)) return 'UNKNOWN';
+        if ($summary === null) {
+            // A null optional summary alone is not NO_RFI. Require the existing
+            // authenticated customer GET projection and no contradictory history.
+            return $cases->isEmpty() && self::hasVerifiedNoRfiObservation($account, $at) ? 'NO_RFI' : 'UNKNOWN';
+        }
+        if ($cases->isEmpty() && $summary === 'not_required') return 'NO_RFI';
+        // Resolved account evidence does not require a historical case row.
+        return 'RESOLVED_RFI';
+    }
+
+    public static function permitsRfi(UserProviderAccount $account): bool
+    {
+        return in_array(self::rfiState($account), ['NO_RFI', 'RESOLVED_RFI'], true);
+    }
+
+    private static function hasVerifiedNoRfiObservation(UserProviderAccount $account, \DateTimeImmutable $at): bool
+    {
+        $metadata = $account->metadata;
+        if ($account->status !== 'active' || $account->provider_status !== 'clear'
+            || ! in_array($account->provider_sub_status, [null, ''], true)
+            || $account->reconciliation_status !== 'reconciled' || $account->reconciliation_error !== null
+            || $account->security_conflict_at !== null
+            || ! is_string($account->external_customer_id) || trim($account->external_customer_id) === ''
+            || ! is_string($account->external_account_id) || trim($account->external_account_id) === ''
+            || ! is_array($metadata) || ($metadata['nium_last_state_source'] ?? null) !== 'nium_v5_customer_get_response') return false;
+        foreach (['customer_id_verified_at', 'wallet_id_verified_at', 'provider_status_updated_at', 'reconciled_at'] as $field) {
+            if (! ($account->{$field} instanceof \DateTimeInterface) || $account->{$field} > $at) return false;
+        }
+        $timestamp = $metadata['nium_last_state_at'] ?? null;
+        if (! is_string($timestamp) || preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/D', $timestamp) !== 1) return false;
+        try {
+            $observed = new \DateTimeImmutable($timestamp);
+            $errors = \DateTimeImmutable::getLastErrors();
+            if ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0)) return false;
+        } catch (\Throwable) { return false; }
+        // Database timestamps can have seconds precision while metadata retains fractions.
+        return $observed <= $at
+            && $observed->getTimestamp() === $account->provider_status_updated_at->getTimestamp()
+            && $observed->getTimestamp() === $account->reconciled_at->getTimestamp()
+            && $account->customer_id_verified_at->getTimestamp() <= $observed->getTimestamp()
+            && $account->wallet_id_verified_at->getTimestamp() <= $observed->getTimestamp();
     }
 
     private function assertBindings(LockedPayoutRecords $r, DynamicPayoutEvidence $evidence): void

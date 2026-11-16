@@ -246,6 +246,115 @@ final class NiumDynamicConfirmationPersistenceTest extends DynamicConfirmationDa
         $this->assertEmptyDynamicState();
     }
 
+    public static function actualAmlRestrictions(): array
+    {
+        $restrictions = [
+            'manual review without match row' => [['status' => 'manual_review']],
+            'rejected decision' => [['compliance_decision' => 'rejected']],
+            'explicit hold' => [['compliance_decision' => 'hold']],
+            'recorded match outcome' => [['screening_result' => 'match']],
+            'unverified result' => [['screening_result' => 'unknown']],
+            'high risk evidence' => [['risk_level' => 'high']],
+            'critical risk evidence' => [['risk_level' => 'critical']],
+            'match summary' => [['result_summary' => ['outcome' => 'match', 'match_count' => 0]]],
+            'positive match count' => [['result_summary' => ['outcome' => 'clear', 'match_count' => 1]]],
+            'reviewed but undecided' => [['reviewed_at' => '2030-01-01T00:09:00Z']],
+        ];
+        $cases = [];
+        foreach ($restrictions as $name => [$changes]) {
+            foreach ([false, true] as $superseded) {
+                $cases[$name.($superseded ? ' superseded' : ' current')] = [$changes, $superseded];
+            }
+        }
+        return $cases;
+    }
+
+    #[DataProvider('actualAmlRestrictions')]
+    public function test_screening_supersession_does_not_override_actual_aml_restrictions(array $changes, bool $superseded): void
+    {
+        $screening = AmlScreening::query()->sole();
+        $screening->update(['status' => 'pending', 'compliance_decision' => 'pending_review',
+            'screening_result' => null, 'completed_at' => null, 'risk_level' => 'unknown',
+            'superseded_at' => $superseded ? now() : null, ...$changes]);
+        $before = $screening->fresh()->getAttributes();
+
+        $this->rejected(fn () => $this->confirmDynamic(), 'dynamic_compliance_hold_or_evidence_unavailable');
+
+        $this->assertSame($before, $screening->fresh()->getAttributes());
+        $this->assertEmptyDynamicState();
+    }
+
+    public static function unfinishedAmlControls(): array
+    {
+        $cases = [];
+        foreach (['pending', 'running', 'failed', 'unknown'] as $status) {
+            foreach ([false, true] as $futureSupersession) {
+                $cases[$status.($futureSupersession ? ' future supersession' : ' current')] = [$status, $futureSupersession];
+            }
+        }
+        return $cases;
+    }
+
+    #[DataProvider('unfinishedAmlControls')]
+    public function test_active_unfinished_control_cannot_use_another_clearance_or_future_supersession(
+        string $status, bool $futureSupersession): void
+    {
+        // A separate completed/clear row cannot resolve this still-active obligation.
+        $screening = AmlScreening::query()->sole()->replicate();
+        $screening->fill(['status' => $status, 'compliance_decision' => 'pending_review',
+            'screening_result' => null, 'completed_at' => null,
+            'result_summary' => $status === 'failed' ? ['error' => 'provider_failure'] : null,
+            'superseded_at' => $futureSupersession ? now()->addMinute() : null])->save();
+        $before = $screening->fresh()->getAttributes();
+
+        $this->rejected(fn () => $this->confirmDynamic(), 'dynamic_compliance_hold_or_evidence_unavailable');
+
+        $this->assertSame($before, $screening->fresh()->getAttributes());
+        $this->assertEmptyDynamicState();
+    }
+
+    public static function unresolvedMatchStates(): array
+    {
+        $cases = [];
+        foreach (['open', 'confirmed_match', 'unknown'] as $status) {
+            foreach ([false, true] as $superseded) $cases[] = [$status, $superseded];
+        }
+        return $cases;
+    }
+
+    #[DataProvider('unresolvedMatchStates')]
+    public function test_unresolved_matches_block_even_failed_or_superseded_screenings(string $status, bool $superseded): void
+    {
+        $screening = AmlScreening::query()->sole();
+        $screening->update(['status' => 'failed', 'compliance_decision' => 'pending_review',
+            'screening_result' => null, 'completed_at' => null, 'superseded_at' => $superseded ? now() : null]);
+        $screening->matches()->create(['list_type' => 'sanctions', 'source' => 'fixture',
+            'matched_name' => 'Fixture Match', 'status' => $status]);
+        $before = $screening->fresh()->getAttributes();
+        $beforeMatches = $screening->matches()->get()->toArray();
+
+        $this->rejected(fn () => $this->confirmDynamic(), 'dynamic_compliance_hold_or_evidence_unavailable');
+
+        $this->assertSame($before, $screening->fresh()->getAttributes());
+        $this->assertSame($beforeMatches, $screening->matches()->get()->toArray());
+        $this->assertEmptyDynamicState();
+    }
+
+    public function test_manually_cleared_match_remains_eligible_without_rewriting_aml_evidence(): void
+    {
+        $screening = AmlScreening::query()->sole();
+        $screening->update(['screening_result' => 'match', 'reviewed_at' => now()]);
+        $screening->matches()->create(['list_type' => 'sanctions', 'source' => 'fixture',
+            'matched_name' => 'Fixture Cleared Match', 'status' => 'cleared', 'resolved_at' => now()]);
+        $before = $screening->fresh()->getAttributes();
+
+        $this->confirmDynamic();
+
+        $this->assertSame($before, $screening->fresh()->getAttributes());
+        $this->assertSame('cleared', $screening->matches()->sole()->status);
+        $this->assertSame(1, NiumDynamicReservation::query()->count());
+    }
+
     public function test_current_rfi_hold_is_rejected(): void
     {
         $this->account->update(['compliance_status' => null, 'odd_status' => 'unknown', 'rfi_status' => 'cleared']);

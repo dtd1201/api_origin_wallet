@@ -171,7 +171,7 @@ final class NiumDynamicPayoutController extends Controller
         if ($dynamicQuote && $reasons === []) {
             try {
                 DynamicPayoutGate::assertDispatchEnabled();
-                $this->quotes->assertCurrent($quote, $user, $beneficiary, $wallet);
+                // prepare() checks the current quote before any provider observation.
                 $review = $this->reviews->prepare($user, $beneficiary, $wallet, $quote,
                     new PayoutInstruction($instruction['purpose_code'], $instruction['source_of_funds'], $instruction['comment']));
                 if ($review['status'] === 'READY') {
