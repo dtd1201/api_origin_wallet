@@ -94,6 +94,11 @@ final class NiumDynamicPayoutQuoteService
         }
         $path = $this->quotePath($binding['base_url']);
         $expectedUrl = $binding['base_url'].$path;
+        // Explicit Quote preparation captures authenticated Wallet evidence before
+        // the locked current()/funds checks. Discovery/Options never refresh it.
+        // refresh() owns its short persistence transaction; all HTTP stays outside.
+        $this->wallets->refresh($user, $wallet);
+        $wallet->refresh();
         $dispatched = false;
         $response = $this->nium->post(path: $path, payload: $payload, user: $user,
             operation: 'dynamic_payout_reference_quote', externalReference: (string) $beneficiary->id,

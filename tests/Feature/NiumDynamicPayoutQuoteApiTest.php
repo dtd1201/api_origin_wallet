@@ -68,6 +68,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     private int $detailsSchemaReads = 0;
     private int $walletReads = 0;
     private ?string $walletResponseBody = null;
+    private int $walletResponseStatus = 200;
+    private ?\Closure $duringWalletRead = null;
+    private ?\Closure $walletOutgoing = null;
 
     protected function setUp(): void
     {
@@ -151,9 +154,21 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
                 $reference, $beforeDispatch): Response {
                 $this->walletReads++;
                 $this->assertSame(0, DB::transactionLevel());
-                $beforeDispatch(new Request(new PsrRequest('GET', rtrim((string) config('services.nium.base_url'), '/').$path,
-                    ['x-api-key' => 'synthetic-wallet-test-key'])));
-                if ($this->walletResponseBody !== null) return $this->response($this->walletResponseBody);
+                $this->assertFalse(DB::connection()->getPdo()->inTransaction());
+                \App\Services\Wallet\Concurrency\OwnerFirst::outside();
+                $this->assertSame('/api/v1/client/fixture-client/customer/fixture-customer/wallet/fixture-wallet', $path);
+                $this->assertSame([], $query);
+                $this->assertSame($this->owner->id, $user->id);
+                $this->assertSame((string) $this->wallet->id, $reference);
+                $url = rtrim((string) config('services.nium.base_url'), '/').$path;
+                $outgoing = $this->walletOutgoing === null
+                    ? new Request(new PsrRequest('GET', $url, ['x-api-key' => 'synthetic-wallet-test-key']))
+                    : ($this->walletOutgoing)($url);
+                if ($outgoing !== null) $beforeDispatch($outgoing);
+                if ($this->duringWalletRead !== null) ($this->duringWalletRead)();
+                if ($this->walletResponseBody !== null) {
+                    return new Response(new PsrResponse($this->walletResponseStatus, ['Content-Type' => 'application/json'], $this->walletResponseBody));
+                }
                 if (config('services.nium.base_url') === 'https://api.spend.nium.com') {
                     return $this->response('[{"walletHashId":"fixture-wallet","currencyCode":"USD","balance":2000}]');
                 }
@@ -203,13 +218,10 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     }
 
     private function providerQuote(string $mode = 'SOURCE_AMOUNT', ?string $body = null, ?\Closure $during = null,
-        ?\Closure $outgoing = null, bool $captureWalletSnapshot = true): void
+        ?\Closure $outgoing = null): void
     {
-        // Explicit offline test setup: capture through the actual authenticated
-        // snapshot writer. Quote itself must never fetch or fabricate evidence.
-        if ($captureWalletSnapshot) {
-            app(DynamicPayoutWalletSnapshot::class)->refresh($this->owner, $this->wallet->fresh());
-        }
+        // Register only the provider Quote response. Production preparation must
+        // obtain its own authenticated Wallet evidence through the real writer.
         $origin = rtrim((string) config('services.nium.base_url'), '/');
         $this->nium->shouldReceive('post')->once()->withArgs(static fn ($path, $payload, $user, $transferId, $operation): bool =>
             $operation === 'dynamic_payout_reference_quote')->andReturnUsing(function ($path, $payload, $user,
@@ -489,8 +501,13 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->useQuoteOrigin();
         $this->customerListing();
         $this->providerQuote($mode);
+        $this->assertSame(0, $this->walletReads);
+        $this->assertArrayNotHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
         $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
+        $this->assertSame(1, $this->walletReads);
         $stored = NiumDynamicPayoutQuote::query()->findOrFail($id);
+        $this->assertSame('2000.00000000', app(DynamicPayoutWalletSnapshot::class)
+            ->current($this->owner, $this->wallet->fresh(), $this->account));
         $service = app(NiumDynamicPayoutQuoteService::class);
         $service->assertCurrent($stored, $this->owner, $this->beneficiary, $this->wallet);
         $projection = $service->project($stored);
@@ -1859,6 +1876,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             ->assertJsonPath('supported_amount_modes', ['SOURCE_AMOUNT', 'DESTINATION_AMOUNT'])
             ->assertJsonPath('currency_scales', ['USD' => 2, $currency => 2])
             ->assertJsonPath('executable_amount_modes', [])->assertJsonPath('requires_instruction_validation', true);
+        $this->assertSame(0, $this->walletReads);
+        $this->assertArrayNotHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
         $this->noAdmission();
         $this->assertSame(0, Transfer::query()->count());
     }
@@ -1900,6 +1920,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             $response->assertJsonPath('status', 'QUOTE_REFERENCE_ONLY')->assertJsonPath('supported_amount_modes', ['DESTINATION_AMOUNT'])
                 ->assertJsonPath('currency_scales', ['USD' => 2, $currency => 2])->assertJsonPath('reason_codes', []);
         }
+        $this->assertSame(0, $this->walletReads);
+        $this->assertArrayNotHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
         $this->noAdmission();
         $this->assertSame(0, Transfer::query()->count());
     }
@@ -2370,11 +2393,16 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         DB::statement("SET TIME ZONE 'Asia/Bangkok'");
         $this->customerListing();
         $this->providerQuote($mode);
+        $this->assertSame(0, $this->walletReads);
+        $this->assertArrayNotHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
         $response = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()
             ->assertJsonPath('status', 'QUOTE_REFERENCE_ONLY')->assertJsonPath('quoted_principal.amount', '980')
             ->assertJsonPath('planned_included_fee.amount', '20')->assertJsonPath('planned_total_usd_debit', '1000')
             ->assertJsonPath('nium_quoted_fx_rate', '0.800000000000000001')
             ->assertJsonPath('quote_expires_at', '2030-01-01T01:00:00.000000Z')->assertJsonPath('review', 'REQUIRED');
+        $this->assertSame(1, $this->walletReads);
+        $this->assertSame('2000.00000000', app(DynamicPayoutWalletSnapshot::class)
+            ->current($this->owner, $this->wallet->fresh(), $this->account));
         $this->assertArrayNotHasKey('accepted_fingerprint', $response->json());
         $stored = NiumDynamicPayoutQuote::query()->sole();
         $this->assertSame($mode === 'SOURCE_AMOUNT' ? '980' : '784',
@@ -2985,20 +3013,156 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         return [[2000.0], [true], [false], [null], [-1], ['2e3'], ['2000.000000001'], ['1000000000000']];
     }
 
+    public static function quoteWalletFailures(): array
+    {
+        $valid = '[{"curSymbol":"USD","balance":2000}]';
+        return [
+            'redirect' => [$valid, 302],
+            'unauthorized' => [$valid, 401],
+            'provider error' => [$valid, 500],
+            'malformed JSON' => ['{"currencies":', 200],
+            'duplicate amount keys' => ['[{"curSymbol":"USD","balance":1,"balance":2000}]', 200],
+            'wrong client' => ['[{"clientHashId":"foreign","curSymbol":"USD","balance":2000}]', 200],
+            'wrong customer' => ['[{"customerHashId":"foreign","curSymbol":"USD","balance":2000}]', 200],
+            'wrong wallet' => ['[{"walletHashId":"foreign","curSymbol":"USD","balance":2000}]', 200],
+            'missing USD' => ['[{"curSymbol":"EUR","balance":2000}]', 200],
+            'ambiguous USD' => ['[{"curSymbol":"USD","balance":2000},{"curSymbol":"USD","balance":2000}]', 200],
+            'conflicting balances' => ['[{"curSymbol":"USD","balance":2000,"availableBalance":1}]', 200],
+            'exponent amount' => ['[{"curSymbol":"USD","balance":2e3}]', 200],
+            'excess precision' => ['[{"curSymbol":"USD","balance":2000.000000001}]', 200],
+        ];
+    }
+
+    #[DataProvider('quoteWalletFailures')]
+    public function test_failed_wallet_refresh_prevents_quote_http_and_all_admission(string $body, int $status): void
+    {
+        $this->customerListing();
+        $this->nium->shouldNotReceive('post');
+        $this->walletResponseBody = $body;
+        $this->walletResponseStatus = $status;
+        $raw = $this->wallet->fresh()->raw_data;
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503);
+        $this->assertSame(1, $this->walletReads);
+        $this->assertSame($raw, $this->wallet->fresh()->raw_data);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->assertSame(0, LedgerEntry::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_wallet_timeout_cannot_fall_back_to_an_existing_valid_authenticated_snapshot(): void
+    {
+        app(DynamicPayoutWalletSnapshot::class)->refresh($this->owner, $this->wallet);
+        $raw = $this->wallet->fresh()->raw_data;
+        $this->customerListing();
+        $this->nium->shouldNotReceive('post');
+        $this->duringWalletRead = static function (): void {
+            throw new \Illuminate\Http\Client\ConnectionException('synthetic offline timeout');
+        };
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503);
+        $this->assertSame(2, $this->walletReads);
+        $this->assertSame($raw, $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_wallet_refresh_expiring_during_get_cannot_create_a_quote_or_snapshot(): void
+    {
+        $this->customerListing();
+        $this->nium->shouldNotReceive('post');
+        $this->duringWalletRead = fn () => $this->travelTo(now()->addSeconds(30));
+        $raw = $this->wallet->fresh()->raw_data;
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_wallet_authenticated_snapshot_unavailable']);
+        $this->assertSame(1, $this->walletReads);
+        $this->assertSame($raw, $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public static function quoteWalletBindingChanges(): array
+    {
+        return [['customer'], ['wallet'], ['currency'], ['origin'], ['credential']];
+    }
+
+    #[DataProvider('quoteWalletBindingChanges')]
+    public function test_binding_drift_during_wallet_get_prevents_quote_http(string $binding): void
+    {
+        $this->customerListing();
+        $this->nium->shouldNotReceive('post');
+        $raw = $this->wallet->fresh()->raw_data;
+        $this->duringWalletRead = function () use ($binding): void {
+            match ($binding) {
+                'customer' => $this->account->update(['external_customer_id' => 'foreign-customer']),
+                'wallet' => $this->wallet->update(['external_account_id' => 'foreign-wallet']),
+                'currency' => $this->wallet->update(['currency' => 'EUR']),
+                'origin' => config(['services.nium.base_url' => 'https://gateway.nium.com']),
+                'credential' => config(['services.nium.auth.header_value' => 'rotated-synthetic-key']),
+            };
+        };
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_wallet_snapshot_binding_changed']);
+        $this->assertSame(1, $this->walletReads);
+        $this->assertSame($raw, $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_wallet_credentials_cannot_be_replaced_by_a_generic_balance(): void
+    {
+        $this->customerListing();
+        $this->nium->shouldNotReceive('post');
+        config(['services.nium.auth.header_value' => '']);
+        $raw = $this->wallet->fresh()->raw_data;
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503);
+        $this->assertSame(0, $this->walletReads);
+        $this->assertSame($raw, $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public static function quoteSnapshotBindingChanges(): array
+    {
+        return [
+            ['customer', 'foreign-customer'], ['wallet', 'foreign-wallet'], ['account_id', 'foreign-account'],
+            ['owner', 'foreign-owner'], ['currency', 'EUR'], ['response_sha256', 'invalid'], ['available', '999'],
+        ];
+    }
+
+    #[DataProvider('quoteSnapshotBindingChanges')]
+    public function test_changed_snapshot_after_refresh_cannot_be_used_to_persist_a_quote(string $field, string $value): void
+    {
+        $this->customerListing();
+        $this->providerQuote(during: function () use ($field, $value): void {
+            $raw = $this->wallet->fresh()->raw_data;
+            $raw['dynamic_authenticated_availability'][$field] = $value;
+            $this->wallet->refresh()->update(['raw_data' => $raw]);
+        });
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
+        $this->assertSame(1, $this->walletReads);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
     #[DataProvider('invalidProviderBalances')]
     public function test_invalid_provider_balance_cannot_bypass_a_valid_snapshot(mixed $value): void
     {
         $this->customerListing();
-        $this->providerQuote('DESTINATION_AMOUNT');
-        $raw = $this->wallet->fresh()->raw_data;
-        $raw['provider_available_balance'] = $value;
-        // Preserve a float token across JSONB/Eloquent for the unsafe-type case.
-        $this->wallet->setRawAttributes([...$this->wallet->getAttributes(),
-            'raw_data' => json_encode($raw, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION)]);
-        $this->wallet->save();
+        $this->providerQuote('DESTINATION_AMOUNT', during: function () use ($value): void {
+            $this->wallet->refresh();
+            $raw = $this->wallet->raw_data;
+            $raw['provider_available_balance'] = $value;
+            // Mutate after authenticated preparation, preserving the float token.
+            $this->wallet->setRawAttributes([...$this->wallet->getAttributes(),
+                'raw_data' => json_encode($raw, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION)]);
+            $this->wallet->save();
+        });
         $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
             ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->assertSame(1, $this->walletReads);
         $this->noAdmission();
     }
 
@@ -3006,15 +3170,16 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_exact_provider_balance_mirror_allows_quote_only_with_authenticated_snapshot(mixed $integer): void
     {
         $this->customerListing();
-        $this->providerQuote('DESTINATION_AMOUNT');
-        $raw = $this->wallet->fresh()->raw_data;
-        $snapshot = $raw['dynamic_authenticated_availability'];
-        $raw['provider_available_balance'] = $integer;
-        $this->wallet->update(['raw_data' => $raw]);
-        $this->assertSame($integer, $this->wallet->fresh()->raw_data['provider_available_balance']);
-        $reads = $this->walletReads;
+        $snapshot = null;
+        $this->providerQuote('DESTINATION_AMOUNT', during: function () use ($integer, &$snapshot): void {
+            $raw = $this->wallet->fresh()->raw_data;
+            $snapshot = $raw['dynamic_authenticated_availability'];
+            $raw['provider_available_balance'] = $integer;
+            $this->wallet->refresh()->update(['raw_data' => $raw]);
+        });
         $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertCreated();
-        $this->assertSame($reads, $this->walletReads);
+        $this->assertSame(1, $this->walletReads);
+        $this->assertSame($integer, $this->wallet->fresh()->raw_data['provider_available_balance']);
         $this->assertEquals($snapshot, $this->wallet->fresh()->raw_data['dynamic_authenticated_availability']);
         $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
         $this->noAdmission();
@@ -3024,19 +3189,16 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_legacy_amount_without_authenticated_evidence_remains_blocked(mixed $value): void
     {
         $this->customerListing();
-        $this->providerQuote('DESTINATION_AMOUNT');
-        $this->assertSame(1, $this->walletReads);
-        $this->assertArrayHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
-        // refresh() persisted through another model. Reload before removing its
-        // evidence: on the stale fixture, string '2000' equals the original raw
-        // data, so Eloquent skips UPDATE and leaves the authenticated row intact.
         $legacy = ['provider_available_balance' => $value];
-        $this->wallet->refresh()->update(['raw_data' => $legacy]);
-        $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
-        $reads = $this->walletReads;
+        $this->providerQuote('DESTINATION_AMOUNT', during: function () use ($legacy): void {
+            $this->assertArrayHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
+            // A generic sync during Quote HTTP revokes authentication. Never
+            // reconstruct the snapshot from the remaining numeric mirror.
+            $this->wallet->refresh()->update(['raw_data' => $legacy]);
+        });
         $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
             ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
-        $this->assertSame($reads, $this->walletReads);
+        $this->assertSame(1, $this->walletReads);
         $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
         $this->noAdmission();
@@ -3046,15 +3208,16 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     public function test_legacy_amount_never_authenticated_remains_blocked(mixed $value): void
     {
         $this->customerListing();
-        $this->providerQuote('DESTINATION_AMOUNT', captureWalletSnapshot: false);
+        $this->nium->shouldNotReceive('post');
+        $this->walletOutgoing = static fn (string $url): ?Request => null;
         $legacy = ['provider_available_balance' => $value];
         $this->wallet->refresh()->update(['raw_data' => $legacy]);
         $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
         $this->assertSame(0, $this->walletReads);
 
         $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
-            ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
-        $this->assertSame(0, $this->walletReads);
+            ->assertJsonPath('reason_codes', ['dynamic_wallet_authenticated_snapshot_unavailable']);
+        $this->assertSame(1, $this->walletReads);
         $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
         $this->noAdmission();
@@ -3064,10 +3227,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         $this->customerListing();
         $this->providerQuote('DESTINATION_AMOUNT', during: fn () => $this->travelTo(now()->addSeconds(30)));
-        $reads = $this->walletReads;
         $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
             ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
-        $this->assertSame($reads, $this->walletReads);
+        $this->assertSame(1, $this->walletReads);
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
         $this->noAdmission();
     }
@@ -3111,11 +3273,11 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->walletResponseBody = '[{"curSymbol":"USD","balance":999}]';
         $this->customerListing();
         $this->providerQuote('DESTINATION_AMOUNT');
-        $raw = $this->wallet->fresh()->raw_data;
-        $raw['provider_available_balance'] = 999;
-        $this->wallet->update(['raw_data' => $raw]);
         $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(409)
             ->assertJsonPath('reason_codes', ['dynamic_insufficient_available_funds']);
+        $this->assertSame(1, $this->walletReads);
+        $this->assertSame('999.00000000', app(DynamicPayoutWalletSnapshot::class)
+            ->current($this->owner, $this->wallet->fresh(), $this->account));
         $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
         $this->noAdmission();
@@ -3126,10 +3288,11 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         $this->wallet->update(['reserved_balance' => '1500']);
         $this->customerListing();
-        $this->providerQuote();
-        $raw = $this->wallet->fresh()->raw_data;
-        $raw['provider_available_balance'] = $integer;
-        $this->wallet->update(['raw_data' => $raw]);
+        $this->providerQuote(during: function () use ($integer): void {
+            $raw = $this->wallet->fresh()->raw_data;
+            $raw['provider_available_balance'] = $integer;
+            $this->wallet->refresh()->update(['raw_data' => $raw]);
+        });
         $this->postJson($this->path('/quotes'), $this->input())->assertStatus(409)
             ->assertJsonPath('reason_codes', ['dynamic_insufficient_available_funds']);
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
@@ -3164,6 +3327,29 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->expectException(\App\Services\Wallet\Concurrency\OwnerLockContractViolation::class);
         DB::transaction(fn () => app(NiumDynamicPayoutQuoteService::class)
             ->availability($this->owner, $this->beneficiary, $this->wallet));
+    }
+
+    public static function quoteTransactionContexts(): array { return [[false], [true]]; }
+
+    #[DataProvider('quoteTransactionContexts')]
+    public function test_quote_preparation_cannot_refresh_inside_transactions_or_owner_locks(bool $ownerLock): void
+    {
+        $this->nium->shouldNotReceive('get');
+        $this->nium->shouldNotReceive('post');
+        $work = fn () => app(NiumDynamicPayoutQuoteService::class)
+            ->create($this->owner, $this->beneficiary, $this->wallet, PayoutAmountMode::Source, '1000');
+        try {
+            if ($ownerLock) {
+                \App\Services\Wallet\Concurrency\OwnerFirst::users([$this->owner->id], $work);
+            } else {
+                DB::transaction($work);
+            }
+            $this->fail('Quote preparation attempted HTTP inside a transaction.');
+        } catch (\App\Services\Wallet\Concurrency\OwnerLockContractViolation) {
+            $this->assertSame(0, $this->walletReads);
+            $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+            $this->noAdmission();
+        }
     }
 
     public function test_foreign_customer_cannot_review_a_persisted_reference_quote(): void
