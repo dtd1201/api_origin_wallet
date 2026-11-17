@@ -77,10 +77,12 @@ final class NiumDynamicPayoutQuoteService
     }
 
     public function create(User $user, Beneficiary $beneficiary, Balance $wallet,
-        PayoutAmountMode $mode, string $enteredAmount): NiumDynamicPayoutQuote
+        PayoutAmountMode $mode, string $enteredAmount, ?NiumDynamicQuoteDiagnostics $diagnostics = null): NiumDynamicPayoutQuote
     {
+        $diagnostics?->stage('eligibility');
         $this->assertQuoteDestination($beneficiary->currency);
         $binding = $this->availability($user, $beneficiary, $wallet);
+        $diagnostics?->stage('quote_preparation');
         $request = FinalizedUsdPayoutPreparation::quoteRequestForAmount(
             $binding['customer'], $beneficiary->currency, $mode, $enteredAmount);
         $binding['amount_mode'] = $mode->value;
@@ -97,8 +99,9 @@ final class NiumDynamicPayoutQuoteService
         // Explicit Quote preparation captures authenticated Wallet evidence before
         // the locked current()/funds checks. Discovery/Options never refresh it.
         // refresh() owns its short persistence transaction; all HTTP stays outside.
-        $this->wallets->refresh($user, $wallet);
+        $this->wallets->refresh($user, $wallet, diagnostics: $diagnostics);
         $wallet->refresh();
+        $diagnostics?->stage('quote_transport');
         $dispatched = false;
         $response = $this->nium->post(path: $path, payload: $payload, user: $user,
             operation: 'dynamic_payout_reference_quote', externalReference: (string) $beneficiary->id,
@@ -122,16 +125,20 @@ final class NiumDynamicPayoutQuoteService
         if (! $response->successful()) {
             throw new RuntimeException('dynamic_provider_quote_unavailable');
         }
+        $diagnostics?->stage('quote_response_validation');
         $quote = PayoutRateQuote::referenceFromJson($response->body(), $request);
         $this->checkAmounts($quote);
 
         // No provider I/O inside locks. Refuse changed local identity/registration;
         // check current conservative funds again after HTTP.
-        return OwnerFirst::users([$user->id], function () use ($user, $beneficiary, $wallet, $binding, $request, $response, $quote): NiumDynamicPayoutQuote {
+        $diagnostics?->stage('quote_persistence');
+        return OwnerFirst::users([$user->id], function () use ($user, $beneficiary, $wallet, $binding, $request, $response, $quote, $diagnostics): NiumDynamicPayoutQuote {
+            $diagnostics?->stage('quote_persistence');
             $owner = User::query()->lockForUpdate()->findOrFail($user->id);
             $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($binding['provider_account_id']);
             $recipient = Beneficiary::query()->lockForUpdate()->findOrFail($beneficiary->id);
             $balance = Balance::query()->lockForUpdate()->findOrFail($wallet->id);
+            $diagnostics?->stage('eligibility');
             $current = $this->binding($owner, $recipient, $balance);
             $original = $binding;
             unset($original['amount_mode'], $original['entered_amount']);
@@ -141,13 +148,16 @@ final class NiumDynamicPayoutQuoteService
             $this->assertUnused((int) $recipient->provider_id, $binding, $quote['id']);
             // A legacy numeric mirror is not authenticated wallet evidence. Use
             // an existing scoped snapshot; do not add provider I/O under locks.
+            $diagnostics?->stage('wallet_snapshot_validation');
             try {
                 $this->wallets->current($owner, $balance, $account);
             } catch (RuntimeException $exception) {
                 throw new RuntimeException('dynamic_quote_wallet_balance_unavailable', 0, $exception);
             }
+            $diagnostics?->stage('funds_validation');
             $this->assertFunds($balance, FinalizedUsdPayoutPreparation::plannedDebitForPrincipal($quote['sourceAmount'])->amount->value);
 
+            $diagnostics?->stage('quote_persistence');
             return NiumDynamicPayoutQuote::query()->forceCreate([
                 'id' => (string) Str::uuid(), 'user_id' => $owner->id, 'provider_id' => $recipient->provider_id,
                 'provider_account_id' => $binding['provider_account_id'], 'beneficiary_id' => $recipient->id,

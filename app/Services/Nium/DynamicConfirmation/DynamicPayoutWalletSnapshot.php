@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Models\UserProviderAccount;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumService;
+use App\Services\Nium\NiumDynamicQuoteDiagnostics;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Client\Request;
 use RuntimeException;
@@ -62,8 +63,10 @@ final class DynamicPayoutWalletSnapshot
         return $available;
     }
 
-    public function refresh(User $user, Balance $wallet, ?string $exceptIntent = null): array
+    public function refresh(User $user, Balance $wallet, ?string $exceptIntent = null,
+        ?NiumDynamicQuoteDiagnostics $diagnostics = null): array
     {
+        $diagnostics?->stage('wallet_transport');
         OwnerFirst::outside();
         if (DB::transactionLevel() !== 0 || DB::connection()->getPdo()->inTransaction()) {
             throw new RuntimeException('dynamic_wallet_refresh_requires_network_outside_transaction');
@@ -89,6 +92,8 @@ final class DynamicPayoutWalletSnapshot
                 }
                 $authenticated = true;
             });
+        $diagnostics?->stage($authenticated && $response->successful()
+            ? 'wallet_response_validation' : 'wallet_transport');
         if (! $authenticated || ! $response->successful() || now()->greaterThanOrEqualTo($started->copy()->addSeconds(30))
             || strlen($response->body()) > 1048576) {
             throw new RuntimeException('dynamic_wallet_authenticated_snapshot_unavailable');
@@ -99,6 +104,7 @@ final class DynamicPayoutWalletSnapshot
             'observed_at' => now()->toISOString(), 'expires_at' => $started->copy()->addSeconds(30)->toISOString(),
             'response_sha256' => hash('sha256', $response->body())];
 
+        $diagnostics?->stage('wallet_snapshot_persistence');
         return OwnerFirst::users([$user->id], function () use ($user, $wallet, $account, $scope, $credential, $snapshot, $exceptIntent): array {
             $owner = User::query()->lockForUpdate()->findOrFail($user->id);
             $currentAccount = UserProviderAccount::query()->lockForUpdate()->findOrFail($account->id);

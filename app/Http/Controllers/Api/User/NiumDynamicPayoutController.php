@@ -24,6 +24,7 @@ use App\Services\Nium\DynamicConfirmation\DynamicTransferConfirmationService;
 use App\Services\Nium\DynamicConfirmation\OriginDynamicPayoutEvidenceSource;
 use App\Services\Nium\NiumProviderAccountStateService;
 use App\Services\Nium\NiumDynamicPayoutQuoteService;
+use App\Services\Nium\NiumDynamicQuoteDiagnostics;
 use App\Services\Nium\NiumDynamicReviewService;
 use App\Services\Nium\NiumUnsupportedBeneficiaryCorridor;
 use Brick\Math\BigDecimal;
@@ -112,26 +113,33 @@ final class NiumDynamicPayoutController extends Controller
             && BigDecimal::of($amount->value)->isLessThanOrEqualTo(FinalizedUsdPayoutPreparation::FEE_USD))) {
             throw ValidationException::withMessages(['entered_amount' => 'Enter a positive receive amount or a USD send amount greater than the included fee.']);
         }
+        $diagnostics = new NiumDynamicQuoteDiagnostics;
         [$reasons, $wallet] = $this->candidate($user, $beneficiary);
         if ($reasons !== []) {
+            $diagnostics->refusal($reasons[0]);
             return $this->unavailable($reasons);
         }
         if ($input['amount_mode'] === 'SOURCE_AMOUNT'
             && BigDecimal::of($wallet->available_balance)->isLessThan($amount->value)) {
+            $diagnostics->stage('funds_validation');
+            $diagnostics->refusal('dynamic_insufficient_available_funds');
             return $this->unavailable(['dynamic_insufficient_available_funds'], 409);
         }
 
         if ((bool) config('services.nium.payout_fx_enabled', false)) {
             try {
                 $quote = $this->quotes->create($user, $beneficiary, $wallet,
-                    PayoutAmountMode::from($input['amount_mode']), $input['entered_amount']);
+                    PayoutAmountMode::from($input['amount_mode']), $input['entered_amount'], $diagnostics);
 
+                $diagnostics->stage('quote_projection');
                 return $this->json($this->quotes->project($quote), 201);
             } catch (Throwable $exception) {
+                $diagnostics->report($exception);
                 return $this->quoteUnavailable($exception);
             }
         }
 
+        $diagnostics->refusal('dynamic_provider_quote_disabled');
         return $this->unavailable(OriginDynamicPayoutEvidenceSource::MISSING_DEPENDENCIES);
     }
 

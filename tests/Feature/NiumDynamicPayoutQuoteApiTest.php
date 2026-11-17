@@ -38,6 +38,8 @@ use Illuminate\Foundation\Bootstrap\HandleExceptions;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutWebhook;
@@ -3031,6 +3033,195 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
             'exponent amount' => ['[{"curSymbol":"USD","balance":2e3}]', 200],
             'excess precision' => ['[{"curSymbol":"USD","balance":2000.000000001}]', 200],
         ];
+    }
+
+    public static function diagnosticFailures(): array
+    {
+        $generic = 'dynamic_provider_quote_contract_unavailable';
+        return [
+            ['eligibility', RuntimeException::class, 'dynamic_customer_corridor_not_permitted', 'dynamic_customer_corridor_not_permitted', 503],
+            ['wallet_transport', \Illuminate\Http\Client\ConnectionException::class, 'provider_transport_failed', $generic, 503],
+            ['wallet_response_validation', \JsonException::class, 'invalid_json', $generic, 503],
+            ['wallet_snapshot_persistence', QueryException::class, 'database_query_failed', $generic, 503],
+            ['quote_transport', \Illuminate\Http\Client\ConnectionException::class, 'provider_transport_failed', $generic, 503],
+            ['quote_response_validation', \InvalidArgumentException::class, 'payout_quote_response_binding_mismatch', $generic, 503],
+            ['quote_persistence', QueryException::class, 'database_query_failed', $generic, 503],
+            ['wallet_snapshot_validation', RuntimeException::class, 'dynamic_quote_wallet_balance_unavailable', 'dynamic_quote_wallet_balance_unavailable', 503],
+            ['funds_validation', RuntimeException::class, 'dynamic_insufficient_available_funds', 'dynamic_insufficient_available_funds', 409],
+        ];
+    }
+
+    #[DataProvider('diagnosticFailures')]
+    public function test_quote_diagnostic_records_the_failing_stage_once_without_changing_the_response(
+        string $stage, string $class, string $code, string $reason, int $status): void
+    {
+        Log::spy();
+        $secret = 'synthetic-private-key customer-secret wallet-secret amount=1234.56 private-body';
+        $databaseFailure = static function () use ($secret): never {
+            throw new QueryException('private-connection', 'update private_table set body = ?', [$secret], new \PDOException($secret));
+        };
+        $this->customerListing($stage !== 'eligibility');
+        switch ($stage) {
+            case 'wallet_transport':
+                $this->duringWalletRead = static function () use ($secret): never {
+                    throw new \Illuminate\Http\Client\ConnectionException($secret);
+                };
+                break;
+            case 'wallet_response_validation':
+                $this->walletResponseBody = '{"private":"'.$secret.'","currencies":[';
+                break;
+            case 'wallet_snapshot_persistence':
+                Event::listen('eloquent.saving: '.\App\Models\Balance::class, $databaseFailure);
+                break;
+            case 'quote_transport':
+                $this->providerQuote('DESTINATION_AMOUNT', outgoing: static function () use ($secret): never {
+                    throw new \Illuminate\Http\Client\ConnectionException($secret);
+                });
+                break;
+            case 'quote_response_validation':
+                $this->providerQuote('DESTINATION_AMOUNT', body: '{"private":"'.$secret.'"}');
+                break;
+            case 'quote_persistence':
+                Event::listen('eloquent.creating: '.NiumDynamicPayoutQuote::class, $databaseFailure);
+                $this->providerQuote('DESTINATION_AMOUNT');
+                break;
+            case 'wallet_snapshot_validation':
+                $this->providerQuote('DESTINATION_AMOUNT', during: function (): void {
+                    $this->wallet->refresh()->update(['raw_data' => ['provider_available_balance' => 2000]]);
+                });
+                break;
+            case 'funds_validation':
+                $this->walletResponseBody = '[{"curSymbol":"USD","balance":999}]';
+                $this->providerQuote('DESTINATION_AMOUNT');
+                break;
+        }
+        if (in_array($stage, ['eligibility', 'wallet_transport', 'wallet_response_validation', 'wallet_snapshot_persistence'], true)) {
+            $this->nium->shouldNotReceive('post');
+        }
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus($status)
+            ->assertExactJson(['status' => 'UNAVAILABLE', 'reason_codes' => [$reason],
+                'message' => 'Dynamic payout preparation or submission is unavailable. Check any existing transfer status before trying again.']);
+        // Exact equality forbids identifiers, amounts, bodies, exception objects,
+        // previous exceptions, messages and traces, including nested context.
+        Log::shouldHaveReceived('warning')->once()->with('nium.dynamic_quote.failed', [
+            'stage' => $stage, 'exception_class' => $class, 'internal_code' => $code,
+        ]);
+        Log::shouldHaveReceived('warning')->once();
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_quote_logger_failure_does_not_replace_the_original_http_response(): void
+    {
+        Log::shouldReceive('warning')->once()->andThrow(new RuntimeException('synthetic logger failure'));
+        $this->customerListing(false);
+        $this->nium->shouldNotReceive('post');
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_customer_corridor_not_permitted']);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public static function diagnosticWalletHttpStatuses(): array { return [[302], [401], [500]]; }
+
+    #[DataProvider('diagnosticWalletHttpStatuses')]
+    public function test_unsuccessful_wallet_http_is_logged_as_transport_without_body_or_status(int $status): void
+    {
+        Log::spy();
+        $this->customerListing();
+        $this->nium->shouldNotReceive('post');
+        $this->walletResponseBody = '[{"curSymbol":"USD","balance":2000,"private":"synthetic-secret"}]';
+        $this->walletResponseStatus = $status;
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_wallet_authenticated_snapshot_unavailable']);
+        Log::shouldHaveReceived('warning')->once()->with('nium.dynamic_quote.failed', [
+            'stage' => 'wallet_transport', 'exception_class' => RuntimeException::class,
+            'internal_code' => 'dynamic_wallet_authenticated_snapshot_unavailable',
+        ]);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_snapshot_save_refusal_is_logged_without_creating_a_quote(): void
+    {
+        Log::spy();
+        $this->customerListing();
+        $this->nium->shouldNotReceive('post');
+        Event::listen('eloquent.saving: '.\App\Models\Balance::class, static fn (): bool => false);
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_provider_quote_contract_unavailable']);
+        Log::shouldHaveReceived('warning')->once()->with('nium.dynamic_quote.failed', [
+            'stage' => 'wallet_snapshot_persistence', 'exception_class' => RuntimeException::class,
+            'internal_code' => 'dynamic_execution_state_not_persisted',
+        ]);
+        $this->assertArrayNotHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public static function diagnosticPreflightRefusals(): array
+    {
+        return [
+            ['nium_dynamic_quotes.quote_contract_enabled', false, 'eligibility', 'dynamic_quote_contract_disabled', 503],
+            ['available_balance', '999', 'funds_validation', 'dynamic_insufficient_available_funds', 409],
+            ['services.nium.payout_fx_enabled', false, 'eligibility', 'dynamic_provider_quote_disabled', 503],
+        ];
+    }
+
+    #[DataProvider('diagnosticPreflightRefusals')]
+    public function test_quote_preflight_refusal_emits_one_safe_diagnostic_without_transport(
+        string $key, mixed $value, string $stage, string $code, int $status): void
+    {
+        Log::spy();
+        if ($key === 'available_balance') $this->wallet->update([$key => $value]);
+        else config([$key => $value]);
+        $this->nium->shouldNotReceive('get');
+        $this->nium->shouldNotReceive('post');
+        $reasons = $key === 'services.nium.payout_fx_enabled' ? OriginDynamicPayoutEvidenceSource::MISSING_DEPENDENCIES : [$code];
+        $this->postJson($this->path('/quotes'), $this->input())->assertStatus($status)
+            ->assertJsonPath('reason_codes', $reasons);
+        Log::shouldHaveReceived('warning')->once()->with('nium.dynamic_quote.failed', [
+            'stage' => $stage, 'exception_class' => null, 'internal_code' => $code,
+        ]);
+        Log::shouldHaveReceived('warning')->once();
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_separate_quote_requests_do_not_share_diagnostic_stage_or_deduplication_state(): void
+    {
+        Log::spy();
+        $this->customerListing();
+        $this->walletResponseBody = '{';
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503);
+        Log::shouldHaveReceived('warning')->once();
+        $this->walletResponseBody = null;
+        $this->providerQuote('DESTINATION_AMOUNT', body: '{}');
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503);
+        // Spy count assertions verify immediately; filter each request's context before counting.
+        Log::shouldHaveReceived('warning')->with('nium.dynamic_quote.failed', [
+            'stage' => 'wallet_response_validation', 'exception_class' => \JsonException::class, 'internal_code' => 'invalid_json',
+        ])->once();
+        Log::shouldHaveReceived('warning')->with('nium.dynamic_quote.failed', [
+            'stage' => 'quote_response_validation', 'exception_class' => \InvalidArgumentException::class,
+            'internal_code' => 'payout_quote_response_invalid',
+        ])->once();
+        Log::shouldHaveReceived('warning')->twice();
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_successful_options_and_quote_do_not_emit_failure_diagnostics(): void
+    {
+        Log::spy();
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence();
+        $this->getJson($this->path('/options?beneficiary_id='.$this->beneficiary->id))->assertOk()
+            ->assertJsonPath('dynamic_available', true);
+        $this->assertSame(0, $this->walletReads);
+        $this->providerQuote('DESTINATION_AMOUNT');
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertCreated();
+        Log::shouldNotHaveReceived('warning');
+        $this->noAdmission();
     }
 
     #[DataProvider('quoteWalletFailures')]
