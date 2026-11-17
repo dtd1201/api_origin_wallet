@@ -29,6 +29,7 @@ final class NiumDynamicReviewService
         'dynamic_payout_schema_endpoint_unverified', 'dynamic_payout_schema_destination_amount_unverified',
         'dynamic_payout_source_amount_contract_unverified', 'dynamic_payout_destination_amount_contract_unverified',
         'dynamic_payout_amount_precision_unsupported', 'dynamic_eligibility_scope_changed',
+        'dynamic_payout_amount_out_of_schema_bounds',
         'dynamic_payout_amount_modes_unverified',
         'dynamic_payout_schema_conditional_unsupported', 'dynamic_instruction_validation_endpoint_unverified',
     ];
@@ -203,6 +204,8 @@ final class NiumDynamicReviewService
             || ($e['execution_eligibility']['supported_amount_modes'] ?? null) !== $schema['supported_amount_modes']) {
             throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
         }
+        DynamicPayoutEligibility::assertAmounts($schema, $b['destination_currency'],
+            PayoutAmountMode::from($record['amount_mode']), $projected);
         $selected = $e['execution_eligibility']['selection'];
         if ($selected['payout_method'] !== $b['payout_method']
             || $selected['destination_country'] !== $b['destination_country']

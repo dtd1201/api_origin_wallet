@@ -43,12 +43,12 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         ], PayoutAmountMode::cases());
     }
 
-    public function test_spend_2020_12_schema_retains_conditions_and_observes_only_destination_precision(): void
+    public function test_spend_schema_retains_conditions_and_separates_funding_precision_from_source_mode(): void
     {
         $result = DynamicPayoutEligibility::schemaObservation($this->body(), $this->scope());
         $this->assertSame('https://json-schema.org/draft/2020-12/schema', $result['schema_uri']);
-        $this->assertSame(['GBP' => 2], $result['currency_scales']);
-        $this->assertSame([], $result['supported_amount_modes']);
+        $this->assertSame(['USD' => 2, 'GBP' => 2], $result['currency_scales']);
+        $this->assertSame(['DESTINATION_AMOUNT'], $result['supported_amount_modes']);
         $this->assertFalse($result['source_amount_present']);
         $this->assertSame($this->schema()['required'], $result['required']);
         $this->assertSame($this->schema()['allOf'], $result['allOf']);
@@ -84,8 +84,10 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
     #[DataProvider('modes')]
     public function test_schema_field_presence_or_absence_does_not_supply_spend_mode_authority(PayoutAmountMode $mode, string $reason): void
     {
+        $schema = $this->schema();
+        $schema['required'] = ['beneficiary.id']; // Precision without amount requirements is insufficient.
         $this->expectExceptionMessage($reason);
-        DynamicPayoutEligibility::schemaObservation($this->body(), $this->scope(), $mode);
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope(), $mode);
     }
 
     public function test_destination_amount_is_required_for_a_precision_observation(): void
@@ -96,12 +98,143 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
         DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
     }
 
+    public static function dynamicCorridors(): array
+    {
+        return [['HK', 'HKD', 2], ['SG', 'SGD', 2], ['GB', 'GBP', 2], ['DK', 'EUR', 2],
+            ['DE', 'EUR', 2], ['JP', 'JPY', 0], ['KR', 'KRW', 0], ['TH', 'THB', 2], ['CH', 'EUR', 2]];
+    }
+
+    #[DataProvider('dynamicCorridors')]
+    public function test_destination_only_schema_without_allof_keeps_all_required_fields_and_never_grants_source_mode(
+        string $country, string $currency, int $scale): void
+    {
+        $schema = $this->schema();
+        unset($schema['allOf']);
+        $schema['properties']['payout.destinationAmount']['maximumDecimals'] = $scale;
+        $schema['properties']['payout.destinationAmount']['minimum'] = 1;
+        // Match the reported count without inventing the undisclosed Production field names.
+        for ($index = 1; $index <= 16; $index++) {
+            $schema['required'][] = 'synthetic.field'.$index;
+            $schema['properties']['synthetic.field'.$index] = ['type' => 'string'];
+        }
+        $scope = $this->scope();
+        $scope['currency'] = $currency;
+        $scope['path'] = '/api/v1/client/fixture-client/customer/fixture-customer/currency/'.$currency.'/payout/schema';
+        $scope['query']['destinationCountry'] = $country;
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope, PayoutAmountMode::Destination);
+        $this->assertSame(['USD' => 2, $currency => $scale], $result['currency_scales']);
+        $this->assertSame(['DESTINATION_AMOUNT'], $result['supported_amount_modes']);
+        $this->assertCount(17, $result['required']);
+        $this->assertSame($schema['required'], $result['required']);
+        $this->assertSame([], $result['allOf']);
+        $this->assertSame($this->body($schema), $result['schema_json']);
+        $this->assertSame(['minimum' => '1'], $result['amount_limits']['payout.destinationAmount']);
+        $this->assertFalse($result['eligible']);
+        $this->assertTrue($result['requires_instruction_validation']);
+        $this->expectExceptionMessage('dynamic_payout_source_amount_contract_unverified');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $scope, PayoutAmountMode::Source);
+    }
+
+    public static function amountBounds(): array
+    {
+        return [
+            'inclusive minimum' => ['minimum', '784', true],
+            'above minimum' => ['minimum', '783.99', true],
+            'below minimum' => ['minimum', '784.01', false],
+            'no float rounding of minimum' => ['minimum', '784.000000000000000001', false],
+            'zero minimum' => ['minimum', '0', true],
+            'negative minimum' => ['minimum', '-1.5', true],
+            'exponent minimum' => ['minimum', '7.84e2', true],
+            'inclusive maximum' => ['maximum', '784', true],
+            'below maximum' => ['maximum', '784.01', true],
+            'above maximum' => ['maximum', '783.99', false],
+            'no float rounding of maximum' => ['maximum', '783.999999999999999999', false],
+        ];
+    }
+
+    #[DataProvider('amountBounds')]
+    public function test_amount_limits_are_numeric_inclusive_and_exact(string $keyword, string $token, bool $permitted): void
+    {
+        $schema = $this->schema();
+        unset($schema['allOf']);
+        $schema['properties']['payout.destinationAmount'][$keyword] = '__BOUND__';
+        $body = str_replace('"__BOUND__"', $token, $this->body($schema));
+        $result = DynamicPayoutEligibility::schemaObservation($body, $this->scope(), PayoutAmountMode::Destination);
+        if (! $permitted) $this->expectExceptionMessage('dynamic_payout_amount_out_of_schema_bounds');
+        DynamicPayoutEligibility::assertAmounts($result, 'GBP', PayoutAmountMode::Destination, [
+            'quoted_principal' => ['amount' => '980'], 'quoted_destination_amount' => ['amount' => '784']]);
+        if ($permitted) $this->assertFalse($result['instruction_validated']);
+    }
+
+    public static function invalidBounds(): array
+    {
+        return [['null'], ['true'], ['"0"'], ['"NaN"'], ['[]'], ['{}'], ['1e1025']];
+    }
+
+    #[DataProvider('invalidBounds')]
+    public function test_malformed_or_unsupported_minimum_is_not_ignored(string $token): void
+    {
+        $schema = $this->schema();
+        $schema['properties']['payout.destinationAmount']['minimum'] = '__BOUND__';
+        $this->expectExceptionMessage('dynamic_payout_schema_contract_unavailable');
+        DynamicPayoutEligibility::schemaObservation(str_replace('"__BOUND__"', $token, $this->body($schema)), $this->scope());
+    }
+
+    public function test_conflicting_numeric_bounds_fail_closed(): void
+    {
+        $schema = $this->schema();
+        $schema['properties']['payout.destinationAmount']['minimum'] = 2;
+        $schema['properties']['payout.destinationAmount']['maximum'] = 1;
+        $this->expectExceptionMessage('dynamic_payout_schema_contract_unavailable');
+        DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
+    }
+
+    public function test_retained_gateway_string_maximum_is_enforced_as_an_exact_bound(): void
+    {
+        $schema = $this->schema();
+        $schema['$schema'] = 'http://json-schema.org/draft-07/schema#';
+        $schema['properties']['payout.destinationAmount']['maximum'] = '783.99';
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema),
+            $this->scope('https://gatewaysandbox.nium.com'), PayoutAmountMode::Destination);
+        $this->expectExceptionMessage('dynamic_payout_amount_out_of_schema_bounds');
+        DynamicPayoutEligibility::assertAmounts($result, 'GBP', PayoutAmountMode::Destination, [
+            'quoted_principal' => ['amount' => '980'], 'quoted_destination_amount' => ['amount' => '784']]);
+    }
+
+    public function test_source_instruction_obeys_its_own_bounds_not_the_omitted_destination_property(): void
+    {
+        $schema = $this->schema();
+        $schema['required'] = ['payout.sourceAmount'];
+        unset($schema['allOf']);
+        $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2,
+            'minimum' => 980, 'maximum' => 980];
+        $schema['properties']['payout.destinationAmount']['minimum'] = 9999;
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope(), PayoutAmountMode::Source);
+        $this->assertSame(['SOURCE_AMOUNT'], $result['supported_amount_modes']);
+        DynamicPayoutEligibility::assertAmounts($result, 'GBP', PayoutAmountMode::Source, [
+            'quoted_principal' => ['amount' => '980'], 'quoted_destination_amount' => ['amount' => '784']]);
+        $this->expectExceptionMessage('dynamic_payout_amount_out_of_schema_bounds');
+        DynamicPayoutEligibility::assertAmounts($result, 'GBP', PayoutAmountMode::Source, [
+            'quoted_principal' => ['amount' => '979.99'], 'quoted_destination_amount' => ['amount' => '784']]);
+    }
+
+    public function test_two_unconditionally_required_amounts_cannot_authorize_a_single_amount_instruction(): void
+    {
+        $schema = $this->schema();
+        unset($schema['allOf']);
+        $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
+        $schema['required'][] = 'payout.sourceAmount';
+        $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
+        $this->assertSame([], $result['supported_amount_modes']);
+        $this->assertFalse($result['eligible']);
+    }
+
     public function test_exact_decimal_count_extension_never_widens_the_observed_two_decimal_limit(): void
     {
         $schema = $this->schema();
         $schema['properties']['payout.destinationAmount']['maximumDecimals'] = '2';
         $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
-        $this->assertSame(['GBP' => 2], $result['currency_scales']);
+        $this->assertSame(['USD' => 2, 'GBP' => 2], $result['currency_scales']);
         $this->assertFalse($result['eligible']);
     }
 
@@ -248,6 +381,7 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
     public function test_both_precision_properties_without_amount_requirements_supply_no_modes(): void
     {
         $schema = $this->schema();
+        unset($schema['allOf']);
         $schema['required'] = ['beneficiary.id'];
         $schema['properties']['payout.sourceAmount'] = ['type' => 'number', 'maximumDecimals' => 2];
         $result = DynamicPayoutEligibility::schemaObservation($this->body($schema), $this->scope());
@@ -358,7 +492,7 @@ final class NiumDynamicPayoutSchemaTest extends TestCase
 
     public static function missingSchemaKeywords(): array
     {
-        return [['$schema'], ['type'], ['properties'], ['required'], ['allOf']];
+        return [['$schema'], ['type'], ['properties'], ['required']];
     }
 
     #[DataProvider('missingSchemaKeywords')]

@@ -227,8 +227,8 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
             'payout_method' => 'LOCAL', 'routing_code_type' => 'synthetic-route-a'], $options['selection']);
         $this->assertSame(hash('sha256', $corridorsBody), $options['customer_corridors_sha256']);
         $this->assertSame(hash('sha256', $schemaBody), $options['payout_schema_sha256']);
-        $this->assertSame(['GBP' => 2], $options['currency_scales']);
-        $this->assertSame([], $options['supported_amount_modes']); // No USD source precision was evidenced.
+        $this->assertSame(['USD' => 2, 'GBP' => 2], $options['currency_scales']);
+        $this->assertSame(['DESTINATION_AMOUNT'], $options['supported_amount_modes']); // No source-mode authority from USD funding precision.
         $this->assertSame($schemaBody, $options['schema_observation']['schema_json']);
         $this->assertSame('https://json-schema.org/draft/2020-12/schema', $options['schema_observation']['schema_uri']);
         $this->assertFalse($options['schema_observation']['source_amount_present']);

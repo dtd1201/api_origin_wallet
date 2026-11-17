@@ -13,6 +13,7 @@ use App\Services\Nium\NiumEntitlementEvidenceTransport;
 use App\Services\Nium\NiumService;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\Decimal;
 use App\Domain\Nium\DynamicMultiCurrency\Financial\PayoutAmountMode;
+use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Client\Request;
 use RuntimeException;
@@ -46,12 +47,8 @@ final class DynamicPayoutEligibility
     {
         $evidence = $this->options($user, $beneficiary, $quote->binding, $legalEntity, $quote->id,
             PayoutAmountMode::from($quote->binding['amount_mode']));
-        foreach (['USD' => $amounts['quoted_principal']['amount'], $beneficiary->currency => $amounts['quoted_destination_amount']['amount']] as $currency => $amount) {
-            if (! isset($evidence['currency_scales'][$currency])
-                || ! (new Decimal($amount))->fitsScale($evidence['currency_scales'][$currency])) {
-                throw new RuntimeException('dynamic_payout_amount_precision_unsupported');
-            }
-        }
+        self::assertAmounts($evidence['schema_observation'], $beneficiary->currency,
+            PayoutAmountMode::from($quote->binding['amount_mode']), $amounts);
 
         return $evidence;
     }
@@ -240,11 +237,12 @@ final class DynamicPayoutEligibility
         if (! ($root instanceof \stdClass) || ($schema['$schema'] ?? null) !== $dialect
             || ($schema['type'] ?? null) !== 'object' || ! self::schemaProperties($root->properties ?? null)
             || ! self::requiredNames($root->required ?? null) || $root->required === []
-            || ! is_array($root->allOf ?? null) || ! array_is_list($root->allOf) || $root->allOf === []) {
+            || (property_exists($root, 'allOf')
+                && (! is_array($root->allOf) || ! array_is_list($root->allOf) || $root->allOf === []))) {
             throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
         }
         $amountRequirements = $root->required;
-        foreach ($root->allOf as $condition) {
+        foreach ($root->allOf ?? [] as $condition) {
             if (! ($condition instanceof \stdClass) || ! (($condition->if ?? null) instanceof \stdClass)
                 || ! (($condition->then ?? null) instanceof \stdClass)) {
                 throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
@@ -282,19 +280,33 @@ final class DynamicPayoutEligibility
         if (! property_exists($root->properties, 'payout.destinationAmount')) {
             throw new RuntimeException('dynamic_payout_schema_destination_amount_unverified');
         }
-        // The gateway USD scale is independently documented in the retained remittance
-        // contract. Spend gets no source scale or mode permission from an absent field.
-        $scales = $spend ? [] : ['USD' => 2];
+        // USD funding already has a two-decimal ceiling in the retained remittance
+        // contract and FinalizedUsdPayoutPreparation. This is not source-mode evidence.
+        // An explicit source property can narrow that ceiling, never widen it.
+        $scales = ['USD' => 2];
+        $limits = [];
         foreach (['payout.sourceAmount' => 'USD', 'payout.destinationAmount' => $currency] as $name => $code) {
             if (! property_exists($root->properties, $name)) continue;
             $property = $root->properties->{$name};
             if (! ($property instanceof \stdClass) || ($property->type ?? null) !== 'number'
                 || array_diff(array_keys(get_object_vars($property)), ['$id', 'title', 'description',
-                    'type', 'maximum', 'maximumDecimals']) !== []
+                    'type', 'minimum', 'maximum', 'maximumDecimals']) !== []
                 || ! in_array($property->maximumDecimals ?? null, [0, 1, 2, '0', '1', '2'], true)) {
                 throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
             }
             $scales[$code] = (int) $property->maximumDecimals;
+            $limits[$name] = [];
+            foreach (['minimum', 'maximum'] as $bound) {
+                if (property_exists($property, $bound)) {
+                    $limits[$name][$bound] = self::schemaBound($property->{$bound}, $schema['properties'][$name][$bound],
+                        // The retained draft-07 example encodes maximum as a string.
+                        ! $spend && $bound === 'maximum');
+                }
+            }
+            if (isset($limits[$name]['minimum'], $limits[$name]['maximum'])
+                && BigDecimal::of($limits[$name]['minimum'])->isGreaterThan($limits[$name]['maximum'])) {
+                throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
+            }
         }
         // Precision properties alone establish no amount mode. A required amount
         // (possibly conditional) supplies a candidate for non-settling validation,
@@ -312,13 +324,46 @@ final class DynamicPayoutEligibility
                 ? 'dynamic_payout_source_amount_contract_unverified' : 'dynamic_payout_destination_amount_contract_unverified');
         }
         return ['schema_uri' => $dialect, 'currency_scales' => $scales,
-            'supported_amount_modes' => $modes,
+            'supported_amount_modes' => $modes, 'amount_limits' => $limits,
             // Retain the exact constraints, including number types/tokens, for evidence.
-            // The parsed summary is never evaluated as a payload validator.
+            // The summary alone never validates a complete payout instruction.
             'schema_json' => $body,
-            'required' => $schema['required'], 'allOf' => $schema['allOf'],
+            'required' => $schema['required'], 'allOf' => $schema['allOf'] ?? [],
             'source_amount_present' => property_exists($root->properties, 'payout.sourceAmount'),
             'instruction_validated' => false, 'eligible' => false, 'requires_instruction_validation' => true];
+    }
+
+    /** Exact checks on quote amounts, repeated from retained schema bytes under admission locks. */
+    public static function assertAmounts(array $schema, string $destinationCurrency, PayoutAmountMode $mode, array $amounts): void
+    {
+        foreach (['USD' => $amounts['quoted_principal']['amount'], $destinationCurrency => $amounts['quoted_destination_amount']['amount']] as $currency => $amount) {
+            if (! isset($schema['currency_scales'][$currency])
+                || ! (new Decimal($amount))->fitsScale($schema['currency_scales'][$currency])) {
+                throw new RuntimeException('dynamic_payout_amount_precision_unsupported');
+            }
+        }
+        // JSON Schema property bounds apply to the field present in the exact
+        // single-amount remittance body, not to an omitted opposite amount field.
+        $amount = BigDecimal::of($amounts[$mode === PayoutAmountMode::Source ? 'quoted_principal' : 'quoted_destination_amount']['amount']);
+        $limits = $schema['amount_limits']['payout.'.$mode->quoteField()];
+        if ((isset($limits['minimum']) && $amount->isLessThan($limits['minimum']))
+            || (isset($limits['maximum']) && $amount->isGreaterThan($limits['maximum']))) {
+            throw new RuntimeException('dynamic_payout_amount_out_of_schema_bounds');
+        }
+    }
+
+    private static function schemaBound(mixed $native, mixed $token, bool $legacyString): string
+    {
+        // Native decoding verifies JSON number vs string; only the exact token
+        // participates in arithmetic. Bound parsing is resource limited, not rounded.
+        if ((! is_int($native) && ! is_float($native) && ! ($legacyString && is_string($native)))
+            || ! is_string($token) || strlen($token) > 1024
+            || preg_match('/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE]([+-]?[0-9]{1,4}))?$/D', $token, $matches) !== 1
+            || abs((int) ($matches[1] ?? 0)) > 1024) {
+            throw new RuntimeException('dynamic_payout_schema_contract_unavailable');
+        }
+
+        return (string) BigDecimal::of($token);
     }
 
     private static function requiredNames(mixed $names): bool
