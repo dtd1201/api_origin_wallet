@@ -64,10 +64,8 @@ final class DynamicWalletResponse
             $amounts = [];
             foreach (['balance', 'availableBalance', 'withHoldingBalance'] as $field) {
                 if (property_exists($row, $field)) {
-                    if (! is_string($row->$field)) {
-                        throw new RuntimeException('dynamic_wallet_usd_availability_unavailable');
-                    }
-                    $amounts[$field] = DynamicReservationLedger::storage($row->$field);
+                    $amounts[$field] = DynamicProviderBalance::normalize($row->$field,
+                        'dynamic_wallet_usd_availability_unavailable');
                 }
             }
             if (isset($amounts['balance'], $amounts['availableBalance'])

@@ -21,6 +21,47 @@ final class DynamicPayoutWalletSnapshot
     public function __construct(private readonly NiumService $nium,
         private readonly NiumProviderAccountStateService $accounts) {}
 
+    /** Read existing server-captured evidence only. Never refresh or promote generic sync data. */
+    public function current(User $user, Balance $wallet, UserProviderAccount $account): string
+    {
+        $scope = $this->scope($user, $wallet, $account);
+        DynamicPayoutEnvironment::configured()->assertContract('wallet');
+        $snapshot = $wallet->raw_data['dynamic_authenticated_availability'] ?? null;
+        if (! is_array($snapshot) || ($snapshot['version'] ?? null) !== 'nium-dynamic-authenticated-wallet-v1') {
+            throw new RuntimeException('dynamic_wallet_authenticated_snapshot_unavailable');
+        }
+        foreach ($scope as $key => $value) {
+            if (($snapshot[$key] ?? null) !== $value) {
+                throw new RuntimeException('dynamic_wallet_snapshot_binding_changed');
+            }
+        }
+        $times = [];
+        foreach (['requested_at', 'observed_at', 'expires_at'] as $key) {
+            $value = $snapshot[$key] ?? null;
+            $time = is_string($value) && preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/D', $value) === 1
+                ? \DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s.u\Z', $value, new \DateTimeZone('UTC')) : false;
+            if ($time === false || $time->format('Y-m-d\TH:i:s.u\Z') !== $value) {
+                throw new RuntimeException('dynamic_wallet_authenticated_snapshot_unavailable');
+            }
+            $times[$key] = $time;
+        }
+        $at = now()->toDateTimeImmutable();
+        if ($times['requested_at'] > $times['observed_at'] || $times['observed_at'] > $at
+            || $times['expires_at'] <= $at || $times['expires_at'] != $times['requested_at']->modify('+30 seconds')
+            || ! is_string($snapshot['response_sha256'] ?? null)
+            || preg_match('/^[a-f0-9]{64}$/D', $snapshot['response_sha256']) !== 1) {
+            throw new RuntimeException('dynamic_wallet_authenticated_snapshot_unavailable');
+        }
+        $available = DynamicProviderBalance::normalize($wallet->raw_data['provider_available_balance'] ?? null);
+        // Snapshot amounts are canonical strings written by refresh(). Only the
+        // generic mirror may have a legacy int representation; it must agree.
+        if (($snapshot['available'] ?? null) !== $available) {
+            throw new RuntimeException('dynamic_wallet_snapshot_binding_changed');
+        }
+
+        return $available;
+    }
+
     public function refresh(User $user, Balance $wallet, ?string $exceptIntent = null): array
     {
         OwnerFirst::outside();

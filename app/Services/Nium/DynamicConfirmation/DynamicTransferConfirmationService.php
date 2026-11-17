@@ -479,8 +479,9 @@ final class DynamicTransferConfirmationService
         if ($evidence->validUntil <= $finalAt) {
             throw new RuntimeException('dynamic_execution_evidence_expired');
         }
-        $balance = $wallet->raw_data['provider_available_balance'] ?? null;
-        if (! is_string($balance) || \Brick\Math\BigDecimal::of(DynamicReservationLedger::storage($balance))
+        $balance = DynamicProviderBalance::normalize($wallet->raw_data['provider_available_balance'] ?? null,
+            'dynamic_execution_provider_funds_unavailable');
+        if (\Brick\Math\BigDecimal::of($balance)
             ->isLessThan(DynamicReservationLedger::storage((string) $wallet->reserved_balance))) {
             throw new RuntimeException('dynamic_execution_provider_funds_unavailable');
         }

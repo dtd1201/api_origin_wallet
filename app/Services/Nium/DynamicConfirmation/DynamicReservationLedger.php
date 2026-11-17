@@ -205,12 +205,8 @@ final class DynamicReservationLedger
 
     private function providerAvailable(Balance $wallet): BigDecimal
     {
-        $amount = $wallet->raw_data['provider_available_balance'] ?? null;
-        if (! is_string($amount)) {
-            throw new RuntimeException('dynamic_authoritative_wallet_balance_unavailable');
-        }
-
-        return BigDecimal::of(self::storage($amount));
+        // The confirmation evidence source establishes authenticity separately.
+        return BigDecimal::of(DynamicProviderBalance::normalize($wallet->raw_data['provider_available_balance'] ?? null));
     }
 
     private function entry(NiumDynamicIntent $intent, Balance $wallet, string $reservationId,

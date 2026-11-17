@@ -13,6 +13,8 @@ use App\Models\NiumDynamicPayoutOutbox;
 use App\Models\NiumDynamicReservation;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutWalletSnapshot;
 use App\Services\Nium\NiumProviderAccountStateService;
+use App\Services\Nium\NiumCustomerOnboardingService;
+use App\Services\Nium\NiumDataSyncService;
 use App\Services\Nium\NiumService;
 use GuzzleHttp\Psr7\Response as PsrResponse;
 use GuzzleHttp\Psr7\Request as PsrRequest;
@@ -81,6 +83,108 @@ final class NiumDynamicWalletSnapshotTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(0, LedgerEntry::query()->count());
         $this->assertSame(0, NiumDynamicIntent::query()->count());
         $this->assertSame(0, NiumDynamicPayoutOutbox::query()->count());
+    }
+
+    public static function exactMirrors(): array
+    {
+        return [[1000, '1000.00000000'], ['1000', '1000.00000000'],
+            ['1000.01', '1000.01000000'], ['1000.01000000', '1000.01000000'], [0, '0.00000000']];
+    }
+
+    #[DataProvider('exactMirrors')]
+    public function test_current_snapshot_accepts_exact_mirror_types_without_rewriting_evidence(mixed $mirror, string $expected): void
+    {
+        $this->response('[{"curSymbol":"USD","balance":"'.$expected.'"}]');
+        $snapshot = $this->snapshots->refresh($this->owner, $this->wallet);
+        $raw = $this->wallet->fresh()->raw_data;
+        $raw['provider_available_balance'] = $mirror;
+        $this->wallet->update(['raw_data' => $raw]);
+        $this->assertSame($expected, $this->snapshots->current($this->owner, $this->wallet->fresh(), $this->account));
+        $this->assertEquals($snapshot, $this->wallet->fresh()->raw_data['dynamic_authenticated_availability']);
+        $this->assertSame($mirror, $this->wallet->fresh()->raw_data['provider_available_balance']);
+        $this->assertSame(0, LedgerEntry::query()->count());
+    }
+
+    public static function invalidStoredSnapshots(): array
+    {
+        $cases = [];
+        foreach (['version', 'origin', 'client', 'customer', 'wallet', 'balance_id', 'account_id',
+            'owner', 'provider_id', 'currency', 'request_path'] as $field) {
+            $cases['changed '.$field] = [$field, 'changed'];
+            $cases['wrong type '.$field] = [$field, true];
+        }
+        return [...$cases,
+            'wrong amount' => ['available', '999.00000000'],
+            'snapshot amount is not canonical' => ['available', 1000],
+            'missing amount' => ['available', null],
+            'invalid digest' => ['response_sha256', 'unverified'],
+            'missing digest' => ['response_sha256', null],
+            'malformed requested time' => ['requested_at', 'now'],
+            'future observation' => ['observed_at', '2030-01-01T00:10:01.000000Z'],
+            'observation before request' => ['observed_at', '2030-01-01T00:09:59.000000Z'],
+            'extended freshness' => ['expires_at', '2030-01-01T00:11:00.000000Z'],
+        ];
+    }
+
+    #[DataProvider('invalidStoredSnapshots')]
+    public function test_current_snapshot_rejects_missing_or_changed_evidence_without_refresh(string $field, mixed $value): void
+    {
+        $this->response('[{"curSymbol":"USD","balance":1000}]');
+        $this->snapshots->refresh($this->owner, $this->wallet);
+        $raw = $this->wallet->fresh()->raw_data;
+        $raw['provider_available_balance'] = 1000;
+        $raw['dynamic_authenticated_availability'][$field] = $value;
+        $this->wallet->update(['raw_data' => $raw]);
+        $this->expectException(RuntimeException::class);
+        $this->snapshots->current($this->owner, $this->wallet->fresh(), $this->account);
+    }
+
+    public function test_current_snapshot_expires_at_the_original_thirty_second_boundary(): void
+    {
+        $this->response('[{"curSymbol":"USD","balance":1000}]');
+        $this->snapshots->refresh($this->owner, $this->wallet);
+        $this->travelTo(now()->addSeconds(30));
+        $this->expectExceptionMessage('dynamic_wallet_authenticated_snapshot_unavailable');
+        $this->snapshots->current($this->owner, $this->wallet->fresh(), $this->account);
+    }
+
+    public function test_current_snapshot_cannot_be_reconstructed_from_a_generic_integer_balance(): void
+    {
+        $this->nium->shouldNotReceive('get');
+        $this->wallet->update(['raw_data' => ['provider_available_balance' => 1000,
+            'provider_balance_observed_at' => now()->toISOString()]]);
+        $this->expectExceptionMessage('dynamic_wallet_authenticated_snapshot_unavailable');
+        $this->snapshots->current($this->owner, $this->wallet->fresh(), $this->account);
+    }
+
+    public function test_current_snapshot_cannot_follow_a_rebound_account_and_wallet(): void
+    {
+        $this->response('[{"curSymbol":"USD","balance":1000}]');
+        $this->snapshots->refresh($this->owner, $this->wallet);
+        $this->account->update(['external_account_id' => 'rebound-wallet']);
+        $this->wallet->update(['external_account_id' => 'rebound-wallet']);
+        $this->expectExceptionMessage('dynamic_wallet_snapshot_binding_changed');
+        $this->snapshots->current($this->owner, $this->wallet->fresh(), $this->account->fresh());
+    }
+
+    public function test_generic_wallet_sync_preserves_a_valid_json_integer_but_revokes_dynamic_authentication(): void
+    {
+        $this->response('[{"curSymbol":"USD","balance":1000}]');
+        $this->snapshots->refresh($this->owner, $this->wallet);
+        config(['services.nium.wallet_balance_endpoint' => '/fixture-balances']);
+        $syncNium = Mockery::mock(NiumService::class)->makePartial();
+        $syncNium->shouldReceive('clientId')->andReturn('fixture-client');
+        $syncNium->shouldReceive('customerId')->andReturn('fixture-customer');
+        $syncNium->shouldReceive('walletId')->andReturn('fixture-wallet');
+        $syncNium->shouldReceive('get')->once()->andReturn(new Response(new PsrResponse(200, [],
+            '{"balances":[{"walletHashId":"fixture-wallet","currency":"USD","availableBalance":1000}]}')));
+        $sync = new NiumDataSyncService($syncNium, app(NiumCustomerOnboardingService::class));
+        $sync->syncBalances($this->account->provider, $this->owner);
+        $wallet = $this->wallet->fresh();
+        $this->assertSame(1000, $wallet->raw_data['provider_available_balance']);
+        $this->assertArrayNotHasKey('dynamic_authenticated_availability', $wallet->raw_data);
+        $this->expectExceptionMessage('dynamic_wallet_authenticated_snapshot_unavailable');
+        $this->snapshots->current($this->owner, $wallet, $this->account);
     }
 
     public function test_lower_then_higher_provider_observations_do_not_permanently_reduce_local_funds(): void

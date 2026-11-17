@@ -29,6 +29,7 @@ use App\Services\Nium\DynamicConfirmation\DynamicPayoutDispatcher;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutReconciler;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutTransport;
 use App\Services\Nium\DynamicConfirmation\DynamicTransferConfirmationService;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutWalletSnapshot;
 use Tests\Support\DynamicPayoutTransportStub;
 use GuzzleHttp\Psr7\Request as PsrRequest;
 use GuzzleHttp\Psr7\Response as PsrResponse;
@@ -65,6 +66,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     private ?array $detailsReceivingInputs = null;
     private ?string $detailsSchemaBody = null;
     private int $detailsSchemaReads = 0;
+    private int $walletReads = 0;
+    private ?string $walletResponseBody = null;
 
     protected function setUp(): void
     {
@@ -146,9 +149,11 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->nium->shouldReceive('get')->withArgs(static fn ($path, $query = [], $user = null, $operation = null): bool =>
             $operation === 'dynamic_wallet_availability')->andReturnUsing(function ($path, $query, $user, $operation,
                 $reference, $beforeDispatch): Response {
+                $this->walletReads++;
                 $this->assertSame(0, DB::transactionLevel());
                 $beforeDispatch(new Request(new PsrRequest('GET', rtrim((string) config('services.nium.base_url'), '/').$path,
                     ['x-api-key' => 'synthetic-wallet-test-key'])));
+                if ($this->walletResponseBody !== null) return $this->response($this->walletResponseBody);
                 if (config('services.nium.base_url') === 'https://api.spend.nium.com') {
                     return $this->response('[{"walletHashId":"fixture-wallet","currencyCode":"USD","balance":2000}]');
                 }
@@ -198,8 +203,13 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     }
 
     private function providerQuote(string $mode = 'SOURCE_AMOUNT', ?string $body = null, ?\Closure $during = null,
-        ?\Closure $outgoing = null): void
+        ?\Closure $outgoing = null, bool $captureWalletSnapshot = true): void
     {
+        // Explicit offline test setup: capture through the actual authenticated
+        // snapshot writer. Quote itself must never fetch or fabricate evidence.
+        if ($captureWalletSnapshot) {
+            app(DynamicPayoutWalletSnapshot::class)->refresh($this->owner, $this->wallet->fresh());
+        }
         $origin = rtrim((string) config('services.nium.base_url'), '/');
         $this->nium->shouldReceive('post')->once()->withArgs(static fn ($path, $payload, $user, $transferId, $operation): bool =>
             $operation === 'dynamic_payout_reference_quote')->andReturnUsing(function ($path, $payload, $user,
@@ -2965,11 +2975,161 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
-    public function test_balance_including_existing_holds_is_checked_after_provider_response(): void
+    public static function providerBalanceRepresentations(): array
+    {
+        return [[2000], ['2000'], ['2000.00000000']];
+    }
+
+    public static function invalidProviderBalances(): array
+    {
+        return [[2000.0], [true], [false], [null], [-1], ['2e3'], ['2000.000000001'], ['1000000000000']];
+    }
+
+    #[DataProvider('invalidProviderBalances')]
+    public function test_invalid_provider_balance_cannot_bypass_a_valid_snapshot(mixed $value): void
+    {
+        $this->customerListing();
+        $this->providerQuote('DESTINATION_AMOUNT');
+        $raw = $this->wallet->fresh()->raw_data;
+        $raw['provider_available_balance'] = $value;
+        // Preserve a float token across JSONB/Eloquent for the unsafe-type case.
+        $this->wallet->setRawAttributes([...$this->wallet->getAttributes(),
+            'raw_data' => json_encode($raw, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION)]);
+        $this->wallet->save();
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('providerBalanceRepresentations')]
+    public function test_exact_provider_balance_mirror_allows_quote_only_with_authenticated_snapshot(mixed $integer): void
+    {
+        $this->customerListing();
+        $this->providerQuote('DESTINATION_AMOUNT');
+        $raw = $this->wallet->fresh()->raw_data;
+        $snapshot = $raw['dynamic_authenticated_availability'];
+        $raw['provider_available_balance'] = $integer;
+        $this->wallet->update(['raw_data' => $raw]);
+        $this->assertSame($integer, $this->wallet->fresh()->raw_data['provider_available_balance']);
+        $reads = $this->walletReads;
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertCreated();
+        $this->assertSame($reads, $this->walletReads);
+        $this->assertEquals($snapshot, $this->wallet->fresh()->raw_data['dynamic_authenticated_availability']);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->noAdmission();
+    }
+
+    #[DataProvider('providerBalanceRepresentations')]
+    public function test_legacy_amount_without_authenticated_evidence_remains_blocked(mixed $value): void
+    {
+        $this->customerListing();
+        $this->providerQuote('DESTINATION_AMOUNT');
+        $this->assertSame(1, $this->walletReads);
+        $this->assertArrayHasKey('dynamic_authenticated_availability', $this->wallet->fresh()->raw_data);
+        // refresh() persisted through another model. Reload before removing its
+        // evidence: on the stale fixture, string '2000' equals the original raw
+        // data, so Eloquent skips UPDATE and leaves the authenticated row intact.
+        $legacy = ['provider_available_balance' => $value];
+        $this->wallet->refresh()->update(['raw_data' => $legacy]);
+        $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
+        $reads = $this->walletReads;
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
+        $this->assertSame($reads, $this->walletReads);
+        $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('providerBalanceRepresentations')]
+    public function test_legacy_amount_never_authenticated_remains_blocked(mixed $value): void
+    {
+        $this->customerListing();
+        $this->providerQuote('DESTINATION_AMOUNT', captureWalletSnapshot: false);
+        $legacy = ['provider_available_balance' => $value];
+        $this->wallet->refresh()->update(['raw_data' => $legacy]);
+        $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, $this->walletReads);
+
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
+        $this->assertSame(0, $this->walletReads);
+        $this->assertSame($legacy, $this->wallet->fresh()->raw_data);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    public function test_snapshot_expiring_during_quote_http_is_not_refreshed_or_accepted(): void
+    {
+        $this->customerListing();
+        $this->providerQuote('DESTINATION_AMOUNT', during: fn () => $this->travelTo(now()->addSeconds(30)));
+        $reads = $this->walletReads;
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(503)
+            ->assertJsonPath('reason_codes', ['dynamic_quote_wallet_balance_unavailable']);
+        $this->assertSame($reads, $this->walletReads);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('providerBalanceRepresentations')]
+    public function test_confirm_reservation_and_execution_revalidation_share_exact_balance_normalization(mixed $integer): void
+    {
+        $review = $this->readyReview('DESTINATION_AMOUNT');
+        $raw = $this->wallet->fresh()->raw_data;
+        $raw['provider_available_balance'] = $integer;
+        $this->wallet->update(['raw_data' => $raw]);
+        $reads = $this->walletReads;
+        $this->postJson($this->path(''), $this->submitReady($review))->assertCreated();
+        $intent = NiumDynamicIntent::query()->sole();
+        \App\Services\Wallet\Concurrency\OwnerFirst::users([$this->owner->id], function () use ($intent): void {
+            $lockedIntent = NiumDynamicIntent::query()->lockForUpdate()->findOrFail($intent->id);
+            NiumDynamicPayoutOutbox::query()->where('intent_id', $intent->id)->lockForUpdate()->sole();
+            app(DynamicTransferConfirmationService::class)->revalidateForExecution($lockedIntent);
+        });
+        $this->assertSame($reads, $this->walletReads);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'hold')->count());
+        $this->assertSame(0, NiumDynamicPayoutOutbox::query()->sole()->attempts);
+    }
+
+    public function test_normalized_integer_cannot_replace_the_authenticated_review_amount(): void
+    {
+        $review = $this->readyReview('DESTINATION_AMOUNT');
+        $raw = $this->wallet->fresh()->raw_data;
+        $raw['provider_available_balance'] = 1999;
+        $this->wallet->update(['raw_data' => $raw]);
+        $this->postJson($this->path(''), $this->submitReady($review))->assertStatus(409)
+            ->assertJsonPath('reason_codes', ['dynamic_review_binding_changed']);
+        $this->noAdmission();
+    }
+
+    public function test_authenticated_provider_funds_below_debit_remain_insufficient_despite_local_books(): void
+    {
+        $this->walletResponseBody = '[{"curSymbol":"USD","balance":999}]';
+        $this->customerListing();
+        $this->providerQuote('DESTINATION_AMOUNT');
+        $raw = $this->wallet->fresh()->raw_data;
+        $raw['provider_available_balance'] = 999;
+        $this->wallet->update(['raw_data' => $raw]);
+        $this->postJson($this->path('/quotes'), $this->input('DESTINATION_AMOUNT'))->assertStatus(409)
+            ->assertJsonPath('reason_codes', ['dynamic_insufficient_available_funds']);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());
+        $this->noAdmission();
+    }
+
+    #[DataProvider('providerBalanceRepresentations')]
+    public function test_balance_including_existing_holds_is_checked_after_provider_response(mixed $integer): void
     {
         $this->wallet->update(['reserved_balance' => '1500']);
         $this->customerListing();
         $this->providerQuote();
+        $raw = $this->wallet->fresh()->raw_data;
+        $raw['provider_available_balance'] = $integer;
+        $this->wallet->update(['raw_data' => $raw]);
         $this->postJson($this->path('/quotes'), $this->input())->assertStatus(409)
             ->assertJsonPath('reason_codes', ['dynamic_insufficient_available_funds']);
         $this->assertSame(0, NiumDynamicPayoutQuote::query()->count());

@@ -24,6 +24,8 @@ use App\Services\Nium\DynamicConfirmation\DynamicPayoutEligibility;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization;
 use App\Services\Nium\DynamicConfirmation\DynamicRegisteredAccountEvidence;
 use App\Services\Nium\DynamicConfirmation\DynamicReservationLedger;
+use App\Services\Nium\DynamicConfirmation\DynamicProviderBalance;
+use App\Services\Nium\DynamicConfirmation\DynamicPayoutWalletSnapshot;
 use App\Services\Nium\DynamicConfirmation\ExactProviderJson;
 use Brick\Math\BigDecimal;
 use Illuminate\Http\Client\Request;
@@ -39,7 +41,8 @@ final class NiumDynamicPayoutQuoteService
         private readonly NiumBeneficiaryPayoutMethodResolver $registration,
         private readonly NiumProviderAccountStateService $accounts,
         private readonly DynamicPayoutFinancialAuthorization $financial,
-        private readonly DynamicRegisteredAccountEvidence $registeredAccount) {}
+        private readonly DynamicRegisteredAccountEvidence $registeredAccount,
+        private readonly DynamicPayoutWalletSnapshot $wallets) {}
 
     /** Authenticated customer listing permits reference quoting, never execution. */
     public function availability(User $user, Beneficiary $beneficiary, Balance $wallet): array
@@ -121,7 +124,7 @@ final class NiumDynamicPayoutQuoteService
         // check current conservative funds again after HTTP.
         return OwnerFirst::users([$user->id], function () use ($user, $beneficiary, $wallet, $binding, $request, $response, $quote): NiumDynamicPayoutQuote {
             $owner = User::query()->lockForUpdate()->findOrFail($user->id);
-            UserProviderAccount::query()->lockForUpdate()->findOrFail($binding['provider_account_id']);
+            $account = UserProviderAccount::query()->lockForUpdate()->findOrFail($binding['provider_account_id']);
             $recipient = Beneficiary::query()->lockForUpdate()->findOrFail($beneficiary->id);
             $balance = Balance::query()->lockForUpdate()->findOrFail($wallet->id);
             $current = $this->binding($owner, $recipient, $balance);
@@ -131,6 +134,13 @@ final class NiumDynamicPayoutQuoteService
                 throw new RuntimeException('dynamic_quote_binding_changed');
             }
             $this->assertUnused((int) $recipient->provider_id, $binding, $quote['id']);
+            // A legacy numeric mirror is not authenticated wallet evidence. Use
+            // an existing scoped snapshot; do not add provider I/O under locks.
+            try {
+                $this->wallets->current($owner, $balance, $account);
+            } catch (RuntimeException $exception) {
+                throw new RuntimeException('dynamic_quote_wallet_balance_unavailable', 0, $exception);
+            }
             $this->assertFunds($balance, FinalizedUsdPayoutPreparation::plannedDebitForPrincipal($quote['sourceAmount'])->amount->value);
 
             return NiumDynamicPayoutQuote::query()->forceCreate([
@@ -391,11 +401,9 @@ final class NiumDynamicPayoutQuoteService
 
     private function assertFunds(Balance $wallet, string $debit): void
     {
-        $providerAvailable = $wallet->raw_data['provider_available_balance'] ?? null;
-        if (! is_string($providerAvailable)) {
-            throw new RuntimeException('dynamic_quote_wallet_balance_unavailable');
-        }
-        $ceiling = BigDecimal::of(DynamicReservationLedger::storage($providerAvailable))
+        $providerAvailable = DynamicProviderBalance::normalize($wallet->raw_data['provider_available_balance'] ?? null,
+            'dynamic_quote_wallet_balance_unavailable');
+        $ceiling = BigDecimal::of($providerAvailable)
             ->minus(DynamicReservationLedger::storage($wallet->reserved_balance));
         if ($ceiling->isLessThan($debit) || BigDecimal::of($wallet->available_balance)->isLessThan($debit)) {
             throw new RuntimeException('dynamic_insufficient_available_funds');

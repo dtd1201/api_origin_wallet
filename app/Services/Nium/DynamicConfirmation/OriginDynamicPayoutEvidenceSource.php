@@ -149,7 +149,8 @@ final class OriginDynamicPayoutEvidenceSource implements DynamicPayoutEvidenceSo
                 || $live['execution_eligibility']['payout_schema_sha256'] !== $old['execution_eligibility']['payout_schema_sha256']
                 || $live['instruction_validation']['request_sha256'] !== $old['instruction_validation']['request_sha256']
                 || $observedWallet !== $storedWallet
-                || $live['wallet_availability']['available'] !== ($records->wallet->raw_data['provider_available_balance'] ?? null)) {
+                || $live['wallet_availability']['available'] !== DynamicProviderBalance::normalize(
+                    $records->wallet->raw_data['provider_available_balance'] ?? null, 'dynamic_review_binding_changed')) {
                 throw new RuntimeException('dynamic_review_binding_changed');
             }
             $assembled = $this->reviews->assemble($review, $quote);
