@@ -15,11 +15,26 @@ final class DynamicWalletResponse
         if (strlen($body) > 1048576) {
             throw new RuntimeException('dynamic_wallet_authenticated_snapshot_unavailable');
         }
-        // Quote ORIGINAL numeric tokens before ANY JSON decoding. Reuse the
+        // Quote ORIGINAL monetary tokens before ANY JSON decoding. Reuse the
         // shared duplicate-key/syntax checks without relaxing its object contract
         // or ever passing Wallet monetary numbers through a PHP float.
-        $json = preg_replace_callback('~"(?:[^"\\\\]|\\\\.)*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?~s',
-            static fn (array $m): string => str_starts_with($m[0], '"') ? $m[0] : json_encode($m[0], JSON_THROW_ON_ERROR), $body);
+        $stringToken = '"(?:[^"\\\\]|\\\\.)*"';
+        $numberToken = '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?';
+        $json = preg_replace_callback('~('.$stringToken.')(\s*:\s*)('.$numberToken.')|'.$stringToken.'|'.$numberToken.'~s',
+            static function (array $m): string {
+                if (isset($m[3])) {
+                    // Retain currency number types so an unquoted 840 cannot
+                    // become evidence for the string-only ISO code contract.
+                    if (in_array(json_decode($m[1], false, 64, JSON_THROW_ON_ERROR),
+                        ['currency', 'currencyCode', 'curSymbol', 'isoCode'], true)) {
+                        return $m[0];
+                    }
+
+                    return $m[1].$m[2].json_encode($m[3], JSON_THROW_ON_ERROR);
+                }
+
+                return str_starts_with($m[0], '"') ? $m[0] : json_encode($m[0], JSON_THROW_ON_ERROR);
+            }, $body);
         ExactProviderJson::decode('{"walletResponse":'.$json.'}');
         // Objects remain objects: a JSON object with numeric keys is not a list.
         $data = json_decode($json, false, 64, JSON_THROW_ON_ERROR);
@@ -50,15 +65,26 @@ final class DynamicWalletResponse
             }
             self::identity($row, $identity);
             $currencies = [];
+            $numericIsoCode = null;
             foreach (['currency', 'currencyCode', 'curSymbol', 'isoCode'] as $field) {
                 if (property_exists($row, $field)) {
-                    if (! is_string($row->$field) || preg_match('/^[A-Z]{3}$/D', $row->$field) !== 1) {
+                    if (! is_string($row->$field)) {
+                        throw new RuntimeException('dynamic_wallet_currency_unverified');
+                    }
+                    if ($field === 'isoCode' && preg_match('/^[0-9]{3}$/D', $row->$field) === 1) {
+                        $numericIsoCode = $row->$field;
+                        continue;
+                    }
+                    if (preg_match('/^[A-Z]{3}$/D', $row->$field) !== 1) {
                         throw new RuntimeException('dynamic_wallet_currency_unverified');
                     }
                     $currencies[] = $row->$field;
                 }
             }
-            if ($currencies === [] || count(array_unique($currencies)) !== 1) {
+            // Only the USD source wallet has an evidenced numeric mapping.
+            // Require alphabetic evidence too; retain legacy alphabetic aliases.
+            if ($currencies === [] || count(array_unique($currencies)) !== 1
+                || ($numericIsoCode !== null && ($numericIsoCode !== '840' || $currencies[0] !== 'USD'))) {
                 throw new RuntimeException('dynamic_wallet_currency_unverified');
             }
             $amounts = [];
