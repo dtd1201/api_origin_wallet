@@ -51,6 +51,23 @@ final class NiumDynamicPayoutAccountingTest extends TestCase
             ['records' => array_values($rows), 'response_sha256' => [str_repeat('a', 64)], 'observed_at' => '2030-01-01T00:00:00Z']);
     }
 
+    public static function changedProviderInstructions(): array
+    {
+        return [['purposeCode', 'OTHER'], ['sourceOfFunds', 'Personal Savings'], ['customerComments', 'Changed']];
+    }
+
+    #[DataProvider('changedProviderInstructions')]
+    public function test_provider_instruction_conflict_cannot_settle_even_with_matching_money(string $field, string $value): void
+    {
+        $result = $this->evaluate([0 => [$field => $value]], intentChanges: ['confirmed_terms' => [
+            'remittance_instruction' => ['purposeCode' => 'CORRIDOR-SPECIFIC', 'sourceOfFunds' => 'Corporate Account',
+                'customerComments' => 'Confirmed invoice'],
+        ]]);
+        $this->assertSame('unavailable', $result['state']);
+        $this->assertSame('dynamic_provider_instruction_conflict', $result['reason']);
+        $this->assertArrayNotHasKey('receipt', $result);
+    }
+
     public function test_effective_amount_is_not_added_to_the_separate_fee_again(): void
     {
         $result = $this->evaluate();

@@ -340,7 +340,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
                 'maximumDecimals' => in_array($this->beneficiary->currency, ['JPY', 'KRW'], true) ? 0 : 2, ...$constraints]]], JSON_THROW_ON_ERROR);
     }
 
-    private function readyReview(string $mode = 'SOURCE_AMOUNT', bool $checkOptions = false): array
+    private function readyReview(string $mode = 'SOURCE_AMOUNT', bool $checkOptions = false, string $sourceOfFunds = 'Salary'): array
     {
         // Real accepted customer authorization; only provider HTTP is synthetic.
         $this->fullRegistration();
@@ -355,7 +355,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         }
         $id = $this->postJson($this->path('/quotes'), $this->input($mode))->assertCreated()->json('dynamic_quote_id');
         $response = $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id, 'dynamic_quote_id' => $id,
-            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']]);
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => $sourceOfFunds, 'comment' => 'Invoice']]);
         $this->assertSame([], $response->json('reason_codes'), 'Review refusal: '.$response->getContent());
         return $response->assertOk()->assertJsonPath('status', 'READY')->assertJsonPath('total_usd_debit', '1000')
             ->assertJsonPath('principal.amount', '980')->assertJsonPath('included_fee.amount', '20')->json();
@@ -365,6 +365,88 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
     {
         return ['provider_account_id' => $this->account->id, 'beneficiary_id' => $this->beneficiary->id,
             'balance_id' => $this->wallet->id, 'client_reference' => $reference, 'accepted_fingerprint' => $review['accepted_fingerprint']];
+    }
+
+    public static function sourceOfFunds(): array
+    {
+        return array_map(static fn (string $value): array => [$value], [
+            'Salary', 'Personal Savings', 'Personal Wealth', 'Retirement Funds',
+            'Business Owner/Shareholder', 'Loan Facility', 'Personal Account', 'Corporate Account',
+        ]);
+    }
+
+    #[DataProvider('sourceOfFunds')]
+    public function test_selected_source_of_funds_survives_provider_validation_review_confirm_and_dispatch(string $sourceOfFunds): void
+    {
+        $review = $this->readyReview(sourceOfFunds: $sourceOfFunds);
+        $this->assertSame($sourceOfFunds, $review['instruction']['source_of_funds']);
+        $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
+        $validatedJson = $record['evidence']['instruction_validation']['request_json'];
+        $this->assertSame($sourceOfFunds, json_decode($validatedJson, true, flags: JSON_THROW_ON_ERROR)['sourceOfFunds']);
+        $this->assertSame(hash('sha256', $validatedJson), $record['evidence']['instruction_validation']['request_sha256']);
+        $this->noAdmission();
+
+        $this->postJson($this->path(''), $this->submitReady($review))->assertCreated();
+        $intent = NiumDynamicIntent::query()->sole();
+        $snapshot = $intent->confirmed_terms;
+        $this->assertSame($sourceOfFunds, $snapshot['remittance_instruction']['sourceOfFunds']);
+        $this->assertSame($review['accepted_fingerprint'], $intent->terms_fingerprint);
+        $this->assertSame(hash('sha256', json_encode($snapshot, JSON_THROW_ON_ERROR)), $intent->terms_fingerprint);
+        $this->assertSame(hash('sha256', $validatedJson), $snapshot['validated_remittance_sha256']);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $wire = new DynamicPayoutTransportStub;
+        $this->app->instance(DynamicPayoutTransport::class, $wire);
+        // Renew observations through the existing exact-request validation path before Dispatch.
+        $this->travelTo(now()->addSeconds(31));
+        app(DynamicPayoutDispatcher::class)->dispatch($outbox->id);
+        $this->assertSame(1, $wire->submissions);
+        $this->assertSame($validatedJson, $outbox->fresh()->request_json);
+        $this->assertSame($validatedJson, $wire->bodies[0]);
+        $this->assertSame($sourceOfFunds, json_decode($wire->bodies[0], true, flags: JSON_THROW_ON_ERROR)['sourceOfFunds']);
+        $this->assertSame($snapshot, $intent->fresh()->confirmed_terms);
+        $this->assertSame($review['accepted_fingerprint'], $intent->fresh()->terms_fingerprint);
+    }
+
+    public static function invalidSourceOfFunds(): array
+    {
+        return [[null], [''], ['salary'], ['Corporate account'], ['UNLISTED'], [' Salary'], ['Salary '], ["Salary\n"], [['Salary']]];
+    }
+
+    #[DataProvider('invalidSourceOfFunds')]
+    public function test_review_rejects_missing_or_non_enum_source_of_funds_before_provider_validation(mixed $sourceOfFunds): void
+    {
+        $this->duringValidation = function (): void { $this->fail('An invalid source of funds must not reach Nium validation.'); };
+        $this->postJson($this->path('/reviews'), [
+            'beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => '11111111-1111-4111-8111-111111111111',
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => $sourceOfFunds, 'comment' => 'Invoice'],
+        ])->assertUnprocessable()->assertJsonValidationErrors(['instruction.source_of_funds']);
+        $this->noAdmission();
+    }
+
+    public function test_review_does_not_default_a_missing_source_of_funds(): void
+    {
+        $this->postJson($this->path('/reviews'), [
+            'beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => '11111111-1111-4111-8111-111111111111',
+            'instruction' => ['purpose_code' => 'IR005', 'comment' => 'Invoice'],
+        ])->assertUnprocessable()->assertJsonValidationErrors(['instruction.source_of_funds']);
+        $this->noAdmission();
+    }
+
+    public function test_provider_rejected_source_of_funds_cannot_produce_ready_or_confirmation(): void
+    {
+        $this->fullRegistration(); $this->customerListing(); $this->executionEvidence(); $this->providerQuote();
+        $id = $this->postJson($this->path('/quotes'), $this->input())->assertCreated()->json('dynamic_quote_id');
+        $this->validationResponse = '{"valid":false,"issues":[{"field":"sourceOfFunds","code":"synthetic-context-refusal"}]}';
+        $this->postJson($this->path('/reviews'), [
+            'beneficiary_id' => $this->beneficiary->id, 'dynamic_quote_id' => $id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Loan Facility', 'comment' => 'Invoice'],
+        ])->assertStatus(503)->assertJsonPath('reason_codes', ['dynamic_payout_instruction_rejected'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->postJson($this->path(''), $this->submitReady(['accepted_fingerprint' => str_repeat('a', 64)]))
+            ->assertStatus(503);
+        $this->noAdmission();
     }
 
     #[DataProvider('modes')]
@@ -1182,8 +1264,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame($history ? 'cleared' : null, $this->account->fresh()->rfi_status);
         $this->assertSame(1, NiumRfiCase::query()->where('status', 'requested')->count());
         $this->assertSame($history ? 12 : 1, NiumRfiCase::query()->count());
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
-        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
@@ -1770,7 +1852,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
-    public function test_v2_binding_change_after_confirmation_prevents_dispatch_and_preserves_reservation(): void
+    public function test_v2_binding_change_after_confirmation_prevents_dispatch_and_releases_unsent_reservation(): void
     {
         $this->detailsBinding = true;
         $review = $this->readyReview();
@@ -1785,7 +1867,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(0, $wire->submissions);
         $this->assertSame(0, $outbox->fresh()->attempts);
         $this->assertSame('exception', $outbox->fresh()->state);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
@@ -1809,7 +1891,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(0, $wire->submissions);
         $this->assertSame(0, $outbox->fresh()->attempts);
         $this->assertSame('exception', $outbox->fresh()->state);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
@@ -1830,7 +1912,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(2, $this->detailsReads); // Renewal happens outside locks; stale evidence grants no wire attempt.
         $this->assertSame(0, $outbox->fresh()->attempts);
         $this->assertSame('dynamic_submission_not_started', $outbox->fresh()->exception_code);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
     }
 
     public static function v2MappingChanges(): array { return [['customer'], ['beneficiary'], ['account']]; }
@@ -2140,9 +2222,9 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame($beforeWire ? 'dynamic_submission_not_started'
             : ($evidenceHold !== null ? 'dynamic_compliance_hold_or_evidence_unavailable'
                 : 'dynamic_customer_account_beneficiary_or_wallet_ineligible'), $outbox->fresh()->exception_code);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
-        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
-        $this->assertSame('1000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
         $this->assertSame('2000.00000000', $this->wallet->fresh()->ledger_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
         $this->assertSame($terms, $intent->fresh()->getAttributes());
@@ -2163,7 +2245,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(0, $wire->submissions);
         $this->assertSame(0, $outbox->fresh()->attempts);
         $this->assertSame('exception', $outbox->fresh()->state);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
     }
 
     public function test_ready_review_rechecks_balance_and_receiving_account_before_new_admission(): void
@@ -2213,7 +2295,7 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame(0, $wire->submissions);
         $this->assertSame(0, $outbox->fresh()->attempts);
         $this->assertSame('dynamic_customer_account_beneficiary_or_wallet_ineligible', $outbox->fresh()->exception_code);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
@@ -2248,11 +2330,17 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->noAdmission();
     }
 
-    public function test_changed_server_review_instruction_cannot_reuse_the_original_accepted_fingerprint(): void
+    public static function changedInstructionFields(): array
+    {
+        return [['comment', 'Changed after Review'], ['source_of_funds', 'Personal Savings'], ['purpose_code', 'CORRIDOR-SPECIFIC']];
+    }
+
+    #[DataProvider('changedInstructionFields')]
+    public function test_changed_server_review_instruction_cannot_reuse_the_original_accepted_fingerprint(string $field, string $value): void
     {
         $review = $this->readyReview();
         $record = app(NiumDynamicReviewService::class)->load($review['accepted_fingerprint']);
-        $record['instruction']['comment'] = 'Changed after Review';
+        $record['instruction'][$field] = $value;
         Cache::store('database')->put('nium:dynamic:review:v1:'.$review['accepted_fingerprint'],
             Crypt::encryptString(json_encode($record, JSON_THROW_ON_ERROR)), now()->addHour());
         $this->postJson($this->path(''), $this->submitReady($review))->assertStatus(409)
@@ -2649,8 +2737,8 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertNull($outbox->fresh()->submission_started_at);
         $this->assertSame('exception', $outbox->fresh()->state);
         $this->assertSame('dynamic_payout_amount_out_of_schema_bounds', $outbox->fresh()->exception_code);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
-        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 

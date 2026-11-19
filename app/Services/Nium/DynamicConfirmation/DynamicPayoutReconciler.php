@@ -27,7 +27,8 @@ final class DynamicPayoutReconciler
         $token = (string) Str::uuid();
         $claimed = $this->dispatcher->locked($id, function ($intent, $outbox, $reservation) use ($token): array|false {
             if ($outbox->attempts !== 1 || ! in_array($outbox->state, ['submitted', 'ambiguous', 'exception', 'matched'], true)
-                || $outbox->next_reconciliation_at === null || $outbox->next_reconciliation_at->isFuture()
+                || ($outbox->next_reconciliation_at === null && $outbox->state !== 'exception')
+                || $outbox->next_reconciliation_at?->isFuture()
                 || ($outbox->reconciliation_claimed_at !== null
                     && $outbox->reconciliation_claimed_at->addSeconds(120)->isFuture())) {
                 return false;
@@ -47,12 +48,6 @@ final class DynamicPayoutReconciler
                 }
                 $receipt['post_match_recovery']['attempts']++;
                 $outbox->financial_evidence = $receipt;
-            }
-            if (! $postMatch && $outbox->reconciliation_attempts >= max(1, (int) config('nium_dynamic_payouts.max_reconciliation_attempts', 8))) {
-                $outbox->financial_state = 'unavailable';
-                DynamicPayoutDispatcher::exception($outbox, 'dynamic_reconciliation_exhausted');
-
-                return false;
             }
             DynamicPayoutDispatcher::persist($outbox->forceFill(['reconciliation_token' => $token, 'reconciliation_claimed_at' => now(),
                 'reconciliation_attempts' => $outbox->reconciliation_attempts + ($postMatch ? 0 : 1)]));
@@ -85,9 +80,20 @@ final class DynamicPayoutReconciler
                     }
                     $current->provider_reference = $result['provider_reference'];
                 }
-                // Webhook exceptions cannot be cleared by a stale in-flight read.
-                if (in_array($current->provider_status, ['RETURNED', 'REJECTED', 'FAILED', 'CANCELLED'], true)) {
-                    DynamicPayoutDispatcher::exception($current, 'dynamic_provider_terminal_exception');
+                // Retain fresh accounting evidence even for terminal callbacks. Neither a stale
+                // success nor a later matching read may erase a consumed discrepancy or return.
+                if (in_array($current->provider_status, ['RETURNED', 'REJECTED', 'FAILED', 'CANCELLED'], true)
+                    || ($current->state === 'exception' && $reservation->state === 'consumed')
+                    || ($current->state === 'exception' && in_array($current->financial_state, ['mismatched', 'exception'], true))
+                    || $current->exception_code === 'dynamic_provider_reference_conflict') {
+                    $receipt = $current->financial_evidence ?? [];
+                    $receipt['exception_recovery'] = ['state' => $result['state'], 'reason' => $result['reason'],
+                        'checked_at' => now()->toISOString(), 'receipt' => $result['receipt'] ?? null];
+                    $current->financial_evidence = $receipt;
+                    if ($current->provider_status !== 'RETURNED' && ($result['provider_status'] ?? null) === 'RETURNED') {
+                        $current->provider_status = 'RETURNED';
+                    }
+                    DynamicPayoutDispatcher::exception($current, $current->exception_code ?? 'dynamic_provider_terminal_exception');
 
                     return;
                 }
@@ -160,6 +166,7 @@ final class DynamicPayoutReconciler
             }
             $this->dispatcher->locked($id, function ($intent, $current) use ($token): void {
                 if ($current->reconciliation_token === $token) {
+                    $current->forceFill(['reconciliation_token' => null, 'reconciliation_claimed_at' => null]);
                     DynamicPayoutDispatcher::exception($current, 'dynamic_financial_settlement_requires_review');
                 }
             });

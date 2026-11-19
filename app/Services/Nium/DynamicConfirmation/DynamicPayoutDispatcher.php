@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Services\Nium\DynamicConfirmation;
 
 use App\Services\Wallet\Concurrency\OwnerFirst;
+use App\Services\Wallet\Concurrency\OwnerLockContext;
 use App\Models\AuditLog;
+use App\Models\Balance;
 use App\Models\LedgerEntry;
 use App\Models\NiumDynamicIntent;
 use App\Models\NiumDynamicPayoutOutbox;
@@ -51,9 +53,10 @@ final class DynamicPayoutDispatcher
             if ($exception->getMessage() === 'dynamic_wallet_has_unresolved_payout') {
                 return;
             }
-            $this->locked($id, function ($intent, $outbox) use ($exception): void {
+            $this->locked($id, function ($intent, $outbox, $reservation, $context) use ($exception): void {
                 if ($outbox->state === 'held') {
                     self::exception($outbox, self::reason($exception));
+                    $this->releaseUnsent($intent, $outbox, $reservation, $context);
                 }
             });
 
@@ -71,12 +74,13 @@ final class DynamicPayoutDispatcher
         } catch (Throwable) {
             $result = ['http_status' => null, 'provider_reference' => null];
         }
-        $this->locked($id, function ($intent, $current) use ($outbox, $result): void {
+        $this->locked($id, function ($intent, $current, $reservation, $context) use ($outbox, $result): void {
             if ($current->claim_token !== $outbox->claim_token || $current->state !== 'claimed') {
                 return;
             }
             if ($current->attempts !== 1 || $current->submission_started_at === null) {
                 self::exception($current, 'dynamic_submission_not_started');
+                $this->releaseUnsent($intent, $current, $reservation, $context);
 
                 return;
             }
@@ -125,7 +129,17 @@ final class DynamicPayoutDispatcher
     /** A lost worker may have sent the POST. Stale claims are never returned to held. */
     public function recoverInterrupted(string $id): void
     {
-        $this->locked($id, function ($intent, $outbox): void {
+        $this->locked($id, function ($intent, $outbox, $reservation, $context): void {
+            if ($outbox->state === 'held' && $intent->quote_expires_at->lessThanOrEqualTo(now())
+                && $outbox->attempts === 0 && $outbox->submission_started_at === null && $outbox->provider_reference === null) {
+                self::exception($outbox, 'dynamic_quote_expired_before_submission');
+                $this->releaseUnsent($intent, $outbox, $reservation, $context);
+                return;
+            }
+            if ($outbox->state === 'exception' && $outbox->attempts === 0) {
+                $this->releaseUnsent($intent, $outbox, $reservation, $context);
+                return;
+            }
             if ($outbox->state !== 'claimed' || $outbox->claimed_at === null
                 || $outbox->claimed_at->addSeconds(max(60, (int) config('nium_dynamic_payouts.claim_timeout_seconds', 120)))->isFuture()) {
                 return;
@@ -136,6 +150,7 @@ final class DynamicPayoutDispatcher
                 self::alert($outbox, 'dynamic_submission_worker_interrupted');
             } else {
                 self::exception($outbox, 'dynamic_claim_interrupted_before_submission');
+                $this->releaseUnsent($intent, $outbox, $reservation, $context);
             }
         });
     }
@@ -186,10 +201,31 @@ final class DynamicPayoutDispatcher
     public static function exception(NiumDynamicPayoutOutbox $outbox, string $code): void
     {
         $same = $outbox->state === 'exception' && $outbox->exception_code === $code;
-        DynamicPayoutDispatcher::persist($outbox->forceFill(['state' => 'exception', 'exception_code' => $code, 'next_reconciliation_at' => null]));
+        DynamicPayoutDispatcher::persist($outbox->forceFill(['state' => 'exception', 'exception_code' => $code,
+            // An exception is not proof of no provider debit. Continue read-only recovery.
+            'next_reconciliation_at' => $outbox->attempts === 1 ? now()->addSeconds(self::recoveryDelay()) : null]));
         if (! $same) {
             self::alert($outbox, $code);
         }
+    }
+
+    public static function recoveryDelay(): int
+    {
+        return max(60, min(86400, (int) config('nium_dynamic_payouts.exception_reconciliation_delay_seconds', 3600)));
+    }
+
+    /** The durable wire marker is committed before HTTP; state=exception fences any late worker. */
+    private function releaseUnsent(NiumDynamicIntent $intent, NiumDynamicPayoutOutbox $outbox,
+        NiumDynamicReservation $reservation, OwnerLockContext $context): void
+    {
+        if ($outbox->state !== 'exception' || $outbox->attempts !== 0 || $outbox->submission_started_at !== null
+            || $outbox->provider_reference !== null || $reservation->state !== 'held') return;
+        $release = app(DynamicReservationLedger::class)->release($intent, $reservation,
+            Balance::query()->lockForUpdate()->findOrFail($intent->balance_id), $context);
+        self::persist($reservation->forceFill(['state' => 'released', 'release_entry_id' => $release->id,
+            'released_at' => now()]));
+        self::persist($outbox->forceFill(['financial_state' => 'not_submitted',
+            'financial_risk_state' => 'NO_PROVIDER_SUBMISSION']));
     }
 
     private static function alert(NiumDynamicPayoutOutbox $outbox, string $code): void

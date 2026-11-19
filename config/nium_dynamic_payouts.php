@@ -6,6 +6,8 @@ return [
     'live_automatic_dispatch_authorized' => (bool) env('NIUM_DYNAMIC_LIVE_DISPATCH_AUTHORIZED', false),
     'operator_authorization_reference' => env('NIUM_DYNAMIC_OPERATOR_AUTHORIZATION_REFERENCE'),
     'max_reconciliation_attempts' => 8,
+    // Exhausting the fast polling budget escalates attention; unresolved funds still get GET recovery.
+    'exception_reconciliation_delay_seconds' => 3600,
     'reconciliation_delays_seconds' => [60, 120, 300, 600, 1800, 3600, 7200, 14400],
     'max_transaction_pages' => 20,
     'claim_timeout_seconds' => 120,

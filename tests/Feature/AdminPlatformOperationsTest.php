@@ -9,7 +9,7 @@ use App\Models\IntegrationProvider;
 use App\Models\LedgerEntry;
 use App\Models\User;
 use App\Models\WebhookEvent;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\OwnerFirstPostgresDatabase as RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Tests\TestCase;

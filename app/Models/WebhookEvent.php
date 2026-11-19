@@ -27,9 +27,10 @@ class WebhookEvent extends Model
         'error_message',
         'nium_va_evidence',
         'nium_va_recovery',
+        'nium_processing_claim',
     ];
 
-    protected $hidden = ['nium_va_evidence', 'nium_va_recovery'];
+    protected $hidden = ['nium_va_evidence', 'nium_va_recovery', 'nium_processing_claim'];
 
     protected function casts(): array
     {
@@ -37,6 +38,7 @@ class WebhookEvent extends Model
             'payload' => 'array',
             'nium_va_evidence' => 'encrypted:array',
             'nium_va_recovery' => 'array',
+            'nium_processing_claim' => 'array',
             'received_at' => 'datetime',
             'processed_at' => 'datetime',
         ];

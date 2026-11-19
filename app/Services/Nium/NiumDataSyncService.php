@@ -5,13 +5,10 @@ namespace App\Services\Nium;
 use App\Services\Wallet\Concurrency\OwnerFirst;
 use App\Models\Balance;
 use App\Models\IntegrationProvider;
-use App\Models\Transaction;
-use App\Models\Transfer;
 use App\Models\User;
 use App\Services\Integrations\Contracts\DataSyncProvider;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 class NiumDataSyncService implements DataSyncProvider
@@ -222,9 +219,13 @@ class NiumDataSyncService implements DataSyncProvider
                 break;
             }
         }
-        $count = 0;
-
-        DB::transaction(function () use ($items, $provider, $user, &$count): void {
+        $count = OwnerFirst::users([$user->id], function () use ($items, $provider, $user, $account): int {
+            $count = 0;
+            $currentAccount = $user->providerAccounts()->whereKey($account->id)->where('provider_id', $provider->id)->lockForUpdate()->firstOrFail();
+            if ($currentAccount->external_customer_id !== $account->external_customer_id
+                || $currentAccount->external_account_id !== $account->external_account_id) {
+                throw new RuntimeException('Nium transaction sync account binding changed.');
+            }
             foreach ($items as $item) {
                 $externalTransactionId = $this->value($item, [
                     // transactionId is shared by Nium transaction sync and
@@ -257,18 +258,24 @@ class NiumDataSyncService implements DataSyncProvider
                     'clientReference',
                     'client_reference',
                 ]);
-                $transfer = $this->findTransfer($provider, $transferReference);
+                foreach (['customerHashId' => $account->external_customer_id, 'walletHashId' => $account->external_account_id] as $field => $expected) {
+                    if (isset($item[$field]) && $item[$field] !== $expected) {
+                        throw new RuntimeException('Nium transaction sync response scope conflict.');
+                    }
+                }
+                $transfer = app(NiumTransactionWriter::class)->findTransfer($provider, (int) $user->id, [
+                    $transferReference, ...array_values(array_intersect_key($item, array_flip([
+                        'systemReferenceNumber', 'system_reference_number', 'systemTraceAuditNumber',
+                        'retrievalReferenceNumber', 'authCode', 'paymentId', 'payment_id', 'clientReference', 'client_reference',
+                    ]))),
+                ]);
                 $currency = strtoupper((string) ($this->value($item, ['currency', 'currencyCode']) ?: $transfer?->source_currency ?: 'USD'));
                 $amount = $this->numericValue($item, ['amount', 'transactionAmount', 'sourceAmount', 'cardTransactionAmount', 'authAmount', 'billingAmount',], 0);
 
-                Transaction::query()->updateOrCreate(
-                    [
-                        'provider_id' => $provider->id,
-                        'external_transaction_id' => (string) $externalTransactionId,
-                    ],
+                app(NiumTransactionWriter::class)->save($provider, (int) $user->id, (string) $externalTransactionId,
                     [
                         'user_id' => $user->id,
-                        'bank_account_id' => null,
+                        'bank_account_id' => $transfer?->source_bank_account_id,
                         'transfer_id' => $transfer?->id,
                         'transaction_type' => $this->value($item, ['type', 'transactionType']),
                         'direction' => $this->direction($item, $amount),
@@ -310,9 +317,9 @@ class NiumDataSyncService implements DataSyncProvider
 
                 $count++;
             }
-        });
-
-        $account->update(['transactions_last_synced_at' => now()]);
+            $currentAccount->update(['transactions_last_synced_at' => now()]);
+            return $count;
+        }, 3);
 
         return ['synced_transactions' => $count];
     }
@@ -392,23 +399,6 @@ class NiumDataSyncService implements DataSyncProvider
         $value = $this->value($item, $paths);
 
         return is_numeric($value) ? $value : $default;
-    }
-
-    private function findTransfer(IntegrationProvider $provider, mixed $reference): ?Transfer
-    {
-        if (! filled($reference)) {
-            return null;
-        }
-
-        return Transfer::query()
-            ->where('provider_id', $provider->id)
-            ->where(function ($query) use ($reference): void {
-                $query->where('external_transfer_id', $reference)
-                    ->orWhere('external_payment_id', $reference)
-                    ->orWhere('transfer_no', $reference)
-                    ->orWhere('client_reference', $reference);
-            })
-            ->first();
     }
 
     private function direction(array $item, mixed $amount): string

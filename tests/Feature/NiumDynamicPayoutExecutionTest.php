@@ -59,13 +59,33 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->app->instance(DynamicPayoutTransport::class, $this->wire);
     }
 
-    private function prepare(PayoutAmountMode $mode = PayoutAmountMode::Source): NiumDynamicPayoutOutbox
+    private function prepare(PayoutAmountMode $mode = PayoutAmountMode::Source, string $sourceOfFunds = 'Salary'): NiumDynamicPayoutOutbox
     {
-        $this->source->review = $this->usdReview($mode, ['instruction' => new PayoutInstruction('IR005', 'Salary', 'Fixture invoice')]);
+        $this->source->review = $this->usdReview($mode, ['instruction' => new PayoutInstruction('IR005', $sourceOfFunds, 'Fixture invoice')]);
         $this->confirmDynamic();
         config(['nium_dynamic_confirmation.automatic_dispatch_enabled' => true]);
 
         return NiumDynamicPayoutOutbox::query()->sole();
+    }
+
+    public function test_new_review_enum_does_not_rewrite_or_reject_an_existing_confirmed_instruction_at_dispatch(): void
+    {
+        // Synthetic historical instruction outside today's ingress enum, already sealed under the old string contract.
+        $historicalSource = 'Historical provider-approved source';
+        $outbox = $this->prepare(sourceOfFunds: $historicalSource);
+        $intent = NiumDynamicIntent::query()->sole();
+        $snapshot = $intent->confirmed_terms;
+        $fingerprint = $intent->terms_fingerprint;
+        $this->assertSame($historicalSource, $snapshot['remittance_instruction']['sourceOfFunds']);
+        $this->assertSame($intent->id, $this->confirmDynamic()->id); // Existing confirmation remains idempotent.
+        $this->dispatcher->dispatch($outbox->id);
+        $this->assertSame(1, $this->wire->submissions);
+        $request = $outbox->fresh()->request_json;
+        $this->assertSame($request, $this->wire->bodies[0]);
+        $this->assertSame($historicalSource, json_decode($request, true, flags: JSON_THROW_ON_ERROR)['sourceOfFunds']);
+        $this->assertSame($snapshot, $intent->fresh()->confirmed_terms);
+        $this->assertSame($fingerprint, $intent->fresh()->terms_fingerprint);
+        $this->assertSame(hash('sha256', json_encode($snapshot, JSON_THROW_ON_ERROR)), $fingerprint);
     }
 
     private function records(NiumDynamicPayoutOutbox $outbox, string $fee = '20'): array
@@ -202,12 +222,12 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->reconciler->reconcile($outbox->id);
         $this->assertSame('exception', $outbox->fresh()->state);
         $this->assertSame('PROVIDER_EXCEPTION_REQUIRES_REVIEW', $outbox->fresh()->financial_risk_state);
-        $this->assertNull($outbox->fresh()->next_reconciliation_at);
+        $this->assertNotNull($outbox->fresh()->next_reconciliation_at);
         $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
-    public function test_quote_expiry_immediately_before_wire_keeps_the_hold_and_sends_nothing(): void
+    public function test_quote_expiry_immediately_before_wire_releases_the_proven_unsent_hold(): void
     {
         $outbox = $this->prepare();
         $this->wire->beforeWire = fn () => $this->travelTo($this->at('01:00:00'));
@@ -215,7 +235,7 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame(0, $this->wire->submissions);
         $this->assertSame('exception', $outbox->fresh()->state);
         $this->assertSame(0, $outbox->fresh()->attempts);
-        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
     }
 
     public function test_submission_marker_save_veto_cannot_send_an_unrecorded_payout(): void
@@ -249,10 +269,16 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
     }
 
-    public function test_changed_consent_instruction_or_missing_authoritative_source_cannot_dispatch(): void
+    public static function changedInstructions(): array
+    {
+        return [['Salary', 'Changed invoice'], ['Personal Savings', 'Fixture invoice']];
+    }
+
+    #[DataProvider('changedInstructions')]
+    public function test_changed_consent_instruction_or_missing_authoritative_source_cannot_dispatch(string $sourceOfFunds, string $comment): void
     {
         $outbox = $this->prepare();
-        $this->source->review = $this->usdReview(changes: ['instruction' => new PayoutInstruction('IR005', 'Salary', 'Changed invoice')]);
+        $this->source->review = $this->usdReview(changes: ['instruction' => new PayoutInstruction('IR005', $sourceOfFunds, $comment)]);
         $this->dispatcher->dispatch($outbox->id);
         $this->assertSame('exception', $outbox->fresh()->state);
         $this->assertSame(0, $this->wire->submissions);
@@ -269,7 +295,7 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame('exception', $outbox->fresh()->state);
         $this->assertSame(0, $outbox->fresh()->attempts);
         $this->assertSame(0, $this->wire->submissions);
-        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
     }
 
@@ -570,7 +596,7 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame(1, $outbox->fresh()->attempts);
     }
 
-    public function test_missing_records_exhaust_read_only_budget_without_reposting(): void
+    public function test_missing_records_exhaust_fast_budget_and_schedule_slow_get_recovery_without_reposting(): void
     {
         $outbox = $this->prepare();
         config(['nium_dynamic_payouts.max_reconciliation_attempts' => 2]);
@@ -582,7 +608,7 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->reconciler->reconcile($outbox->id);
         $this->assertSame('unavailable', $outbox->fresh()->financial_state);
         $this->assertSame('dynamic_reconciliation_exhausted', $outbox->fresh()->exception_code);
-        $this->assertNull($outbox->fresh()->next_reconciliation_at);
+        $this->assertNotNull($outbox->fresh()->next_reconciliation_at);
         $this->assertSame(2, $this->wire->reads);
         $this->assertSame(1, $this->wire->submissions);
     }
@@ -750,6 +776,156 @@ final class NiumDynamicPayoutExecutionTest extends DynamicConfirmationDatabaseTe
         $this->assertSame('exception', $outbox->fresh()->state);
         $this->assertSame('RETURNED', $outbox->fresh()->provider_status);
         $this->assertSame(0, LedgerEntry::query()->where('entry_type', 'debit')->count());
+    }
+
+    public function test_late_paid_callback_revives_an_exhausted_exception_and_settles_once(): void
+    {
+        $outbox = $this->prepare();
+        config(['nium_dynamic_payouts.max_reconciliation_attempts' => 1]);
+        $this->wire->afterWire = static fn () => throw new RuntimeException('timeout after acceptance');
+        $this->dispatcher->dispatch($outbox->id);
+        $this->wire->batch = ['records' => [], 'response_sha256' => [], 'observed_at' => now()->toISOString()];
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('exception', $outbox->fresh()->state);
+        $this->assertNotNull($outbox->fresh()->next_reconciliation_at);
+        $this->webhook($outbox, 'PAID');
+        $this->wire->batch = $this->records($outbox->fresh());
+        $this->reconciler->reconcile($outbox->id);
+        $this->dispatcher->dispatch($outbox->id);
+        $this->assertSame('matched', $outbox->fresh()->state);
+        $this->assertSame('paid', $this->customerStatus($outbox)['status']);
+        $this->assertSame('consumed', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame(1, $this->wire->submissions);
+    }
+
+    public function test_missing_fee_evidence_can_arrive_after_fast_polling_is_exhausted(): void
+    {
+        $outbox = $this->prepare();
+        config(['nium_dynamic_payouts.max_reconciliation_attempts' => 1]);
+        $this->dispatcher->dispatch($outbox->id);
+        $batch = $this->records($outbox->fresh());
+        $this->wire->batch = $batch;
+        $this->wire->batch['records'] = [$batch['records'][0]];
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('MISSING_FEE_RECORDS', $outbox->fresh()->financial_evidence['fee_evidence']);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->travelTo($outbox->fresh()->next_reconciliation_at->addSecond());
+        $this->wire->batch = $batch;
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('matched', $outbox->fresh()->state);
+        $this->assertSame('1000', $outbox->fresh()->financial_evidence['wallet_debit_usd']);
+        $this->assertSame(1, $this->wire->submissions);
+    }
+
+    public function test_terminal_exception_with_no_schedule_still_records_authenticated_evidence_without_refund(): void
+    {
+        $outbox = $this->prepare();
+        $this->dispatcher->dispatch($outbox->id);
+        $this->webhook($outbox, 'RETURNED');
+        $outbox->fresh()->forceFill(['next_reconciliation_at' => null])->save(); // Historical stuck row.
+        $this->wire->batch = $this->records($outbox->fresh());
+        $this->wire->batch['records'][0]['status'] = 'Returned';
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('RETURNED', $outbox->fresh()->provider_status);
+        $this->assertSame('Returned', $outbox->fresh()->financial_evidence['exception_recovery']['receipt']['terminal_observation']['status']);
+        $this->assertNotNull($outbox->fresh()->next_reconciliation_at);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame(0, LedgerEntry::query()->whereIn('entry_type', ['debit', 'release'])->count());
+        $this->assertSame(1, $this->wire->submissions);
+    }
+
+    public function test_a_later_matching_read_cannot_clear_a_consumed_accounting_discrepancy(): void
+    {
+        $outbox = $this->prepare();
+        $this->dispatcher->dispatch($outbox->id);
+        $this->wire->batch = $this->records($outbox->fresh(), '21');
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('exception', $outbox->fresh()->state);
+        $original = $outbox->fresh()->financial_evidence;
+        $this->travelTo($outbox->fresh()->next_reconciliation_at->addSecond());
+        $this->wire->batch = $this->records($outbox->fresh());
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('exception', $outbox->fresh()->state);
+        $this->assertSame($original['wallet_debit_usd'], $outbox->fresh()->financial_evidence['wallet_debit_usd']);
+        $this->assertSame('matched', $outbox->fresh()->financial_evidence['exception_recovery']['state']);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+    }
+
+    public function test_settlement_write_failure_keeps_recovery_scheduled_and_can_settle_after_repair(): void
+    {
+        $outbox = $this->prepare();
+        $this->dispatcher->dispatch($outbox->id);
+        $this->wire->batch = $this->records($outbox->fresh());
+        $event = 'eloquent.creating: '.LedgerEntry::class;
+        Event::listen($event, static fn ($entry) => $entry->entry_type === 'debit' ? false : null);
+        try {
+            $this->reconciler->reconcile($outbox->id);
+        } finally {
+            Event::forget($event);
+        }
+        $this->assertSame('dynamic_financial_settlement_requires_review', $outbox->fresh()->exception_code);
+        $this->assertNull($outbox->fresh()->reconciliation_token);
+        $this->assertNotNull($outbox->fresh()->next_reconciliation_at);
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->travelTo($outbox->fresh()->next_reconciliation_at->addSecond());
+        $this->reconciler->reconcile($outbox->id);
+        $this->assertSame('matched', $outbox->fresh()->state);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'debit')->count());
+        $this->assertSame(1, $this->wire->submissions);
+    }
+
+    public function test_interrupted_claim_without_a_wire_marker_releases_once_and_fences_late_sender(): void
+    {
+        $outbox = $this->prepare();
+        $outbox->forceFill(['state' => 'claimed', 'claim_token' => '11111111-1111-4111-8111-111111111111',
+            'claimed_at' => now()->subMinutes(5)])->save();
+        $this->dispatcher->recoverInterrupted($outbox->id);
+        $this->dispatcher->recoverInterrupted($outbox->id);
+        $this->dispatcher->dispatch($outbox->id);
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('0.00000000', $this->wallet->fresh()->reserved_balance);
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'release')->count());
+        $this->assertSame(0, $this->wire->submissions);
+        $this->expectExceptionMessage('dynamic_submission_already_claimed');
+        $this->dispatcher->beginWire($outbox->id, '11111111-1111-4111-8111-111111111111');
+    }
+
+    public function test_confirmed_non_hk_purpose_and_source_are_identical_in_wire_and_settlement_audit(): void
+    {
+        $this->source->review = $this->usdReview(changes: [
+            'instruction' => new PayoutInstruction('CORRIDOR_SPECIFIC', 'Corporate Account', 'Confirmed invoice'),
+        ]);
+        $intent = $this->confirmDynamic();
+        config(['nium_dynamic_confirmation.automatic_dispatch_enabled' => true]);
+        $outbox = NiumDynamicPayoutOutbox::query()->sole();
+        $this->dispatcher->dispatch($outbox->id);
+        $body = json_decode($this->wire->bodies[0], true, flags: JSON_THROW_ON_ERROR);
+        foreach ($intent->confirmed_terms['remittance_instruction'] as $field => $value) {
+            $this->assertSame($value, $body[$field]);
+        }
+        $this->wire->batch = $this->records($outbox->fresh());
+        $this->reconciler->reconcile($outbox->id);
+        $receipt = $outbox->fresh()->financial_evidence;
+        $this->assertSame($intent->confirmed_terms['remittance_instruction'], $receipt['confirmed_instruction']);
+        $this->assertSame($intent->terms_fingerprint, $receipt['terms_fingerprint']);
+        $this->assertSame(hash('sha256', $this->wire->bodies[0]), $receipt['request_sha256']);
+        $this->assertSame('matched', $outbox->fresh()->state);
+    }
+
+    public function test_expired_queued_intent_releases_once_even_when_dispatch_is_disabled(): void
+    {
+        $outbox = $this->prepare();
+        config(['nium_dynamic_confirmation.automatic_dispatch_enabled' => false]);
+        $this->travelTo($this->at('01:00:00'));
+        $this->artisan('nium:process-dynamic-payouts')->assertSuccessful();
+        $this->artisan('nium:process-dynamic-payouts')->assertSuccessful();
+        $this->assertSame('released', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('not_submitted', $outbox->fresh()->financial_state);
+        $this->assertSame(1, LedgerEntry::query()->where('entry_type', 'release')->count());
+        $this->assertSame('2000.00000000', $this->wallet->fresh()->available_balance);
+        $this->assertSame(0, $this->wire->submissions);
     }
 
     public function test_concurrent_dispatch_workers_issue_one_wire_attempt(): void

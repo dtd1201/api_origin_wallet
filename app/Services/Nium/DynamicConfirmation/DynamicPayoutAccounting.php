@@ -16,7 +16,26 @@ final class DynamicPayoutAccounting
     public function evaluate(NiumDynamicIntent $intent, NiumDynamicPayoutOutbox $outbox, array $batch): array
     {
         try {
-            return $this->inspect($intent, $outbox, $batch);
+            $result = $this->inspect($intent, $outbox, $batch);
+            if ($result['state'] === 'exception' && ! isset($result['receipt'])) {
+                $reference = $result['provider_reference'] ?? $outbox->provider_reference;
+                $rows = array_filter($batch['records'], static fn (array $row): bool => $reference !== null
+                    && (($row['authCode'] ?? null) === $reference
+                        || ($row['originalAuthorizationCode'] ?? null) === $reference
+                        || ($row['labels']['originalAuthorizationCode'] ?? null) === $reference));
+                $result['receipt'] = ['provider_exception_records' => array_values(array_map(
+                    static fn (array $row): array => array_intersect_key($row, array_flip([
+                        'authCode', 'originalAuthorizationCode', 'transactionType', 'status', 'settlementStatus',
+                        'authCurrencyCode', 'settlementAuthAmount', 'labels',
+                    ])), $rows)), 'response_sha256' => $batch['response_sha256'],
+                    'observed_at' => $batch['observed_at'], 'release_authorized' => false];
+            }
+            if (isset($result['receipt'])) {
+                $result['receipt']['confirmed_instruction'] = $intent->confirmed_terms['remittance_instruction'] ?? null;
+                $result['receipt']['terms_fingerprint'] = $intent->terms_fingerprint;
+                $result['receipt']['request_sha256'] = $outbox->request_sha256;
+            }
+            return $result;
         } catch (Throwable) {
             return ['state' => 'unavailable', 'reason' => 'dynamic_accounting_fields_unsupported'];
         }
@@ -72,10 +91,21 @@ final class DynamicPayoutAccounting
             || ($remit['labels']['beneficiaryId'] ?? null) !== $intent->confirmed_terms['context']['external_beneficiary_id']) {
             return ['state' => 'unavailable', 'reason' => 'dynamic_remittance_binding_unverified'];
         }
+        foreach (['purposeCode', 'sourceOfFunds', 'customerComments'] as $field) {
+            if (array_key_exists($field, $remit)
+                && $remit[$field] !== ($intent->confirmed_terms['remittance_instruction'][$field] ?? null)) {
+                return ['state' => 'unavailable', 'reason' => 'dynamic_provider_instruction_conflict',
+                    'provider_reference' => $reference];
+            }
+        }
         $status = strtoupper(trim((string) ($remit['status'] ?? '')));
         if (in_array($status, ['RETURNED', 'REJECTED', 'DECLINED', 'FAILED', 'ERROR', 'BLOCKED', 'CANCELLED', 'REVERSAL'], true)
             || in_array($remit['settlementStatus'] ?? null, ['Released', 'Disputed', 'Waived'], true)) {
-            $result = ['state' => 'exception', 'reason' => 'dynamic_provider_terminal_exception', 'provider_reference' => $reference];
+            $result = ['state' => 'exception', 'reason' => 'dynamic_provider_terminal_exception', 'provider_reference' => $reference,
+                'receipt' => ['terminal_observation' => array_intersect_key($remit, array_flip([
+                    'authCode', 'status', 'settlementStatus', 'transactionType', 'authCurrencyCode', 'settlementAuthAmount',
+                ])), 'response_sha256' => $batch['response_sha256'], 'observed_at' => $batch['observed_at'],
+                    'release_authorized' => false]];
             // Only the correlated remittance establishes its payout status. A failed
             // fee or released settlement alone does not establish a returned payout.
             $terminal = match ($status) {

@@ -102,7 +102,11 @@ class ProviderWebhookEventController extends Controller
                     $retry['count'] = (int) Arr::get($payload, '_origin_retry.count', 0) + 1;
                     $payload['_origin_retry'] = $retry;
                     $providerWebhookEvent->update([
-                        'processing_status' => 'retrying', 'error_message' => null, 'payload' => $payload,
+                        'payload' => $payload,
+                        // Nium owns processing status through its exclusive claim. A competing
+                        // Admin request may record intent, but cannot invalidate the active owner.
+                        ...(strtolower((string) $providerWebhookEvent->provider?->code) === 'nium' ? []
+                            : ['processing_status' => 'retrying', 'error_message' => null]),
                     ]);
                 }
 
@@ -136,7 +140,7 @@ class ProviderWebhookEventController extends Controller
             ], 422);
         }
 
-        if ($event->nium_va_evidence !== null && $event->processing_status === 'processing') {
+        if (strtolower((string) $event->provider?->code) === 'nium' && $event->processing_status === 'processing') {
             return response()->json([
                 'message' => 'Webhook recovery is already in progress.',
                 'webhook_event' => $this->payload($event),

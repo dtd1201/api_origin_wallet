@@ -79,7 +79,7 @@ final class DynamicPayoutWebhook
                     if ($status === 'PAID') {
                         $outbox->provider_status = 'PAID';
                     }
-                    if ($outbox->state !== 'matched' && $outbox->state !== 'exception') {
+                    if ($outbox->state !== 'matched') {
                         $outbox->next_reconciliation_at = now();
                     }
                 }

@@ -31,6 +31,7 @@ use Brick\Math\BigDecimal;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
 use Throwable;
@@ -38,6 +39,13 @@ use Throwable;
 /** Customer boundary only. No controller path posts a payout or trusts client financial terms. */
 final class NiumDynamicPayoutController extends Controller
 {
+    // Nium remittance sourceOfFunds enum supplied by the API documentation.
+    // Apply at new Review ingress only: sealed historical instructions must retain their original bytes.
+    private const SOURCE_OF_FUNDS = [
+        'Salary', 'Personal Savings', 'Personal Wealth', 'Retirement Funds',
+        'Business Owner/Shareholder', 'Loan Facility', 'Personal Account', 'Corporate Account',
+    ];
+
     public function __construct(private readonly DynamicTransferConfirmationService $confirmation,
         private readonly NiumProviderAccountStateService $accounts,
         private readonly DynamicPayoutCustomerStatus $status,
@@ -152,9 +160,14 @@ final class NiumDynamicPayoutController extends Controller
             'dynamic_quote_id' => ['required_without:fx_quote_id', 'prohibits:fx_quote_id', 'uuid'],
             'instruction' => ['required', 'array:purpose_code,source_of_funds,comment'],
             'instruction.purpose_code' => ['required', 'string', 'max:255', 'regex:/^[^\x00-\x1F\x7F]+$/D'],
-            'instruction.source_of_funds' => ['required', 'string', 'max:255', 'regex:/^[^\x00-\x1F\x7F]+$/D'],
+            'instruction.source_of_funds' => ['required', 'string', 'max:255', 'regex:/^[^\x00-\x1F\x7F]+$/D', Rule::in(self::SOURCE_OF_FUNDS)],
             'instruction.comment' => ['required', 'string', 'max:255', 'regex:/^[^\x00-\x1F\x7F]+$/D'],
         ]);
+        // Global TrimStrings must not turn a non-enum JSON value into an accepted selection.
+        if ($request->isJson() && data_get(json_decode($request->getContent(), true), 'instruction.source_of_funds')
+            !== $input['instruction']['source_of_funds']) {
+            throw ValidationException::withMessages(['instruction.source_of_funds' => 'Select an exact Nium source of funds value.']);
+        }
         $beneficiary = $user->beneficiaries()->findOrFail($input['beneficiary_id']);
         $dynamicQuote = isset($input['dynamic_quote_id']);
         $quote = ($dynamicQuote ? NiumDynamicPayoutQuote::query() : FxQuote::query())
