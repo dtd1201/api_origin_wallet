@@ -82,8 +82,11 @@ final class DynamicPayoutInstructionValidation
         }
         $body = ExactProviderJson::decode($response->body());
         $shape = json_decode($response->body(), false, 64, JSON_THROW_ON_ERROR);
-        if (($body['valid'] ?? null) !== true || ($body['issues'] ?? null) !== []
-            || ! is_array($shape->issues ?? null)) {
+        // OpenAPI declares issues as an array and does not document nullable.
+        // Approved compatibility exception: Production Evidence 14527 returned valid=true, issues=null.
+        // Require the field explicitly; an omitted issues field is not an explicit null.
+        if (($body['valid'] ?? null) !== true || ! array_key_exists('issues', $body)
+            || ($body['issues'] !== null && ($body['issues'] !== [] || ! is_array($shape->issues ?? null)))) {
             throw new RuntimeException('dynamic_payout_instruction_rejected');
         }
         foreach (['clientHashId' => 'client', 'customerHashId' => 'customer', 'walletHashId' => 'wallet'] as $field => $key) {

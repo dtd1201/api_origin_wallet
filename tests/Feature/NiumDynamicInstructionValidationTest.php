@@ -84,22 +84,53 @@ final class NiumDynamicInstructionValidationTest extends DynamicConfirmationData
 
     public static function modes(): array { return [['SOURCE_AMOUNT'], ['DESTINATION_AMOUNT']]; }
 
-    #[DataProvider('modes')]
-    public function test_validates_only_the_exact_selected_amount_and_instruction_without_a_payout(string $mode): void
+    public static function acceptedResponses(): array
+    {
+        return [
+            'source empty issues' => ['SOURCE_AMOUNT', '{"valid":true,"issues":[]}'],
+            'source explicit null issues evidence 14527' => ['SOURCE_AMOUNT', '{"valid":true,"issues":null}'],
+            'destination empty issues' => ['DESTINATION_AMOUNT', '{"valid":true,"issues":[]}'],
+            'destination explicit null issues evidence 14527' => ['DESTINATION_AMOUNT', '{"valid":true,"issues":null}'],
+        ];
+    }
+
+    #[DataProvider('acceptedResponses')]
+    public function test_validates_only_the_exact_selected_amount_and_instruction_without_a_payout(string $mode, string $body): void
     {
         $this->quote->binding = [...$this->quote->binding, 'amount_mode' => $mode];
-        $this->observe('{"valid":true,"issues":[]}');
+        $this->observe($body);
         $result = $this->validation->validate($this->owner, $this->beneficiary, $this->quote,
             new PayoutInstruction('IR005', 'Salary', 'Invoice'), $this->amounts);
         $this->assertSame('fixture-customer', $result['scope']['customer']);
         $this->assertSame('fixture-quote', $result['scope']['quote']);
         $this->assertSame(now()->addSeconds(30)->toISOString(), $result['expires_at']);
+        $this->assertSame(hash('sha256', $body), $result['response_sha256']);
+        $this->assertSame(hash('sha256', $result['request_json']), $result['request_sha256']);
     }
 
     public static function refusals(): array
     {
-        return [['{"valid":false,"issues":[] }'], ['{"valid":true,"issues":[{"field":"purposeCode"}]}'], ['{"status":"OK"}'],
-            ['{"valid":true}'], ['{"valid":"true","issues":[]}'], ['{"valid":true,"issues":{}}']];
+        return [
+            'false with empty issues' => ['{"valid":false,"issues":[]}'],
+            'false with explicit null issues' => ['{"valid":false,"issues":null}'],
+            'validation errors' => ['{"valid":true,"issues":[{"field":"purposeCode"}]}'],
+            'nonempty null array' => ['{"valid":true,"issues":[null]}'],
+            'unrelated response' => ['{"status":"OK"}'],
+            'missing issues' => ['{"valid":true}'],
+            'missing valid with empty issues' => ['{"issues":[]}'],
+            'missing valid with explicit null issues' => ['{"issues":null}'],
+            'string valid' => ['{"valid":"true","issues":[]}'],
+            'numeric valid' => ['{"valid":1,"issues":null}'],
+            'null valid' => ['{"valid":null,"issues":null}'],
+            'empty object issues' => ['{"valid":true,"issues":{}}'],
+            'nonempty object issues' => ['{"valid":true,"issues":{"field":"purposeCode"}}'],
+            'empty string issues' => ['{"valid":true,"issues":""}'],
+            'string null issues' => ['{"valid":true,"issues":"null"}'],
+            'string array issues' => ['{"valid":true,"issues":"[]"}'],
+            'false issues' => ['{"valid":true,"issues":false}'],
+            'true issues' => ['{"valid":true,"issues":true}'],
+            'numeric issues' => ['{"valid":true,"issues":0}'],
+        ];
     }
 
     #[DataProvider('refusals')]
@@ -107,6 +138,14 @@ final class NiumDynamicInstructionValidationTest extends DynamicConfirmationData
     {
         $this->observe($body);
         $this->expectExceptionMessage('dynamic_payout_instruction_rejected');
+        $this->validation->validate($this->owner, $this->beneficiary, $this->quote,
+            new PayoutInstruction('IR005', 'Salary', 'Invoice'), $this->amounts);
+    }
+
+    public function test_malformed_json_cannot_authorize_an_instruction(): void
+    {
+        $this->observe('{"valid":true,"issues":null');
+        $this->expectException(\JsonException::class);
         $this->validation->validate($this->owner, $this->beneficiary, $this->quote,
             new PayoutInstruction('IR005', 'Salary', 'Invoice'), $this->amounts);
     }
