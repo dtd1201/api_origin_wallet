@@ -25,7 +25,7 @@ final class DynamicBeneficiaryDetailsResponse
         self::identifier($registered['beneficiaryAccountNumber']);
         // Legal entity belongs to the authenticated registration request, not a
         // field promised by the Details response. All other supplied receiving
-        // inputs must be echoed exactly; unknown mappings remain a refusal.
+        // inputs must be echoed exactly except bank-name casing; unknown mappings remain a refusal.
         unset($registered['clientLegalEntity']);
         foreach ($registered as $field => $value) {
             if (is_string($value)) self::plain($value);
@@ -52,8 +52,14 @@ final class DynamicBeneficiaryDetailsResponse
             && $response['clientLegalEntity'] !== ($registered['clientLegalEntity'] ?? null)) self::refuse();
         self::maskFlags($response);
         foreach ($expected as $field => $value) {
-            if (! array_key_exists($field, $response) || $response[$field] !== $value) self::refuse();
+            if (! array_key_exists($field, $response)) self::refuse();
             if (is_string($value)) self::plain($response[$field]);
+            if ($field === 'beneficiaryBankName' && is_string($value)) {
+                // Production Details may change bank-name casing. Fold only this field:
+                // no trimming, whitespace/punctuation changes or Unicode normalization.
+                if (mb_convert_case($response[$field], MB_CASE_FOLD, 'UTF-8')
+                    !== mb_convert_case($value, MB_CASE_FOLD, 'UTF-8')) self::refuse();
+            } elseif ($response[$field] !== $value) self::refuse();
         }
         foreach (self::RECEIVING_FIELDS as $field) {
             // Absent optional registration inputs may be absent/null at Nium,
@@ -66,7 +72,7 @@ final class DynamicBeneficiaryDetailsResponse
     private static function plain(mixed $value): void
     {
         if (! is_string($value) || trim($value) === ''
-            || preg_match('/[\x00-\x1f\x7f*#?•●…]|\.{2,}|masked|redacted/i', $value)) self::refuse();
+            || preg_match('/[\x00-\x1f\x7f*#?•●…]|\.{2,}|masked|redacted/iu', $value) !== 0) self::refuse();
     }
 
     private static function identifier(mixed $value): void

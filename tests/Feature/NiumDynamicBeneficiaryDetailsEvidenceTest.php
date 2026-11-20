@@ -143,6 +143,32 @@ final class NiumDynamicBeneficiaryDetailsEvidenceTest extends DynamicConfirmatio
         $this->assertFalse($this->inspect(false)['customer_scope_confirmed']);
     }
 
+    public function test_case_only_bank_echo_binds_customer_scoped_details_without_rewriting_registered_evidence(): void
+    {
+        $body = $this->body(['beneficiaryBankName' => 'SYNTHETIC BANK',
+            'customerHashId' => 'fixture-customer', 'clientHashId' => 'fixture-client']);
+        $this->expectDetails($body);
+        $result = $this->inspect();
+        $this->assertTrue($result['payload_matches']);
+        $this->assertTrue($result['customer_scope_confirmed']);
+        $this->assertSame([], $result['reason_codes']);
+        $this->binding['beneficiary_customer_binding_sha256'] = $result['customer_binding_sha256'];
+        $snapshot = app(DynamicRegisteredAccountEvidence::class)->bindingObservation($this->beneficiary, $this->account, $this->binding);
+        $this->assertSame('fixture-customer', $snapshot['scope']['customer']);
+        $this->assertSame('fixture-client', $snapshot['scope']['client']);
+        $this->assertSame($body, $snapshot['response_json']);
+        $this->assertSame(hash('sha256', $body), $snapshot['response_sha256']);
+        $this->assertSame('Synthetic Bank', $this->beneficiary->fresh()->bank_name);
+        $exchange = NiumApiExchangeEvidence::query()->sole();
+        $this->assertArrayNotHasKey('customerHashId', json_decode($exchange->raw_response_body, true, 64, JSON_THROW_ON_ERROR));
+        $this->assertSame('Synthetic Bank', json_decode($exchange->raw_request_body, true, 64, JSON_THROW_ON_ERROR)['beneficiaryBankName']);
+        $this->assertSame($result, $this->inspect()); // Revalidation of sealed evidence must use the same rule.
+        $this->assertSame(0, NiumDynamicIntent::query()->count());
+        $this->assertSame(0, NiumDynamicPayoutOutbox::query()->count());
+        $this->assertSame(0, NiumDynamicReservation::query()->count());
+        $this->assertSame(0, LedgerEntry::query()->count());
+    }
+
     public static function twoSlotResponses(): array
     {
         return [
@@ -346,13 +372,18 @@ final class NiumDynamicBeneficiaryDetailsEvidenceTest extends DynamicConfirmatio
         return [[['beneficiaryHashId' => 'foreign']], [['destinationCountry' => 'HK']], [['destinationCurrency' => 'USD']],
             [['payoutMethod' => 'SWIFT']], [['beneficiaryName' => 'Other Payee']], [['beneficiaryAccountNumber' => '0099999999']],
             [['routingCodeValue1' => 'OTHERSGXXX1']], [['beneficiaryAccountNumber' => '****5678']],
-            [['routingCodeValue1' => null]], [['beneficiaryBankAccountType' => null]]];
+            [['routingCodeValue1' => null]], [['beneficiaryBankAccountType' => null]],
+            [['beneficiaryBankName' => 'Other Bank']], [['beneficiaryBankName' => 'SYNTHETIC  BANK']],
+            [['beneficiaryBankName' => ' SYNTHETIC BANK']], [['beneficiaryBankName' => 'SYNTHETIC BANK ']],
+            [['beneficiaryBankName' => '[REDACTED]']], [['accountNumberMasked' => true]],
+            [['customerHashId' => 'foreign-customer']], [['customerHashId' => 'FIXTURE-CUSTOMER']],
+            [['clientHashId' => 'FIXTURE-CLIENT']], [['routingCodeValue1' => 'testsgsgxxx']]];
     }
 
     #[DataProvider('conflictingBodies')]
     public function test_provider_conflicts_and_masking_never_create_authority(array $changes): void
     {
-        $this->expectDetails($this->body($changes));
+        $this->expectDetails($this->body(['beneficiaryBankName' => 'SYNTHETIC BANK', ...$changes]));
         $this->assertBlocked();
     }
 

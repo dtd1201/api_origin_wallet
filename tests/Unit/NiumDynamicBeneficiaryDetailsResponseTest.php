@@ -38,6 +38,28 @@ final class NiumDynamicBeneficiaryDetailsResponseTest extends TestCase
         $this->assertArrayNotHasKey('clientLegalEntity', $matched);
     }
 
+    public static function bankNameCaseVariants(): array
+    {
+        return [
+            ['Synthetic Bank', 'SYNTHETIC BANK'],
+            ['Synthetic Bank', 'synthetic bank'],
+            ['Banque Étoile', 'BANQUE ÉTOILE'],
+            ['Straße Bank', 'STRASSE BANK'],
+            ['Τράπεζα Σ', 'ΤΡΆΠΕΖΑ ς'],
+        ];
+    }
+
+    #[DataProvider('bankNameCaseVariants')]
+    public function test_only_bank_name_uses_unicode_case_folding_and_preserves_registered_binding(string $registeredName, string $detailsName): void
+    {
+        $registered = [...$this->registration(), 'beneficiaryBankName' => $registeredName];
+        $matched = DynamicBeneficiaryDetailsResponse::verify($this->response(['beneficiaryBankName' => $detailsName]),
+            $registered, 'synthetic-payee', 'synthetic-client', 'synthetic-customer');
+        unset($registered['clientLegalEntity']);
+        ksort($registered, SORT_STRING);
+        $this->assertSame(['beneficiaryHashId' => 'synthetic-payee', ...$registered], $matched);
+    }
+
     public static function opaqueReceivingFormats(): array
     {
         return [
@@ -94,10 +116,19 @@ final class NiumDynamicBeneficiaryDetailsResponseTest extends TestCase
             [['destinationCurrency' => 'USD']], [['payoutMethod' => 'SWIFT']],
             [['beneficiaryName' => 'Other Payee']], [['beneficiaryAccountType' => 'Corporate']],
             [['beneficiaryBankName' => 'Other Bank']], [['beneficiaryBankAccountType' => 'Checking']],
+            [['beneficiaryBankName' => ' SYNTHETIC BANK']], [['beneficiaryBankName' => 'SYNTHETIC BANK ']],
+            [['beneficiaryBankName' => 'SYNTHETIC  BANK']], [['beneficiaryBankName' => 'SYNTHETICBANK']],
+            [['beneficiaryBankName' => "SYNTHETIC\u{00a0}BANK"]], [['beneficiaryBankName' => 'SYNTHETIC-BANK']],
+            [['beneficiaryBankName' => null]], [['beneficiaryBankName' => 123]], [['beneficiaryBankName' => []]],
             [['beneficiaryAccountNumber' => '12345678']], [['beneficiaryAccountNumber' => 12345678]],
             [['routingCodeType1' => 'SWIFT CODE']], [['routingCodeValue1' => 'OTHERSSGXXX']],
             [['beneficiaryBankCode' => '123']], [['routingCodeType2' => 'SORT CODE', 'routingCodeValue2' => '123456']],
             [['customerHashId' => 'foreign']], [['clientHashId' => null]], [['clientLegalEntity' => 'SG']],
+            [['customerHashId' => 'SYNTHETIC-CUSTOMER']], [['clientHashId' => 'SYNTHETIC-CLIENT']],
+            [['beneficiaryHashId' => 'SYNTHETIC-PAYEE']], [['destinationCurrency' => 'sgd']],
+            [['payoutMethod' => 'local']], [['beneficiaryName' => 'SYNTHETIC PAYEE']],
+            [['beneficiaryAccountType' => 'individual']], [['beneficiaryBankAccountType' => 'savings']],
+            [['routingCodeType1' => 'swift']], [['routingCodeValue1' => 'testsgsgxxx']],
             [['beneficiaryAccountNumber' => null]], [['routingCodeValue1' => null]],
         ];
     }
@@ -110,12 +141,45 @@ final class NiumDynamicBeneficiaryDetailsResponseTest extends TestCase
             'synthetic-payee', 'synthetic-client', 'synthetic-customer');
     }
 
+    #[DataProvider('mismatches')]
+    public function test_case_only_bank_match_cannot_override_other_receiving_or_scope_conflicts(array $changes): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('dynamic_registered_account_customer_scope_unavailable');
+        DynamicBeneficiaryDetailsResponse::verify($this->response(['beneficiaryBankName' => 'SYNTHETIC BANK', ...$changes]),
+            $this->registration(), 'synthetic-payee', 'synthetic-client', 'synthetic-customer');
+    }
+
+    public function test_account_number_remains_case_sensitive_when_bank_name_differs_only_in_case(): void
+    {
+        $registered = [...$this->registration(), 'beneficiaryAccountNumber' => 'Account001'];
+        $this->expectException(RuntimeException::class);
+        DynamicBeneficiaryDetailsResponse::verify($this->response([
+            'beneficiaryBankName' => 'SYNTHETIC BANK', 'beneficiaryAccountNumber' => 'ACCOUNT001']),
+            $registered, 'synthetic-payee', 'synthetic-client', 'synthetic-customer');
+    }
+
+    public static function bankNameNonCaseChanges(): array
+    {
+        return [['Banque Étoile', 'BANQUE ETOILE'], ['Banque Étoile', "BANQUE E\u{0301}TOILE"],
+            ['Synthetic Bank', 'Synthetic Bаnk']]; // Cyrillic а is not Latin a.
+    }
+
+    #[DataProvider('bankNameNonCaseChanges')]
+    public function test_bank_name_does_not_remove_accents_normalize_unicode_or_match_lookalikes(string $registeredName, string $detailsName): void
+    {
+        $this->expectException(RuntimeException::class);
+        DynamicBeneficiaryDetailsResponse::verify($this->response(['beneficiaryBankName' => $detailsName]),
+            [...$this->registration(), 'beneficiaryBankName' => $registeredName],
+            'synthetic-payee', 'synthetic-client', 'synthetic-customer');
+    }
+
     public static function maskedValues(): array
     {
         return [['beneficiaryAccountNumber', '******5678'], ['beneficiaryAccountNumber', 'XXXX5678'],
             ['beneficiaryAccountNumber', '••••5678'], ['beneficiaryAccountNumber', '1234...5678'],
             ['routingCodeValue1', 'XXXXSGSGXXX'], ['routingCodeValue1', 'TEST****XXX'],
-            ['beneficiaryName', '[REDACTED]']];
+            ['beneficiaryName', '[REDACTED]'], ['beneficiaryBankName', '[REDACTED]']];
     }
 
     #[DataProvider('maskedValues')]
@@ -125,6 +189,35 @@ final class NiumDynamicBeneficiaryDetailsResponseTest extends TestCase
         $this->expectException(RuntimeException::class);
         DynamicBeneficiaryDetailsResponse::verify($this->response([$field => $value]), $registered,
             'synthetic-payee', 'synthetic-client', 'synthetic-customer');
+    }
+
+    #[DataProvider('maskedValues')]
+    public function test_case_only_bank_match_never_accepts_masked_or_redacted_receiving_values(string $field, string $value): void
+    {
+        $this->expectException(RuntimeException::class);
+        DynamicBeneficiaryDetailsResponse::verify($this->response(['beneficiaryBankName' => 'SYNTHETIC BANK', $field => $value]),
+            $this->registration(), 'synthetic-payee', 'synthetic-client', 'synthetic-customer');
+    }
+
+    public function test_invalid_utf8_in_registered_bank_name_is_refused(): void
+    {
+        $registered = [
+            ...$this->registration(),
+            'beneficiaryBankName' => "\xC3\x28",
+        ];
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage(
+            'dynamic_registered_account_customer_scope_unavailable'
+        );
+
+        DynamicBeneficiaryDetailsResponse::verify(
+            $this->response(),
+            $registered,
+            'synthetic-payee',
+            'synthetic-client',
+            'synthetic-customer'
+        );
     }
 
     public static function invalidBodies(): array
@@ -149,10 +242,19 @@ final class NiumDynamicBeneficiaryDetailsResponseTest extends TestCase
             'synthetic-payee', 'synthetic-client', 'synthetic-customer');
     }
 
+    public function test_registered_bank_name_must_still_be_present_in_details(): void
+    {
+        $response = json_decode($this->response(), true, 64, JSON_THROW_ON_ERROR);
+        unset($response['beneficiaryBankName']);
+        $this->expectException(RuntimeException::class);
+        DynamicBeneficiaryDetailsResponse::verify(json_encode($response, JSON_THROW_ON_ERROR), $this->registration(),
+            'synthetic-payee', 'synthetic-client', 'synthetic-customer');
+    }
+
     public function test_provider_mask_flag_cannot_be_overruled_by_equal_strings(): void
     {
         $this->expectException(RuntimeException::class);
-        DynamicBeneficiaryDetailsResponse::verify($this->response(['accountNumberMasked' => true]), $this->registration(),
+        DynamicBeneficiaryDetailsResponse::verify($this->response(['beneficiaryBankName' => 'SYNTHETIC BANK', 'accountNumberMasked' => true]), $this->registration(),
             'synthetic-payee', 'synthetic-client', 'synthetic-customer');
     }
 
