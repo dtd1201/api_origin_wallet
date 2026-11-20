@@ -10,10 +10,21 @@ final class NiumBeneficiarySchemaPattern
     // ECMAScript WhiteSpace + LineTerminator, including BOM and excluding U+0085.
     private const SPACE = '\x{0009}-\x{000d}\x{0020}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}';
 
+    // With Unicode mode and no ignoreCase flag, ECMAScript digits/words remain ASCII.
+    // Explicit complements also work as members of a larger (possibly negated) class.
+    private const CHARACTER_CLASSES = [
+        'd' => '0-9',
+        'D' => '\x{0000}-\x{002f}\x{003a}-\x{10ffff}',
+        'w' => 'A-Za-z0-9_',
+        'W' => '\x{0000}-\x{002f}\x{003a}-\x{0040}\x{005b}-\x{005e}\x{0060}\x{007b}-\x{10ffff}',
+        's' => self::SPACE,
+    ];
+
     public static function compile(string $pattern): ?string
     {
         $expression = '';
         $inClass = false;
+        $classStart = 0;
         $length = strlen($pattern);
         for ($i = 0; $i < $length; $i++) {
             $char = $pattern[$i];
@@ -22,10 +33,21 @@ final class NiumBeneficiarySchemaPattern
                     return null;
                 }
                 $escape = $pattern[$i];
-                if ($escape === 's') {
-                    $expression .= $inClass ? self::SPACE : '['.self::SPACE.']';
+                if ($inClass && str_contains('dDwWsS', $escape)
+                    && self::isClassRangeEndpoint($pattern, $i, $classStart)) {
+                    // ECMAScript /u forbids a character-set escape as either range endpoint.
+                    return null;
+                }
+                if (isset(self::CHARACTER_CLASSES[$escape])) {
+                    $characters = self::CHARACTER_CLASSES[$escape];
+                    $expression .= $inClass ? $characters : '['.$characters.']';
                 } elseif ($escape === 'S' && ! $inClass) {
                     $expression .= '[^'.self::SPACE.']';
+                } elseif ($escape === 'v') {
+                    // PCRE's \v includes more characters than ECMAScript's vertical tab.
+                    $expression .= '\x{000b}';
+                } elseif ($escape === 'b' && $inClass) {
+                    $expression .= '\x{0008}';
                 } elseif (str_contains('\\^$.*+?()[]{}|/nrtf', $escape) || ($escape === '-' && $inClass)) {
                     $expression .= '\\'.$escape;
                 } else {
@@ -37,6 +59,7 @@ final class NiumBeneficiarySchemaPattern
                     return null;
                 }
                 $inClass = true;
+                $classStart = $i;
                 $expression .= $char;
             } elseif ($char === ']') {
                 if (! $inClass) {
@@ -82,6 +105,26 @@ final class NiumBeneficiarySchemaPattern
         }
 
         return null;
+    }
+
+    /** $escapeIndex points at the letter after the backslash in the original pattern. */
+    private static function isClassRangeEndpoint(string $pattern, int $escapeIndex, int $classStart): bool
+    {
+        if (($pattern[$escapeIndex + 1] ?? '') === '-'
+            && ($pattern[$escapeIndex + 2] ?? '') !== ']') {
+            return true;
+        }
+        $hyphen = $escapeIndex - 2;
+        $firstMember = $classStart + (($pattern[$classStart + 1] ?? '') === '^' ? 2 : 1);
+        if ($hyphen <= $firstMember || $pattern[$hyphen] !== '-') {
+            return false;
+        }
+        $backslashes = 0;
+        for ($i = $hyphen - 1; $i > $classStart && $pattern[$i] === '\\'; $i--) {
+            $backslashes++;
+        }
+
+        return $backslashes % 2 === 0;
     }
 
     public static function matches(string $pattern, string $value): bool

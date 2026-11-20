@@ -274,6 +274,39 @@ class NiumBeneficiaryProductionSchemaTest extends TestCase
         }
     }
 
+    #[DataProvider('productionContactCases')]
+    public function test_production_digit_escape_normalizes_and_remains_authoritative_in_preflight(string $contact, bool $valid): void
+    {
+        // Evidence 14734/14735: only substitute the observed contact pattern in memory.
+        // The independently fingerprinted HK/USD/SWIFT fixture stays untouched.
+        $fixture = $this->fixture();
+        $fixture[0]->properties->beneficiaryContactNumber->pattern = '^\d{0,17}$';
+        $service = $this->requirementsService($fixture);
+        $schema = $service->requirements(new User, $this->corridor());
+        $field = array_column($schema->fields, null, 'name')['beneficiaryContactNumber'];
+        $this->assertSame('^\d{0,17}$', $field['pattern']);
+        $this->assertSame(NiumBeneficiarySchemaPattern::DIALECT, $field['pattern_dialect']);
+
+        try {
+            $result = (new NiumBeneficiaryPreflightValidator($service))->validate(
+                [...$this->payload(), 'beneficiaryContactNumber' => $contact], $this->corridor(), $schema);
+            $this->assertTrue($valid, 'Invalid contact must fail preflight.');
+            $this->assertTrue($result['valid']);
+        } catch (ValidationException $exception) {
+            $this->assertFalse($valid, 'Valid contact must pass preflight.');
+            $this->assertArrayHasKey('beneficiaryContactNumber', $exception->errors());
+        }
+    }
+
+    public static function productionContactCases(): array
+    {
+        return [
+            ['', true], ['0123456789', true], ['01234567890123456', true],
+            ['123456789012345678', false], ['12a34', false], ['+1234', false], ['12 34', false],
+            ['١٢٣٤', false], ['１２３４', false], ['𝟙𝟚𝟛𝟜', false], ["123\n", false],
+        ];
+    }
+
     private function fixture(): array
     {
         // An explicit environment override runs the same tests against the untouched, private original.
@@ -282,13 +315,13 @@ class NiumBeneficiaryProductionSchemaTest extends TestCase
         return json_decode(file_get_contents($path), false, 512, JSON_THROW_ON_ERROR);
     }
 
-    private function requirementsService(): NiumBeneficiaryRequirementsService
+    private function requirementsService(?array $fixture = null): NiumBeneficiaryRequirementsService
     {
         $nium = Mockery::mock(NiumService::class);
         $nium->shouldReceive('clientId')->andReturn('test-client');
         $nium->shouldReceive('customerId')->andReturn('test-customer');
         $nium->shouldReceive('path')->andReturn('/validationSchemas');
-        $nium->shouldReceive('get')->andReturn(new Response(new PsrResponse(200, [], json_encode($this->fixture()))));
+        $nium->shouldReceive('get')->andReturn(new Response(new PsrResponse(200, [], json_encode($fixture ?? $this->fixture()))));
         $nium->shouldNotReceive('post');
 
         return new NiumBeneficiaryRequirementsService($nium);

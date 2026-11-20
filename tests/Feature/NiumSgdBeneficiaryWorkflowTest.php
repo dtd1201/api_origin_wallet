@@ -320,6 +320,96 @@ class NiumSgdBeneficiaryWorkflowTest extends TestCase
         ];
     }
 
+    #[DataProvider('contactPatternCorridors')]
+    public function test_contact_digit_escape_is_preserved_through_requirements_create_and_update(string $country, string $currency, string $method, string $type): void
+    {
+        // Synthetic corridor/schema fixtures test shared validation, not live corridor availability.
+        config(['services.nium.beneficiary_update_endpoint' => '/beneficiaries/{beneficiaryHashId}',
+            'services.nium.beneficiary_update_enabled' => true,
+            'services.nium.supported_corridors' => [[
+                'destinationCountry' => $country, 'destinationCurrency' => $currency, 'payoutMethod' => $method,
+                'beneficiaryAccountType' => $type === 'business' ? 'CORPORATE' : 'INDIVIDUAL',
+                'customerType' => 'CORPORATE', 'routingCodeType' => 'SWIFT',
+            ]]]);
+        $schema = $this->syntheticSchema();
+        $schema['properties']['beneficiaryContactNumber'] = ['type' => 'string', 'pattern' => '^\d{0,17}$'];
+        Http::fake([
+            '*validationSchemas*' => Http::response([$schema]),
+            'https://gateway.nium.test/beneficiaries' => Http::response(['beneficiaryHashId' => 'contact-fixture', 'status' => 'ACTIVE']),
+            'https://gateway.nium.test/beneficiaries/contact-fixture' => Http::response(['status' => 'ACTIVE']),
+        ]);
+        $response = $this->getJson($this->url('requirements', ['country_code' => $country, 'currency' => $currency,
+            'payout_method' => $method, 'beneficiary_type' => $type]))->assertOk();
+        $field = array_column($response->json('fields'), null, 'name')['beneficiaryContactNumber'];
+        $this->assertSame('^\d{0,17}$', $field['pattern']);
+        $this->assertSame('ecma262-unicode', $field['pattern_dialect']);
+
+        $payload = $this->payload();
+        $payload['country_code'] = $country;
+        $payload['currency'] = $currency;
+        $payload['beneficiary_type'] = $type;
+        $payload['raw_data']['nium']['payoutMethod'] = $method;
+        if ($type === 'business') {
+            // The synthetic identification rule applies only to Individual beneficiaries.
+            $payload['raw_data']['nium']['additionalFields'] = [];
+        }
+        $payload['phone'] = '01234567890123456';
+        $created = $this->postJson($this->baseUrl(), $payload)->assertCreated();
+        $this->putJson($this->baseUrl().'/'.$created->json('id'), ['phone' => '9876543210'])->assertOk();
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && $request->url() === 'https://gateway.nium.test/beneficiaries'
+            && $request['beneficiaryContactNumber'] === $payload['phone']
+            && $request['destinationCurrency'] === $currency && $request['payoutMethod'] === $method);
+        Http::assertSent(fn ($request) => $request->method() === 'PUT'
+            && $request['beneficiaryContactNumber'] === '9876543210');
+        $this->assertSame('9876543210', Beneficiary::query()->sole()->phone);
+        $this->assertTrue(data_get(Beneficiary::query()->sole()->raw_data, 'nium.beneficiary_preflight.valid'));
+    }
+
+    public static function contactPatternCorridors(): array
+    {
+        return [['SG', 'SGD', 'LOCAL', 'individual'], ['HK', 'USD', 'SWIFT', 'business'], ['HK', 'SGD', 'SWIFT', 'business']];
+    }
+
+    #[DataProvider('invalidContactWrites')]
+    public function test_contact_digit_escape_blocks_invalid_create_and_update_before_provider_mutation(string $operation, string $contact): void
+    {
+        config(['services.nium.beneficiary_update_endpoint' => '/beneficiaries/{beneficiaryHashId}',
+            'services.nium.beneficiary_update_enabled' => true]);
+        $schema = $this->syntheticSchema();
+        $schema['properties']['beneficiaryContactNumber'] = ['type' => 'string', 'pattern' => '^\d{0,17}$'];
+        Http::fake(['*validationSchemas*' => Http::response([$schema])]);
+        if ($operation === 'create') {
+            $this->postJson($this->baseUrl(), [...$this->payload(), 'phone' => $contact])
+                ->assertUnprocessable()->assertJsonValidationErrors('beneficiaryContactNumber');
+            $this->assertDatabaseCount('beneficiaries', 0);
+        } else {
+            $beneficiary = $this->customer->beneficiaries()->create([
+                ...$this->payload(), 'payout_method' => 'LOCAL', 'phone' => '1234567890',
+                'external_beneficiary_id' => 'contact-fixture', 'status' => 'active',
+            ]);
+            $this->putJson($this->baseUrl().'/'.$beneficiary->id, ['phone' => $contact])
+                ->assertUnprocessable()->assertJsonValidationErrors('beneficiaryContactNumber');
+            $this->assertSame('1234567890', $beneficiary->fresh()->phone);
+            $this->assertSame('active', $beneficiary->fresh()->status);
+            $this->assertDatabaseCount('beneficiaries', 1);
+        }
+        Http::assertNotSent(fn ($request) => $request->method() !== 'GET');
+        $this->assertSame(0, ApiRequestLog::query()->whereIn('request_method', ['POST', 'PUT'])->count());
+    }
+
+    public static function invalidContactWrites(): array
+    {
+        $cases = [];
+        foreach (['create', 'update'] as $operation) {
+            foreach (['12a34', '+1234', '12 34', '١٢٣٤', '１２３４', '123456789012345678'] as $contact) {
+                $cases[] = [$operation, $contact];
+            }
+        }
+
+        return $cases;
+    }
+
     public function test_unseen_unsupported_pattern_still_blocks_requirements_and_create_with_safe_errors(): void
     {
         $schema = $this->syntheticSchema();
