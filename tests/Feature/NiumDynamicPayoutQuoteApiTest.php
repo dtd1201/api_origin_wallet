@@ -881,6 +881,19 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->account->update($updates);
     }
 
+    private function historicalAmlExecution(string $status): AmlScreening
+    {
+        $screening = AmlScreening::query()->where('user_id', $this->owner->id)->sole();
+        $screening->forceFill(['status' => $status, 'compliance_decision' => 'pending_review',
+            'screening_result' => null, 'risk_level' => 'unknown', 'superseded_at' => null,
+            'reviewed_by_user_id' => null, 'reviewed_at' => null,
+            'result_summary' => $status === 'failed' ? ['error' => 'provider_failure'] : null,
+            'created_at' => now()->subDay(), 'updated_at' => now()->subMinutes(2),
+            'screened_at' => $status === 'pending' ? null : now()->subMinutes(3),
+            'completed_at' => $status === 'failed' ? now()->subMinutes(2) : null])->save();
+        return $screening->fresh();
+    }
+
     /** Produce the mixed history through the same writer used by customer reconciliation. */
     private function reconciledCustomerRfiHistory(bool $verifiedNotification = false,
         string $template = 'CUSTOMER_STATUS_WEBHOOK'): void
@@ -1441,6 +1454,135 @@ final class NiumDynamicPayoutQuoteApiTest extends DynamicConfirmationDatabaseTes
         $this->assertSame($before, AmlScreening::query()->where('user_id', $this->owner->id)->get()->toArray());
         $this->assertNull($this->account->fresh()->rfi_status);
         $this->assertSame(0, NiumRfiCase::query()->count());
+    }
+
+    public static function historicalAmlExecutionStates(): array
+    {
+        $cases = [];
+        foreach (['pending', 'running', 'failed', 'unknown'] as $status) {
+            foreach ([false, true] as $notification) $cases[$status.($notification ? ' reconciled notification' : ' GET')] = [$status, $notification];
+        }
+        return $cases;
+    }
+
+    #[DataProvider('historicalAmlExecutionStates')]
+    public function test_verified_nium_clear_allows_older_execution_only_screening_without_manual_approval(
+        string $status, bool $notification): void
+    {
+        $screening = $this->historicalAmlExecution($status);
+        if ($notification) $this->reconciledCustomerRfiHistory(verifiedNotification: true);
+        else $this->authenticatedAccountWithoutRfi();
+        // The same customer is eligible in the existing Nium/HK payout path.
+        app(\App\Services\Transfers\TransferEligibilityService::class)
+            ->ensureUserCanCreateForProvider($this->owner, $this->account->provider);
+        $beforeScreening = $screening->fresh()->getAttributes();
+        $beforeAccount = $this->account->fresh()->getAttributes();
+        $beforeCases = NiumRfiCase::query()->orderBy('id')->get()->toArray();
+
+        $review = $this->readyReview($notification ? 'DESTINATION_AMOUNT' : 'SOURCE_AMOUNT', checkOptions: true);
+        $this->noAdmission();
+        $this->postJson($this->path(''), $this->submitReady($review))->assertCreated();
+
+        $this->assertSame($beforeScreening, $screening->fresh()->getAttributes());
+        $this->assertSame($beforeAccount, $this->account->fresh()->getAttributes());
+        $this->assertSame($beforeCases, NiumRfiCase::query()->orderBy('id')->get()->toArray());
+        $this->assertSame(0, $screening->matches()->count());
+        $this->assertNull($screening->fresh()->superseded_at);
+        $this->assertSame('pending_review', $screening->fresh()->compliance_decision);
+        $this->assertSame(1, NiumDynamicIntent::query()->count());
+        $this->assertSame(1, NiumDynamicPayoutOutbox::query()->count());
+        $this->assertSame('held', NiumDynamicReservation::query()->sole()->state);
+        $this->assertSame('1000.00000000', $this->wallet->fresh()->reserved_balance);
+    }
+
+    public static function historicalAmlRestrictions(): array
+    {
+        return [
+            'manual review' => [['status' => 'manual_review'], null, null],
+            'explicit hold' => [['compliance_decision' => 'hold'], null, null],
+            'rejected decision' => [['compliance_decision' => 'rejected'], null, null],
+            'match outcome' => [['screening_result' => 'match'], null, null],
+            'unknown outcome' => [['screening_result' => 'unknown'], null, null],
+            'high risk' => [['risk_level' => 'high'], null, null],
+            'match summary' => [['result_summary' => ['outcome' => 'match', 'match_count' => 0]], null, null],
+            'positive match count' => [['result_summary' => ['outcome' => 'clear', 'match_count' => 1]], null, null],
+            'undecided manual review' => [['reviewed_at' => '2030-01-01T00:09:00Z'], null, null],
+            'open sanctions match' => [[], 'open', null],
+            'confirmed match' => [[], 'confirmed_match', null],
+            'unknown match resolution' => [[], 'unknown', null],
+            'requested RFI' => [[], null, 'requested'],
+            'RFI under review' => [[], null, 'responded_under_review'],
+            'rejected RFI' => [[], null, 'rejected_authoritative'],
+        ];
+    }
+
+    #[DataProvider('historicalAmlRestrictions')]
+    public function test_older_execution_evidence_does_not_hide_findings_or_open_rfi(
+        array $changes, ?string $matchStatus, ?string $rfiStatus): void
+    {
+        $screening = $this->historicalAmlExecution('failed');
+        $this->authenticatedAccountWithoutRfi();
+        $review = $this->readyReview();
+        // Keep the historical timestamp: a later CLEAR must not override an actual finding.
+        $screening->forceFill([...$changes, 'updated_at' => $screening->updated_at])->save();
+        if ($matchStatus !== null) $screening->matches()->create(['list_type' => 'sanctions', 'source' => 'fixture',
+            'matched_name' => 'Unresolved historical finding', 'status' => $matchStatus]);
+        if ($rfiStatus !== null) NiumRfiCase::query()->create([
+            'provider_id' => $this->account->provider_id, 'user_provider_account_id' => $this->account->id,
+            'scope' => 'customer', 'origin' => 'authoritative_fetch',
+            'provider_reference_fingerprint' => hash('sha256', 'active-rfi-after-clear'), 'status' => $rfiStatus, 'evidence' => []]);
+        $beforeScreening = $screening->fresh()->getAttributes();
+        $beforeMatches = $screening->matches()->get()->toArray();
+        $beforeCases = NiumRfiCase::query()->orderBy('id')->get()->toArray();
+
+        $this->postJson($this->path('/reviews'), ['beneficiary_id' => $this->beneficiary->id,
+            'dynamic_quote_id' => NiumDynamicPayoutQuote::query()->sole()->id,
+            'instruction' => ['purpose_code' => 'IR005', 'source_of_funds' => 'Salary', 'comment' => 'Invoice']])
+            ->assertStatus(503)->assertJsonPath('reason_codes', [$rfiStatus !== null
+                ? 'dynamic_quote_local_eligibility_changed' : 'dynamic_compliance_hold_or_evidence_unavailable'])
+            ->assertJsonMissingPath('accepted_fingerprint');
+        $this->assertQuoteFailure('dynamic_compliance_hold_or_evidence_unavailable', fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'historical-evidence-restriction', $review['accepted_fingerprint']));
+
+        $this->assertSame($beforeScreening, $screening->fresh()->getAttributes());
+        $this->assertSame($beforeMatches, $screening->matches()->get()->toArray());
+        $this->assertSame($beforeCases, NiumRfiCase::query()->orderBy('id')->get()->toArray());
+        $this->noAdmission();
+    }
+
+    public static function historicalAmlChronologyFailures(): array
+    {
+        return [
+            'updated at CLEAR' => [['updated_at' => '2030-01-01T00:10:00Z'], [], []],
+            'created after CLEAR' => [['created_at' => '2030-01-01T00:11:00Z'], [], []],
+            'screened at CLEAR' => [['screened_at' => '2030-01-01T00:10:00Z'], [], []],
+            'completed after CLEAR' => [['completed_at' => '2030-01-01T00:11:00Z'], [], []],
+            'future supersession' => [['superseded_at' => '2030-01-01T00:11:00Z'], [], []],
+            'no reconciliation timestamp' => [[], ['reconciled_at' => null], []],
+            'new reconciliation pending' => [[], ['reconciliation_requested_at' => '2030-01-01T00:11:00Z'], []],
+            'unverified CLEAR source' => [[], [], ['nium_last_state_source' => 'unknown']],
+        ];
+    }
+
+    #[DataProvider('historicalAmlChronologyFailures')]
+    public function test_unverified_or_newer_execution_evidence_still_blocks_review_and_confirmation(
+        array $screeningChanges, array $accountChanges, array $metadataChanges): void
+    {
+        $screening = $this->historicalAmlExecution('failed');
+        $this->authenticatedAccountWithoutRfi();
+        $this->account->update(['rfi_status' => 'cleared']);
+        $review = $this->readyReview();
+        $screening->forceFill(['updated_at' => $screening->updated_at, ...$screeningChanges])->save();
+        $this->account->update([...$accountChanges, 'metadata' => [...$this->account->metadata, ...$metadataChanges]]);
+
+        $this->assertQuoteFailure('dynamic_compliance_hold_or_evidence_unavailable', fn () =>
+            app(DynamicTransferConfirmationService::class)->validateReview($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, $review['accepted_fingerprint']));
+        $this->assertQuoteFailure('dynamic_compliance_hold_or_evidence_unavailable', fn () =>
+            app(DynamicTransferConfirmationService::class)->confirm($this->owner, $this->account->id,
+                $this->beneficiary->id, $this->wallet->id, 'unverified-screening-chronology', $review['accepted_fingerprint']));
+        $this->noAdmission();
     }
 
     public static function verifiedProfileRestrictions(): array

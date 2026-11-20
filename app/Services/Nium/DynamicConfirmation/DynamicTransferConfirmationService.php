@@ -238,11 +238,17 @@ final class DynamicTransferConfirmationService
             || $r->wallet->external_account_id !== $r->account->external_account_id) {
             throw new RuntimeException('dynamic_customer_account_beneficiary_or_wallet_ineligible');
         }
-        // Dynamic does not require a separate screening row, but an existing active
-        // control without clearance cannot be treated as optional just from its status.
+        // Like the existing Nium payout flow, a later verified CLEAR customer can
+        // make old execution-only screening evidence inapplicable, never a finding/hold.
+        $verifiedClearAt = self::hasVerifiedClearCustomerObservation($r->account, now()->toDateTimeImmutable(),
+            allowVerifiedNotification: true)
+            && in_array($r->account->security_conflict_reason, [null, ''], true)
+            && ($r->account->reconciliation_requested_at === null
+                || $r->account->reconciliation_requested_at <= $r->account->reconciled_at)
+            ? $r->account->reconciled_at : null;
         $screenings = AmlScreening::query()->where('user_id', $r->user->id)
             ->orderBy('id')->lockForUpdate()->get();
-        if ($screenings->contains(fn ($screening): bool => self::hasBlockingAmlEvidence($screening))) {
+        if ($screenings->contains(fn ($screening): bool => self::hasBlockingAmlEvidence($screening, $verifiedClearAt))) {
             throw new RuntimeException('dynamic_compliance_hold_or_evidence_unavailable');
         }
         // Superseding a screening is not a resolution of its sanctions/AML matches.
@@ -264,26 +270,32 @@ final class DynamicTransferConfirmationService
         }
     }
 
-    private static function hasBlockingAmlEvidence(AmlScreening $screening): bool
+    private static function hasBlockingAmlEvidence(AmlScreening $screening, ?\DateTimeInterface $verifiedClearAt): bool
     {
         if ($screening->status === 'completed' && $screening->compliance_decision === 'clear'
             && $screening->completed_at !== null && ! $screening->completed_at->isFuture()) {
             return false;
         }
         $summary = $screening->result_summary ?? [];
-        // prepareProfile()/assertProfileClear() identify current controls by a null
-        // superseded_at. There is no separate "optional" flag: pending/running are
-        // unfinished controls; failed/unknown are missing evidence, not clearance.
-        // Only an already superseded execution-only row is no longer applicable.
-        // Supersession never clears recorded findings/holds or unresolved matches.
-        return ! ($screening->superseded_at !== null && ! $screening->superseded_at->isFuture()
-            && in_array($screening->status, ['pending', 'running', 'failed', 'unknown'], true)
+        // Execution state alone is not a finding. Preserve every recorded restriction
+        // regardless of its age or supersession; unresolved matches are checked separately.
+        $executionOnly = in_array($screening->status, ['pending', 'running', 'failed', 'unknown'], true)
             && in_array($screening->compliance_decision, [null, 'pending_review', 'unknown'], true)
             && $screening->screening_result === null
             && in_array($screening->risk_level, [null, 'unknown', 'low', 'medium'], true)
             && $screening->reviewed_by_user_id === null && $screening->reviewed_at === null
             && is_array($summary) && in_array($summary['outcome'] ?? null, [null, 'clear'], true)
-            && ($summary['match_count'] ?? 0) === 0);
+            && ($summary['match_count'] ?? 0) === 0;
+        if (! $executionOnly) return true;
+        if ($screening->superseded_at !== null && ! $screening->superseded_at->isFuture()) return false;
+        // A future supersession is not history. Without verified chronology, fail closed.
+        if ($screening->superseded_at !== null || $verifiedClearAt === null
+            || $screening->created_at === null || $screening->updated_at === null) return true;
+        foreach (['created_at', 'updated_at', 'screened_at', 'completed_at'] as $field) {
+            if ($screening->{$field} !== null && $screening->{$field} >= $verifiedClearAt) return true;
+        }
+        // Read-only admission: do not mark the screening clear or superseded.
+        return false;
     }
 
     /** Dynamic-only read model. These labels are never written to account/case status. */
