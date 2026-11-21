@@ -120,6 +120,20 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
         $this->assertRefused('dynamic_customer_corridor_ambiguous');
     }
 
+    public function test_numeric_routing_metadata_cannot_become_string_equivalence_evidence(): void
+    {
+        $row = [...$this->row(), 'routing_code_type' => 123,
+            'client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false];
+        $this->expectCorridors($this->body([$row, [...$row, 'routing_code_type' => '123']]));
+        $this->assertRefused('dynamic_customer_corridor_response_contract_unavailable');
+    }
+
+    public function test_identical_incomplete_rows_remain_ambiguous_before_schema(): void
+    {
+        $this->expectCorridors($this->body([$this->row(), $this->row()]));
+        $this->assertRefused('dynamic_customer_corridor_ambiguous');
+    }
+
     public static function listedTuples(): array
     {
         return [['GB', 'GBP', 'LOCAL'], ['DE', 'EUR', 'LOCAL'], ['JP', 'JPY', 'LOCAL'], ['GB', 'GBP', 'SWIFT']];
@@ -199,13 +213,15 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
     {
         return ['four fields' => [[]], 'entity only' => [['client_legal_entity' => ['LEGAL_ENTITY_HK']]],
             'lookup only' => [['ignoreLookup' => false]],
-            'both present' => [['client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false]]];
+            'both present' => [['client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false]],
+            'complete duplicate records' => [['client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false], 2],
+            'three complete duplicate records' => [['client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false], 3]];
     }
 
     #[DataProvider('optionalCorridorMetadata')]
-    public function test_customer_corridor_reaches_schema_without_granting_instruction_authority(array $metadata): void
+    public function test_customer_corridor_reaches_schema_without_granting_instruction_authority(array $metadata, int $copies = 1): void
     {
-        $corridorsBody = $this->body([[...$this->row(), ...$metadata]]);
+        $corridorsBody = $this->body(array_fill(0, $copies, [...$this->row(), ...$metadata]));
         $schemaBody = '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
             .'"type":"object","required":["payout.destinationAmount"],'
             .'"properties":{"payout.destinationAmount":{"type":"number","maximumDecimals":2}},'
@@ -272,7 +288,8 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
     #[DataProvider('foreignResponseEchoes')]
     public function test_foreign_or_null_scope_echo_is_not_accepted(array $echoes): void
     {
-        $this->expectCorridors($this->body([$this->row()], $echoes));
+        $row = [...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false];
+        $this->expectCorridors($this->body([$row, $row], $echoes));
         $this->assertRefused('dynamic_eligibility_scope_changed');
     }
 
@@ -284,7 +301,8 @@ final class NiumDynamicCustomerCorridorsTest extends DynamicConfirmationDatabase
     #[DataProvider('wrongRequests')]
     public function test_actual_request_must_match_the_bound_customer_get(string $mutation): void
     {
-        $this->expectCorridors($this->body([$this->row()]), outgoing: static function ($url) use ($mutation): ?Request {
+        $row = [...$this->row(), 'client_legal_entity' => ['LEGAL_ENTITY_HK'], 'ignoreLookup' => false];
+        $this->expectCorridors($this->body([$row, $row]), outgoing: static function ($url) use ($mutation): ?Request {
             if ($mutation === 'missing_callback') {
                 return null;
             }

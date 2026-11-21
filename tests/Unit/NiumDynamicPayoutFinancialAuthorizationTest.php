@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use App\Models\Beneficiary;
+use App\Domain\Nium\DynamicMultiCurrency\Financial\DocumentaryFeeSchedule;
 use App\Services\Nium\DynamicConfirmation\DynamicPayoutFinancialAuthorization;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -45,6 +46,7 @@ final class NiumDynamicPayoutFinancialAuthorizationTest extends TestCase
         $this->assertArrayNotHasKey('origin_service_fee_usd', $price);
         $this->assertSame('nium-contracted-local-usd-inclusive-v4', $price['version']);
         $this->assertArrayNotHasKey('provider_fee_usd', $price);
+        $this->assertSame('SENDER', $price['fee_payer']);
         $this->assertSame('INCLUDED_IN_TOTAL_USD_DEBIT', $price['fee_treatment']);
         $this->assertSame('PRESERVE_NIUM_QUOTED_RATE_NO_ADDITIONAL_MARGIN', $price['rate_treatment']);
         $this->assertSame('INDEPENDENT_AUTHENTICATED_RECONCILIATION', $price['provider_settlement']);
@@ -54,6 +56,7 @@ final class NiumDynamicPayoutFinancialAuthorizationTest extends TestCase
     public static function unsupportedRows(): array
     {
         return [['FR', 'EUR', 'LOCAL'], ['CH', 'GBP', 'LOCAL'], ['HK', 'USD', 'SWIFT'],
+            ['HK', 'SGD', 'SWIFT'], ['HK', 'SGD', 'LOCAL'], ['SG', 'SGD', 'SWIFT'],
             ['GB', 'GBP', 'WIRE'], ['GB', 'GBP', 'SWIFT'], ['GB', 'GBP', 'local'], ['gb', 'GBP', 'LOCAL']];
     }
 
@@ -75,5 +78,16 @@ final class NiumDynamicPayoutFinancialAuthorizationTest extends TestCase
         $this->assertNotSame($authorization->fingerprint($this->beneficiary('DE', 'EUR')),
             $authorization->fingerprint($this->beneficiary('CH', 'EUR')));
         $this->assertSame(['dynamic_financial_scope_required'], $authorization->unavailableReasons());
+    }
+
+    public function test_documentary_swift_twenty_usd_reference_does_not_authorize_hk_sgd_swift(): void
+    {
+        $reference = DocumentaryFeeSchedule::signedReference();
+        $this->assertSame(['method' => 'SWIFT', 'charge_type' => 'OUR', 'fee' => '20', 'fee_currency' => 'USD'],
+            $reference['swift_foreign_currency'][1]);
+        $this->assertSame('UNKNOWN', $reference['account_applicability']);
+        $this->assertNull(DocumentaryFeeSchedule::contractedLocal('USD', 'HK', 'SGD', 'SWIFT'));
+        $this->expectExceptionMessage('dynamic_pricing_corridor_unsupported');
+        (new DynamicPayoutFinancialAuthorization)->pricing($this->beneficiary('HK', 'SGD', 'SWIFT'));
     }
 }

@@ -165,10 +165,90 @@ final class NiumDynamicPayoutEligibilityTest extends TestCase
         DynamicPayoutEligibility::select(['data' => [$row]], $country, $currency, 'HK', $rail === 'LOCAL' ? 'SWIFT' : 'LOCAL');
     }
 
-    public function test_duplicate_matching_rows_are_ambiguous(): void
+    public function test_complete_identical_customer_rows_are_equivalent_without_promoting_the_listing(): void
+    {
+        $rows = [$this->row(), array_reverse($this->row(), true), $this->row()];
+        $listing = DynamicPayoutEligibility::listing(['data' => $rows], 'GB', 'GBP');
+        $this->assertSame($rows, $listing['matches']);
+        $this->assertFalse($listing['eligible']);
+        $this->assertSame(DynamicPayoutEligibility::select(['data' => [$this->row()]], 'GB', 'GBP', 'HK'),
+            DynamicPayoutEligibility::select(['data' => $rows], 'GB', 'GBP', 'HK'));
+    }
+
+    public function test_complete_hk_sgd_swift_duplicates_only_establish_customer_corridor_selection(): void
+    {
+        // Synthetic full records, not evidence of Production entitlement or pricing.
+        $row = [...$this->row(), 'destination_country' => ['HK'], 'destination_currency' => 'SGD',
+            'payout_method' => 'SWIFT', 'routing_code_type' => 'SWIFT'];
+        $this->assertSame(['legal_entity' => 'HK', 'destination_country' => 'HK', 'destination_currency' => 'SGD',
+            'payout_method' => 'SWIFT', 'routing_code_type' => 'SWIFT'],
+            DynamicPayoutEligibility::select(['data' => [$row, $row]], 'HK', 'SGD', 'HK', 'SWIFT'));
+    }
+
+    public static function contradictoryDuplicates(): array
+    {
+        return [
+            'routing' => [['routing_code_type' => 'SWIFT']],
+            'legal entity' => [['client_legal_entity' => ['LEGAL_ENTITY_SG']]],
+            'lookup policy' => [['ignoreLookup' => true]],
+            'country scope' => [['destination_country' => ['GB', 'FR']]],
+            'additional authorization' => [['authorization' => ['status' => 'DENIED']]],
+            'additional identifier' => [['corridor_id' => 'different-corridor']],
+        ];
+    }
+
+    #[DataProvider('contradictoryDuplicates')]
+    public function test_matching_tuple_cannot_hide_any_full_record_difference(array $changes): void
     {
         $this->expectExceptionMessage('dynamic_customer_corridor_ambiguous');
-        DynamicPayoutEligibility::select(['data' => [$this->row(), $this->row()]], 'GB', 'GBP', 'HK');
+        DynamicPayoutEligibility::select(['data' => [$this->row(), $this->row(), [...$this->row(), ...$changes]]],
+            'GB', 'GBP', 'HK');
+    }
+
+    #[DataProvider('omittedMetadata')]
+    public function test_duplicate_rows_with_missing_metadata_are_not_proven_equivalent(string $field): void
+    {
+        $row = $this->row();
+        unset($row[$field]);
+        $listing = DynamicPayoutEligibility::listing(['data' => [$row, $row]], 'GB', 'GBP');
+        $this->assertArrayNotHasKey($field, $listing['matches'][0]);
+        $this->expectExceptionMessage('dynamic_customer_corridor_ambiguous');
+        DynamicPayoutEligibility::select(['data' => [$row, $row]], 'GB', 'GBP', 'HK');
+    }
+
+    public function test_identical_four_field_rows_still_lack_equivalence_evidence(): void
+    {
+        $this->expectExceptionMessage('dynamic_customer_corridor_ambiguous');
+        DynamicPayoutEligibility::select(['data' => [$this->spendRow(), $this->spendRow()]], 'GB', 'GBP', 'HK');
+    }
+
+    public function test_duplicate_blank_routing_does_not_establish_equivalence(): void
+    {
+        $row = [...$this->row(), 'routing_code_type' => ' '];
+        $this->expectExceptionMessage('dynamic_customer_corridor_ambiguous');
+        DynamicPayoutEligibility::select(['data' => [$row, $row]], 'GB', 'GBP', 'HK');
+    }
+
+    public function test_identical_unmodeled_authorization_metadata_is_not_discarded_before_equivalence(): void
+    {
+        $row = [...$this->row(), 'authorization' => ['status' => 'DENIED']];
+        // Public projection intentionally omits unmodeled fields. Selection must inspect the full record.
+        $this->assertArrayNotHasKey('authorization', DynamicPayoutEligibility::listing(['data' => [$row, $row]], 'GB', 'GBP')['matches'][0]);
+        $this->expectExceptionMessage('dynamic_customer_corridor_ambiguous');
+        DynamicPayoutEligibility::select(['data' => [$row, $row]], 'GB', 'GBP', 'HK');
+    }
+
+    public function test_duplicate_equivalence_cannot_override_the_registration_legal_entity(): void
+    {
+        $this->expectExceptionMessage('dynamic_customer_corridor_not_permitted');
+        DynamicPayoutEligibility::select(['data' => [$this->row(), $this->row()]], 'GB', 'GBP', 'SG');
+    }
+
+    public function test_duplicate_equivalence_cannot_authorize_lookup_bypass(): void
+    {
+        $row = [...$this->row(), 'ignoreLookup' => true];
+        $this->expectExceptionMessage('dynamic_customer_corridor_response_contract_unavailable');
+        DynamicPayoutEligibility::select(['data' => [$row, $row]], 'GB', 'GBP', 'HK');
     }
 
     public function test_lookup_bypass_is_not_interpreted_as_authority(): void

@@ -21,6 +21,10 @@ use RuntimeException;
 /** Runtime customer-scoped reads. No operator audit-collector configuration or catalogue promotion. */
 final class DynamicPayoutEligibility
 {
+    // Retained customer supportedCorridors V1 fields, not the public catalogue.
+    private const CORRIDOR_FIELDS = ['destination_currency', 'payout_method', 'destination_country',
+        'routing_code_type', 'client_legal_entity', 'ignoreLookup'];
+
     public function __construct(private readonly NiumService $nium) {}
 
     /** Customer-scoped corridor support only; pricing and instruction admission remain separate. */
@@ -28,7 +32,9 @@ final class DynamicPayoutEligibility
     {
         $body = $this->read($user, $beneficiary, $binding, 'customer_corridors', null, now(), listing: true);
         try {
-            $decoded = ExactProviderJson::decode($body);
+            ExactProviderJson::decode($body);
+            // Corridor metadata is typed, not money: retain JSON scalar types.
+            $decoded = json_decode($body, true, 64, JSON_THROW_ON_ERROR);
         } catch (\Throwable $exception) {
             throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable', previous: $exception);
         }
@@ -66,7 +72,8 @@ final class DynamicPayoutEligibility
             $bodies[$endpoint] = $this->read($user, $beneficiary, $binding, $endpoint, $reference, $started);
             if ($endpoint === 'customer_corridors') {
                 try {
-                    $body = ExactProviderJson::decode($bodies[$endpoint]);
+                    ExactProviderJson::decode($bodies[$endpoint]);
+                    $body = json_decode($bodies[$endpoint], true, 64, JSON_THROW_ON_ERROR);
                 } catch (\Throwable $exception) {
                     throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable', previous: $exception);
                 }
@@ -151,6 +158,16 @@ final class DynamicPayoutEligibility
     /** Preserve every matching row. A listing alone never authorizes an instruction. */
     public static function listing(array $body, string $country, string $currency, string $rail = 'LOCAL'): array
     {
+        $matches = array_map(static fn (array $row): array => array_intersect_key($row, array_flip(self::CORRIDOR_FIELDS)),
+            self::matchingRows($body, $country, $currency, $rail));
+
+        return ['status' => $matches === [] ? 'NOT_LISTED' : 'LISTED', 'eligible' => false,
+            'matches' => $matches, 'reason_codes' => $matches === [] ? ['dynamic_customer_corridor_not_permitted'] : []];
+    }
+
+    /** Keep full records for equivalence checks, before the public listing projection. */
+    private static function matchingRows(array $body, string $country, string $currency, string $rail): array
+    {
         if (! is_array($body['data'] ?? null) || ! array_is_list($body['data'])) {
             throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
         }
@@ -181,21 +198,22 @@ final class DynamicPayoutEligibility
             if (array_key_exists('ignoreLookup', $row) && ! is_bool($row['ignoreLookup'])) {
                 throw new RuntimeException('dynamic_customer_corridor_response_contract_unavailable');
             }
-            $matches[] = array_intersect_key($row, array_flip(['destination_currency', 'payout_method',
-                'destination_country', 'routing_code_type', 'client_legal_entity', 'ignoreLookup']));
+            $matches[] = $row;
         }
-        return ['status' => $matches === [] ? 'NOT_LISTED' : 'LISTED', 'eligible' => false,
-            'matches' => $matches, 'reason_codes' => $matches === [] ? ['dynamic_customer_corridor_not_permitted'] : []];
+        return $matches;
     }
 
-    /** Select one customer-scoped tuple; never fabricate metadata omitted by Nium. */
+    /** Select one customer-scoped tuple, allowing only complete, proven duplicate records. */
     public static function select(array $body, string $country, string $currency, string $entity, string $rail = 'LOCAL'): array
     {
-        $listing = self::listing($body, $country, $currency, $rail);
-        $matches = $listing['matches'];
-        if (count($matches) !== 1) {
-            throw new RuntimeException(count($matches) === 0 ? 'dynamic_customer_corridor_not_permitted' : 'dynamic_customer_corridor_ambiguous');
+        $matches = self::matchingRows($body, $country, $currency, $rail);
+        if ($matches === []) {
+            throw new RuntimeException('dynamic_customer_corridor_not_permitted');
         }
+        if (count($matches) > 1 && ! self::equivalentRows($matches)) {
+            throw new RuntimeException('dynamic_customer_corridor_ambiguous');
+        }
+        // Use a representative only after every full matching record is proven equivalent.
         $row = $matches[0];
         // The caller supplies entity from the authenticated original registration
         // request. A missing corridor field neither supplies nor changes that entity.
@@ -213,6 +231,23 @@ final class DynamicPayoutEligibility
         }
         return ['legal_entity' => $entity, 'destination_country' => $country,
             'destination_currency' => $currency, 'payout_method' => $rail, 'routing_code_type' => $row['routing_code_type']];
+    }
+
+    private static function equivalentRows(array $rows): bool
+    {
+        $reference = null;
+        foreach ($rows as $row) {
+            // Duplicate equivalence requires all six documented fields explicitly.
+            // Unknown fields may add authorization conditions: do not discard them,
+            // infer missing metadata, or normalize lists, casing or scalar types.
+            if (count($row) !== count(self::CORRIDOR_FIELDS)
+                || array_diff(self::CORRIDOR_FIELDS, array_keys($row)) !== []
+                || trim($row['routing_code_type']) === '') return false;
+            ksort($row, SORT_STRING); // JSON object member order alone is immaterial.
+            if ($reference !== null && $row !== $reference) return false;
+            $reference = $row;
+        }
+        return true;
     }
 
     /** Structural/precision observation, never a partial JSON Schema instruction validator. */

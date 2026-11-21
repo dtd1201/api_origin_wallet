@@ -164,6 +164,8 @@ final class NiumFinalizedUsdPayoutPreparationTest extends TestCase
             ['FR', 'EUR', 'LOCAL', '1.5'],
             ['CH', 'GBP', 'LOCAL', '1.5'],
             ['AU', 'AUD', 'LOCAL', '1.5'],
+            // Planning arithmetic is not a contracted pricing grant for this Production tuple.
+            ['HK', 'SGD', 'SWIFT', '1.5'],
         ];
     }
 
@@ -183,6 +185,11 @@ final class NiumFinalizedUsdPayoutPreparationTest extends TestCase
         $this->assertSame('UNVERIFIED', $s['corridor_eligibility']);
         $this->assertSame('UNVERIFIED', $s['provider_margin_applicability']);
         $this->assertSame('DENIED', $s['admission']);
+        if ($country === 'HK' && $currency === 'SGD' && $method === 'SWIFT') {
+            $this->assertSame(['currency' => 'USD', 'amount' => '20'], $s['included_fee']);
+            $this->assertNull($s['fee_classification']);
+            $this->assertSame('UNVERIFIED', $s['pricing_authorization']);
+        }
     }
 
     public static function invalidAmounts(): array
