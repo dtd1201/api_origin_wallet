@@ -107,6 +107,9 @@ final class NiumHkSubmitKycValidator
         }
 
         $document = $documents[0];
+        if (! is_array($document)) {
+            throw new RuntimeException('Invalid Nium HK biometric passport identity document.');
+        }
         $expiryValue = $document['expiryDate'] ?? null;
         try {
             $expiry = is_string($expiryValue)
@@ -130,8 +133,18 @@ final class NiumHkSubmitKycValidator
             throw new RuntimeException('Invalid Nium HK biometric passport identity document.');
         }
 
-        if (array_key_exists('fileIds', $document) || array_key_exists('proofOfAddressDocument', $payload)) {
-            throw new RuntimeException('Biometric Submit KYC must not contain fileIds or proofOfAddress.');
+        if (array_key_exists('proofOfAddressDocument', $payload)) {
+            throw new RuntimeException('Biometric Submit KYC must not contain proofOfAddress.');
+        }
+
+        if ($payload['entityType'] === 'applicant') {
+            $fileIds = $document['fileIds'] ?? null;
+            if (! is_array($fileIds) || ! array_is_list($fileIds) || count($fileIds) !== 1
+                || ! is_string($fileIds[0]) || ! Str::isUuid($fileIds[0])) {
+                throw new RuntimeException('HK applicant biometric Submit KYC requires exactly one valid Nium File ID.');
+            }
+        } elseif (array_key_exists('fileIds', $document)) {
+            throw new RuntimeException('Biometric stakeholder Submit KYC must not contain fileIds.');
         }
     }
 }

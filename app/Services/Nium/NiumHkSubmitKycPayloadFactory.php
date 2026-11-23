@@ -14,7 +14,7 @@ final class NiumHkSubmitKycPayloadFactory
 
     public function build(KycRelatedPerson $person, string $entityType, string $referenceId): array
     {
-        $identity = $this->identityResolver->resolve($person);
+        $identity = $this->identityResolver->resolve($person, requireAvailableFile: $entityType === 'applicant');
         if ($entityType === 'individual_stakeholder') {
             if ($identity['is_resident'] === true) {
                 throw new \RuntimeException('HK-resident stakeholder manual KYC requires an approved national ID document.');
@@ -45,6 +45,10 @@ final class NiumHkSubmitKycPayloadFactory
                 'expiryDate' => $identity['expiry_date'],
             ]],
         ];
+
+        if ($entityType === 'applicant') {
+            $payload['proofOfIdentityDocument'][0]['fileIds'] = [$identity['file_id']];
+        }
 
         $this->validator->assert($payload);
 

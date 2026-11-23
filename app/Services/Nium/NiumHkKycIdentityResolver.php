@@ -14,7 +14,7 @@ final class NiumHkKycIdentityResolver
 
     public function __construct(private readonly NiumCustomerDocumentResolver $documentResolver) {}
 
-    public function resolve(KycRelatedPerson $person): array
+    public function resolve(KycRelatedPerson $person, bool $requireAvailableFile = false): array
     {
         $documents = $this->documentResolver->relatedPersonDocuments($person)
             ->filter(function ($document): bool {
@@ -26,11 +26,24 @@ final class NiumHkKycIdentityResolver
         $identity = is_array($metadata) ? ($metadata['nium_biometric_identity'] ?? null) : null;
 
         if ($document !== null) {
+            if ($requireAvailableFile
+                && ((string) $document->kyc_related_person_id !== (string) $person->getKey()
+                    || (string) $document->kyc_profile_id !== (string) $person->kyc_profile_id)) {
+                throw new RuntimeException('HK applicant biometric passport does not belong to the selected person and profile.');
+            }
             $resolved = $this->fromDocument($document, $person);
             if (is_array($identity) && ! array_is_list($identity) && $this->materiallyConflicts($resolved, $identity)) {
                 throw new RuntimeException('Approved biometric identity document conflicts with factual identity metadata.');
             }
+            if ($requireAvailableFile && ($resolved['file_id'] ?? null) === null) {
+                throw new RuntimeException('HK applicant biometric KYC requires an AVAILABLE passport Nium File ID.');
+            }
             return $resolved;
+        }
+
+        if ($requireAvailableFile) {
+            // Factual identity metadata cannot establish an uploaded, available file.
+            throw new RuntimeException('HK applicant biometric KYC requires an approved passport with an AVAILABLE Nium File ID.');
         }
 
         if (! is_array($identity) || array_is_list($identity)) {
