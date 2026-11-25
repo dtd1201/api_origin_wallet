@@ -7,7 +7,7 @@ $allowedOrigins = array_values(array_filter(array_map(
 
 $allowedHeaders = array_values(array_filter(array_map(
     static fn (string $header): string => trim($header),
-    explode(',', (string) env('CORS_ALLOWED_HEADERS', 'Content-Type,X-Requested-With,Authorization,Accept,Origin'))
+    explode(',', (string) env('CORS_ALLOWED_HEADERS', 'Content-Type,X-Requested-With,Authorization,Accept,Origin,X-Auth-Client-Binding'))
 )));
 
 return [
@@ -24,7 +24,7 @@ return [
 
     'allowed_headers' => $allowedHeaders,
 
-    'exposed_headers' => [],
+    'exposed_headers' => ['Retry-After'],
 
     'max_age' => 0,
 

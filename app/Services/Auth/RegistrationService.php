@@ -3,121 +3,102 @@
 namespace App\Services\Auth;
 
 use App\Mail\RegistrationVerificationCodeMail;
+use App\Models\AuthRegistrationEvidence;
 use App\Models\PendingRegistration;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Str;
 
 class RegistrationService
 {
+    public function __construct(private readonly AuthSecurity $security) {}
+
     public function startRegistration(array $validated): array
     {
-        $verificationCode = DB::transaction(function () use ($validated): string {
-            $verificationCode = $this->generateVerificationCode();
-            $activationUrl = URL::temporarySignedRoute(
-                'auth.register.activate',
-                now()->addMinutes(15),
-                [
-                    'email' => $validated['email'],
-                    'code' => $verificationCode,
-                ]
-            );
-
-            PendingRegistration::query()->updateOrCreate(
-                ['email' => $validated['email']],
-                [
-                    'phone' => $validated['phone'] ?? null,
-                    'full_name' => $validated['full_name'] ?? null,
-                    'password_hash' => Hash::make($validated['password']),
-                    'verification_code' => $verificationCode,
-                    'expires_at' => now()->addMinutes(15),
-                    'verified_at' => null,
-                ]
-            );
-
-            Mail::to($validated['email'])->send(
-                new RegistrationVerificationCodeMail(
-                    fullName: (string) ($validated['full_name'] ?? ''),
-                    verificationCode: $verificationCode,
-                    expiresInMinutes: 15,
-                    activationUrl: $activationUrl,
-                )
-            );
-
-            return $verificationCode;
+        $email = trim($validated['email']);
+        $this->security->limit('registration', $email);
+        return DB::transaction(function () use ($validated, $email): array {
+            if (User::where('email', $email)->exists()) {
+                return ['message' => 'If registration can proceed, check your verification email.',
+                    'email' => $email, 'registration_version' => (string) Str::uuid(), 'expires_in_minutes' => 15];
+            }
+            $pending = PendingRegistration::where('email', $email)->lockForUpdate()->first();
+            // Do not let another request replace the password/browser/version
+            // underneath an already delivered verification email.
+            if ($pending !== null && $pending->expires_at->gt(now())) {
+                return ['message' => 'If registration can proceed, check your verification email.',
+                    'email' => $email, 'registration_version' => $pending->registration_version,
+                    'expires_in_minutes' => 15];
+            }
+            $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            $version = (string) Str::uuid();
+            $pending ??= new PendingRegistration;
+            $pending->forceFill(['email' => $email, 'phone' => $validated['phone'] ?? null,
+                'full_name' => $validated['full_name'] ?? null, 'password_hash' => Hash::make($validated['password']),
+                'verification_code' => null, 'verification_code_hash' => Hash::make($code),
+                'registration_version' => $version, 'client_binding_hash' => hash('sha256', $validated['client_binding']),
+                'verification_attempts' => 0, 'expires_at' => now()->addMinutes(15), 'verified_at' => null])->save();
+            $activation = URL::temporarySignedRoute('auth.register.activate', now()->addMinutes(15),
+                ['email' => $email, 'code' => $code, 'registration_version' => $version]);
+            Mail::to($email)->send(new RegistrationVerificationCodeMail(
+                fullName: (string) ($validated['full_name'] ?? ''), verificationCode: $code,
+                expiresInMinutes: 15, activationUrl: $activation));
+            // Preserve registration debug behavior only; it cannot expose TOTP,
+            // recovery codes or restricted authentication capabilities.
+            return ['message' => 'If registration can proceed, check your verification email.', 'email' => $email,
+                'registration_version' => $version, 'expires_in_minutes' => 15,
+                ...((bool) config('mail.expose_verification_code', false) ? ['verification_code' => $code] : [])];
         });
-
-        $response = [
-            'message' => 'Verification link sent to email. Please verify to complete registration.',
-            'email' => $validated['email'],
-            'expires_in_minutes' => 15,
-        ];
-
-        if ((bool) config('mail.expose_verification_code', false)) {
-            $response['verification_code'] = $verificationCode;
-        }
-
-        return $response;
     }
 
-    public function completeRegistrationByCode(string $email, string $verificationCode): User
+    public function completeRegistrationByCode(string $email, string $code, string $version, string $binding): User
     {
-        return DB::transaction(function () use ($email, $verificationCode): User {
-            $pendingRegistration = PendingRegistration::query()
-                ->where('email', $email)
-                ->lockForUpdate()
-                ->first();
+        return $this->complete($email, $code, $version, $binding);
+    }
 
-            abort_if($pendingRegistration === null, 422, 'No pending registration found for this email.');
-            abort_if($pendingRegistration->expires_at->isPast(), 422, 'Verification code has expired.');
-            abort_if($pendingRegistration->verification_code !== $verificationCode, 422, 'Invalid verification code.');
+    public function completeRegistrationByActivationLink(string $email, string $code, string $version): User
+    {
+        // A link click does not prove that the registration-initiating browser
+        // owns the mailbox. No browser enrollment trust is conveyed by GET.
+        return $this->complete($email, $code, $version, null);
+    }
 
-            $user = User::create([
-                'email' => $pendingRegistration->email,
-                'phone' => $pendingRegistration->phone,
-                'full_name' => $pendingRegistration->full_name,
-                'password_hash' => $pendingRegistration->password_hash,
-                'status' => 'pending',
-                'kyc_status' => 'pending',
-            ]);
-
-            $pendingRegistration->delete();
-
+    private function complete(string $email, #[\SensitiveParameter] string $code, string $version, ?string $binding): User
+    {
+        $this->security->limit('registration', $email);
+        $result = DB::transaction(function () use ($email, $code, $version, $binding): ?User {
+            $pending = PendingRegistration::where('email', $email)->lockForUpdate()->first();
+            if ($pending === null || $pending->expires_at->lte(now()) || $pending->verification_attempts >= 5
+                || $pending->registration_version !== $version || $pending->verification_code_hash === null
+                || ($binding !== null && ! hash_equals((string) $pending->client_binding_hash, hash('sha256', $binding)))
+                || ! Hash::check($code, $pending->verification_code_hash)) {
+                if ($pending !== null) {
+                    $pending->forceFill(['verification_attempts' => $pending->verification_attempts + 1])->save();
+                }
+                $this->security->event('registration_verification_failed');
+                return null;
+            }
+            if (User::where('email', $email)->exists()) {
+                return null;
+            }
+            $user = User::create(['email' => $email, 'phone' => $pending->phone, 'full_name' => $pending->full_name,
+                'password_hash' => $pending->password_hash, 'status' => 'pending', 'kyc_status' => 'pending']);
+            $user->forceFill(['email_verified_at' => now()])->save();
+            $user->refresh();
+            $evidence = new AuthRegistrationEvidence;
+            $evidence->forceFill(['user_id' => $user->id, 'registration_version' => $version,
+                'email_hash' => hash('sha256', $user->email), 'password_fingerprint' => hash('sha256', $user->password_hash),
+                'client_binding_hash' => $binding === null ? null : hash('sha256', $binding),
+                'registration_proof_hash' => $pending->verification_code_hash, 'auth_epoch' => $user->auth_epoch,
+                'verified_at' => now(), 'expires_at' => now()->addMinutes(30)])->save();
+            $pending->delete();
+            $this->security->event('registration_email_verified', $user);
             return $user;
         });
-    }
-
-    public function completeRegistrationByActivationLink(string $email, string $verificationCode): User
-    {
-        return DB::transaction(function () use ($email, $verificationCode): User {
-            $pendingRegistration = PendingRegistration::query()
-                ->where('email', $email)
-                ->lockForUpdate()
-                ->first();
-
-            abort_if($pendingRegistration === null, 422, 'No pending registration found for this email.');
-            abort_if($pendingRegistration->expires_at->isPast(), 422, 'Verification link has expired.');
-            abort_if($pendingRegistration->verification_code !== $verificationCode, 422, 'Verification link is invalid.');
-
-            $user = User::create([
-                'email' => $pendingRegistration->email,
-                'phone' => $pendingRegistration->phone,
-                'full_name' => $pendingRegistration->full_name,
-                'password_hash' => $pendingRegistration->password_hash,
-                'status' => 'pending',
-                'kyc_status' => 'pending',
-            ]);
-
-            $pendingRegistration->delete();
-
-            return $user;
-        });
-    }
-
-    private function generateVerificationCode(): string
-    {
-        return str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+        abort_if($result === null, 422, 'Registration verification could not be completed.');
+        return $result;
     }
 }

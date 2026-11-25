@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Models\ApiToken;
+use App\Services\Auth\AuthTokenEligibility;
 use Closure;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -11,6 +12,8 @@ use Symfony\Component\HttpFoundation\Response;
 
 class AuthenticateApiToken
 {
+    public function __construct(private readonly AuthTokenEligibility $eligibility) {}
+
     public function handle(Request $request, Closure $next): Response
     {
         $plainToken = $request->bearerToken();
@@ -32,6 +35,17 @@ class AuthenticateApiToken
             $token->delete();
 
             return $this->unauthorizedResponse('Token has expired.');
+        }
+
+        $audiences = $request->is('api/admin/*') ? ['admin'] : ['user'];
+        // These shared evidence/rate routes retain their controller/policy
+        // checks and can serve either fully authenticated portal.
+        if ($request->is('api/member/*', 'api/kyc-documents/*', 'api/identity-verification-sessions/*')) {
+            $audiences = ['user', 'admin'];
+        }
+        if (! in_array($token->audience, $audiences, true)
+            || ! $this->eligibility->allows($token, $token->user, $token->audience)) {
+            return $this->unauthorizedResponse();
         }
 
         $now = now();

@@ -11,10 +11,12 @@ use Illuminate\Support\Facades\Mail;
 
 class PasswordResetService
 {
-    public function __construct(private readonly AuthVerificationSecurity $verificationSecurity) {}
+    public function __construct(private readonly AuthVerificationSecurity $verificationSecurity,
+        private readonly AuthRevocationService $revocation, private readonly AuthSecurity $security) {}
 
     public function sendResetCode(string $email): array
     {
+        $this->security->limit('password_reset_request', $email);
         $user = User::query()
             ->where('email', $email)
             ->first();
@@ -36,7 +38,7 @@ class PasswordResetService
                 ->first();
 
             if ($this->passwordResetRequestIsThrottled($passwordReset)) {
-                abort(429, 'Please wait before requesting another password reset code.');
+                return '';
             }
 
             $verificationCode = $this->generateVerificationCode();
@@ -63,7 +65,7 @@ class PasswordResetService
             return $verificationCode;
         });
 
-        if ((bool) config('mail.expose_verification_code', false)) {
+        if ($verificationCode !== '' && (bool) config('mail.expose_verification_code', false)) {
             $response['verification_code'] = $verificationCode;
         }
 
@@ -72,6 +74,7 @@ class PasswordResetService
 
     public function resetPassword(array $validated, ?string $ipAddress = null, ?string $userAgent = null): void
     {
+        $this->security->limit('password_reset', $validated['email']);
         $this->verificationSecurity->enforceRateLimits(
             'password_reset',
             $validated['email'],
@@ -93,6 +96,9 @@ class PasswordResetService
 
                 return 'No user found for this email.';
             }
+
+            // Preserve the global User → factor → challenge/grant ordering.
+            $this->revocation->lockFactor($user);
 
             $passwordReset = DB::table('password_reset_tokens')
                 ->where('email', $validated['email'])
@@ -160,9 +166,11 @@ class PasswordResetService
 
             $user->forceFill([
                 'password_hash' => Hash::make($validated['password']),
+                'credentials_changed_at' => now(),
             ])->save();
 
-            $user->apiTokens()->delete();
+            $this->revocation->revokeLocked($user, 'password_reset');
+            $this->security->notice($user, 'password reset');
 
             DB::table('password_reset_tokens')
                 ->where('email', $validated['email'])
@@ -172,7 +180,7 @@ class PasswordResetService
         });
 
         if ($result !== null) {
-            abort(422, $result);
+            abort(422, 'Password reset could not be completed.');
         }
 
         $this->verificationSecurity->clearAccountRateLimit('password_reset', $validated['email']);

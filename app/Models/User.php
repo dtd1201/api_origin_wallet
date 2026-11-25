@@ -39,6 +39,10 @@ class User extends Authenticatable
      */
     protected $hidden = [
         'password_hash',
+        'auth_epoch',
+        'credentials_changed_at',
+        'authFactors',
+        'auth_factors',
     ];
 
     /**
@@ -50,6 +54,9 @@ class User extends Authenticatable
     {
         return [
             'password_hash' => 'hashed',
+            'auth_epoch' => 'integer',
+            'email_verified_at' => 'immutable_datetime',
+            'credentials_changed_at' => 'immutable_datetime',
         ];
     }
 

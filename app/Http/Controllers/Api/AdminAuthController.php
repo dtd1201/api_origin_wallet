@@ -8,7 +8,6 @@ use App\Models\User;
 use App\Services\Auth\ApiAuthService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
 
 class AdminAuthController extends Controller
 {
@@ -18,66 +17,17 @@ class AdminAuthController extends Controller
 
     public function login(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-            'password' => ['required', 'string'],
-        ]);
-
-        $user = User::query()
-            ->with(['profile', 'providerAccounts.provider', 'roles'])
-            ->where('email', $validated['email'])
-            ->first();
-
-        if ($user === null || ! Hash::check($validated['password'], $user->password_hash)) {
-            return response()->json([
-                'message' => 'Invalid credentials.',
-            ], 422);
-        }
-
-        if (! $user->isAdmin()) {
-            return response()->json([
-                'message' => 'This account is not allowed to access admin.',
-            ], 403);
-        }
-
-        return response()->json($this->apiAuthService->startLogin($user), 202);
+        return app(MandatoryAuthController::class)->login($request);
     }
 
     public function verifyLogin(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-            'verification_code' => ['required', 'digits:6'],
-        ]);
-
-        [, $payload] = $this->apiAuthService->completeLogin(
-            $validated['email'],
-            $validated['verification_code'],
-            (string) $request->userAgent(),
-            function (User $user): void {
-                abort_if(! $user->isAdmin(), 403, 'This account is not allowed to access admin.');
-            },
-            $request->ip(),
-        );
-
-        return response()->json([
-            'message' => 'Login successful.',
-            ...$payload,
-        ]);
+        return app(MandatoryAuthController::class)->verify($request);
     }
 
     public function resendLogin(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-        ]);
-
-        return response()->json(
-            $this->apiAuthService->resendLogin(
-                $validated['email'],
-                adminOnly: true,
-            )
-        );
+        return app(MandatoryAuthController::class)->retired($request);
     }
 
     public function me(Request $request): JsonResponse

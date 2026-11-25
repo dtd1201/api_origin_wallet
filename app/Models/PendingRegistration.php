@@ -6,6 +6,8 @@ use Illuminate\Database\Eloquent\Model;
 
 class PendingRegistration extends Model
 {
+    protected $hidden = ['password_hash', 'verification_code', 'verification_code_hash', 'client_binding_hash'];
+
     protected $fillable = [
         'email',
         'phone',

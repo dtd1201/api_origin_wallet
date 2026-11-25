@@ -2,6 +2,8 @@
 
 use App\Http\Controllers\Api\AdminAuthController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\MandatoryAuthController;
+use App\Http\Middleware\AuthNoStore;
 use App\Http\Controllers\Api\BankRateController;
 use App\Http\Controllers\Api\ChatbotController;
 use App\Http\Controllers\Api\ContactSubmissionController;
@@ -29,7 +31,7 @@ Route::middleware('auth.token')->prefix('member')->group(function (): void {
     Route::get('bank-rates', [BankRateController::class, 'authenticated']);
 });
 
-Route::prefix('auth')->group(function (): void {
+Route::prefix('auth')->middleware(AuthNoStore::class)->group(function (): void {
     Route::post('register', [AuthController::class, 'register']);
     Route::post('register/verify', [AuthController::class, 'verifyRegistration']);
     Route::get('register/activate', [AuthController::class, 'activateRegistration'])
@@ -57,7 +59,7 @@ Route::middleware('auth.token')
     ->get('kyc-documents/{user}/{artifactHash}', [KycSubmissionController::class, 'showDocument'])
     ->name('kyc-documents.show');
 
-Route::prefix('admin/auth')->group(function (): void {
+Route::prefix('admin/auth')->middleware(AuthNoStore::class)->group(function (): void {
     Route::post('login', [AdminAuthController::class, 'login']);
     Route::post('login/verify', [AdminAuthController::class, 'verifyLogin']);
     Route::post('login/resend', [AdminAuthController::class, 'resendLogin']);
@@ -67,6 +69,26 @@ Route::prefix('admin/auth')->group(function (): void {
         Route::get('me', [AdminAuthController::class, 'me']);
     });
 });
+
+foreach (['auth', 'admin/auth'] as $authPrefix) {
+    Route::prefix($authPrefix)->middleware(AuthNoStore::class)->group(function () use ($authPrefix): void {
+        foreach ([
+            'enrollment/identity/request' => 'identityRequest', 'enrollment/identity/verify' => 'identityVerify',
+            'enrollment/setup' => 'setup', 'enrollment/confirm' => 'confirm', 'challenges/cancel' => 'cancel',
+            'recovery/start' => 'recoveryStart', 'recovery/verify' => 'recoveryVerify', 'recovery/request' => 'recoveryRequest',
+            'totp/replacement/setup' => 'replacementSetup', 'totp/replacement/confirm' => 'replacementConfirm',
+        ] as $path => $method) {
+            Route::post($path, [MandatoryAuthController::class, $method]);
+        }
+        $middleware = $authPrefix === 'admin/auth' ? ['auth.token', 'auth.admin'] : ['auth.token'];
+        Route::middleware($middleware)->group(function (): void {
+            Route::get('security', [MandatoryAuthController::class, 'security']);
+            Route::post('security/step-up', [MandatoryAuthController::class, 'stepUp']);
+            Route::post('security/step-up/verify', [MandatoryAuthController::class, 'stepUpVerify']);
+            Route::post('recovery-codes/regenerate', [MandatoryAuthController::class, 'regenerate']);
+        });
+    });
+}
 
 Route::post('webhooks/providers/{provider}', ProviderWebhookController::class)
     ->name('webhooks.providers.handle');

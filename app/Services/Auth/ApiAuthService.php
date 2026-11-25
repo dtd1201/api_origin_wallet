@@ -2,245 +2,82 @@
 
 namespace App\Services\Auth;
 
-use App\Mail\LoginVerificationCodeMail;
 use App\Models\ApiToken;
-use App\Models\PendingLogin;
+use App\Models\AuthChallenge;
 use App\Models\User;
+use App\Models\UserAuthFactor;
 use App\Services\Integrations\IntegrationProviderCatalog;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 
 class ApiAuthService
 {
     public function __construct(
         private readonly IntegrationProviderCatalog $providerCatalog,
-        private readonly AuthVerificationSecurity $verificationSecurity,
+        private readonly AuthChallengeService $challenges,
+        private readonly TotpService $totp,
+        private readonly AuthSecurity $security,
     ) {}
 
-    public function issueToken(User $user, string $tokenName): string
+    /**
+     * Only persisted, consumed, TOTP-proven completion records can issue once.
+     * No caller-provided boolean or synthetic User field conveys MFA assurance.
+     * Caller already holds User → factor → challenge inside the same transaction.
+     */
+    public function issueToken(User $user, AuthChallenge $completion, string $tokenName): string
     {
-        $plainToken = Str::random(80);
-
-        $user->apiTokens()->create([
-            'name' => Str::limit($tokenName, 255, ''),
-            'token_hash' => hash('sha256', $plainToken),
-            'expires_at' => now()->addDays(30),
-        ]);
+        if (DB::transactionLevel() < 1) {
+            throw new \LogicException('MFA issuance requires a completion transaction.');
+        }
+        $lockedUser = User::whereKey($user->id)->lockForUpdate()->firstOrFail();
+        $factor = $this->challenges->lockFactor($lockedUser);
+        $proof = AuthChallenge::whereKey($completion->id)->lockForUpdate()->firstOrFail();
+        abort_unless($factor !== null && $factor->confirmed_at !== null
+            && $proof->user_id === $lockedUser->id && $proof->consumed_at !== null && $proof->revoked_at === null
+            && $proof->token_issued_at === null && $proof->expires_at->gt(now()) && $proof->ceremony_deadline->gt(now())
+            && in_array($proof->purpose, ['login_totp', 'enrollment_setup', 'replacement_setup'], true)
+            && in_array($proof->audience, ['user', 'admin'], true)
+            && ($proof->audience !== 'admin' || $lockedUser->isAdmin())
+            && $proof->auth_epoch === $lockedUser->auth_epoch && (int) $proof->factor_id === $factor->id
+            && $proof->factor_version === $factor->version && $proof->verified_counter !== null
+            && $proof->verified_counter === $factor->last_accepted_time_step
+            && $proof->mfa_verified_at !== null && $proof->mfa_verified_at->lte(now()), 422, 'Authentication could not be completed.');
+        $plainToken = bin2hex(random_bytes(40));
+        $row = new ApiToken;
+        $row->forceFill(['user_id' => $lockedUser->id, 'name' => Str::limit($tokenName, 255, ''),
+            'token_hash' => hash('sha256', $plainToken), 'expires_at' => now()->addDays(30),
+            'audience' => $proof->audience, 'auth_epoch' => $lockedUser->auth_epoch,
+            'factor_id' => $factor->id, 'factor_version' => $factor->version,
+            'mfa_verified_at' => $proof->mfa_verified_at])->save();
+        $proof->forceFill(['token_issued_at' => now()])->save();
 
         return $plainToken;
     }
 
-    public function startLogin(User $user): array
+    public function startLogin(string $email, #[\SensitiveParameter] string $password, string $audience, #[\SensitiveParameter] string $binding): array
     {
-        $verificationCode = DB::transaction(function () use ($user): string {
-            $verificationCode = $this->generateVerificationCode();
-
-            PendingLogin::query()->updateOrCreate(
-                ['email' => $user->email],
-                [
-                    'user_id' => $user->id,
-                    'verification_code' => null,
-                    'verification_code_hash' => Hash::make($verificationCode),
-                    'verification_attempts' => 0,
-                    'locked_until' => null,
-                    'last_attempt_at' => null,
-                    'verification_sent_at' => now(),
-                    'expires_at' => now()->addMinutes(15),
-                ]
-            );
-
-            Mail::to($user->email)->send(
-                new LoginVerificationCodeMail(
-                    fullName: (string) ($user->full_name ?? ''),
-                    verificationCode: $verificationCode,
-                    expiresInMinutes: 15,
-                )
-            );
-
-            return $verificationCode;
-        });
-
-        $response = [
-            'message' => 'Verification code sent to email. Please verify to complete login.',
-            'email' => $user->email,
-            'expires_in_minutes' => 15,
-        ];
-
-        if ((bool) config('mail.expose_verification_code', false)) {
-            $response['verification_code'] = $verificationCode;
-        }
-
-        return $response;
+        return $this->challenges->credentials($email, $password, $audience, $binding);
     }
 
-    public function resendLogin(string $email, bool $adminOnly = false): array
+    public function completeLogin(string $token, string $code, string $audience, string $binding): array
     {
-        $result = DB::transaction(function () use ($email, $adminOnly): array {
-            $pendingLogin = PendingLogin::query()
-                ->with('user')
-                ->where('email', $email)
-                ->lockForUpdate()
-                ->first();
-
-            if ($pendingLogin === null || $pendingLogin->user === null) {
-                abort(422, 'No pending login found for this email.');
-            }
-
-            $user = $pendingLogin->user;
-
-            if ($adminOnly && ! $user->isAdmin()) {
-                abort(403, 'This account is not allowed to access admin.');
-            }
-
-            if (
-                $pendingLogin->verification_sent_at !== null
-                && $pendingLogin->verification_sent_at->addSeconds(120)->isFuture()
-            ) {
-                abort(429, 'Please wait before requesting another verification code.');
-            }
-
-            $verificationCode = $this->generateVerificationCode();
-
-            $pendingLogin->update([
-                'verification_code' => null,
-                'verification_code_hash' => Hash::make($verificationCode),
-                'verification_attempts' => 0,
-                'locked_until' => null,
-                'last_attempt_at' => null,
-                'verification_sent_at' => now(),
-                'expires_at' => now()->addMinutes(15),
-            ]);
-
-            Mail::to($user->email)->send(
-                new LoginVerificationCodeMail(
-                    fullName: (string) ($user->full_name ?? ''),
-                    verificationCode: $verificationCode,
-                    expiresInMinutes: 15,
-                )
-            );
-
-            return [
-                'email' => $user->email,
-                'verification_code' => $verificationCode,
-            ];
-        });
-
-        $response = [
-            'message' => 'A new verification code has been sent to your email.',
-            'email' => $result['email'],
-            'expires_in_minutes' => 15,
-            'resend_cooldown_seconds' => 120,
-        ];
-
-        if ((bool) config('mail.expose_verification_code', false)) {
-            $response['verification_code'] = $result['verification_code'];
-        }
-
-        return $response;
-    }
-
-    public function completeLogin(
-        string $email,
-        string $verificationCode,
-        string $tokenName,
-        ?callable $afterUserResolved = null,
-        ?string $ipAddress = null,
-    ): array {
-        $this->verificationSecurity->enforceRateLimits('login', $email, $ipAddress, $tokenName);
-
-        $result = DB::transaction(function () use ($email, $verificationCode, $tokenName, $afterUserResolved, $ipAddress): array {
-            $pendingLogin = PendingLogin::query()
-                ->where('email', $email)
-                ->lockForUpdate()
-                ->first();
-
-            if ($pendingLogin === null) {
-                $this->verificationSecurity->record('login_verification_failed', $email, null, $ipAddress, $tokenName, [
-                    'reason' => 'pending_login_missing',
-                ]);
-
-                return ['error' => 'No pending login found for this email.'];
-            }
-
-            if ($pendingLogin->locked_until?->isFuture()) {
-                $this->verificationSecurity->record('login_verification_lockout', $email, $pendingLogin->user_id, $ipAddress, $tokenName, [
-                    'reason' => 'attempt_limit',
-                    'locked_until' => $pendingLogin->locked_until->toIso8601String(),
-                ]);
-
-                return ['error' => 'Too many invalid verification attempts. Please request a new code.'];
-            }
-
-            if ($pendingLogin->expires_at->isPast()) {
-                $this->verificationSecurity->record('login_verification_failed', $email, $pendingLogin->user_id, $ipAddress, $tokenName, [
-                    'reason' => 'expired',
-                ]);
-
-                return ['error' => 'Verification code has expired.'];
-            }
-
-            if (! Hash::check($verificationCode, (string) $pendingLogin->verification_code_hash)) {
-                $pendingLogin->verification_attempts++;
-                $pendingLogin->last_attempt_at = now();
-                $lockedOut = $pendingLogin->verification_attempts >= $this->verificationSecurity->maxAttempts();
-
-                if ($lockedOut) {
-                    $pendingLogin->locked_until = now()->addMinutes($this->verificationSecurity->lockoutMinutes());
+        return $this->challenges->run($token, $audience, $binding, ['login_totp'],
+            function (User $user, ?UserAuthFactor $factor, AuthChallenge $challenge) use ($code): array {
+                if ($factor === null) {
+                    return $this->challenges->reject($user, $challenge, 'factor_missing');
                 }
-
-                $pendingLogin->save();
-                $this->verificationSecurity->record(
-                    $lockedOut ? 'login_verification_lockout' : 'login_verification_failed',
-                    $email,
-                    $pendingLogin->user_id,
-                    $ipAddress,
-                    $tokenName,
-                    ['attempts' => $pendingLogin->verification_attempts, 'reason' => 'invalid_code']
-                );
-
-                if (! $lockedOut && $pendingLogin->verification_attempts >= $this->verificationSecurity->suspiciousAttemptThreshold()) {
-                    $this->verificationSecurity->record('suspicious_verification_attempts', $email, $pendingLogin->user_id, $ipAddress, $tokenName, [
-                        'attempts' => $pendingLogin->verification_attempts,
-                        'purpose' => 'login',
-                    ]);
+                $counter = $this->totp->matchingCounter($this->totp->decrypt($factor->secret_ciphertext, $factor->encryption_key_version), $code);
+                if ($counter === null || $counter <= $factor->last_accepted_time_step) {
+                    return $this->challenges->reject($user, $challenge, $counter === null ? 'totp_invalid' : 'totp_replay');
                 }
+                $factor->forceFill(['last_accepted_time_step' => $counter])->save();
+                $this->challenges->consume($challenge, ['verified_counter' => $counter, 'mfa_verified_at' => now()]);
+                $plain = $this->security->tokenIssuance(fn () => $this->issueToken($user, $challenge, 'portal'));
+                $this->security->event('authentication_login_succeeded', $user,
+                    ['challenge_id' => $challenge->id, 'audience' => $challenge->audience]);
 
-                return ['error' => $lockedOut
-                    ? 'Too many invalid verification attempts. Please request a new code.'
-                    : 'Invalid verification code.'];
-            }
-
-            $user = User::query()
-                ->with(['profile', 'providerAccounts.provider', 'roles'])
-                ->find($pendingLogin->user_id);
-
-            if ($user === null) {
-                return ['error' => 'User account no longer exists.'];
-            }
-
-            if ($afterUserResolved !== null) {
-                $afterUserResolved($user);
-            }
-
-            $token = $this->issueToken($user, $tokenName);
-            $pendingLogin->delete();
-
-            return [
-                'success' => true,
-                $user,
-                $this->buildAuthPayload($user, $token),
-            ];
-        });
-
-        if (! isset($result['success'])) {
-            abort(422, $result['error']);
-        }
-
-        $this->verificationSecurity->clearAccountRateLimit('login', $email);
-
-        return [$result[0], $result[1]];
+                return ['message' => 'Login successful.', ...$this->buildAuthPayload($user, $plain)];
+            });
     }
 
     public function buildAuthPayload(User $user, ?string $plainToken = null): array
@@ -310,10 +147,5 @@ class ApiAuthService
                 $token->delete();
             }
         });
-    }
-
-    private function generateVerificationCode(): string
-    {
-        return str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
     }
 }

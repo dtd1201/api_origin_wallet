@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\AuthenticateApiToken;
+use App\Http\Middleware\AuthNoStore;
 use App\Http\Middleware\EnsureAdminUser;
 use App\Http\Middleware\EnsureAuthenticatedUserMatchesRoute;
 use App\Http\Middleware\EnsurePermission;
@@ -9,6 +10,7 @@ use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -41,5 +43,21 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        $exceptions->render(function (\Throwable $exception, Request $request) {
+            return AuthNoStore::renderException($request, $exception);
+        });
+        $exceptions->report(function (\Throwable $exception) {
+            if (! AuthNoStore::appliesTo(request())) {
+                return null;
+            }
+            // The routing pipeline reports BEFORE rendering. Never pass the
+            // original message, exception object, trace, previous chain or
+            // request body/headers to the logger on these sensitive routes.
+            Log::error('Authentication request failed.', [
+                'exception_type' => $exception::class,
+                'status' => AuthNoStore::exceptionStatus($exception),
+            ]);
+
+            return false;
+        });
     })->create();

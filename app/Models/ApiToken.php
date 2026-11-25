@@ -7,6 +7,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ApiToken extends Model
 {
+    protected $hidden = ['token_hash', 'auth_epoch', 'factor_id', 'factor_version'];
+
     protected $fillable = [
         'user_id',
         'name',
@@ -20,6 +22,9 @@ class ApiToken extends Model
         return [
             'last_used_at' => 'datetime',
             'expires_at' => 'datetime',
+            'mfa_verified_at' => 'immutable_datetime',
+            'auth_epoch' => 'integer',
+            'factor_version' => 'integer',
         ];
     }
 

@@ -7,7 +7,6 @@ use App\Models\ApiToken;
 use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Services\Auth\ApiAuthService;
-use App\Services\Auth\GoogleTokenVerifier;
 use App\Services\Auth\PasswordResetService;
 use App\Services\Auth\RegistrationService;
 use App\Services\Integrations\ProviderOnboardingManager;
@@ -15,8 +14,6 @@ use App\Support\PrimaryProvider;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Throwable;
 
@@ -31,10 +28,11 @@ class AuthController extends Controller
     public function register(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'email' => ['required', 'email:rfc,dns', 'max:255', 'unique:users,email'],
+            'email' => ['required', 'email:rfc', 'max:255'],
             'phone' => ['nullable', 'string', 'max:30'],
             'full_name' => ['nullable', 'string', 'max:255'],
             'password' => ['required', 'string', 'min:6', 'confirmed'],
+            'client_binding' => ['required', 'string', 'regex:/\\A[0-9a-f]{64}\\z/D'],
         ]);
 
         return response()->json($this->registrationService->startRegistration($validated), 202);
@@ -44,104 +42,42 @@ class AuthController extends Controller
     {
         $validated = $request->validate([
             'email' => ['required', 'email'],
-            'verification_code' => ['required', 'digits:6'],
+            'verification_code' => ['required', 'string', 'digits:6'],
+            'registration_version' => ['required', 'uuid'],
+            'client_binding' => ['required', 'string', 'regex:/\\A[0-9a-f]{64}\\z/D'],
         ]);
+        $this->registrationService->completeRegistrationByCode($validated['email'], $validated['verification_code'],
+            $validated['registration_version'], $validated['client_binding']);
 
-        $user = $this->registrationService->completeRegistrationByCode(
-            $validated['email'],
-            $validated['verification_code']
-        );
-        $token = $this->apiAuthService->issueToken($user, (string) $request->userAgent());
-        $payload = $this->apiAuthService->buildAuthPayload(
-            $user->fresh(['profile', 'providerAccounts.provider', 'roles']),
-            $token
-        );
-
-        return response()->json([
-            'message' => 'Email verified successfully. Registration completed and user logged in. Account status remains pending until provider onboarding is completed.',
-            ...$payload,
-        ], 201);
+        return response()->json(['message' => 'Email verified. Sign in with your password to enroll your authenticator.',
+            'next_action' => 'credentials_required'], 201);
     }
 
     public function activateRegistration(Request $request): JsonResponse
     {
         abort_unless($request->hasValidSignature(), 403, 'Verification link is invalid or has expired.');
+        $validated = $request->validate(['email' => ['required', 'email'],
+            'code' => ['required', 'string', 'digits:6'], 'registration_version' => ['required', 'uuid']]);
+        $this->registrationService->completeRegistrationByActivationLink(
+            $validated['email'], $validated['code'], $validated['registration_version']);
 
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-            'code' => ['required', 'digits:6'],
-        ]);
-
-        $user = $this->registrationService->completeRegistrationByActivationLink(
-            $validated['email'],
-            $validated['code']
-        );
-        $token = $this->apiAuthService->issueToken($user, (string) $request->userAgent());
-        $payload = $this->apiAuthService->buildAuthPayload(
-            $user->fresh(['profile', 'providerAccounts.provider', 'roles']),
-            $token
-        );
-
-        return response()->json([
-            'message' => 'Email verified successfully. Registration completed and user logged in. Account status remains pending until provider onboarding is completed.',
-            ...$payload,
-        ], 201);
+        return response()->json(['message' => 'Email verified. Sign in with your password and retain your email verification code for authenticator enrollment.',
+            'next_action' => 'credentials_required'], 201);
     }
 
     public function login(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-            'password' => ['required', 'string'],
-        ]);
-
-        $user = User::query()
-            ->with(['profile', 'providerAccounts.provider', 'roles'])
-            ->where('email', $validated['email'])
-            ->first();
-
-        if ($user === null || ! Hash::check($validated['password'], $user->password_hash)) {
-            return response()->json([
-                'message' => 'Invalid credentials.',
-            ], 422);
-        }
-
-        return response()->json($this->apiAuthService->startLogin($user), 202);
+        return app(MandatoryAuthController::class)->login($request);
     }
 
     public function verifyLogin(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-            'verification_code' => ['required', 'digits:6'],
-        ]);
-
-        [, $payload] = $this->apiAuthService->completeLogin(
-            $validated['email'],
-            $validated['verification_code'],
-            (string) $request->userAgent(),
-            ipAddress: $request->ip(),
-        );
-
-        return response()->json([
-            'message' => 'Login successful.',
-            ...$payload,
-        ]);
+        return app(MandatoryAuthController::class)->verify($request);
     }
 
     public function resendLogin(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'email' => ['required', 'email'],
-        ]);
-
-        return response()->json(
-            $this->apiAuthService->resendLogin(
-                $validated['email'],
-                adminOnly: false,
-            ),
-            202
-        );
+        return app(MandatoryAuthController::class)->retired($request);
     }
 
     public function forgotPassword(Request $request): JsonResponse
@@ -175,64 +111,11 @@ class AuthController extends Controller
         ]);
     }
 
-    public function googleLogin(Request $request, GoogleTokenVerifier $googleTokenVerifier): JsonResponse
+    public function googleLogin(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'id_token' => ['required', 'string'],
-        ]);
-
-        try {
-            $googleUser = $googleTokenVerifier->verify($validated['id_token']);
-        } catch (\RuntimeException $exception) {
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
-        }
-
-        [$user, $payload, $isNewUser] = DB::transaction(function () use ($googleUser, $request): array {
-            $user = User::query()
-                ->with(['profile', 'providerAccounts.provider', 'roles'])
-                ->where('email', $googleUser['email'])
-                ->lockForUpdate()
-                ->first();
-
-            $isNewUser = false;
-
-            if ($user === null) {
-                $isNewUser = true;
-
-                $user = User::create([
-                    'email' => $googleUser['email'],
-                    'full_name' => $googleUser['full_name'] !== '' ? $googleUser['full_name'] : null,
-                    'password_hash' => Hash::make(Str::random(40)),
-                    'status' => 'pending',
-                    'kyc_status' => 'pending',
-                ]);
-
-                $user->load(['profile', 'providerAccounts.provider', 'roles']);
-            } elseif (blank($user->full_name) && $googleUser['full_name'] !== '') {
-                $user->forceFill([
-                    'full_name' => $googleUser['full_name'],
-                ])->save();
-
-                $user->load(['profile', 'providerAccounts.provider', 'roles']);
-            }
-
-            $token = $this->apiAuthService->issueToken($user, (string) $request->userAgent());
-
-            return [
-                $user,
-                $this->apiAuthService->buildAuthPayload($user, $token),
-                $isNewUser,
-            ];
-        });
-
-        return response()->json([
-            'message' => $isNewUser
-                ? 'Google login successful. New account created.'
-                : 'Google login successful.',
-            ...$payload,
-        ], $isNewUser ? 201 : 200);
+        // No ID-token parsing, provider calls, account creation or enrollment authority.
+        return response()->json(['message' => 'Use email and password, then your authenticator, to sign in.',
+            'next_action' => 'credentials_required'], 410);
     }
 
     public function me(Request $request): JsonResponse

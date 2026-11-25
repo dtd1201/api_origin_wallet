@@ -10,6 +10,7 @@ use App\Models\IntegrationProvider;
 use App\Models\User;
 use App\Models\UserIntegrationLink;
 use App\Services\Integrations\IntegrationProviderCatalog;
+use App\Services\Auth\AuthRevocationService;
 use App\Support\PrimaryProvider;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -95,6 +96,13 @@ class UserController extends Controller
         $before = $user->load(['profile', 'kycProfile', 'roles', 'integrationLinks.provider'])->toArray();
 
         $user = DB::transaction(function () use ($before, $request, $user, $validated): User {
+            // Serialize only credential mutation with authentication. Existing
+            // profile/integration-link business behavior remains below.
+            $changingPassword = array_key_exists('password', $validated) || array_key_exists('password_hash', $validated);
+            if ($changingPassword) {
+                $user = User::whereKey($user->id)->lockForUpdate()->firstOrFail();
+                app(AuthRevocationService::class)->lockFactor($user);
+            }
             $payload = collect($validated)
                 ->except(['password', 'integration_links'])
                 ->all();
@@ -104,6 +112,11 @@ class UserController extends Controller
             }
 
             $user->update($payload);
+            if ($changingPassword) {
+                $user->forceFill(['credentials_changed_at' => now()])->save();
+                app(AuthRevocationService::class)->revokeLocked($user, 'admin_password_change');
+                app(\App\Services\Auth\AuthSecurity::class)->notice($user, 'password changed by an administrator');
+            }
             $this->syncIntegrationLinks(
                 $user,
                 array_key_exists('integration_links', $validated) ? $validated['integration_links'] : null
