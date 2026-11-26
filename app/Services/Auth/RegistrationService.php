@@ -59,6 +59,14 @@ class RegistrationService
         return $this->complete($email, $code, $version, $binding);
     }
 
+    public function verifyAndStartEnrollment(string $email, string $code, string $version, string $binding): array
+    {
+        // Registration already supplied the chosen password. The code must
+        // match its immutable version and original browser. No link-click or
+        // email-only login can enter this transaction.
+        return $this->complete($email, $code, $version, $binding, true);
+    }
+
     public function completeRegistrationByActivationLink(string $email, string $code, string $version): User
     {
         // A link click does not prove that the registration-initiating browser
@@ -66,10 +74,10 @@ class RegistrationService
         return $this->complete($email, $code, $version, null);
     }
 
-    private function complete(string $email, #[\SensitiveParameter] string $code, string $version, ?string $binding): User
+    private function complete(string $email, #[\SensitiveParameter] string $code, string $version, ?string $binding, bool $enroll = false): User|array
     {
         $this->security->limit('registration', $email);
-        $result = DB::transaction(function () use ($email, $code, $version, $binding): ?User {
+        $result = DB::transaction(function () use ($email, $code, $version, $binding, $enroll): User|array|null {
             $pending = PendingRegistration::where('email', $email)->lockForUpdate()->first();
             if ($pending === null || $pending->expires_at->lte(now()) || $pending->verification_attempts >= 5
                 || $pending->registration_version !== $version || $pending->verification_code_hash === null
@@ -96,6 +104,13 @@ class RegistrationService
                 'verified_at' => now(), 'expires_at' => now()->addMinutes(30)])->save();
             $pending->delete();
             $this->security->event('registration_email_verified', $user);
+            if ($enroll) {
+                return app(AuthChallengeService::class)->create($user, null, 'user', 'enrollment_setup',
+                    hash('sha256', $binding), now(), now()->addSeconds(config('totp.ceremony_seconds', 1200)), [
+                        'trusted_identity_method' => 'new_registration', 'trusted_identity_verified_at' => now(),
+                        'registration_evidence_id' => $evidence->id,
+                    ]);
+            }
             return $user;
         });
         abort_if($result === null, 422, 'Registration verification could not be completed.');

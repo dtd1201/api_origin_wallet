@@ -48,8 +48,7 @@ class MandatoryAuthController extends Controller
 
     public function identityVerify(Request $request): JsonResponse
     {
-        $data = $this->bound($request, ['identity_proof' => ['nullable', 'string', 'max:64', 'required_without:grant_token'],
-            'grant_token' => ['nullable', 'string', 'regex:/\A[0-9a-f]{64}\z/D', 'required_without:identity_proof', 'prohibits:identity_proof']]);
+        $data = $this->bound($request, ['identity_proof' => self::TOTP, 'grant_token' => ['prohibited']]);
 
         return response()->json($this->enrollment->identityVerify($data['challenge_token'], $this->audience($request),
             $this->binding($request), $data['identity_proof'] ?? null, $data['grant_token'] ?? null), 202);
@@ -85,8 +84,7 @@ class MandatoryAuthController extends Controller
 
     public function recoveryVerify(Request $request): JsonResponse
     {
-        $data = $this->bound($request, ['recovery_code' => ['nullable', 'string', 'max:80', 'required_without:grant_token'],
-            'grant_token' => ['nullable', 'string', 'regex:/\A[0-9a-f]{64}\z/D', 'required_without:recovery_code', 'prohibits:recovery_code']]);
+        $data = $this->bound($request, ['recovery_code' => ['required', 'string', 'max:80'], 'grant_token' => ['prohibited']]);
 
         return response()->json($this->recovery->verify($data['challenge_token'], $this->audience($request), $this->binding($request),
             $data['recovery_code'] ?? null, $data['grant_token'] ?? null), 202);

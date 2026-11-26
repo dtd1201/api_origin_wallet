@@ -5,216 +5,70 @@ namespace Tests\Feature;
 use App\Mail\LoginVerificationCodeMail;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
-use Tests\TestCase;
-use App\Models\PendingLogin;
+use Tests\Support\MfaFixture;
+use Tests\Support\TotpTestTools;
+use Tests\Support\IsolatedAuthTestCase as TestCase;
 
 class AdminAuthTest extends TestCase
 {
-    use RefreshDatabase;
+    use RefreshDatabase, TotpTestTools;
 
-    public function test_admin_can_start_admin_login_flow(): void
+    protected function setUp(): void
     {
-        config()->set('mail.expose_verification_code', true);
+        parent::setUp();
+        $this->travelTo(now()->startOfMinute());
         Mail::fake();
-
-        $admin = User::factory()->create([
-            'email' => 'admin@example.com',
-        ]);
-        $admin->roles()->create([
-            'role_code' => 'admin',
-        ]);
-
-        $response = $this->postJson('/api/admin/auth/login', [
-            'email' => 'admin@example.com',
-            'password' => 'password',
-        ]);
-
-        $response
-            ->assertAccepted()
-            ->assertJsonPath('email', 'admin@example.com')
-            ->assertJsonStructure([
-                'message',
-                'email',
-                'expires_in_minutes',
-                'verification_code',
-            ]);
-
-        Mail::assertSent(LoginVerificationCodeMail::class, function (LoginVerificationCodeMail $mail) use ($admin): bool {
-            return $mail->hasTo($admin->email);
-        });
+        Http::preventStrayRequests();
+        config(['totp.rates.credentials' => [100, 100], 'totp.rates.verification' => [100, 100]]);
     }
 
-    public function test_non_admin_cannot_start_admin_login_flow(): void
+    public function test_admin_login_requires_totp_without_sending_email(): void
     {
-        User::factory()->create([
-            'email' => 'user@example.com',
-        ]);
-
-        $response = $this->postJson('/api/admin/auth/login', [
-            'email' => 'user@example.com',
-            'password' => 'password',
-        ]);
-
-        $response
-            ->assertForbidden()
-            ->assertJsonPath('message', 'This account is not allowed to access admin.');
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'super_admin']);
+        MfaFixture::factor($admin);
+        $challenge = $this->loginChallenge($admin, 'admin');
+        $this->assertDatabaseCount('api_tokens', 0);
+        Mail::assertNotSent(LoginVerificationCodeMail::class);
+        $result = $this->ceremonyPost('/api/admin/auth/login/verify', $challenge, ['totp_code' => $this->otpCode()])
+            ->assertOk()->assertJsonPath('user.id', $admin->id)->assertJsonStructure(['token', 'token_type', 'user', 'onboarding', 'providers']);
+        $this->withToken($result->json('token'))->getJson('/api/admin/auth/me')->assertOk();
+        $this->withToken($result->json('token'))->getJson('/api/auth/me')->assertUnauthorized();
     }
 
-    public function test_admin_can_verify_admin_login_flow(): void
+    public function test_non_admin_and_unknown_credentials_have_the_same_failure(): void
     {
-        config()->set('mail.expose_verification_code', true);
-        Mail::fake();
-
-        $admin = User::factory()->create([
-            'email' => 'admin@example.com',
-        ]);
-        $admin->roles()->create([
-            'role_code' => 'super_admin',
-        ]);
-
-        $loginResponse = $this->postJson('/api/admin/auth/login', [
-            'email' => 'admin@example.com',
-            'password' => 'password',
-        ]);
-
-        $verifyResponse = $this->postJson('/api/admin/auth/login/verify', [
-            'email' => 'admin@example.com',
-            'verification_code' => $loginResponse->json('verification_code'),
-        ]);
-
-        $verifyResponse
-            ->assertOk()
-            ->assertJsonPath('user.email', 'admin@example.com')
-            ->assertJsonPath('user.roles.0', 'super_admin')
-            ->assertJsonStructure([
-                'message',
-                'token',
-                'token_type',
-                'user',
-            ]);
+        $user = User::factory()->create();
+        foreach ([$user->email, 'unknown@example.com'] as $email) {
+            $this->postJson('/api/admin/auth/login', ['email' => $email, 'password' => 'password', 'client_binding' => $this->binding])
+                ->assertStatus(422)->assertJsonPath('message', 'Authentication could not be completed.');
+        }
+        $this->assertDatabaseCount('auth_challenges', 0);
     }
 
-
-    public function test_admin_can_resend_admin_login_verification_code(): void
+    public function test_admin_role_is_rechecked_at_completion(): void
     {
-        config()->set('mail.expose_verification_code', true);
-        Mail::fake();
-
-        $admin = User::factory()->create([
-            'email' => 'admin-resend@example.com',
-        ]);
-
-        $admin->roles()->create([
-            'role_code' => 'admin',
-        ]);
-
-        $loginResponse = $this->postJson('/api/admin/auth/login', [
-            'email' => $admin->email,
-            'password' => 'password',
-        ]);
-
-        $loginResponse->assertAccepted();
-
-        $pending = PendingLogin::query()
-            ->where('email', $admin->email)
-            ->firstOrFail();
-
-        $oldHash = $pending->verification_code_hash;
-
-        $pending->update([
-            'verification_sent_at' => now()->subSeconds(121),
-        ]);
-
-        $response = $this->postJson('/api/admin/auth/login/resend', [
-            'email' => $admin->email,
-        ]);
-
-        $response
-            ->assertOk()
-            ->assertJsonPath('email', $admin->email)
-            ->assertJsonPath('expires_in_minutes', 15)
-            ->assertJsonPath('resend_cooldown_seconds', 120);
-
-        $pending->refresh();
-
-        $this->assertNotSame(
-            $oldHash,
-            $pending->verification_code_hash
-        );
-
-        $this->assertSame(0, $pending->verification_attempts);
-        $this->assertNull($pending->locked_until);
-        $this->assertNull($pending->last_attempt_at);
-        $this->assertNotNull($pending->verification_sent_at);
-
-        Mail::assertSent(LoginVerificationCodeMail::class, 2);
+        $admin = User::factory()->create();
+        $admin->roles()->create(['role_code' => 'admin']);
+        MfaFixture::factor($admin);
+        $challenge = $this->loginChallenge($admin, 'admin');
+        $admin->roles()->delete();
+        $this->ceremonyPost('/api/admin/auth/login/verify', $challenge, ['totp_code' => $this->otpCode()])->assertStatus(422);
+        $this->assertDatabaseCount('api_tokens', 0);
     }
 
-    public function test_admin_login_verification_resend_is_blocked_during_cooldown(): void
+    public function test_both_resend_routes_are_retired_even_with_a_pending_legacy_code(): void
     {
-        Mail::fake();
-
-        $admin = User::factory()->create([
-            'email' => 'admin-resend-cooldown@example.com',
-        ]);
-
-        $admin->roles()->create([
-            'role_code' => 'admin',
-        ]);
-
-        $this->postJson('/api/admin/auth/login', [
-            'email' => $admin->email,
-            'password' => 'password',
-        ])->assertAccepted();
-
-        $response = $this->postJson('/api/admin/auth/login/resend', [
-            'email' => $admin->email,
-        ]);
-
-        $response
-            ->assertStatus(429)
-            ->assertJsonPath(
-                'message',
-                'Please wait before requesting another verification code.'
-            );
-
-        Mail::assertSent(LoginVerificationCodeMail::class, 1);
-    }
-
-    public function test_non_admin_cannot_resend_admin_login_verification_code(): void
-    {
-        Mail::fake();
-
-        $user = User::factory()->create([
-            'email' => 'user-resend@example.com',
-        ]);
-
-        $response = $this->postJson('/api/admin/auth/login/resend', [
-            'email' => $user->email,
-        ]);
-
-        $response->assertStatus(422);
-
+        $user = User::factory()->create();
+        \App\Models\PendingLogin::create(['user_id' => $user->id, 'email' => $user->email,
+            'verification_code_hash' => \Illuminate\Support\Facades\Hash::make('123456'), 'expires_at' => now()->addMinutes(15)]);
+        foreach (['/api/auth', '/api/admin/auth'] as $prefix) {
+            $this->postJson($prefix.'/login/resend', ['email' => $user->email])->assertStatus(410);
+            $this->postJson($prefix.'/login/verify', ['email' => $user->email, 'verification_code' => '123456'])->assertStatus(422);
+        }
         Mail::assertNothingSent();
+        $this->assertDatabaseCount('api_tokens', 0);
     }
-
-    public function test_admin_login_verification_resend_requires_pending_login(): void
-    {
-        Mail::fake();
-
-        $response = $this->postJson('/api/admin/auth/login/resend', [
-            'email' => 'missing-pending@example.com',
-        ]);
-
-        $response
-            ->assertStatus(422)
-            ->assertJsonPath(
-                'message',
-                'No pending login found for this email.'
-            );
-
-        Mail::assertNothingSent();
-    }
-
 }

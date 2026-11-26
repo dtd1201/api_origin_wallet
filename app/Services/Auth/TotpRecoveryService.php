@@ -14,7 +14,6 @@ class TotpRecoveryService
 {
     public function __construct(private readonly AuthChallengeService $challenges, private readonly TotpService $totp,
         private readonly AuthRevocationService $revocation, private readonly RecoveryCodeService $codes,
-        private readonly EnrollmentGrantService $grants, private readonly EnrollmentTrustPolicy $trust,
         private readonly AuthTokenEligibility $eligibility, private readonly AuthSecurity $security) {}
 
     public function start(string $token, string $audience, string $binding): array
@@ -29,31 +28,20 @@ class TotpRecoveryService
             if ($factor === null || $challenge->credential_verified_at->lt(now()->subMinutes(5))) {
                 return $this->challenges->reject($user, $challenge, 'fresh_password_required');
             }
-            $grant = null;
-            if ($grantToken !== null) {
-                $grant = $this->grants->find($grantToken);
-                $valid = $grant !== null && $this->trust->validGrant($grant, $user, $challenge->audience, 'replacement');
-                if ($valid) {
-                    $grant->forceFill(['consumed_at' => now()])->save();
-                }
-            } else {
-                // Account/factor locks serialize consumers; delay locking the
-                // recovery row until all challenge/grant transitions are made.
-                $valid = $code !== null && $this->codes->valid($factor, $code) !== null;
-            }
+            // Grants are retired, including direct service callers. Recovery
+            // codes authorize replacement only, never an unrestricted session.
+            $valid = $grantToken === null && $code !== null && $this->codes->valid($factor, $code) !== null;
             if (! $valid) {
                 return $this->challenges->reject($user, $challenge, 'recovery_invalid');
             }
             $this->revocation->revokeLocked($user, 'recovery_authorized', $challenge);
-            $this->security->event($grant ? 'assisted_recovery_authorized' : 'recovery_code_consumed', $user);
+            $this->security->event('recovery_code_consumed', $user);
             $this->security->notice($user, 'authenticator recovery authorized');
 
             $result = $this->challenges->transition($user, $factor, $challenge, 'replacement_setup', [
-                'trusted_identity_method' => $grant ? 'assisted_recovery' : 'recovery_code',
-                'trusted_identity_verified_at' => now(), 'grant_id' => $grant?->id,
-                'ceremony_deadline' => $grant ? $challenge->ceremony_deadline->min($grant->expires_at) : $challenge->ceremony_deadline,
+                'trusted_identity_method' => 'recovery_code', 'trusted_identity_verified_at' => now(),
             ]);
-            if ($grant === null && ! $this->codes->consume($factor, $code)) {
+            if (! $this->codes->consume($factor, $code)) {
                 // Invariant failure rolls the success transition back; a normal
                 // invalid code already returned a committed failure above.
                 throw new \RuntimeException('Recovery consumption conflict.');
@@ -66,10 +54,8 @@ class TotpRecoveryService
     public function intake(string $email): array
     {
         $this->security->limit('assisted_intake', $email);
-        $user = User::where('email', $email)->first();
-        $this->security->event('assisted_recovery_requested', $user);
-
-        return ['message' => 'Recovery request recorded. Contact your established Origin Wallet support channel.'];
+        // Compatibility endpoint conveys no approval and creates no recovery capability.
+        return ['message' => 'If both your authenticator and recovery codes are lost, contact your established Origin Wallet support channel. Automatic recovery is unavailable.'];
     }
 
     public function status(User $user): array

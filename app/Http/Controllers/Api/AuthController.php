@@ -46,11 +46,8 @@ class AuthController extends Controller
             'registration_version' => ['required', 'uuid'],
             'client_binding' => ['required', 'string', 'regex:/\\A[0-9a-f]{64}\\z/D'],
         ]);
-        $this->registrationService->completeRegistrationByCode($validated['email'], $validated['verification_code'],
-            $validated['registration_version'], $validated['client_binding']);
-
-        return response()->json(['message' => 'Email verified. Sign in with your password to enroll your authenticator.',
-            'next_action' => 'credentials_required'], 201);
+        return response()->json($this->registrationService->verifyAndStartEnrollment($validated['email'], $validated['verification_code'],
+            $validated['registration_version'], $validated['client_binding']), 201);
     }
 
     public function activateRegistration(Request $request): JsonResponse

@@ -41,6 +41,9 @@ class User extends Authenticatable
         'password_hash',
         'auth_epoch',
         'credentials_changed_at',
+        'auth_legacy_email_hash',
+        'auth_legacy_password_fingerprint',
+        'auth_legacy_not_before',
         'authFactors',
         'auth_factors',
     ];
@@ -57,6 +60,7 @@ class User extends Authenticatable
             'auth_epoch' => 'integer',
             'email_verified_at' => 'immutable_datetime',
             'credentials_changed_at' => 'immutable_datetime',
+            'auth_legacy_not_before' => 'immutable_datetime',
         ];
     }
 

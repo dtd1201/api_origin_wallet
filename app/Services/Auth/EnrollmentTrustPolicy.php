@@ -10,6 +10,34 @@ use Carbon\CarbonImmutable;
 
 class EnrollmentTrustPolicy
 {
+    /** A cutover snapshot of the established legacy OTP destination or durable
+     * registration proof binds the channel to the current address. Neither is
+     * enough to enroll: the current ceremony must separately prove ownership.
+     */
+    public function establishedEmail(User $user): bool
+    {
+        $evidence = AuthRegistrationEvidence::where('user_id', $user->id)->first();
+        $hold = max(72, (int) config('totp.ownership_hold_hours', 72));
+        if (filter_var($user->email, FILTER_VALIDATE_EMAIL) === false
+            || ($user->credentials_changed_at !== null && $user->credentials_changed_at->addHours($hold)->gt(now()))) {
+            return false;
+        }
+        // Null email_verified_at is expected for pre-TOTP accounts. The
+        // migration captures their immutable, previously trusted OTP address;
+        // only a NEW, bound email proof can authorize actual setup.
+        if (is_string($user->auth_legacy_email_hash) && $user->auth_legacy_not_before?->lte(now())
+            && hash_equals($user->auth_legacy_email_hash, hash('sha256', $user->email))
+            && is_string($user->auth_legacy_password_fingerprint)
+            && (hash_equals($user->auth_legacy_password_fingerprint, hash('sha256', $user->password_hash))
+                || $user->credentials_changed_at !== null)) {
+            return true;
+        }
+
+        return $user->email_verified_at !== null && $user->email_verified_at->lte(now()->subHours($hold))
+            && $evidence !== null && $evidence->verified_at->eq($user->email_verified_at)
+            && hash_equals($evidence->email_hash, hash('sha256', $user->email));
+    }
+
     public function newRegistration(User $user): ?AuthRegistrationEvidence
     {
         $evidence = AuthRegistrationEvidence::where('user_id', $user->id)->first();
@@ -66,6 +94,11 @@ class EnrollmentTrustPolicy
         if ($challenge->trusted_identity_method === 'new_registration') {
             return $challenge->audience === 'user' && $this->newRegistration($user)?->id === $challenge->registration_evidence_id;
         }
+        if ($challenge->trusted_identity_method === 'existing_email') {
+            return $challenge->purpose === 'enrollment_setup' && $this->establishedEmail($user)
+                && is_string($challenge->identity_email_hash)
+                && hash_equals($challenge->identity_email_hash, hash('sha256', $user->email));
+        }
         if ($challenge->trusted_identity_method === 'totp_step_up') {
             $token = $challenge->initiating_token_id ? \App\Models\ApiToken::find($challenge->initiating_token_id) : null;
 
@@ -75,20 +108,7 @@ class EnrollmentTrustPolicy
         if ($challenge->trusted_identity_method === 'recovery_code') {
             return $challenge->purpose === 'replacement_setup';
         }
-        if ($challenge->trusted_identity_method === 'assisted_recovery') {
-            $grant = AuthEnrollmentGrant::whereKey($challenge->grant_id)->lockForUpdate()->first();
-
-            return $challenge->purpose === 'replacement_setup' && config('totp.assisted.enabled')
-                && $grant !== null && $grant->user_id === $user->id && $grant->audience === $challenge->audience
-                && $grant->purpose === 'replacement' && $grant->consumed_at !== null
-                && $grant->expires_at->gt(now()) && $grant->auth_epoch === $user->auth_epoch - 1
-                && hash_equals($grant->email_hash, hash('sha256', $user->email))
-                && $grant->policy_reference === config('totp.assisted.policy_reference');
-        }
-        $grant = $challenge->grant_id ? AuthEnrollmentGrant::whereKey($challenge->grant_id)->lockForUpdate()->first() : null;
-        $purpose = $challenge->trusted_identity_method === 'migration_email' ? 'migration'
-            : ($challenge->purpose === 'replacement_setup' ? 'replacement' : 'initial_enrollment');
-
-        return $grant !== null && $this->validGrant($grant, $user, $challenge->audience, $purpose);
+        // Retained grant rows/services are never an authentication authority.
+        return false;
     }
 }

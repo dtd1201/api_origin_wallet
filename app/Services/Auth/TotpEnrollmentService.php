@@ -16,7 +16,7 @@ use Throwable;
 class TotpEnrollmentService
 {
     public function __construct(private readonly AuthChallengeService $challenges, private readonly TotpService $totp,
-        private readonly EnrollmentTrustPolicy $trust, private readonly EnrollmentGrantService $grants,
+        private readonly EnrollmentTrustPolicy $trust,
         private readonly AuthRevocationService $revocation, private readonly RecoveryCodeService $codes,
         private readonly AuthSecurity $security, private readonly ApiAuthService $auth) {}
 
@@ -41,26 +41,38 @@ class TotpEnrollmentService
                     return ['next_action' => 'enrollment_identity_required', 'methods' => ['registration_email_proof']];
                 }
             }
-            $migration = $challenge->audience === 'user' ? $this->trust->migration($user) : null;
-            if ($migration === null) {
+            if (! $this->trust->establishedEmail($user)) {
                 return ['next_action' => 'enrollment_identity_required',
-                    'methods' => config('totp.assisted.enabled') ? ['operator_grant'] : [],
-                    'policy_pending' => ! config('totp.assisted.enabled')];
+                    'methods' => [], 'support_required' => true];
             }
-            $migration = AuthEnrollmentGrant::whereKey($migration->id)->lockForUpdate()->firstOrFail();
-            if ($migration->proof_send_count >= config('totp.proof_send_limit', 3)
-                || ($migration->proof_sent_at !== null && $migration->proof_sent_at->addSeconds(config('totp.proof_send_cooldown_seconds', 120))->gt(now()))) {
-                return $this->challenges->reject($user, $challenge, 'proof_send_limit');
+            // The account lock serializes all browsers/audiences. Restarting
+            // password login does not reset the send budget or cooldown.
+            $sent = AuthChallenge::where('user_id', $user->id)->where('purpose', 'enrollment_identity')
+                ->where('proof_sent_at', '>', now()->subSeconds(config('totp.ceremony_seconds', 1200)));
+            $last = (clone $sent)->max('proof_sent_at');
+            if ((int) (clone $sent)->sum('proof_send_count') >= config('totp.proof_send_limit', 3)) {
+                abort(429, 'Wait before requesting another enrollment code.', ['Retry-After' => (string) config('totp.ceremony_seconds', 1200)]);
+            }
+            $resendAt = $last === null ? null : \Carbon\CarbonImmutable::parse($last)->addSeconds(config('totp.proof_send_cooldown_seconds', 120));
+            if ($resendAt?->gt(now())) {
+                abort(429, 'Wait before requesting another enrollment code.',
+                    ['Retry-After' => (string) max(1, $resendAt->getTimestamp() - now()->getTimestamp())]);
             }
             // Never send a proof to a log/array/failover transport in runtime.
             // Mail::fake() in isolated tests is explicitly permitted.
             if (! Mail::isFake() && ! in_array(config('mail.mailers.'.config('mail.default').'.transport'), ['smtp', 'ses', 'ses-v2', 'postmark', 'resend', 'mailgun'], true)) {
                 abort(503, 'Enrollment identity delivery is unavailable.');
             }
-            $proof = bin2hex(random_bytes(16));
-            $challenge->forceFill(['grant_id' => $migration->id, 'identity_proof_hash' => Hash::make($proof),
+            $proof = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            // A new delivery invalidates previous outstanding proofs. Hashes
+            // bind the code to this exact account/email/epoch/browser/purpose.
+            AuthChallenge::where('user_id', $user->id)->where('purpose', 'enrollment_identity')
+                ->whereKeyNot($challenge->id)->whereNull('consumed_at')->whereNull('revoked_at')
+                ->update(['revoked_at' => now(), 'identity_proof_hash' => null]);
+            $challenge->forceFill(['identity_email_hash' => hash('sha256', $user->email),
+                // Fixed-size digest avoids bcrypt's 72-byte input truncation.
+                'identity_proof_hash' => Hash::make(hash('sha256', $this->proofContext($user, $challenge).$proof)),
                 'proof_sent_at' => now(), 'proof_send_count' => $challenge->proof_send_count + 1])->save();
-            $migration->forceFill(['proof_sent_at' => now(), 'proof_send_count' => $migration->proof_send_count + 1])->save();
             $this->security->event('enrollment_identity_proof_requested', $user, ['challenge_id' => $challenge->id]);
             DB::afterCommit(function () use ($user, $proof): void {
                 try {
@@ -70,15 +82,16 @@ class TotpEnrollmentService
                 }
             });
 
-            return ['next_action' => 'enrollment_identity_required', 'methods' => ['migration_email_proof'],
-                'proof_expires_in_seconds' => min(600, $challenge->expires_at->getTimestamp() - now()->getTimestamp())];
+            return ['next_action' => 'enrollment_identity_required', 'methods' => ['enrollment_email_proof'],
+                'resend_after_seconds' => (int) config('totp.proof_send_cooldown_seconds', 120),
+                'proof_expires_in_seconds' => min(300, $challenge->expires_at->getTimestamp() - now()->getTimestamp())];
         });
     }
 
     public function identityVerify(string $token, string $audience, string $binding, ?string $proof, ?string $grantToken): array
     {
         return $this->challenges->run($token, $audience, $binding, ['enrollment_identity'], function (User $user, $factor, AuthChallenge $challenge) use ($proof, $grantToken): array {
-            if ($factor !== null) {
+            if ($factor !== null || $grantToken !== null) {
                 return $this->challenges->reject($user, $challenge, 'already_enrolled');
             }
             $evidence = $challenge->audience === 'user' ? $this->trust->newRegistration($user) : null;
@@ -94,25 +107,27 @@ class TotpEnrollmentService
 
                 return $this->challenges->reject($user, $challenge, 'registration_proof_invalid');
             }
-            if ($grantToken !== null) {
-                $grant = $this->grants->find($grantToken);
-                if ($grant !== null && $this->trust->validGrant($grant, $user, $challenge->audience, 'initial_enrollment')) {
-                    return $this->challenges->transition($user, null, $challenge, 'enrollment_setup', [
-                        'trusted_identity_method' => 'operator_grant', 'trusted_identity_verified_at' => now(), 'grant_id' => $grant->id,
-                    ]);
-                }
-            } elseif ($challenge->identity_proof_hash !== null && $challenge->proof_sent_at?->addMinutes(10)->gt(now())
-                && $proof !== null && Hash::check($proof, $challenge->identity_proof_hash)) {
-                $grant = AuthEnrollmentGrant::whereKey($challenge->grant_id)->lockForUpdate()->first();
-                if ($grant !== null && $this->trust->validGrant($grant, $user, $challenge->audience, 'migration')) {
-                    return $this->challenges->transition($user, null, $challenge, 'enrollment_setup', [
-                        'trusted_identity_method' => 'migration_email', 'trusted_identity_verified_at' => now(), 'grant_id' => $grant->id,
-                    ]);
-                }
+            if ($this->trust->establishedEmail($user) && $challenge->identity_proof_hash !== null
+                && is_string($challenge->identity_email_hash)
+                && hash_equals($challenge->identity_email_hash, hash('sha256', $user->email))
+                && $challenge->proof_sent_at?->addMinutes(5)->gt(now()) && $proof !== null
+                && preg_match('/\A[0-9]{6}\z/D', $proof) === 1
+                && Hash::check(hash('sha256', $this->proofContext($user, $challenge).$proof), $challenge->identity_proof_hash)) {
+                return $this->challenges->transition($user, null, $challenge, 'enrollment_setup', [
+                    'trusted_identity_method' => 'existing_email', 'trusted_identity_verified_at' => now(),
+                    'identity_email_hash' => $challenge->identity_email_hash,
+                ]);
             }
 
             return $this->challenges->reject($user, $challenge, 'identity_proof_invalid');
         });
+    }
+
+    private function proofContext(User $user, AuthChallenge $challenge): string
+    {
+        return implode('|', ['enrollment-email-v1', $user->id, hash('sha256', $user->email),
+            $user->auth_epoch, $challenge->audience, $challenge->purpose, $challenge->token_hash,
+            $challenge->client_binding_hash]).'|';
     }
 
     public function setup(string $token, string $audience, string $binding, bool $replacement = false): array

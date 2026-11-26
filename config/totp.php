@@ -1,6 +1,7 @@
 <?php
 
 return [
+    'ownership_hold_hours' => 72,
     // Mandatory enforcement has no off switch. These gates authorize identity
     // proof policies only, never password-only access or factor disabling.
     'migration' => [

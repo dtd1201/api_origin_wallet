@@ -8,7 +8,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
-use Tests\TestCase;
+use Tests\Support\IsolatedAuthTestCase as TestCase;
 
 class AuthPasswordResetTest extends TestCase
 {
@@ -111,7 +111,7 @@ class AuthPasswordResetTest extends TestCase
 
         $response
             ->assertStatus(422)
-            ->assertSee('Invalid password reset code.');
+            ->assertSee('Password reset could not be completed.');
 
         $user->refresh();
 

@@ -2,275 +2,92 @@
 
 namespace Tests\Feature;
 
-use App\Models\PendingLogin;
+use App\Models\AuthChallenge;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
-use Tests\TestCase;
+use Tests\Support\MfaFixture;
+use Tests\Support\TotpTestTools;
+use Tests\Support\IsolatedAuthTestCase as TestCase;
 
 class AuthVerificationSecurityTest extends TestCase
 {
-    use RefreshDatabase;
+    use RefreshDatabase, TotpTestTools;
 
     protected function setUp(): void
     {
         parent::setUp();
-
-        config()->set('mail.expose_verification_code', true);
-        config()->set('auth.verification.account_rate_limit', 100);
-        config()->set('auth.verification.ip_rate_limit', 100);
+        $this->travelTo(now()->startOfMinute());
         Mail::fake();
+        config(['mail.expose_verification_code' => true, 'totp.rates.credentials' => [100, 100],
+            'totp.rates.verification' => [100, 100], 'auth.verification.account_rate_limit' => 100,
+            'auth.verification.ip_rate_limit' => 100]);
     }
 
-    public function test_correct_hashed_login_code_succeeds_without_changing_login_contract(): void
+    public function test_wrong_totp_attempts_commit_and_exhaust_the_challenge(): void
     {
-        $user = User::factory()->create(['email' => 'correct@example.com']);
-        $login = $this->startLogin($user);
-        $pending = PendingLogin::query()->where('email', $user->email)->firstOrFail();
-
-        $this->assertNull($pending->verification_code);
-        $this->assertNotSame($login->json('verification_code'), $pending->verification_code_hash);
-        $this->assertTrue(Hash::check($login->json('verification_code'), $pending->verification_code_hash));
-
-        $this->postJson('/api/auth/login/verify', [
-            'email' => $user->email,
-            'verification_code' => $login->json('verification_code'),
-        ])->assertOk()
-            ->assertJsonPath('message', 'Login successful.')
-            ->assertJsonPath('user.email', $user->email)
-            ->assertJsonStructure(['token', 'token_type', 'user', 'onboarding', 'providers']);
-
-        $this->assertDatabaseMissing('pending_logins', ['email' => $user->email]);
-        $this->assertDatabaseCount('api_tokens', 1);
-    }
-
-    public function test_user_can_resend_login_verification_code(): void
-    {
-        $user = User::factory()->create([
-            'email' => 'resend-user@example.com',
-            'full_name' => 'Resend User',
-        ]);
-
-        $firstLogin = $this->startLogin($user);
-        $firstCode = $firstLogin->json('verification_code');
-
-        PendingLogin::query()
-            ->where('email', $user->email)
-            ->update([
-                'verification_sent_at' => now()->subSeconds(121),
-            ]);
-
-        $response = $this->postJson('/api/auth/login/resend', [
-            'email' => $user->email,
-        ]);
-
-        $response
-            ->assertAccepted()
-            ->assertJsonPath('email', $user->email)
-            ->assertJsonPath('expires_in_minutes', 15)
-            ->assertJsonPath('resend_cooldown_seconds', 120)
-            ->assertJsonStructure([
-                'message',
-                'email',
-                'expires_in_minutes',
-                'resend_cooldown_seconds',
-                'verification_code',
-            ]);
-
-        $newCode = $response->json('verification_code');
-
-        $this->assertNotSame($firstCode, $newCode);
-
-        $pending = PendingLogin::query()
-            ->where('email', $user->email)
-            ->firstOrFail();
-
-        $this->assertNull($pending->verification_code);
-        $this->assertTrue(Hash::check($newCode, $pending->verification_code_hash));
-        $this->assertFalse(Hash::check($firstCode, $pending->verification_code_hash));
-
-        Mail::assertSent(
-            \App\Mail\LoginVerificationCodeMail::class,
-            function (\App\Mail\LoginVerificationCodeMail $mail) use ($user, $newCode): bool {
-                return $mail->hasTo($user->email)
-                    && $mail->verificationCode === $newCode;
-            }
-        );
-
-        $this->postJson('/api/auth/login/verify', [
-            'email' => $user->email,
-            'verification_code' => $newCode,
-        ])->assertOk()
-            ->assertJsonPath('message', 'Login successful.');
-    }
-
-    public function test_user_login_resend_is_blocked_during_cooldown(): void
-    {
-        $user = User::factory()->create([
-            'email' => 'resend-cooldown@example.com',
-        ]);
-
-        $this->startLogin($user);
-
-        $response = $this->postJson('/api/auth/login/resend', [
-            'email' => $user->email,
-        ]);
-
-        $response
-            ->assertStatus(429)
-            ->assertJsonPath(
-                'message',
-                'Please wait before requesting another verification code.'
-            );
-    }
-
-    public function test_wrong_code_increments_attempts_and_records_security_events(): void
-    {
-        config()->set('auth.verification.suspicious_attempt_threshold', 2);
-        $user = User::factory()->create(['email' => 'wrong@example.com']);
-        $login = $this->startLogin($user);
-        $wrongCode = $this->wrongCode($login->json('verification_code'));
-
-        foreach (range(1, 2) as $attempt) {
-            $this->postJson('/api/auth/login/verify', [
-                'email' => $user->email,
-                'verification_code' => $wrongCode,
-            ])->assertStatus(422)->assertJsonPath('message', 'Invalid verification code.');
-
-            $this->assertDatabaseHas('pending_logins', [
-                'email' => $user->email,
-                'verification_attempts' => $attempt,
-            ]);
+        $user = User::factory()->create();
+        MfaFixture::factor($user);
+        $token = $this->loginChallenge($user);
+        $invalid = $this->invalidOtp();
+        for ($attempt = 1; $attempt <= 5; $attempt++) {
+            $this->ceremonyPost('/api/auth/login/verify', $token, ['totp_code' => $invalid])->assertStatus(422);
+            $this->assertSame($attempt, $this->storedChallenge($token)->attempts);
         }
-
-        $this->assertDatabaseHas('auth_security_events', [
-            'user_id' => $user->id,
-            'event_type' => 'login_verification_failed',
-        ]);
-        $this->assertDatabaseHas('auth_security_events', [
-            'user_id' => $user->id,
-            'event_type' => 'suspicious_verification_attempts',
-        ]);
+        $this->assertNotNull($this->storedChallenge($token)->revoked_at);
+        $this->ceremonyPost('/api/auth/login/verify', $token, ['totp_code' => $this->otpCode()])->assertStatus(422);
+        $this->assertDatabaseCount('api_tokens', 0);
+        $this->assertDatabaseHas('auth_security_events', ['event_type' => 'authentication_challenge_failed']);
     }
 
-    public function test_maximum_attempts_locks_login_and_blocks_the_correct_code(): void
+    public function test_shared_account_and_ip_limits_survive_challenge_restart(): void
     {
-        config()->set('auth.verification.max_attempts', 2);
-        $user = User::factory()->create(['email' => 'locked@example.com']);
-        $login = $this->startLogin($user);
-        $wrongCode = $this->wrongCode($login->json('verification_code'));
-
-        $this->postJson('/api/auth/login/verify', [
-            'email' => $user->email,
-            'verification_code' => $wrongCode,
-        ])->assertStatus(422);
-        $this->postJson('/api/auth/login/verify', [
-            'email' => $user->email,
-            'verification_code' => $wrongCode,
-        ])->assertStatus(422)->assertJsonPath('message', 'Too many invalid verification attempts. Please request a new code.');
-
-        $this->assertNotNull(PendingLogin::query()->where('email', $user->email)->value('locked_until'));
-        $this->assertDatabaseHas('auth_security_events', ['event_type' => 'login_verification_lockout']);
-
-        $this->postJson('/api/auth/login/verify', [
-            'email' => $user->email,
-            'verification_code' => $login->json('verification_code'),
-        ])->assertStatus(422)->assertJsonPath('message', 'Too many invalid verification attempts. Please request a new code.');
+        config(['totp.rates.verification' => [1, 100]]);
+        $user = User::factory()->create();
+        MfaFixture::factor($user);
+        $a = $this->loginChallenge($user);
+        $b = $this->loginChallenge($user);
+        $this->ceremonyPost('/api/auth/login/verify', $a, ['totp_code' => $this->invalidOtp()])->assertStatus(422);
+        $this->ceremonyPost('/api/auth/login/verify', $b, ['totp_code' => $this->otpCode()])->assertStatus(429)->assertHeader('Retry-After');
+        $this->assertDatabaseHas('auth_security_events', ['event_type' => 'authentication_rate_limited']);
     }
 
-    public function test_expired_login_code_is_rejected(): void
+    public function test_ip_budget_applies_across_accounts_and_portals(): void
     {
-        $user = User::factory()->create(['email' => 'expired@example.com']);
-        $login = $this->startLogin($user);
-        PendingLogin::query()->where('email', $user->email)->update(['expires_at' => now()->subSecond()]);
-
-        $this->postJson('/api/auth/login/verify', [
-            'email' => $user->email,
-            'verification_code' => $login->json('verification_code'),
-        ])->assertStatus(422)->assertJsonPath('message', 'Verification code has expired.');
+        config(['totp.rates.credentials' => [100, 1]]);
+        foreach (['a', 'b'] as $name) {
+            User::factory()->create(['email' => $name.'@example.com']);
+        }
+        $this->postJson('/api/auth/login', ['email' => 'a@example.com', 'password' => 'password', 'client_binding' => $this->binding])->assertAccepted();
+        $this->postJson('/api/admin/auth/login', ['email' => 'b@example.com', 'password' => 'password', 'client_binding' => $this->binding])->assertStatus(429);
     }
 
-    public function test_account_verification_rate_limit_is_enforced_and_recorded(): void
+    public function test_cache_lock_failure_fails_closed(): void
     {
-        config()->set('auth.verification.account_rate_limit', 1);
-        $user = User::factory()->create(['email' => 'rate@example.com']);
-        $login = $this->startLogin($user);
-
-        $payload = ['email' => $user->email, 'verification_code' => $this->wrongCode($login->json('verification_code'))];
-        $this->postJson('/api/auth/login/verify', $payload)->assertStatus(422);
-        $this->postJson('/api/auth/login/verify', $payload)
-            ->assertStatus(429)
-            ->assertJsonPath('message', 'Too many verification attempts. Please try again later.');
-
-        $this->assertDatabaseHas('auth_security_events', ['event_type' => 'verification_rate_limited']);
+        Cache::shouldReceive('lock')->andThrow(new \RuntimeException('synthetic unavailable store'));
+        $this->postJson('/api/auth/login', ['email' => 'nobody@example.com', 'password' => 'password', 'client_binding' => $this->binding])
+            ->assertStatus(503)->assertJsonMissingPath('exception');
+        $this->assertDatabaseCount('auth_challenges', 0);
     }
 
-    public function test_ip_verification_rate_limit_applies_across_accounts(): void
+    public function test_password_reset_attempt_limit_and_replay_prevention_remain(): void
     {
-        config()->set('auth.verification.ip_rate_limit', 1);
-        $first = User::factory()->create(['email' => 'ip-first@example.com']);
-        $second = User::factory()->create(['email' => 'ip-second@example.com']);
-        $firstLogin = $this->startLogin($first);
-        $secondLogin = $this->startLogin($second);
-        $server = ['REMOTE_ADDR' => '198.51.100.42'];
-
-        $this->withServerVariables($server)->postJson('/api/auth/login/verify', [
-            'email' => $first->email,
-            'verification_code' => $this->wrongCode($firstLogin->json('verification_code')),
-        ])->assertStatus(422);
-
-        $this->withServerVariables($server)->postJson('/api/auth/login/verify', [
-            'email' => $second->email,
-            'verification_code' => $this->wrongCode($secondLogin->json('verification_code')),
-        ])->assertStatus(429);
-    }
-
-    public function test_password_reset_attempt_limit_and_replay_prevention(): void
-    {
-        config()->set('auth.verification.max_attempts', 2);
-        $user = User::factory()->create([
-            'email' => 'reset-security@example.com',
-            'password_hash' => Hash::make('old-password'),
-        ]);
-        $reset = $this->postJson('/api/auth/forgot-password', ['email' => $user->email])->assertAccepted();
-        $wrongCode = $this->wrongCode($reset->json('verification_code'));
-        $payload = [
-            'email' => $user->email,
-            'verification_code' => $wrongCode,
-            'password' => 'new-password',
-            'password_confirmation' => 'new-password',
-        ];
-
-        $this->postJson('/api/auth/reset-password', $payload)->assertStatus(422);
-        $this->postJson('/api/auth/reset-password', $payload)
-            ->assertStatus(422)
-            ->assertJsonPath('message', 'Too many invalid password reset attempts. Please request a new code.');
+        config(['auth.verification.max_attempts' => 2]);
+        $user = User::factory()->create();
+        $reset = $this->postJson('/api/auth/forgot-password', ['email' => $user->email])->assertAccepted()->json('verification_code');
+        $wrong = $reset === '000000' ? '111111' : '000000';
+        $body = ['email' => $user->email, 'verification_code' => $wrong, 'password' => 'new-password', 'password_confirmation' => 'new-password'];
+        $this->postJson('/api/auth/reset-password', $body)->assertStatus(422);
+        $this->postJson('/api/auth/reset-password', $body)->assertStatus(422);
         $this->assertDatabaseHas('auth_security_events', ['event_type' => 'password_reset_verification_lockout']);
-
-        DB::table('password_reset_tokens')->where('email', $user->email)->update([
-            'verification_attempts' => 0,
-            'locked_until' => null,
-        ]);
-        $payload['verification_code'] = $reset->json('verification_code');
-        $this->postJson('/api/auth/reset-password', $payload)->assertOk();
-        $this->postJson('/api/auth/reset-password', $payload)
-            ->assertStatus(422)
-            ->assertJsonPath('message', 'No pending password reset found for this email.');
-    }
-
-    private function startLogin(User $user)
-    {
-        return $this->postJson('/api/auth/login', [
-            'email' => $user->email,
-            'password' => 'password',
-        ])->assertAccepted()
-            ->assertJsonStructure(['message', 'email', 'expires_in_minutes', 'verification_code']);
-    }
-
-    private function wrongCode(string $correctCode): string
-    {
-        return $correctCode === '000000' ? '999999' : '000000';
+        $body['verification_code'] = $reset;
+        $this->postJson('/api/auth/reset-password', $body)->assertStatus(422);
+        DB::table('password_reset_tokens')->where('email', $user->email)->update(['locked_until' => null, 'verification_attempts' => 0]);
+        $this->postJson('/api/auth/reset-password', $body)->assertOk();
+        $this->postJson('/api/auth/reset-password', $body)->assertStatus(422);
+        $this->assertTrue(Hash::check('new-password', $user->fresh()->password_hash));
     }
 }
